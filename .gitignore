@@ -28,6 +28,9 @@ tests_artifacts/
 tmp*/
 pytest-cache-files-*/
 
+# Data/history files (runtime artifacts)
+data/history/*.csv
+
 # Coverage / build
 .coverage
 htmlcov/
