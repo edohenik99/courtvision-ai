@@ -9,9 +9,10 @@ This module extracts the main scoring logic from runtime_scoring.py including:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Mapping
 
+from courtvision.config import EliteThresholds
 from courtvision.scoring import confidence
 from courtvision.scoring.confidence import (
     compute_confidence,
@@ -165,16 +166,21 @@ def compute_selection_score(row: Mapping[str, Any]) -> dict[str, Any]:
 
 @dataclass(frozen=True, slots=True)
 class CandidateScoringConfig:
-    """Configuration thresholds for candidate scoring and elite qualification."""
+    """LEGACY: Configuration thresholds for candidate scoring - runtime thresholds come from EliteThresholds.
 
-    elite_min_confidence: float = 0.65
-    elite_min_quality_score: float = 82.0
-    elite_min_player_minutes: float = 24.0
-    elite_min_player_edge: float = 1.5
-    elite_min_player_confidence: float = 0.65
-    elite_min_moneyline_edge: float = 0.06
-    elite_min_moneyline_confidence: float = 0.70
-    elite_max_plus_moneyline_odds: int = 300
+    This dataclass exists for backward compatibility only. Runtime elite board filtering
+    uses EliteThresholds from courtvision.config as the canonical source. These defaults
+    are synchronized to EliteThresholds.default() to prevent confusion.
+    """
+
+    elite_min_confidence: float = field(default_factory=lambda: EliteThresholds.default().confidence)
+    elite_min_quality_score: float = field(default_factory=lambda: EliteThresholds.default().quality_score)
+    elite_min_player_minutes: float = field(default_factory=lambda: EliteThresholds.default().player_minutes)
+    elite_min_player_edge: float = field(default_factory=lambda: EliteThresholds.default().player_edge)
+    elite_min_player_confidence: float = field(default_factory=lambda: EliteThresholds.default().player_confidence)
+    elite_min_moneyline_edge: float = field(default_factory=lambda: EliteThresholds.default().moneyline_edge)
+    elite_min_moneyline_confidence: float = field(default_factory=lambda: EliteThresholds.default().moneyline_confidence)
+    elite_max_plus_moneyline_odds: int = field(default_factory=lambda: EliteThresholds.default().max_plus_moneyline_odds)
 
 
 class CandidateScoringPolicy:

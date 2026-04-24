@@ -7,6 +7,8 @@ into a package-owned pipeline that delegates to specialized modules.
 from __future__ import annotations
 
 import logging
+import json
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -47,6 +49,41 @@ def _nan_safe_to_float(value: Any, default: float | None = None) -> float | None
     return float(converted)
 
 
+def _normalize_game_key(row: Any) -> str:
+    """Return stable game key - prefer int game_id, fallback to team@opponent.
+
+    This helper ensures consistent game key normalization across cap enforcement
+    and analytics calculations. Handles both Series (DataFrame row) and dict.
+    """
+    # Handle both Series and dict-like objects
+    if hasattr(row, "get"):
+        raw_game_id = row.get("game_id")
+        team = str(row.get("team_abbr", row.get("team", ""))).strip().upper()
+        opponent = str(row.get("opponent", "")).strip().upper()
+    else:
+        raw_game_id = row.game_id if hasattr(row, "game_id") else None
+        team = str(getattr(row, "team_abbr", getattr(row, "team", ""))).strip().upper()
+        opponent = str(getattr(row, "opponent", "")).strip().upper()
+
+    # Prefer game_id, cast to int
+    if raw_game_id is not None and str(raw_game_id).strip():
+        try:
+            return str(int(float(str(raw_game_id))))
+        except (ValueError, TypeError):
+            pass
+
+    # Fallback: team@opponent composite key (sorted for stability)
+    if team and opponent:
+        teams_sorted = sorted([team, opponent])
+        return f"{teams_sorted[0]}@{teams_sorted[1]}"
+
+    # Last resort: team alone
+    if team:
+        return team
+
+    return "unknown"
+
+
 @dataclass(frozen=True, slots=True)
 class PredictionConfig:
     """Configuration for prediction pipeline."""
@@ -68,6 +105,8 @@ class PredictionConfig:
     enable_injury_context: bool = True
     enable_market_quality: bool = True
     enable_partial_fill: bool = True
+    elite_market_mode: str = "points_only"
+    elite_allowed_markets: tuple[str, ...] = ()
 
 
 @dataclass
@@ -127,6 +166,22 @@ class PredictionPipeline:
         self.injury_engine = injury_engine or InjuryEngine()
         self.market_evaluator = market_evaluator or MarketEvaluator()
         self.logger = logger or logging.getLogger(self.__class__.__name__)
+        self._elite_allowed_markets = self._resolve_elite_allowed_markets()
+
+    def _resolve_elite_allowed_markets(self) -> set[str]:
+        mode = str(getattr(self.config, "elite_market_mode", "points_only") or "points_only").strip().lower()
+        explicit = [normalize_market_alias(m) or str(m).strip().lower() for m in getattr(self.config, "elite_allowed_markets", ()) if str(m).strip()]
+        explicit_set = {m for m in explicit if m}
+        points_only = {"player_points"}
+        player_props = {"player_points", "player_rebounds", "player_assists", "player_3pt_made", "player_steals", "player_blocks"}
+        full = set(player_props) | {"moneyline", "team_total"}
+        if explicit_set:
+            return explicit_set
+        if mode == "full":
+            return full
+        if mode == "player_props":
+            return player_props
+        return points_only
 
     def _normalize_injury_context(
         self,
@@ -218,6 +273,7 @@ class PredictionPipeline:
             games=games_normalized,
             odds=odds,
             player_baselines=player_baselines,
+            team_baselines=team_baselines,
             injury_context=injury_context,
             is_player_inactive_fn=is_player_inactive_fn,
         )
@@ -282,6 +338,11 @@ class PredictionPipeline:
                 selection_stage_trace["elite"]["candidate_count_after_backfill"] = 0
                 return df
             
+            # Log count by market_type BEFORE filtering
+            if "market_type" in df.columns:
+                count_before = df["market_type"].value_counts().to_dict()
+                self.logger.info("count_by_market_type_before_filter %s", count_before)
+            
             # Sort by selection_score to prioritize best bets
             df_sorted = df.sort_values("selection_score", ascending=False) if "selection_score" in df.columns else df
             
@@ -299,6 +360,15 @@ class PredictionPipeline:
             for _, row in df_sorted.iterrows():
                 market = str(row.get("market_type", row.get("market", "unknown")))
                 selection = str(row.get("selection", "unknown")).lower()
+                normalized_market = normalize_market_alias(market) or market
+                if normalized_market not in self._elite_allowed_markets:
+                    elite_telemetry.record(
+                        market=market,
+                        selection_side=selection,
+                        rejection_reason="market_filtered_by_elite_policy",
+                    )
+                    passed_mask.append(False)
+                    continue
                 
                 # Check basic elite criteria using centralized thresholds
                 is_elite_flag = row.get("is_elite", False) == True
@@ -351,35 +421,33 @@ class PredictionPipeline:
             
             capped_selection = []
             team_counts: dict[str, int] = {}
-            game_counts: dict[int, int] = {}
+            game_counts: dict = {}
             skipped_by_team_cap = 0
             skipped_by_game_cap = 0
             
-            # Log unique game_ids in admitted_df before cap enforcement
-            unique_games_in_admitted = admitted_df["game_id"].unique() if "game_id" in admitted_df.columns else []
+            # Log unique game keys in admitted_df before cap enforcement
+            sample_game_keys = [_normalize_game_key(row) for _, row in admitted_df.head(10).iterrows()]
             self.logger.info(
-                "[CAP_DEBUG] Cap enforcement starting: admitted_df has %d rows, %d unique game_ids: %s",
-                len(admitted_df), len(unique_games_in_admitted), list(unique_games_in_admitted)[:10]
+                "[CAP_DEBUG] Cap enforcement starting: admitted_df has %d rows, sample game_keys: %s",
+                len(admitted_df), sample_game_keys
             )
             
             for idx, row in admitted_df.iterrows():
                 team = str(row.get("team_abbr", row.get("team", ""))).strip().upper()
-                # Convert game_id to int for consistent dictionary key hashing
-                raw_game_id = row.get("game_id", 0)
-                game_id = int(raw_game_id) if pd.notna(raw_game_id) and raw_game_id != 0 else 0
+                game_key = _normalize_game_key(row)
                 player = row.get("player_name", "unknown")
                 market = row.get("market_type", "unknown")
                 
                 # Detailed game cap check logging
-                current_game_count = game_counts.get(game_id, 0)
-                game_cap_check = game_id and current_game_count >= elite_game_cap
+                current_game_count = game_counts.get(game_key, 0)
+                game_cap_check = game_key != "unknown" and current_game_count >= elite_game_cap
                 
                 self.logger.info(
-                    "[CAP_DEBUG] Row %d: player=%s, team=%s, game_id=%s, "
+                    "[CAP_DEBUG] Row %d: player=%s, team=%s, game_key=%s, "
                     "current_team_count=%d, current_game_count=%d, "
                     "team_cap=%d, game_cap=%d, "
                     "team_would_skip=%s, game_would_skip=%s",
-                    idx, player, team, str(game_id), 
+                    idx, player, team, str(game_key), 
                     team_counts.get(team, 0), current_game_count,
                     elite_team_cap, elite_game_cap,
                     team and team_counts.get(team, 0) >= elite_team_cap,
@@ -396,36 +464,36 @@ class PredictionPipeline:
                     continue
                 
                 # Check game cap
-                if game_id and game_counts.get(game_id, 0) >= elite_game_cap:
+                if game_key != "unknown" and game_counts.get(game_key, 0) >= elite_game_cap:
                     if "selection_rejection_reason" in admitted_df.columns:
                         admitted_df.at[idx, "selection_rejection_reason"] = "reject_game_exposure_cap"
-                    admitted_df.at[idx, "game_exposure_count_at_decision"] = game_counts.get(game_id, 0)
+                    admitted_df.at[idx, "game_exposure_count_at_decision"] = game_counts.get(game_key, 0)
                     skipped_by_game_cap += 1
-                    self.logger.info("[CAP_DEBUG] Row %d: SKIPPED by game_cap (count=%d)", idx, game_counts.get(game_id, 0))
+                    self.logger.info("[CAP_DEBUG] Row %d: SKIPPED by game_cap (count=%d)", idx, game_counts.get(game_key, 0))
                     continue
                 
                 # Row passes caps - select it
                 capped_selection.append(idx)
                 if team:
                     team_counts[team] = team_counts.get(team, 0) + 1
-                if game_id:
-                    game_counts[game_id] = game_counts.get(game_id, 0) + 1
+                if game_key != "unknown":
+                    game_counts[game_key] = game_counts.get(game_key, 0) + 1
                 
                 self.logger.info(
                     "[CAP_DEBUG] Row %d: SELECTED (team_count now=%d, game_count now=%d)",
-                    idx, team_counts.get(team, 0), game_counts.get(game_id, 0)
+                    idx, team_counts.get(team, 0), game_counts.get(game_key, 0)
                 )
                 
                 # Track exposure at decision time
                 admitted_df.at[idx, "team_exposure_count_at_decision"] = team_counts.get(team, 0) - 1
-                admitted_df.at[idx, "game_exposure_count_at_decision"] = game_counts.get(game_id, 0) - 1
+                admitted_df.at[idx, "game_exposure_count_at_decision"] = game_counts.get(game_key, 0) - 1
             
             # Create capped DataFrame
             capped_df = admitted_df.loc[capped_selection].copy() if capped_selection else pd.DataFrame()
             
-            # Log first 10 row game_ids for verification
-            first_10_game_ids = [str(admitted_df.iloc[i].get("game_id", "NULL")) for i in range(min(10, len(admitted_df)))]
-            self.logger.info("[CAP_DEBUG] First 10 row game_ids: %s", ",".join(first_10_game_ids))
+            # Log first 10 row game_keys for verification
+            first_10_game_keys = [str(_normalize_game_key(admitted_df.iloc[i])) for i in range(min(10, len(admitted_df)))]
+            self.logger.info("[CAP_DEBUG] First 10 row game_keys: %s", ",".join(first_10_game_keys))
             
             # Log final game counts
             final_game_counts_str = ",".join([f"{k}:{v}" for k, v in game_counts.items()]) if game_counts else "none"
@@ -447,6 +515,24 @@ class PredictionPipeline:
             selected_df = capped_df.head(elite_size)
             selection_stage_trace["elite"]["candidate_count_after_backfill"] = len(selected_df)
             
+            # Recalculate max exposure from ACTUAL final selection (not full capped_df)
+            final_game_counts = {}
+            final_team_counts = {}
+            for _, row in selected_df.iterrows():
+                # Use same normalization as cap enforcement loop
+                gkey = _normalize_game_key(row)
+                if gkey and gkey != "unknown":
+                    final_game_counts[gkey] = final_game_counts.get(gkey, 0) + 1
+                team_abbr = str(row.get("team_abbr", row.get("team", ""))).strip().upper()
+                if team_abbr:
+                    final_team_counts[team_abbr] = final_team_counts.get(team_abbr, 0) + 1
+            
+            final_max_game = max(final_game_counts.values()) if final_game_counts else 0
+            final_max_team = max(final_team_counts.values()) if final_team_counts else 0
+            
+            # [CAP_ENFORCE] trace
+            print(f"[CAP_ENFORCE] before_rows={len(df)} after_rows={len(selected_df)} skipped_team_cap={skipped_by_team_cap} skipped_game_cap={skipped_by_game_cap} final_max_game={final_max_game}")
+            
             # Clean rejection_reason in selected rows
             if "selection_rejection_reason" in selected_df.columns:
                 selected_df["selection_rejection_reason"] = ""
@@ -455,9 +541,21 @@ class PredictionPipeline:
             self.logger.info(
                 "elite_concentration_summary team_cap=%d game_cap=%d selected=%d skipped_team=%d skipped_game=%d max_team=%d max_game=%d",
                 elite_team_cap, elite_game_cap, len(selected_df), skipped_by_team_cap, skipped_by_game_cap,
-                selection_stage_trace["elite"]["max_team_exposure"],
-                selection_stage_trace["elite"]["max_game_exposure"]
+                final_max_team, final_max_game
             )
+            
+            # Log count by market_type AFTER filtering
+            if "market_type" in selected_df.columns:
+                count_after = selected_df["market_type"].value_counts().to_dict()
+                self.logger.info("count_by_market_type_after_filter %s", count_after)
+            
+            # Assertion: game cap must be enforced on FINAL selection
+            if final_max_game > elite_game_cap:
+                self.logger.error(
+                    "[CAP_ASSERT] Game cap violated in final selection: max_game_exposure=%d > cap=%d",
+                    final_max_game, elite_game_cap
+                )
+                raise RuntimeError(f"Game cap violated: {final_max_game} > {elite_game_cap}")
             
             return selected_df
 
@@ -541,6 +639,16 @@ class PredictionPipeline:
             self.logger.info("elite_telemetry_totals %s", dict(elite_telemetry.totals))
         except Exception as e:
             self.logger.warning("elite_telemetry_write_failed %s", str(e))
+        try:
+            self._write_market_availability_audit(
+                prediction_date=self.config.prediction_date,
+                odds=odds,
+                candidates_df=candidates_df,
+                elite_df=elite_df,
+                rejected_rows=rejected if isinstance(rejected, list) else [],
+            )
+        except Exception as e:
+            self.logger.warning("market_availability_audit_write_failed %s", str(e))
 
         self.logger.info("prediction_complete summary_keys=%s", list(result.summary.keys()))
         return result
@@ -550,6 +658,7 @@ class PredictionPipeline:
         games: pd.DataFrame,
         odds: pd.DataFrame,
         player_baselines: pd.DataFrame,
+        team_baselines: pd.DataFrame | None,
         injury_context: dict[str, Any],
         is_player_inactive_fn: Callable[[str], bool],
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -570,7 +679,14 @@ class PredictionPipeline:
             return False
 
         # Fully modeled markets (real projections)
-        FULLY_MODELED_MARKETS = {"player_points"}
+        FULLY_MODELED_MARKETS = {
+            "player_points",
+            "player_rebounds",
+            "player_assists",
+            "player_3pt_made",
+            "player_steals",
+            "player_blocks",
+        }
         # Markets with placeholder/incomplete projections
         PARTIALLY_MODELED_MARKETS = {
             "player_rebounds",
@@ -592,7 +708,9 @@ class PredictionPipeline:
             # Check if market is fully modeled
             if normalized not in FULLY_MODELED_MARKETS:
                 if normalized in PARTIALLY_MODELED_MARKETS:
-                    return "unsupported_market", "unsupported_projection_market"
+                    return "unsupported_market", "market_not_supported_by_projection"
+                if normalized in {"moneyline", "team_total"}:
+                    return "unsupported_market", "market_not_supported_by_projection"
                 return "unsupported_market", "unsupported_market_type"
 
             # For fully modeled markets, check projection validity
@@ -656,9 +774,17 @@ class PredictionPipeline:
 
             # Get line and odds
             line = _nan_safe_to_float(market_row.get("line"), projection)
+            pre_rejection_reason = ""
+            if market_rows.empty and normalized_market in {"moneyline", "team_total"}:
+                pre_rejection_reason = "market_missing_line"
+            if line is None:
+                line = projection
+                pre_rejection_reason = pre_rejection_reason or "market_missing_line"
             raw_odds = _nan_safe_to_float(market_row.get("odds"), float(self.config.synthetic_odds_default))
             if raw_odds in (None, 0.0):
                 raw_odds = float(self.config.synthetic_odds_default)
+                if not partial_fill:
+                    pre_rejection_reason = pre_rejection_reason or "market_missing_odds"
             odds = int(raw_odds if raw_odds is not None else self.config.synthetic_odds_default)
 
             # Compute edge
@@ -719,6 +845,7 @@ class PredictionPipeline:
                 "synthetic_line": synthetic_line,
                 "line_source": "live_market" if is_live_market and not synthetic_line else "partial_fill",
                 "source_lane": "live_market_candidate" if is_live_market and not synthetic_line else "partial_fill_candidate",
+                "pre_rejection_reason": pre_rejection_reason,
                 **injury_metadata,
             }
 
@@ -766,6 +893,150 @@ class PredictionPipeline:
             reject_candidate_fn=reject_candidate,
             allow_partial_fill=self.config.enable_partial_fill,
         )
+
+        # Team-market candidates (moneyline, team totals) if offered by provider.
+        team_rows = odds.copy() if isinstance(odds, pd.DataFrame) else pd.DataFrame()
+        if not team_rows.empty:
+            market_source_col = "market_type" if "market_type" in team_rows.columns else ("market" if "market" in team_rows.columns else None)
+            if market_source_col:
+                team_rows["_normalized_market"] = team_rows[market_source_col].map(lambda v: normalize_market_alias(v) or str(v).strip().lower())
+                team_rows = team_rows[team_rows["_normalized_market"].isin({"moneyline", "team_total"})].copy()
+            else:
+                team_rows = pd.DataFrame()
+        team_baselines_df = team_baselines.copy() if isinstance(team_baselines, pd.DataFrame) else pd.DataFrame()
+        team_lookup: dict[str, pd.Series] = {}
+        if not team_baselines_df.empty and "team_abbr" in team_baselines_df.columns:
+            for _, row in team_baselines_df.iterrows():
+                team_lookup[str(row.get("team_abbr", "")).strip().upper()] = row
+        for _, row in team_rows.iterrows():
+            market = str(row.get("_normalized_market", "")).strip().lower()
+            team = str(row.get("team", row.get("team_abbr", ""))).strip().upper()
+            opp = str(row.get("opponent", "")).strip().upper()
+            odds_value = _nan_safe_to_float(row.get("odds"))
+            line_value = _nan_safe_to_float(row.get("line"))
+            if odds_value in (None, 0.0):
+                rejected.append(
+                    reject_candidate(
+                        player_row=pd.Series({"player_name": "", "team": team}),
+                        market=market,
+                        reason="market_missing_odds",
+                        team=team,
+                    )
+                )
+                continue
+            if market == "team_total" and line_value is None:
+                rejected.append(
+                    reject_candidate(
+                        player_row=pd.Series({"player_name": "", "team": team}),
+                        market=market,
+                        reason="market_missing_line",
+                        team=team,
+                    )
+                )
+                continue
+            team_base = team_lookup.get(team)
+            opp_base = team_lookup.get(opp)
+            if market == "team_total":
+                projection = _nan_safe_to_float(team_base.get("team_pts_avg") if team_base is not None else None)
+                if projection is None:
+                    rejected.append(
+                        reject_candidate(
+                            player_row=pd.Series({"player_name": "", "team": team}),
+                            market=market,
+                            reason="projection_missing_for_market",
+                            team=team,
+                        )
+                    )
+                    continue
+                selection = str(row.get("selection", "over")).strip().lower() or "over"
+                edge = float(projection - float(line_value))
+                confidence = 0.60
+                sportsbook_line = float(line_value)
+            else:
+                if team_base is None or opp_base is None:
+                    rejected.append(
+                        reject_candidate(
+                            player_row=pd.Series({"player_name": "", "team": team}),
+                            market=market,
+                            reason="market_not_supported_by_projection",
+                            team=team,
+                        )
+                    )
+                    continue
+                team_pts = _nan_safe_to_float(team_base.get("team_pts_avg"), 0.0) or 0.0
+                opp_pts = _nan_safe_to_float(opp_base.get("team_pts_avg"), 0.0) or 0.0
+                win_prob_projection = min(max(0.5 + ((team_pts - opp_pts) / 40.0), 0.05), 0.95)
+                implied_prob = 100.0 / (float(odds_value) + 100.0) if float(odds_value) > 0 else abs(float(odds_value)) / (abs(float(odds_value)) + 100.0)
+                projection = float(win_prob_projection)
+                sportsbook_line = float(implied_prob)
+                edge = float(projection - sportsbook_line)
+                selection = str(row.get("selection", team)).strip().lower() or team.lower()
+                confidence = 0.58
+            scoring_input = {
+                "market_type": market,
+                "projection": projection,
+                "line": sportsbook_line,
+                "sportsbook_line": sportsbook_line,
+                "edge": edge,
+                "edge_abs": abs(edge),
+                "confidence": confidence,
+                "player_name": team,
+                "team": team,
+                "minutes_avg": 0.0,
+                "minutes_recent": 0.0,
+                "is_live_market": bool(row.get("is_live", True)),
+                "synthetic_line": bool(row.get("synthetic", False)),
+                "odds": int(odds_value),
+                "selection": selection,
+            }
+            scoring_result = self.scoring_policy.apply_scoring_metadata(scoring_input)
+            candidate = {
+                "prediction_date": self.config.prediction_date,
+                "player_name": team,
+                "entity_name": team,
+                "player_id": "",
+                "team": team,
+                "team_abbr": team,
+                "opponent": opp,
+                "market_type": market,
+                "selection": selection,
+                "sportsbook_line": sportsbook_line,
+                "model_projection": projection,
+                "projection_support_status": "modeled",
+                "edge": edge,
+                "edge_pct": edge / sportsbook_line if sportsbook_line else 0.0,
+                "confidence": confidence,
+                "quality_score": scoring_result.get("quality_score", 0.0),
+                "selection_score": scoring_result.get("selection_score", 0.0),
+                "odds": int(odds_value),
+                "is_elite": scoring_result.get("is_elite", False),
+                "qualification_reason": "team_market_modeled",
+                "is_live_market": bool(row.get("is_live", True)),
+                "synthetic_line": bool(row.get("synthetic", False)),
+                "line_source": "live_market",
+                "source_lane": "live_market_candidate",
+                "pre_rejection_reason": "",
+            }
+            if abs(edge) < self.config.min_edge:
+                rejected.append(
+                    reject_candidate(
+                        player_row=pd.Series({"player_name": team, "team": team}),
+                        market=market,
+                        reason="market_supported_but_failed_quality",
+                        team=team,
+                    )
+                )
+            elif confidence < self.config.min_confidence:
+                rejected.append(
+                    reject_candidate(
+                        player_row=pd.Series({"player_name": team, "team": team}),
+                        market=market,
+                        reason="market_supported_but_failed_confidence",
+                        team=team,
+                    )
+                )
+            else:
+                accepted.append(candidate)
 
         # Stage-level diagnostics: rejection breakdown
         if rejected:
@@ -815,6 +1086,7 @@ class PredictionPipeline:
             "3pt_made": "threes_avg",
             "steals": "stl_avg",
             "blocks": "blk_avg",
+            "threes": "threes_avg",
         }
 
         column = stat_map.get(stat_key, f"{stat_key}_avg")
@@ -826,6 +1098,66 @@ class PredictionPipeline:
             projection = _nan_safe_to_float(player_row.get(recent_col), 0.0) or 0.0
 
         return max(projection, 0.0)
+
+    def _write_market_availability_audit(
+        self,
+        prediction_date: str,
+        odds: pd.DataFrame,
+        candidates_df: pd.DataFrame,
+        elite_df: pd.DataFrame,
+        rejected_rows: list[dict[str, Any]],
+    ) -> None:
+        diagnostics_dir = Path(self.config.out_dir) / "runtime" / "diagnostics"
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        raw_market_col = "raw_market_name" if "raw_market_name" in odds.columns else ("market" if "market" in odds.columns else "market_type")
+        raw_counts = (
+            odds[raw_market_col].astype(str).value_counts().to_dict()
+            if not odds.empty and raw_market_col in odds.columns
+            else {}
+        )
+        normalized_series = odds[raw_market_col].map(lambda m: normalize_market_alias(m) or str(m).strip().lower()) if raw_counts else pd.Series(dtype=str)
+        normalized_counts = normalized_series.value_counts().to_dict() if not normalized_series.empty else {}
+        candidate_counts = candidates_df["market_type"].astype(str).value_counts().to_dict() if not candidates_df.empty and "market_type" in candidates_df.columns else {}
+        elite_counts = elite_df["market_type"].astype(str).value_counts().to_dict() if not elite_df.empty and "market_type" in elite_df.columns else {}
+        reject_df = pd.DataFrame(rejected_rows) if rejected_rows else pd.DataFrame()
+        rejection_counts: dict[str, dict[str, int]] = {}
+        if not reject_df.empty and {"market_type", "rejection_reason"}.issubset(reject_df.columns):
+            for (market_type, reason), count in reject_df.groupby(["market_type", "rejection_reason"]).size().items():
+                rejection_counts.setdefault(str(market_type), {})[str(reason)] = int(count)
+        markets = sorted(set(raw_counts.keys()) | set(normalized_counts.keys()) | set(candidate_counts.keys()) | set(elite_counts.keys()) | set(rejection_counts.keys()))
+        rows = []
+        for market in markets:
+            rows.append(
+                {
+                    "market": market,
+                    "count_before_normalization": int(raw_counts.get(market, 0)),
+                    "count_after_normalization": int(normalized_counts.get(market, 0)),
+                    "count_after_candidate_generation": int(candidate_counts.get(market, 0)),
+                    "count_after_scoring": int(candidate_counts.get(market, 0)),
+                    "count_after_elite_filtering": int(elite_counts.get(market, 0)),
+                    "count_in_final_elite_board": int(elite_counts.get(market, 0)),
+                    "rejection_reason_counts": json.dumps(rejection_counts.get(market, {}), sort_keys=True),
+                }
+            )
+        audit_df = pd.DataFrame(rows)
+        csv_path = diagnostics_dir / f"market_availability_audit_{prediction_date}.csv"
+        json_path = diagnostics_dir / f"market_availability_audit_{prediction_date}.json"
+        audit_df.to_csv(csv_path, index=False)
+        json_path.write_text(
+            json.dumps(
+                {
+                    "prediction_date": prediction_date,
+                    "raw_provider_markets": raw_counts,
+                    "normalized_markets": normalized_counts,
+                    "counts": rows,
+                    "rejection_counts_by_market": rejection_counts,
+                    "elite_allowed_markets": sorted(self._elite_allowed_markets),
+                },
+                indent=2,
+                default=str,
+            ),
+            encoding="utf-8",
+        )
 
     def _compute_confidence(
         self,
@@ -898,8 +1230,9 @@ class PredictionPipeline:
         max_team_exposure = int(team_counts.max()) if not team_counts.empty else 0
         unique_teams = int(len(team_counts))
         
-        game_col = elite_df.get("game_id", pd.Series(0, index=elite_df.index))
-        game_counts = game_col.value_counts()
+        # Use normalized game_key for consistent exposure calculation (matches cap enforcement)
+        game_keys = [_normalize_game_key(row) for _, row in elite_df.iterrows()]
+        game_counts = pd.Series(game_keys).value_counts()
         max_game_exposure = int(game_counts.max()) if not game_counts.empty else 0
         unique_games = int(len(game_counts))
         
