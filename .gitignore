@@ -1,0 +1,36 @@
+# Environments
+.venv/
+venv/
+.env
+.env.local
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS/editor junk
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Runtime outputs
+logs/
+outputs/
+outputs_*/
+sanity_outputs/
+tests_artifacts/
+tmp*/
+pytest-cache-files-*/
+
+# Coverage / build
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/

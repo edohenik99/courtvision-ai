@@ -1,0 +1,1005 @@
+"""Package-owned prediction pipeline.
+
+This module extracts the prediction orchestration flow from courtvision_ai.py
+into a package-owned pipeline that delegates to specialized modules.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Callable
+
+import pandas as pd
+
+from courtvision.calibration.buckets import to_float
+from courtvision.data.candidates import score_player_markets
+from courtvision.data.normalization import normalize_games_schema
+from courtvision.injuries import InjuryEngine
+from courtvision.market import MarketEvaluator, normalize_market_alias
+from courtvision.runtime_audit import (
+    EliteTelemetry,
+    assemble_elite_board,
+    get_elite_rejection_reason,
+)
+from courtvision.scoring import CandidateScoringPolicy
+from courtvision.config import EliteThresholds
+from courtvision.selection import build_operator_boards
+from courtvision.selection.operator_boards import assign_candidate_lanes
+
+
+def _empty_injury_context() -> dict[str, Any]:
+    """Return the canonical empty injury context shape."""
+    return {
+        "teams": {},
+        "players": {},
+        "metadata": {},
+    }
+
+
+def _nan_safe_to_float(value: Any, default: float | None = None) -> float | None:
+    """Convert to float while treating None/blank/NaN as missing."""
+    converted = to_float(value)
+    if converted is None or pd.isna(converted):
+        return default
+    return float(converted)
+
+
+@dataclass(frozen=True, slots=True)
+class PredictionConfig:
+    """Configuration for prediction pipeline."""
+
+    prediction_date: str
+    out_dir: str = "outputs"
+    player_baselines_path: Path | None = None
+    team_baselines_path: Path | None = None
+    injuries_path: Path | None = None
+    verbose_outputs: bool = False
+
+    # Scoring configuration
+    min_edge: float = 0.5
+    min_confidence: float = 0.35
+    max_edge_cap: float = 15.0
+    synthetic_odds_default: int = -110
+
+    # Feature flags
+    enable_injury_context: bool = True
+    enable_market_quality: bool = True
+    enable_partial_fill: bool = True
+
+
+@dataclass
+class PredictionResult:
+    """Result container for prediction pipeline."""
+
+    prediction_date: str
+    summary: dict[str, Any] = field(default_factory=dict)
+    selected_props: pd.DataFrame = field(default_factory=pd.DataFrame)
+    elite_props: pd.DataFrame = field(default_factory=pd.DataFrame)
+    full_market_props: pd.DataFrame = field(default_factory=pd.DataFrame)
+    stat_only_props: pd.DataFrame = field(default_factory=pd.DataFrame)
+    market_lines: pd.DataFrame = field(default_factory=pd.DataFrame)
+    merged_market_props: pd.DataFrame = field(default_factory=pd.DataFrame)
+    output_paths: dict[str, Path | None] = field(default_factory=dict)
+    injury_context: dict[str, Any] = field(default_factory=_empty_injury_context)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert result to dictionary for serialization."""
+        return {
+            "prediction_date": self.prediction_date,
+            "summary": self.summary,
+            "selected_props": self.selected_props.to_dict("records") if not self.selected_props.empty else [],
+            "elite_props": self.elite_props.to_dict("records") if not self.elite_props.empty else [],
+            "full_market_props": self.full_market_props.to_dict("records") if not self.full_market_props.empty else [],
+            "stat_only_props": self.stat_only_props.to_dict("records") if not self.stat_only_props.empty else [],
+            "market_lines": self.market_lines.to_dict("records") if not self.market_lines.empty else [],
+            "merged_market_props": self.merged_market_props.to_dict("records") if not self.merged_market_props.empty else [],
+            "output_paths": {k: str(v) if v else None for k, v in self.output_paths.items()},
+        }
+
+
+class PredictionPipeline:
+    """Package-owned prediction pipeline.
+
+    Orchestrates the full prediction flow:
+    1. Load slate / inputs
+    2. Build candidate universe
+    3. Evaluate injury context
+    4. Evaluate market context
+    5. Compute edge / confidence / penalties / selection score
+    6. Assign lanes
+    7. Build boards
+    8. Export outputs
+    """
+
+    def __init__(
+        self,
+        config: PredictionConfig,
+        scoring_policy: CandidateScoringPolicy | None = None,
+        injury_engine: InjuryEngine | None = None,
+        market_evaluator: MarketEvaluator | None = None,
+        logger: logging.Logger | None = None,
+    ) -> None:
+        self.config = config
+        self.scoring_policy = scoring_policy or CandidateScoringPolicy()
+        self.injury_engine = injury_engine or InjuryEngine()
+        self.market_evaluator = market_evaluator or MarketEvaluator()
+        self.logger = logger or logging.getLogger(self.__class__.__name__)
+
+    def _normalize_injury_context(
+        self,
+        injury_context: dict[str, Any] | None,
+        source: str,
+    ) -> tuple[dict[str, Any], str]:
+        """Normalize injury context to the canonical dict shape."""
+        if not isinstance(injury_context, dict):
+            normalized = _empty_injury_context()
+            normalized_source = f"{source}_none"
+        else:
+            normalized = {
+                "teams": injury_context.get("teams", {}) if isinstance(injury_context.get("teams", {}), dict) else {},
+                "players": injury_context.get("players", {}) if isinstance(injury_context.get("players", {}), dict) else {},
+                "metadata": injury_context.get("metadata", {}) if isinstance(injury_context.get("metadata", {}), dict) else {},
+            }
+            normalized_source = source
+
+        self.logger.info(
+            "injury_context_normalized teams=%d players=%d source=%s",
+            len(normalized.get("teams", {})),
+            len(normalized.get("players", {})),
+            normalized_source,
+        )
+        return normalized, normalized_source
+
+    def run(
+        self,
+        games: pd.DataFrame,
+        odds: pd.DataFrame,
+        player_baselines: pd.DataFrame,
+        team_baselines: pd.DataFrame | None = None,
+        injuries: pd.DataFrame | None = None,
+        is_player_inactive_fn: Callable[[str], bool] | None = None,
+    ) -> PredictionResult:
+        """Run the complete prediction pipeline."""
+        self.logger.info("prediction_start date=%s games=%d odds=%d",
+                        self.config.prediction_date, len(games), len(odds))
+
+        # Initialize result
+        result = PredictionResult(prediction_date=self.config.prediction_date)
+
+        # Normalize games schema to canonical internal format
+        # Handles BallDontLie nested dicts (home_team/visitor_team) and flat schemas
+        games_normalized = normalize_games_schema(games) if not games.empty else games
+        if not games_normalized.empty:
+            self.logger.info("games_normalized schema=%s cols=%s",
+                            "canonical",
+                            list(games_normalized.columns))
+
+        # Build injury context if enabled and data available
+        injury_context: dict[str, Any] | None = None
+        injury_context_source = "disabled" if not self.config.enable_injury_context else "no_injuries"
+        if self.config.enable_injury_context and injuries is not None and not injuries.empty:
+            injury_context_source = "injuries_available"
+            # Use normalized team columns: home_team_abbr, visitor_team_abbr
+            # Falls back to team_id if abbr not available
+            home_teams = games_normalized.get("home_team_abbr", games_normalized.get("home_team_id"))
+            visitor_teams = games_normalized.get("visitor_team_abbr", games_normalized.get("visitor_team_id"))
+            if home_teams is not None and visitor_teams is not None:
+                injury_context_source = "injury_engine"
+                active_teams = set(
+                    home_teams.dropna().astype(str).tolist() +
+                    visitor_teams.dropna().astype(str).tolist()
+                )
+                injury_context = self.injury_engine.build_context(
+                    injuries=injuries,
+                    player_baselines=player_baselines,
+                    active_teams=active_teams,
+                )
+                built_teams = 0
+                built_players = 0
+                if isinstance(injury_context, dict):
+                    built_teams = len(injury_context.get("teams", {}))
+                    built_players = len(injury_context.get("players", {}))
+                self.logger.info("injury_context_built teams=%d players=%d",
+                                built_teams,
+                                built_players)
+            else:
+                injury_context_source = "missing_active_teams"
+
+        injury_context, injury_context_source = self._normalize_injury_context(
+            injury_context=injury_context,
+            source=injury_context_source,
+        )
+
+        # Build candidate universe using normalized games
+        candidates, rejected = self._build_candidate_universe(
+            games=games_normalized,
+            odds=odds,
+            player_baselines=player_baselines,
+            injury_context=injury_context,
+            is_player_inactive_fn=is_player_inactive_fn,
+        )
+
+        self.logger.info("candidates_built accepted=%d rejected=%d", len(candidates), len(rejected))
+
+        # Stage-level diagnostics: rejection breakdown
+        if rejected:
+            rejection_counts: dict[str, int] = {}
+            rejection_details: dict[str, list] = {"low_edge": [], "low_confidence": []}
+
+            for r in rejected:
+                reason = r.get("rejection_reason", "unknown")
+                rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+
+                # Track edge/confidence values for debugging
+                if reason == "low_edge":
+                    rejection_details["low_edge"].append(r.get("edge", 0))
+                elif reason == "low_confidence":
+                    rejection_details["low_confidence"].append(r.get("confidence", 0))
+
+            self.logger.info("rejection_breakdown %s", rejection_counts)
+
+            # Identify top 3 rejection causes
+            top_rejections = sorted(rejection_counts.items(), key=lambda x: x[1], reverse=True)[:3]
+            self.logger.info("top_rejection_causes %s", top_rejections)
+
+            # Log sample values for debugging
+            if rejection_details["low_edge"]:
+                sample_edges = rejection_details["low_edge"][:5]
+                self.logger.info("sample_low_edge_values %s (threshold=0.5)", sample_edges)
+            if rejection_details["low_confidence"]:
+                sample_conf = rejection_details["low_confidence"][:5]
+                self.logger.info("sample_low_confidence_values %s (threshold=0.35)", sample_conf)
+
+        if not candidates:
+            result.injury_context = injury_context
+            result.summary = self._build_empty_summary(games, odds)
+            return result
+
+        # Convert candidates to DataFrame
+        candidates_df = pd.DataFrame(candidates)
+
+        # Define selection callables for board building
+        selection_stage_trace: dict[str, dict[str, Any]] = {
+            "elite": {},
+            "full_market": {},
+        }
+
+        # Initialize elite telemetry collector and thresholds
+        slate_date = str(getattr(self.config, 'prediction_date', None) or datetime.now().strftime("%Y-%m-%d"))
+        elite_telemetry = EliteTelemetry(slate_date=slate_date)
+        elite_thresholds = EliteThresholds.default()
+
+        def select_elite_board(df: pd.DataFrame) -> pd.DataFrame:
+            """Select elite candidates (strong conviction, high confidence)."""
+            selection_stage_trace["elite"]["candidate_count_entering_elite_selection"] = len(df)
+            if df.empty:
+                selection_stage_trace["elite"]["candidate_count_after_elite_admission_filter"] = 0
+                selection_stage_trace["elite"]["candidate_count_after_realism_filter"] = 0
+                selection_stage_trace["elite"]["candidate_count_after_exposure_caps"] = 0
+                selection_stage_trace["elite"]["candidate_count_after_backfill"] = 0
+                return df
+            
+            # Sort by selection_score to prioritize best bets
+            df_sorted = df.sort_values("selection_score", ascending=False) if "selection_score" in df.columns else df
+            
+            # Track all candidates entering elite selection
+            for _, row in df_sorted.iterrows():
+                market = str(row.get("market_type", row.get("market", "unknown")))
+                selection = str(row.get("selection", "unknown")).lower()
+                elite_telemetry.record_candidate_seen(
+                    market=market,
+                    selection_side=selection,
+                )
+            
+            # Filter for high quality and high confidence with telemetry
+            passed_mask = []
+            for _, row in df_sorted.iterrows():
+                market = str(row.get("market_type", row.get("market", "unknown")))
+                selection = str(row.get("selection", "unknown")).lower()
+                
+                # Check basic elite criteria using centralized thresholds
+                is_elite_flag = row.get("is_elite", False) == True
+                quality_ok = row.get("quality_score", 0) >= elite_thresholds.quality_score
+                confidence_ok = row.get("confidence", 0) >= elite_thresholds.confidence
+                
+                if is_elite_flag or (quality_ok and confidence_ok):
+                    # Check directional edge validity
+                    rejection_reason = get_elite_rejection_reason(row.to_dict())
+                    if rejection_reason is None:
+                        elite_telemetry.record_pass(
+                            market=market,
+                            selection_side=selection,
+                        )
+                        passed_mask.append(True)
+                    else:
+                        elite_telemetry.record(
+                            market=market,
+                            selection_side=selection,
+                            rejection_reason=rejection_reason,
+                        )
+                        passed_mask.append(False)
+                else:
+                    # Failed quality/confidence check
+                    elite_telemetry.record(
+                        market=market,
+                        selection_side=selection,
+                        rejection_reason="reject_quality_confidence_threshold",
+                    )
+                    passed_mask.append(False)
+            
+            admitted_df = df_sorted[pd.Series(passed_mask, index=df_sorted.index)].copy()
+            selection_stage_trace["elite"]["candidate_count_after_elite_admission_filter"] = len(admitted_df)
+            selection_stage_trace["elite"]["candidate_count_after_realism_filter"] = len(admitted_df)
+            selection_stage_trace["elite"]["candidate_count_after_exposure_caps"] = len(admitted_df)
+            
+            # Apply concentration caps (team/game limits)
+            # Use EliteThresholds as primary source, allow self.config override if explicitly set
+            has_config_team_cap = hasattr(self.config, 'elite_team_cap') and self.config.elite_team_cap is not None
+            has_config_game_cap = hasattr(self.config, 'elite_game_cap') and self.config.elite_game_cap is not None
+            
+            elite_team_cap = self.config.elite_team_cap if has_config_team_cap else elite_thresholds.team_cap
+            elite_game_cap = self.config.elite_game_cap if has_config_game_cap else elite_thresholds.game_cap
+            
+            cap_source = "config" if (has_config_team_cap or has_config_game_cap) else "EliteThresholds"
+            self.logger.info(
+                "[CAP_DEBUG] Starting cap enforcement: source=%s, team_cap=%d, game_cap=%d, candidates=%d",
+                cap_source, elite_team_cap, elite_game_cap, len(admitted_df)
+            )
+            
+            capped_selection = []
+            team_counts: dict[str, int] = {}
+            game_counts: dict[int, int] = {}
+            skipped_by_team_cap = 0
+            skipped_by_game_cap = 0
+            
+            # Log unique game_ids in admitted_df before cap enforcement
+            unique_games_in_admitted = admitted_df["game_id"].unique() if "game_id" in admitted_df.columns else []
+            self.logger.info(
+                "[CAP_DEBUG] Cap enforcement starting: admitted_df has %d rows, %d unique game_ids: %s",
+                len(admitted_df), len(unique_games_in_admitted), list(unique_games_in_admitted)[:10]
+            )
+            
+            for idx, row in admitted_df.iterrows():
+                team = str(row.get("team_abbr", row.get("team", ""))).strip().upper()
+                # Convert game_id to int for consistent dictionary key hashing
+                raw_game_id = row.get("game_id", 0)
+                game_id = int(raw_game_id) if pd.notna(raw_game_id) and raw_game_id != 0 else 0
+                player = row.get("player_name", "unknown")
+                market = row.get("market_type", "unknown")
+                
+                # Detailed game cap check logging
+                current_game_count = game_counts.get(game_id, 0)
+                game_cap_check = game_id and current_game_count >= elite_game_cap
+                
+                self.logger.info(
+                    "[CAP_DEBUG] Row %d: player=%s, team=%s, game_id=%s, "
+                    "current_team_count=%d, current_game_count=%d, "
+                    "team_cap=%d, game_cap=%d, "
+                    "team_would_skip=%s, game_would_skip=%s",
+                    idx, player, team, str(game_id), 
+                    team_counts.get(team, 0), current_game_count,
+                    elite_team_cap, elite_game_cap,
+                    team and team_counts.get(team, 0) >= elite_team_cap,
+                    game_cap_check
+                )
+                
+                # Check team cap
+                if team and team_counts.get(team, 0) >= elite_team_cap:
+                    if "selection_rejection_reason" in admitted_df.columns:
+                        admitted_df.at[idx, "selection_rejection_reason"] = "reject_team_exposure_cap"
+                    admitted_df.at[idx, "team_exposure_count_at_decision"] = team_counts.get(team, 0)
+                    skipped_by_team_cap += 1
+                    self.logger.info("[CAP_DEBUG] Row %d: SKIPPED by team_cap (count=%d)", idx, team_counts.get(team, 0))
+                    continue
+                
+                # Check game cap
+                if game_id and game_counts.get(game_id, 0) >= elite_game_cap:
+                    if "selection_rejection_reason" in admitted_df.columns:
+                        admitted_df.at[idx, "selection_rejection_reason"] = "reject_game_exposure_cap"
+                    admitted_df.at[idx, "game_exposure_count_at_decision"] = game_counts.get(game_id, 0)
+                    skipped_by_game_cap += 1
+                    self.logger.info("[CAP_DEBUG] Row %d: SKIPPED by game_cap (count=%d)", idx, game_counts.get(game_id, 0))
+                    continue
+                
+                # Row passes caps - select it
+                capped_selection.append(idx)
+                if team:
+                    team_counts[team] = team_counts.get(team, 0) + 1
+                if game_id:
+                    game_counts[game_id] = game_counts.get(game_id, 0) + 1
+                
+                self.logger.info(
+                    "[CAP_DEBUG] Row %d: SELECTED (team_count now=%d, game_count now=%d)",
+                    idx, team_counts.get(team, 0), game_counts.get(game_id, 0)
+                )
+                
+                # Track exposure at decision time
+                admitted_df.at[idx, "team_exposure_count_at_decision"] = team_counts.get(team, 0) - 1
+                admitted_df.at[idx, "game_exposure_count_at_decision"] = game_counts.get(game_id, 0) - 1
+            
+            # Create capped DataFrame
+            capped_df = admitted_df.loc[capped_selection].copy() if capped_selection else pd.DataFrame()
+            
+            # Log first 10 row game_ids for verification
+            first_10_game_ids = [str(admitted_df.iloc[i].get("game_id", "NULL")) for i in range(min(10, len(admitted_df)))]
+            self.logger.info("[CAP_DEBUG] First 10 row game_ids: %s", ",".join(first_10_game_ids))
+            
+            # Log final game counts
+            final_game_counts_str = ",".join([f"{k}:{v}" for k, v in game_counts.items()]) if game_counts else "none"
+            self.logger.info(
+                "[CAP_DEBUG] Cap enforcement complete: capped_df=%d, skipped_team=%d, skipped_game=%d, final_game_counts=%s",
+                len(capped_df), skipped_by_team_cap, skipped_by_game_cap, final_game_counts_str
+            )
+            
+            selection_stage_trace["elite"]["candidate_count_after_concentration_caps"] = len(capped_df)
+            selection_stage_trace["elite"]["skipped_by_team_cap"] = skipped_by_team_cap
+            selection_stage_trace["elite"]["skipped_by_game_cap"] = skipped_by_game_cap
+            selection_stage_trace["elite"]["max_team_exposure"] = max(team_counts.values()) if team_counts else 0
+            selection_stage_trace["elite"]["max_game_exposure"] = max(game_counts.values()) if game_counts else 0
+            selection_stage_trace["elite"]["unique_teams"] = len(team_counts)
+            selection_stage_trace["elite"]["unique_games"] = len(game_counts)
+            
+            # Final selection: take top N after caps applied
+            elite_size = self.config.elite_size if hasattr(self.config, 'elite_size') else 10
+            selected_df = capped_df.head(elite_size)
+            selection_stage_trace["elite"]["candidate_count_after_backfill"] = len(selected_df)
+            
+            # Clean rejection_reason in selected rows
+            if "selection_rejection_reason" in selected_df.columns:
+                selected_df["selection_rejection_reason"] = ""
+            
+            # Log concentration summary
+            self.logger.info(
+                "elite_concentration_summary team_cap=%d game_cap=%d selected=%d skipped_team=%d skipped_game=%d max_team=%d max_game=%d",
+                elite_team_cap, elite_game_cap, len(selected_df), skipped_by_team_cap, skipped_by_game_cap,
+                selection_stage_trace["elite"]["max_team_exposure"],
+                selection_stage_trace["elite"]["max_game_exposure"]
+            )
+            
+            return selected_df
+
+        def select_top_per_market(df: pd.DataFrame, limit: int) -> pd.DataFrame:
+            """Select top candidates per market type."""
+            selection_stage_trace["full_market"]["candidate_count_entering_full_market_selection"] = len(df)
+            if df.empty:
+                selection_stage_trace["full_market"]["candidate_count_after_final_full_market_selection"] = 0
+                return df
+            # Group by market_type and select top by selection_score (not just quality_score)
+            sort_column = "selection_score" if "selection_score" in df.columns else "quality_score"
+            result = []
+            for market_type, group in df.groupby("market_type", sort=False):
+                sorted_group = group.sort_values(sort_column, ascending=False).head(limit)
+                result.append(sorted_group)
+            selected_df = pd.concat(result).copy() if result else pd.DataFrame()
+            selection_stage_trace["full_market"]["candidate_count_after_final_full_market_selection"] = len(selected_df)
+            # Clean rejection_reason in selected rows
+            if "selection_rejection_reason" in selected_df.columns:
+                selected_df["selection_rejection_reason"] = ""
+            return selected_df
+
+        # Build operator boards (returns elite_df, full_market_df, construction_trace)
+        elite_df, full_market_df, selection_trace = build_operator_boards(
+            candidates_df,
+            per_market_limit=20,
+            select_elite_board=select_elite_board,
+            select_top_per_market=select_top_per_market,
+        )
+        selection_trace.setdefault("elite", {}).update(selection_stage_trace["elite"])
+        selection_trace.setdefault("full_market", {}).update(selection_stage_trace["full_market"])
+        self.logger.info("board_selection_trace %s", selection_trace)
+        if selection_trace.get("selection_rejection_reasons"):
+            self.logger.info(
+                "selection_rejection_reasons %s",
+                selection_trace["selection_rejection_reasons"],
+            )
+        if selection_trace.get("qualified_but_not_selected_rows"):
+            self.logger.warning(
+                "qualified_but_not_selected_rows_sample %s",
+                selection_trace["qualified_but_not_selected_rows"],
+            )
+
+        # Assign lanes for diagnostic purposes
+        lane_summary = assign_candidate_lanes(candidates_df, elite_df, full_market_df)
+        self.logger.info("lane_assignment %s", lane_summary)
+
+        # Extract boards
+        result.selected_props = elite_df  # Elite board is the selected props
+        result.elite_props = elite_df
+        result.full_market_props = full_market_df
+        # Stat-only board would be non-live candidates (if needed)
+        result.stat_only_props = candidates_df[
+            ~candidates_df.index.isin(elite_df.index) &
+            ~candidates_df.index.isin(full_market_df.index)
+        ].copy() if not candidates_df.empty else pd.DataFrame()
+        result.market_lines = odds
+        result.merged_market_props = candidates_df
+        result.injury_context = injury_context  # Pass through for downstream use
+
+        # Build summary with board analytics
+        result.summary = self._build_summary(
+            games=games,
+            odds=odds,
+            candidates=candidates_df,
+            elite_df=elite_df,
+            selected_df=elite_df,  # Elite is the selected props
+            injury_context=injury_context,
+        )
+
+        # Set summary on telemetry BEFORE writing audit files
+        elite_telemetry.set_summary(result.summary)
+
+        # Write elite telemetry audit files
+        try:
+            out_dir = Path(self.config.out_dir) / "runtime" / "operator"
+            csv_path = elite_telemetry.write_csv(out_dir)
+            json_path = elite_telemetry.write_summary_json(out_dir)
+            self.logger.info("elite_telemetry_csv %s", csv_path)
+            self.logger.info("elite_telemetry_json %s", json_path)
+            self.logger.info("elite_telemetry_totals %s", dict(elite_telemetry.totals))
+        except Exception as e:
+            self.logger.warning("elite_telemetry_write_failed %s", str(e))
+
+        self.logger.info("prediction_complete summary_keys=%s", list(result.summary.keys()))
+        return result
+
+    def _build_candidate_universe(
+        self,
+        games: pd.DataFrame,
+        odds: pd.DataFrame,
+        player_baselines: pd.DataFrame,
+        injury_context: dict[str, Any],
+        is_player_inactive_fn: Callable[[str], bool],
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """Build the universe of betting candidates."""
+        # Input size diagnostics
+        self.logger.info(
+            "candidate_universe_input "
+            "games=%d odds=%d player_baselines=%d injury_teams=%d",
+            len(games),
+            len(odds),
+            len(player_baselines),
+            len(injury_context.get("teams", {})),
+        )
+
+        def is_inactive(player_name: str) -> bool:
+            if is_player_inactive_fn:
+                return is_player_inactive_fn(player_name)
+            return False
+
+        # Fully modeled markets (real projections)
+        FULLY_MODELED_MARKETS = {"player_points"}
+        # Markets with placeholder/incomplete projections
+        PARTIALLY_MODELED_MARKETS = {
+            "player_rebounds",
+            "player_assists",
+            "player_3pt_made",
+            "player_steals",
+            "player_blocks",
+        }
+
+        def _get_projection_support_status(
+            market_type: str, projection: float | None
+        ) -> tuple[str, str | None]:
+            """
+            Determine projection support status and rejection reason if invalid.
+            Returns: (status, rejection_reason)
+            """
+            normalized = normalize_market_alias(market_type) or market_type
+
+            # Check if market is fully modeled
+            if normalized not in FULLY_MODELED_MARKETS:
+                if normalized in PARTIALLY_MODELED_MARKETS:
+                    return "unsupported_market", "unsupported_projection_market"
+                return "unsupported_market", "unsupported_market_type"
+
+            # For fully modeled markets, check projection validity
+            if projection is None:
+                return "projection_missing", "invalid_projection_output"
+            if projection == 0.0:
+                return "zero_projection_placeholder", "invalid_projection_output"
+
+            return "modeled", None
+
+        def build_candidate_row(
+            player_row: pd.Series,
+            market: str,
+            market_rows: pd.DataFrame,
+            partial_fill: bool = False,
+        ) -> dict[str, Any] | None:
+            """Build a candidate row with all scoring fields."""
+            normalized_market = normalize_market_alias(market) or market
+
+            # Get the first market row for line/odds
+            market_row = market_rows.iloc[0] if not market_rows.empty else pd.Series()
+
+            # Get base projection
+            projection = self._compute_projection(
+                player_row=player_row,
+                market_type=normalized_market,
+            )
+
+            # Get base confidence
+            confidence = self._compute_confidence(
+                player_row=player_row,
+                market_type=normalized_market,
+            )
+
+            # Check projection support status
+            support_status, reject_reason = _get_projection_support_status(
+                normalized_market, projection
+            )
+
+            # If unsupported market, return None to trigger rejection
+            if reject_reason:
+                return None  # Will be rejected by score_player_markets with explicit reason
+
+            # Apply injury context if available
+            injury_metadata: dict[str, Any] = {}
+            if injury_context and self.config.enable_injury_context:
+                team_abbr = str(player_row.get("team_abbr", ""))
+                # Determine opponent from team context or use placeholder
+                opp_abbr = "OPP"  # Simplified for package pipeline
+
+                if team_abbr:
+                    projection, confidence, injury_metadata = self.injury_engine.apply_context(
+                        player_row=player_row,
+                        team_abbr=team_abbr,
+                        opp_abbr=opp_abbr,
+                        market_type=normalized_market,
+                        projection=projection,
+                        confidence=confidence,
+                        injury_context=injury_context,
+                    )
+
+            # Get line and odds
+            line = _nan_safe_to_float(market_row.get("line"), projection)
+            raw_odds = _nan_safe_to_float(market_row.get("odds"), float(self.config.synthetic_odds_default))
+            if raw_odds in (None, 0.0):
+                raw_odds = float(self.config.synthetic_odds_default)
+            odds = int(raw_odds if raw_odds is not None else self.config.synthetic_odds_default)
+
+            # Compute edge
+            edge = projection - line
+            edge_pct = (edge / line) if line else 0.0
+
+            # Score the candidate
+            scoring_input = {
+                "market_type": normalized_market,
+                "projection": projection,
+                "line": line,
+                "edge": edge,
+                "edge_pct": edge_pct,
+                "confidence": confidence,
+                "player_name": str(player_row.get("player_name", "")),
+                "team": str(player_row.get("team_abbr", "")),
+                "minutes_avg": _nan_safe_to_float(player_row.get("min_avg")),
+                "minutes_recent": _nan_safe_to_float(player_row.get("min_recent")),
+                "is_live_market": bool(market_row.get("is_live", True)) if not market_row.empty else not partial_fill,
+                "synthetic_line": bool(market_row.get("synthetic", False)) if not market_row.empty else partial_fill,
+            }
+
+            scoring_result = self.scoring_policy.apply_scoring_metadata(scoring_input)
+            is_live_market = bool(market_row.get("is_live", True)) if not market_row.empty else not partial_fill
+            synthetic_line = bool(market_row.get("synthetic", False)) if not market_row.empty else partial_fill
+
+            # Determine qualification_reason based on market source
+            # For live markets, set qualification_reason to pass the live gate filter
+            if is_live_market and not synthetic_line:
+                qualification_reason = "live_market_qualified"
+            elif is_live_market and synthetic_line:
+                qualification_reason = "live_market_fill"
+            else:
+                qualification_reason = "stat_only_qualified"
+
+            return {
+                "prediction_date": self.config.prediction_date,
+                "player_name": str(player_row.get("player_name", "")),
+                "entity_name": str(player_row.get("player_name", "")),
+                "player_id": player_row.get("player_id"),
+                "team": str(player_row.get("team_abbr", "")),
+                "team_abbr": str(player_row.get("team_abbr", "")),
+                "opponent": opp_abbr if 'opp_abbr' in dir() else "OPP",
+                "market_type": normalized_market,
+                "selection": "over" if edge > 0 else "under",
+                "sportsbook_line": line,
+                "model_projection": projection,
+                "projection_support_status": support_status,
+                "edge": edge,
+                "edge_pct": edge_pct,
+                "confidence": confidence,
+                "quality_score": scoring_result.get("quality_score", 0.0),
+                "selection_score": scoring_result.get("selection_score", 0.0),
+                "odds": odds,
+                "is_elite": scoring_result.get("is_elite", False),
+                "qualification_reason": qualification_reason,
+                "is_live_market": is_live_market,
+                "synthetic_line": synthetic_line,
+                "line_source": "live_market" if is_live_market and not synthetic_line else "partial_fill",
+                "source_lane": "live_market_candidate" if is_live_market and not synthetic_line else "partial_fill_candidate",
+                **injury_metadata,
+            }
+
+        def reject_candidate(
+            player_row: pd.Series,
+            market: str | None,
+            reason: str,
+            team: str | None = None,
+            projection_support_status: str = "",
+        ) -> dict[str, Any]:
+            return {
+                "prediction_date": self.config.prediction_date,
+                "player_name": str(player_row.get("player_name", "")),
+                "market_type": market or "",
+                "rejection_reason": reason,
+                "projection_support_status": projection_support_status,
+                "team": team or str(player_row.get("team", "")),
+            }
+
+        def score_candidate_fn(
+            candidate_row: dict[str, Any],
+            player_row: pd.Series | None = None,
+            market: str | None = None,
+            market_rows: pd.DataFrame | None = None,
+            partial_fill: bool = False,
+        ) -> dict[str, Any] | None:
+            # Apply thresholds
+            edge = _nan_safe_to_float(candidate_row.get("edge"), 0.0) or 0.0
+            confidence = _nan_safe_to_float(candidate_row.get("confidence"), 0.0) or 0.0
+
+            if abs(edge) < self.config.min_edge:
+                return None
+            if confidence < self.config.min_confidence:
+                return None
+
+            return candidate_row
+
+        # Use the data module's candidate scoring
+        accepted, rejected = score_player_markets(
+            players_df=player_baselines,
+            odds_df=odds,
+            is_player_inactive=is_inactive,
+            build_candidate_row=build_candidate_row,
+            score_candidate_fn=score_candidate_fn,
+            reject_candidate_fn=reject_candidate,
+            allow_partial_fill=self.config.enable_partial_fill,
+        )
+
+        # Stage-level diagnostics: rejection breakdown
+        if rejected:
+            rejection_counts: dict[str, int] = {}
+            rejection_details: dict[str, list] = {"low_edge": [], "low_confidence": []}
+
+            for r in rejected:
+                reason = r.get("rejection_reason", "unknown")
+                rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+
+                # Track edge/confidence values for debugging
+                if reason == "low_edge":
+                    rejection_details["low_edge"].append(r.get("edge", 0))
+                elif reason == "low_confidence":
+                    rejection_details["low_confidence"].append(r.get("confidence", 0))
+
+            self.logger.info("rejection_breakdown %s", rejection_counts)
+
+            # Identify top 3 rejection causes
+            top_rejections = sorted(rejection_counts.items(), key=lambda x: x[1], reverse=True)[:3]
+            self.logger.info("top_rejection_causes %s", top_rejections)
+
+            # Log sample values for debugging
+            if rejection_details["low_edge"]:
+                sample_edges = rejection_details["low_edge"][:5]
+                self.logger.info("sample_low_edge_values %s (threshold=%s)", sample_edges, self.config.min_edge)
+            if rejection_details["low_confidence"]:
+                sample_conf = rejection_details["low_confidence"][:5]
+                self.logger.info("sample_low_confidence_values %s (threshold=%s)", sample_conf, self.config.min_confidence)
+
+        self.logger.info("candidate_universe_output accepted=%d rejected=%d", len(accepted), len(rejected))
+
+        return accepted, rejected
+
+    def _compute_projection(
+        self,
+        player_row: pd.Series,
+        market_type: str,
+    ) -> float:
+        """Compute projection for a player market."""
+        # Map market type to stat key
+        stat_key = market_type.replace("player_", "")
+        stat_map = {
+            "points": "pts_avg",
+            "rebounds": "reb_avg",
+            "assists": "ast_avg",
+            "3pt_made": "threes_avg",
+            "steals": "stl_avg",
+            "blocks": "blk_avg",
+        }
+
+        column = stat_map.get(stat_key, f"{stat_key}_avg")
+        projection = _nan_safe_to_float(player_row.get(column))
+
+        if projection is None:
+            # Fallback to recent average if available
+            recent_col = column.replace("_avg", "_recent")
+            projection = _nan_safe_to_float(player_row.get(recent_col), 0.0) or 0.0
+
+        return max(projection, 0.0)
+
+    def _compute_confidence(
+        self,
+        player_row: pd.Series,
+        market_type: str,
+    ) -> float:
+        """Compute confidence for a player market."""
+        minutes_avg = _nan_safe_to_float(player_row.get("min_avg"), 0.0) or 0.0
+
+        # Base confidence from minutes
+        if minutes_avg >= 30:
+            base_confidence = 0.75
+        elif minutes_avg >= 25:
+            base_confidence = 0.70
+        elif minutes_avg >= 20:
+            base_confidence = 0.65
+        elif minutes_avg >= 15:
+            base_confidence = 0.60
+        else:
+            base_confidence = 0.55
+
+        # Adjust for stat-specific stability
+        if market_type == "player_points":
+            base_confidence += 0.05
+        elif market_type in {"player_steals", "player_blocks"}:
+            base_confidence -= 0.05
+
+        return min(max(base_confidence, 0.35), 0.98)
+
+    def _compute_board_analytics(self, elite_df: pd.DataFrame) -> dict[str, Any]:
+        """Compute board-level analytics for elite board.
+        
+        Returns metrics like:
+        - elite_count: number of rows
+        - overs_count / unders_count: side distribution
+        - avg_edge / avg_abs_edge: edge distribution
+        - max_team_exposure / max_game_exposure: concentration metrics
+        - unique_teams / unique_games: coverage metrics
+        """
+        if elite_df.empty:
+            return {
+                "elite_count": 0,
+                "overs_count": 0,
+                "unders_count": 0,
+                "avg_edge": 0.0,
+                "avg_abs_edge": 0.0,
+                "max_team_exposure": 0,
+                "max_game_exposure": 0,
+                "unique_teams": 0,
+                "unique_games": 0,
+            }
+        
+        # Basic counts
+        elite_count = len(elite_df)
+        
+        # Side distribution
+        selection_col = elite_df.get("selection", pd.Series("", index=elite_df.index))
+        overs_count = int(selection_col.astype(str).str.lower().eq("over").sum())
+        unders_count = int(selection_col.astype(str).str.lower().eq("under").sum())
+        
+        # Edge distribution
+        edge_col = elite_df.get("edge", pd.Series(0.0, index=elite_df.index))
+        edge_values = pd.to_numeric(edge_col, errors="coerce").dropna()
+        avg_edge = float(edge_values.mean()) if not edge_values.empty else 0.0
+        avg_abs_edge = float(edge_values.abs().mean()) if not edge_values.empty else 0.0
+        
+        # Concentration metrics
+        team_col = elite_df.get("team_abbr", elite_df.get("team", pd.Series("", index=elite_df.index)))
+        team_counts = team_col.astype(str).str.upper().value_counts()
+        max_team_exposure = int(team_counts.max()) if not team_counts.empty else 0
+        unique_teams = int(len(team_counts))
+        
+        game_col = elite_df.get("game_id", pd.Series(0, index=elite_df.index))
+        game_counts = game_col.value_counts()
+        max_game_exposure = int(game_counts.max()) if not game_counts.empty else 0
+        unique_games = int(len(game_counts))
+        
+        return {
+            "elite_count": elite_count,
+            "overs_count": overs_count,
+            "unders_count": unders_count,
+            "avg_edge": round(avg_edge, 4),
+            "avg_abs_edge": round(avg_abs_edge, 4),
+            "max_team_exposure": max_team_exposure,
+            "max_game_exposure": max_game_exposure,
+            "unique_teams": unique_teams,
+            "unique_games": unique_games,
+        }
+
+    def _build_summary(
+        self,
+        games: pd.DataFrame,
+        odds: pd.DataFrame,
+        candidates: pd.DataFrame,
+        elite_df: pd.DataFrame,
+        selected_df: pd.DataFrame,
+        injury_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Build prediction summary."""
+        summary = {
+            "prediction_date": self.config.prediction_date,
+            "games_count": len(games),
+            "odds_count": len(odds),
+            "candidate_count": len(candidates),
+            "elite_count": len(elite_df),
+            "selected_count": len(selected_df),
+            "market_quality_status": "live" if not odds.empty else "degraded",
+            "injury_context_built": bool(injury_context.get("teams", {}) or injury_context.get("players", {})),
+        }
+
+        # Add quality distribution if available
+        if "quality_score" in candidates.columns:
+            quality_scores = pd.to_numeric(candidates["quality_score"], errors="coerce").dropna()
+            if not quality_scores.empty:
+                summary["quality_mean"] = round(float(quality_scores.mean()), 2)
+                summary["quality_median"] = round(float(quality_scores.median()), 2)
+        
+        # Add board-level analytics for elite board
+        board_analytics = self._compute_board_analytics(elite_df)
+        summary["board_analytics"] = board_analytics
+        
+        # Also add key metrics directly to summary for easy access
+        summary.update({
+            "elite_overs_count": board_analytics["overs_count"],
+            "elite_unders_count": board_analytics["unders_count"],
+            "elite_avg_edge": board_analytics["avg_edge"],
+            "elite_avg_abs_edge": board_analytics["avg_abs_edge"],
+            "elite_max_team_exposure": board_analytics["max_team_exposure"],
+            "elite_max_game_exposure": board_analytics["max_game_exposure"],
+            "elite_unique_teams": board_analytics["unique_teams"],
+            "elite_unique_games": board_analytics["unique_games"],
+        })
+
+        return summary
+
+    def _build_empty_summary(
+        self,
+        games: pd.DataFrame,
+        odds: pd.DataFrame,
+    ) -> dict[str, Any]:
+        """Build summary when no candidates found."""
+        return {
+            "prediction_date": self.config.prediction_date,
+            "games_count": len(games),
+            "odds_count": len(odds),
+            "candidate_count": 0,
+            "elite_count": 0,
+            "selected_count": 0,
+            "market_quality_status": "no_candidates",
+            "warning": "No valid candidates found",
+        }
+
+
+# Convenience function for direct usage
+def run_prediction_pipeline(
+    prediction_date: str,
+    games: pd.DataFrame,
+    odds: pd.DataFrame,
+    player_baselines: pd.DataFrame,
+    team_baselines: pd.DataFrame | None = None,
+    injuries: pd.DataFrame | None = None,
+    config: PredictionConfig | None = None,
+    logger: logging.Logger | None = None,
+) -> PredictionResult:
+    """Run prediction pipeline with provided data.
+
+    This is a convenience function that creates and runs a PredictionPipeline.
+    """
+    cfg = config or PredictionConfig(prediction_date=prediction_date)
+    pipeline = PredictionPipeline(config=cfg, logger=logger)
+    return pipeline.run(
+        games=games,
+        odds=odds,
+        player_baselines=player_baselines,
+        team_baselines=team_baselines,
+        injuries=injuries,
+    )
