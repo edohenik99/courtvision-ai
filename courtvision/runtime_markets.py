@@ -79,10 +79,14 @@ _MARKET_ALIASES: dict[str, str] = {
     "rebounds_3q": "player_rebounds",
     "rebounds_4q": "player_rebounds",
     "moneyline": "moneyline",
+    "team_moneyline": "moneyline",
     "h2h": "moneyline",
     "team_total": "team_total",
+    "team_total_over": "team_total",
+    "team_total_under": "team_total",
     "team_totals": "team_total",
     "team_total_points": "team_total",
+    "player_threes": "player_3pt_made",
 }
 
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")

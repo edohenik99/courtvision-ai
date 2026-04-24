@@ -12,6 +12,8 @@ if (-not $PSScriptRoot) {
 Set-Location $PSScriptRoot
 
 $ValidateRuntimeScript = Join-Path $PSScriptRoot "scripts\validate_runtime_outputs.py"
+$PostRunTrackingScript = Join-Path $PSScriptRoot "scripts\post_run_tracking.py"
+$GradeCompletedScript = Join-Path $PSScriptRoot "scripts\grade_completed_picks.py"
 
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "CourtVision Runner - $Date" -ForegroundColor Cyan
@@ -66,31 +68,19 @@ if ($LASTEXITCODE -ne 0) {
     $validationPassed = $false
 }
 
-# Auto-grade if validation passed and games may have been played
+# Persist picks and grade pending history if validation passed
 if ($validationPassed) {
     Write-Host "`n[3/3] Checking for grading..." -ForegroundColor Yellow
-    
-    # Check if picks file exists for grading
-    $picksFile = "outputs\runtime\history\picks_$Date.csv"
-    $gradedFile = "outputs\runtime\history\graded_picks_$Date.csv"
-    
-    if ((Test-Path $picksFile) -and -not (Test-Path $gradedFile)) {
-        Write-Host "  Running auto-grade for $Date..." -ForegroundColor White
-        python courtvision_ai.py --grade-date $Date --verbose-outputs 2>&1 | ForEach-Object {
-            if ($_ -match "graded|hit_rate|roi|letter_grade") {
-                Write-Host "    $_" -ForegroundColor White
-            }
-        }
-        
-        if (Test-Path $gradedFile) {
-            Write-Host "  [OK] Grading complete" -ForegroundColor Green
-            
-            python $ValidateRuntimeScript $Date --grading-summary | ForEach-Object { Write-Host $_ }
-        } else {
-            Write-Host "  [INFO] Games not yet completed or already graded" -ForegroundColor Yellow
-        }
-    } else {
-        Write-Host "  [OK] No grading needed (already graded or no picks)" -ForegroundColor Green
+    python $PostRunTrackingScript --prediction-date $Date --grade-pending 2>&1 | ForEach-Object {
+        Write-Host "  $_" -ForegroundColor White
+    }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  [ERROR] Post-run tracking failed (exit code: $LASTEXITCODE)" -ForegroundColor Red
+        exit 1
+    }
+    # Optional extra pass for older pending picks if manually invoked later.
+    if (Test-Path $GradeCompletedScript) {
+        python $GradeCompletedScript 2>&1 | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkGray }
     }
 }
 

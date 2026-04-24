@@ -207,6 +207,15 @@ def score_player_markets(
 
     working_odds = _normalize_market_rows(working_odds)
 
+    # Prefer player_id matching - create lookup if player_id available
+    player_id_lookup: dict[int, pd.DataFrame] = {}
+    if not working_odds.empty and "player_id" in working_odds.columns:
+        # Group by player_id for fast lookup
+        player_id_lookup = {
+            int(pid): group for pid, group in working_odds.groupby("player_id")
+            if pd.notna(pid) and int(pid) > 0
+        }
+
     coverage_by_market: dict[str, dict[str, int]] = defaultdict(
         lambda: {"candidate_count": 0, "matched_count": 0, "missing_market_lines_count": 0, "unsupported_count": 0}
     )
@@ -219,6 +228,8 @@ def score_player_markets(
     missing_coverage_causes: Counter[str] = Counter()
     market_alias_audit: Counter[tuple[str, str]] = Counter()
     skipped_none_candidates: int = 0
+    # Market match rate tracking
+    market_match_counts: dict[str, dict[str, int]] = defaultdict(lambda: {"attempted": 0, "matched": 0})
 
     if not working_odds.empty:
         for _, row in working_odds.iterrows():
@@ -250,11 +261,21 @@ def score_player_markets(
             )
             continue
 
-        # Use normalized name for matching
+        # Prefer player_id matching, fall back to normalized name
+        player_id = int(player_row.get("player_id", 0) or 0)
         normalized_player_name = _normalize_player_name(player_name)
         exact_name_rows = pd.DataFrame()
         player_market_rows = pd.DataFrame()
-        if not working_odds.empty and "_normalized_name" in working_odds.columns:
+        matched_by_id = False
+
+        # Try player_id matching first (more reliable)
+        if player_id > 0 and player_id in player_id_lookup:
+            player_market_rows = player_id_lookup[player_id].copy()
+            exact_name_rows = player_market_rows.copy()
+            matched_players += 1
+            matched_by_id = True
+        # Fall back to normalized name matching
+        elif not working_odds.empty and "_normalized_name" in working_odds.columns:
             exact_name_rows = working_odds[
                 working_odds["_normalized_name"] == normalized_player_name
             ].copy()
@@ -312,9 +333,12 @@ def score_player_markets(
 
         # Score all live player markets first.
         for market in sorted(available_markets):
+            market_match_counts[market]["attempted"] += 1
             if market not in PRIMARY_PLAYER_MARKETS:
+                market_match_counts[market]["matched"] += 0  # Track attempted but filtered
                 continue
 
+            market_match_counts[market]["matched"] += 1
             coverage_by_market[market]["candidate_count"] += 1
             coverage_by_market[market]["matched_count"] += 1
             coverage_by_team[team]["candidate_count"] += 1
@@ -369,11 +393,21 @@ def score_player_markets(
             )
 
             if scored is None:
+                reason = str(candidate_row.get("pre_rejection_reason", "") or "").strip()
+                if not reason:
+                    edge = _safe_float(candidate_row.get("edge"), 0.0)
+                    confidence = _safe_float(candidate_row.get("confidence"), 0.0)
+                    if abs(edge) < 0.5:
+                        reason = "market_supported_but_failed_quality"
+                    elif confidence < 0.35:
+                        reason = "market_supported_but_failed_confidence"
+                    else:
+                        reason = "edge_and_confidence_below_threshold"
                 rejected_candidates.append(
                     reject_candidate_fn(
                         player_row=player_row,
                         market=market,
-                        reason="edge_and_confidence_below_threshold",
+                        reason=reason,
                         team=team,
                         projection_support_status=candidate_row.get("projection_support_status", ""),
                     )
@@ -427,13 +461,23 @@ def score_player_markets(
                 )
 
                 if scored is None:
+                    reason = str(candidate_row.get("pre_rejection_reason", "") or "").strip()
+                    if not reason:
+                        edge = _safe_float(candidate_row.get("edge"), 0.0)
+                        confidence = _safe_float(candidate_row.get("confidence"), 0.0)
+                        if abs(edge) < 0.5:
+                            reason = "market_supported_but_failed_quality"
+                        elif confidence < 0.35:
+                            reason = "market_supported_but_failed_confidence"
+                        else:
+                            reason = "edge_and_confidence_below_threshold"
                     coverage_by_market[market]["missing_market_lines_count"] += 1
                     coverage_by_team[team]["missing_market_lines_count"] += 1
                     rejected_candidates.append(
                         reject_candidate_fn(
                             player_row=player_row,
                             market=market,
-                            reason="edge_and_confidence_below_threshold",
+                            reason=reason,
                             team=team,
                             projection_support_status=candidate_row.get("projection_support_status", ""),
                         )
@@ -471,6 +515,19 @@ def score_player_markets(
             for market_type, stats in sorted(coverage_by_market.items())
         ],
     )
+    # Market match rate by market_type - tracks coverage efficiency
+    logger.info(
+        "market_match_rate %s",
+        [
+            {
+                "market_type": market,
+                "attempted": counts["attempted"],
+                "matched": counts["matched"],
+                "rate_pct": round(100 * counts["matched"] / counts["attempted"], 1) if counts["attempted"] > 0 else 0
+            }
+            for market, counts in sorted(market_match_counts.items())
+        ],
+    )
     logger.info(
         "market_coverage_by_team %s",
         [
@@ -486,8 +543,8 @@ def score_player_markets(
         "top_missing_coverage_causes %s",
         [{"cause": cause, "count": count} for cause, count in missing_coverage_causes.most_common(10)],
     )
-    logger.warning("top_players_no_market_lines %s", top_unmatched_players)
-    logger.warning("sample_unmatched_market_comparisons %s", unmatched_samples)
+    # Summary stats only - avoid large debug dumps
+    logger.debug(f"[provider_fetch] unmatched_count={len(top_unmatched_players)}")
 
     # Projection support status breakdown
     logger.info(

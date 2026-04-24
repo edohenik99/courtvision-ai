@@ -1,0 +1,2 @@
+date,total_picks,hits,misses,pushes,pending,hit_rate,overs_count,overs_hit_rate,unders_count,unders_hit_rate,avg_edge,avg_abs_edge,max_team_exposure,max_game_exposure
+2026-04-24,6,0,0,0,6,0.0,6,0.0,0,0.0,3.5051,3.5051,2,2

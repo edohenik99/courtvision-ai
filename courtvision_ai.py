@@ -3265,9 +3265,19 @@ class CourtVisionAI:
 
         # Delegate prediction orchestration to package pipeline
         # Thresholds now come from PredictionConfig defaults, not legacy monolith attributes
+        elite_market_mode = os.getenv("ELITE_MARKET_MODE", "points_only").strip().lower() or "points_only"
+        elite_allowed_markets_raw = os.getenv("ELITE_ALLOWED_MARKETS", "").strip()
+        elite_allowed_markets = tuple(
+            part.strip()
+            for part in elite_allowed_markets_raw.split(",")
+            if part.strip()
+        )
         pipeline_config = PredictionConfig(
             prediction_date=prediction_date,
             enable_partial_fill=True,
+            out_dir=str(self.out_dir),
+            elite_market_mode=elite_market_mode,
+            elite_allowed_markets=elite_allowed_markets,
         )
         pipeline = PredictionPipeline(pipeline_config)
         
@@ -3281,6 +3291,76 @@ class CourtVisionAI:
             injuries=injuries,
         )
         print("[STAGE] prediction_pipeline_run_complete")
+
+        # Authoritative pipeline mode (default): use package pipeline outputs directly.
+        # Legacy post-processing path remains available only when explicitly enabled.
+        legacy_pipeline_enabled = os.getenv("COURTVISION_ENABLE_LEGACY_PIPELINE", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if not legacy_pipeline_enabled:
+            elite_df = result.elite_props.copy() if not result.elite_props.empty else pd.DataFrame()
+            full_market_df = result.full_market_props.copy() if not result.full_market_props.empty else pd.DataFrame()
+            qualified_pool_df = result.merged_market_props.copy() if not result.merged_market_props.empty else pd.DataFrame()
+            rejected_df = pd.DataFrame()
+            grading_df, grading_summary = self._grade_history(prediction_date=prediction_date)
+            grading_bucket_summary = summarize_graded_props(grading_df.to_dict("records")) if not grading_df.empty else summarize_graded_props([])
+            self._append_history(self.prediction_history_path, elite_df if not elite_df.empty else qualified_pool_df)
+            board_diagnostics = {
+                "board_counts": {
+                    "elite": int(len(elite_df)),
+                    "full_market": int(len(full_market_df)),
+                    "qualified_pool": int(len(qualified_pool_df)),
+                },
+                "pipeline_mode": "authoritative_package_pipeline",
+                "legacy_pipeline_enabled": False,
+            }
+            summary = dict(result.summary or {})
+            summary.setdefault("prediction_date", prediction_date)
+            summary["pipeline_mode"] = "authoritative_package_pipeline"
+            summary["legacy_pipeline_enabled"] = False
+            summary["selected_count"] = int(len(elite_df))
+            summary["elite_count"] = int(len(elite_df))
+            summary["full_market_count"] = int(len(full_market_df))
+            summary["markets_evaluated"] = int(len(qualified_pool_df))
+            self._log_run(
+                {
+                    "run_type": "predict",
+                    "train_start": "",
+                    "train_end": "",
+                    "prediction_date": prediction_date,
+                    "selected_count": int(len(elite_df)),
+                    "rejected_count": 0,
+                    "notes": json.dumps(summary),
+                }
+            )
+            return {
+                "selected_props": elite_df,
+                "elite_props": elite_df,
+                "qualified_pool_props": qualified_pool_df,
+                "full_market_props": full_market_df,
+                "stat_only_props": pd.DataFrame(),
+                "all_stats_props": pd.DataFrame(),
+                "strike_props": pd.DataFrame(),
+                "high_upside_props": pd.DataFrame(),
+                "predictive_lines_props": pd.DataFrame(),
+                "predictive_market_fill_props": pd.DataFrame(),
+                "premarket_line_board": pd.DataFrame(),
+                "sgp_props": pd.DataFrame(),
+                "sgp_board": pd.DataFrame(),
+                "grading_results": grading_df,
+                "grading_bucket_summary": grading_bucket_summary,
+                "team_board_props": pd.DataFrame(),
+                "near_miss_props": pd.DataFrame(),
+                "rejected_props": rejected_df,
+                "board_diagnostics": board_diagnostics,
+                "final_board_construction": summary.get("final_board_construction", {}),
+                "summary": summary,
+                "games": games,
+                "odds": odds,
+            }
         
         # Extract pipeline results for backward-compatible board building
         selected_df = result.selected_props.copy() if not result.selected_props.empty else pd.DataFrame()
@@ -6095,6 +6175,46 @@ def _write_cli_outputs(
     _write_dataframe(paths["game_predictions"], game_df)
     _write_dataframe(paths["player_edges"], player_edges_df)
     _write_dataframe(paths["game_edges"], game_edges_df)
+    
+    # [FINAL_ELITE_WRITER] runtime marker - actual final writer path
+    elite_count = len(elite_df)
+    game_id_col = elite_df.get("game_id", pd.Series(dtype="int"))
+    market_type_col = elite_df.get("market_type", pd.Series(dtype="object"))
+    
+    # Calculate game exposure
+    game_counts = game_id_col.value_counts().to_dict() if not game_id_col.empty else {}
+    max_game_exposure = max(game_counts.values()) if game_counts else 0
+    
+    # Calculate market distribution
+    market_counts = market_type_col.value_counts().to_dict() if not market_type_col.empty else {}
+    
+    print(f"[FINAL_ELITE_WRITER] function=courtvision_ai.py:prediction_pipeline rows={elite_count} max_game_exposure={max_game_exposure} cap=4")
+    print(f"[FINAL_ELITE_MARKETS] {market_counts}")
+    print(f"[FINAL_ELITE_GAMES] {game_counts}")
+    
+    # Hard validation: game cap must be enforced
+    if max_game_exposure > 4:
+        raise RuntimeError(
+            f"[CAP_VIOLATION] Game cap violated in final elite write: "
+            f"max_game_exposure={max_game_exposure} > cap=4. "
+            f"Game distribution: {game_counts}"
+        )
+    
+    # Persist market coverage diagnostics
+    coverage_path = out_dir / "runtime" / "diagnostics" / f"market_coverage_{prediction_date}.json"
+    coverage_path.parent.mkdir(parents=True, exist_ok=True)
+    coverage_data = {
+        "prediction_date": prediction_date,
+        "elite_count": elite_count,
+        "max_game_exposure": max_game_exposure,
+        "game_cap": 4,
+        "market_distribution": market_counts,
+        "game_distribution": game_counts
+    }
+    with open(coverage_path, "w", encoding="utf-8") as f:
+        json.dump(coverage_data, f, indent=2)
+    print(f"[MARKET_COVERAGE] persisted to {coverage_path}")
+    
     _write_dataframe(paths["elite_board"], elite_df)
     _write_dataframe(paths["full_market_board"], full_market_df)
     _write_dataframe(paths["sgp_board"], sgp_df)

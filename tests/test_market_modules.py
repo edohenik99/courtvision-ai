@@ -48,7 +48,10 @@ class TestNormalizeMarketAlias:
     def test_team_markets(self):
         assert normalize_market_alias("moneyline") == "moneyline"
         assert normalize_market_alias("h2h") == "moneyline"
+        assert normalize_market_alias("team_moneyline") == "moneyline"
         assert normalize_market_alias("team_total") == "team_total"
+        assert normalize_market_alias("team_total_over") == "team_total"
+        assert normalize_market_alias("team_total_under") == "team_total"
 
     def test_unknown_market(self):
         assert normalize_market_alias("unknown_market") is None

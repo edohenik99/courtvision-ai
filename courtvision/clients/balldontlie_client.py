@@ -209,10 +209,12 @@ class BalldontlieClient:
         return games
 
     def get_team_injuries(self) -> list[Injury]:
+        import logging
+        logger = logging.getLogger(__name__)
         try:
             response = self.sdk.nba.injuries.list()
         except Exception as exc:
-            print(f"[WARNING] Injury fetch failed: {exc}")
+            logger.warning(f"[provider_fetch] Injury fetch failed: {exc}")
             return []
 
         raw_rows = response.data if hasattr(response, "data") else response

@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 import csv
+import json
+import logging
+from collections import Counter
 from pathlib import Path
 
 from courtvision.models import GradedPick, PlayerProjection, RankedPlay
+
+# ELITE_GAME_CAP must match the value in selection/operator_boards.py
+ELITE_GAME_CAP = 4
+logger = logging.getLogger("courtvision.reporting")
 
 
 class TextReportWriter:
@@ -35,6 +42,49 @@ class TextReportWriter:
     def write_elite_board(self, prediction_date: str, plays: list[RankedPlay]) -> tuple[Path, Path]:
         txt_path = self.output_dir / f"elite_board_{prediction_date}.txt"
         csv_path = self.output_dir / f"elite_board_{prediction_date}.csv"
+
+        # Calculate game exposure for validation
+        game_counts = Counter()
+        market_counts = Counter()
+        for play in plays:
+            game_id = getattr(play, 'game_id', None)
+            if game_id:
+                game_counts[int(game_id)] += 1
+            market_type = getattr(play, 'market_type', 'unknown')
+            market_counts[market_type] += 1
+        
+        max_game_exposure = max(game_counts.values()) if game_counts else 0
+        rows = len(plays)
+        
+        # [FINAL_ELITE_WRITER] runtime marker
+        print(f"[FINAL_ELITE_WRITER] function=write_elite_board rows={rows} max_game_exposure={max_game_exposure} cap={ELITE_GAME_CAP}")
+        
+        # [FINAL_ELITE_MARKETS] distribution trace
+        market_dist = dict(market_counts)
+        print(f"[FINAL_ELITE_MARKETS] {market_dist}")
+        
+        # Hard validation: game cap must be enforced
+        if max_game_exposure > ELITE_GAME_CAP:
+            raise RuntimeError(
+                f"[CAP_VIOLATION] Game cap violated in final elite write: "
+                f"max_game_exposure={max_game_exposure} > cap={ELITE_GAME_CAP}. "
+                f"Game distribution: {dict(game_counts)}"
+            )
+        
+        # Persist market coverage diagnostics
+        diagnostics_path = self.runtime_dir / "diagnostics" / f"market_coverage_{prediction_date}.json"
+        diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
+        coverage_data = {
+            "prediction_date": prediction_date,
+            "elite_count": rows,
+            "max_game_exposure": max_game_exposure,
+            "game_cap": ELITE_GAME_CAP,
+            "market_distribution": market_dist,
+            "game_distribution": dict(game_counts)
+        }
+        with diagnostics_path.open("w", encoding="utf-8") as f:
+            json.dump(coverage_data, f, indent=2)
+        logger.info(f"[MARKET_COVERAGE] persisted to {diagnostics_path}")
 
         with txt_path.open("w", encoding="utf-8") as handle:
             handle.write(f"CourtVision Elite Board - {prediction_date}\n")

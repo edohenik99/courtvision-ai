@@ -46,10 +46,82 @@ python scripts/run_grading.py --prediction-date 2026-04-10 --out-dir outputs
 - **`run_today.bat`** — Main user entrypoint: optional fit, prediction for a date, validation, and optional grading.
 - **`scripts/validate_runtime_outputs.py`** — Post-run validator used from that flow: exposure caps, directional checks on the elite board, summary printing, and optional `--grading-summary` after grading.
 
+## Result tracking and dashboard
+
+### 1. Daily run
+```powershell
+.\run_today.bat
+```
+- Validation must pass before picks are saved as official.
+- Official picks are appended to `data/history/pick_history.csv`.
+- A runtime copy is saved to `outputs/runtime/history/picks_<date>.csv`.
+
+### 2. Manual grading
+```bash
+python scripts/grade_completed_picks.py --prediction-date YYYY-MM-DD
+```
+- Grades pending picks when actual results are available.
+- Unresolved picks remain `pending`.
+- Writes `graded_picks_<date>.csv` under `outputs/runtime/history/`.
+
+### 3. Dashboard CLI
+```bash
+python scripts/dashboard.py
+```
+- Prints a summary from `data/history` performance files.
+
+### 4. Streamlit dashboard
+```bash
+streamlit run scripts/dashboard.py -- --streamlit
+```
+
+### 5. Important note
+- `data/history/` is long-lived model/result memory.
+- `outputs/runtime/` is disposable runtime output.
+
+## Nightly grading automation
+Use these commands on Windows:
+
+```powershell
+.\scripts\install_nightly_grader.ps1
+.\scripts\uninstall_nightly_grader.ps1
+python scripts\nightly_grade_and_refresh.py
+```
+
+- Daily run (`.\run_today.bat`) creates official picks and appends them to `data/history/pick_history.csv`.
+- The nightly grader runs after games finish, grades pending picks when results are available, and refreshes performance summary files under `data/history/`.
+- The dashboard reads updated performance data from `data/history/`.
+- `outputs/runtime/` remains disposable runtime output.
+- `data/history/` is long-lived memory and must not be deleted.
+
 ## New in this cleanup
 - manifest writing under `outputs/manifests/`
 - explicit pipeline stage contracts
 - provider normalization helpers
+
+## Pipeline mode
+
+Controls which prediction pipeline path is used.
+
+**Default:**
+```env
+COURTVISION_ENABLE_LEGACY_PIPELINE=false
+```
+
+**Meaning:**
+- `courtvision/pipeline/predict_pipeline.py` `PredictionPipeline` is authoritative
+- Single, unified elite board production path
+- Legacy post-processing/rebuild path is skipped
+
+**Optional legacy comparison:**
+```env
+COURTVISION_ENABLE_LEGACY_PIPELINE=true
+```
+
+**Warning:**
+- Legacy mode is for debugging/comparison only
+- Not the default daily operating path
+- May produce different elite board outputs; use only for regression testing
 - better repo hygiene
 
 ## Still needs real work

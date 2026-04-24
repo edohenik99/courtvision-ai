@@ -190,42 +190,55 @@ def build_operator_boards(
         for column in required_selector_columns
     ]
 
-    # Both boards filter for live markets only
+    # Unified live gate logic: single mask for both eligibility marking AND filtering
     qualification_reason_series = prepared_df.get("qualification_reason", pd.Series("", index=prepared_df.index))
-    legacy_live_mask = qualification_reason_series.astype(str).str.contains(
-            "live_market|sportsbook", regex=True, case=False, na=False
-    )
     is_live_market_series = prepared_df.get("is_live_market", pd.Series(False, index=prepared_df.index))
     synthetic_line_series = prepared_df.get("synthetic_line", pd.Series(False, index=prepared_df.index))
     line_source_series = prepared_df.get("line_source", pd.Series("", index=prepared_df.index))
-    # Also consider line_source=="live_market" as valid live market indicator
+
+    # Unified live eligibility mask: must satisfy ALL conditions
+    # 1. is_live_market=True (diagnostic flag)
+    # 2. NOT synthetic_line (must have real sportsbook line)
+    # 3. qualification_reason OR line_source indicates live market origin
+    legacy_live_mask = qualification_reason_series.astype(str).str.contains(
+        "live_market|sportsbook", regex=True, case=False, na=False
+    )
     line_source_live_mask = line_source_series.astype(str).str.contains(
         "live_market", regex=False, case=False, na=False
     )
+    origin_live_mask = legacy_live_mask | line_source_live_mask
+
     diagnostic_live_mask = (
         is_live_market_series.fillna(False).astype(bool)
         & ~synthetic_line_series.fillna(False).astype(bool)
     )
-    # Combined live mask: either legacy qualification reason OR line_source indicates live
-    combined_live_mask = legacy_live_mask | line_source_live_mask
 
-    prepared_df.loc[~combined_live_mask & diagnostic_live_mask & qualification_reason_series.fillna("").astype(str).str.strip().eq(""), "selection_rejection_reason"] = (
-        "selection_live_gate_missing_qualification_reason"
-    )
+    # Unified mask: ALL conditions must be met for live eligibility
+    unified_live_mask = diagnostic_live_mask & origin_live_mask
+
+    # Rejection reasons - unified logic ensures no row marked valid is later dropped
     prepared_df.loc[
         prepared_df["selection_rejection_reason"].eq("")
-        & ~combined_live_mask
-        & diagnostic_live_mask,
-        "selection_rejection_reason",
-    ] = "selection_live_gate_filtered"
-    prepared_df.loc[
-        prepared_df["selection_rejection_reason"].eq("")
-        & ~combined_live_mask
+        & ~unified_live_mask
         & ~diagnostic_live_mask,
         "selection_rejection_reason",
     ] = "selection_not_live_market_eligible"
+    prepared_df.loc[
+        prepared_df["selection_rejection_reason"].eq("")
+        & diagnostic_live_mask
+        & ~origin_live_mask
+        & qualification_reason_series.fillna("").astype(str).str.strip().eq(""),
+        "selection_rejection_reason",
+    ] = "selection_live_gate_missing_qualification_reason"
+    prepared_df.loc[
+        prepared_df["selection_rejection_reason"].eq("")
+        & diagnostic_live_mask
+        & ~origin_live_mask,
+        "selection_rejection_reason",
+    ] = "selection_live_gate_filtered"
 
-    live_candidates_df = prepared_df[diagnostic_live_mask].copy()
+    # Filter using the SAME unified mask used for eligibility marking
+    live_candidates_df = prepared_df[unified_live_mask].copy()
 
     final_board_construction: dict[str, Any] = {"elite": {}, "full_market": {}}
     final_board_construction["required_selector_columns"] = required_selector_diagnostics
