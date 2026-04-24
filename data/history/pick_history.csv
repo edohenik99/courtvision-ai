@@ -1,7 +1,0 @@
-prediction_date,run_timestamp,player_name,team,opponent,game_id,market,selection,line,projection,edge,abs_edge,odds,confidence,quality_score,qualification_reason,provider_used,result_status
-2026-04-24,2026-04-24T16:56:40.124208+00:00,Andre Drummond,PHI,OPP,,player_points,over,6.0,7.803955443286201,1.8039554432862008,1.8039554432862008,-158,0.7000000000000001,57.8965,player_points_edge_confidence_pass,unknown,pending
-2026-04-24,2026-04-24T16:56:40.124208+00:00,Jake LaRavia,LAL,OPP,,player_points,over,5.0,6.4687466387259285,1.4687466387259285,1.4687466387259285,-105,0.7000000000000001,53.9694,player_points_edge_confidence_pass,unknown,pending
-2026-04-24,2026-04-24T16:56:40.124208+00:00,Kevin Durant,HOU,OPP,,player_points,over,23.5,25.888677263218685,2.388677263218685,2.388677263218685,-110,0.8,89.5853,player_points_high_quality_pass,unknown,pending
-2026-04-24,2026-04-24T16:56:40.124208+00:00,Nikola Vucevic,CHI,OPP,,player_points,over,6.0,12.0,6.0,6.0,-258,0.7000000000000001,56.9392,player_points_edge_confidence_pass,unknown,pending
-2026-04-24,2026-04-24T16:56:40.124208+00:00,Quentin Grimes,PHI,OPP,,player_points,over,6.0,12.452016089227326,6.452016089227326,6.452016089227326,-181,0.75,63.7146,player_points_edge_confidence_pass,unknown,pending
-2026-04-24,2026-04-24T16:56:40.124208+00:00,Victor Wembanyama,SAS,OPP,,player_points,over,24.5,27.417000723819086,2.9170007238190863,2.9170007238190863,-110,0.75,70.2106,player_points_edge_confidence_pass,unknown,pending
