@@ -1,0 +1,446 @@
+"""Performance analytics layer for CourtVision betting analysis.
+
+Analyzes pick_history.csv to identify profitable patterns and eliminate losing ones.
+Uses conservative statistical thresholds to ensure recommendations are production-safe.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+import numpy as np
+
+from courtvision.config import ROOT_DIR, DEFAULT_BANKROLL
+
+
+# Minimum sample size for statistical significance
+MIN_SAMPLE_SIZE = 20
+
+# Confidence bucket thresholds
+CONFIDENCE_BUCKETS = [
+    (0.55, 0.65, "0.55-0.65"),
+    (0.65, 0.75, "0.65-0.75"),
+    (0.75, 0.85, "0.75-0.85"),
+    (0.85, 1.01, "0.85+"),  # 1.01 to include 0.85-1.0
+]
+
+# Edge bucket thresholds (as percentages)
+EDGE_BUCKETS = [
+    (0.0, 0.03, "small_0-3pct"),
+    (0.03, 0.06, "medium_3-6pct"),
+    (0.06, 1.0, "large_6pct_plus"),
+]
+
+
+def load_pick_history(path: str | Path | None = None) -> pd.DataFrame:
+    """Load pick_history.csv safely with validation.
+    
+    Args:
+        path: Optional path to pick_history.csv. Defaults to data/history/pick_history.csv
+        
+    Returns:
+        DataFrame with pick history or empty DataFrame if file not found/invalid
+    """
+    if path is None:
+        path = ROOT_DIR / "data" / "history" / "pick_history.csv"
+    else:
+        path = Path(path)
+    
+    if not path.exists():
+        return pd.DataFrame()
+    
+    try:
+        df = pd.read_csv(path)
+        
+        # Validate required columns
+        required_cols = ["date", "player_name", "market_type", "selection", "result"]
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            print(f"Warning: Missing columns in pick_history: {missing_cols}")
+            return pd.DataFrame()
+        
+        # Ensure date column is datetime
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        
+        # Calculate derived columns if not present
+        if "stake" not in df.columns and "stake_fraction" in df.columns:
+            df["stake"] = df["stake_fraction"] * DEFAULT_BANKROLL
+        
+        if "profit_loss" not in df.columns:
+            df["profit_loss"] = df.apply(
+                lambda row: _calculate_profit_loss(
+                    row.get("result"),
+                    row.get("stake", 0),
+                    row.get("odds", 0),
+                ),
+                axis=1,
+            )
+        
+        return df
+    except Exception as e:
+        print(f"Error loading pick_history: {e}")
+        return pd.DataFrame()
+
+
+def _calculate_profit_loss(result: str | None, stake: float, odds: float) -> float:
+    """Calculate profit/loss for a single pick."""
+    if result is None or pd.isna(result):
+        return 0.0
+    
+    result = str(result).lower().strip()
+    
+    if result == "win":
+        # Profit = stake * (odds - 1)
+        return stake * (odds - 1) if odds > 1 else stake
+    elif result == "loss":
+        return -stake
+    elif result == "push":
+        return 0.0
+    else:
+        return 0.0
+
+
+def compute_overall_roi(df: pd.DataFrame) -> dict[str, Any]:
+    """Compute overall ROI across all picks.
+    
+    ROI = total profit_loss / total stake
+    
+    Returns:
+        Dictionary with roi, profit_loss, total_stake, sample_size
+    """
+    if df.empty:
+        return {"roi": 0.0, "profit_loss": 0.0, "total_stake": 0.0, "sample_size": 0}
+    
+    # Only consider graded picks (win/loss/push)
+    graded = df[df["result"].isin(["win", "loss", "push"])].copy()
+    
+    if graded.empty:
+        return {"roi": 0.0, "profit_loss": 0.0, "total_stake": 0.0, "sample_size": 0}
+    
+    total_stake = graded["stake"].sum() if "stake" in graded.columns else 0
+    total_pl = graded["profit_loss"].sum() if "profit_loss" in graded.columns else 0
+    
+    roi = (total_pl / total_stake) if total_stake > 0 else 0.0
+    
+    return {
+        "roi": round(roi, 4),
+        "roi_percent": round(roi * 100, 2),
+        "profit_loss": round(total_pl, 2),
+        "total_stake": round(total_stake, 2),
+        "sample_size": len(graded),
+        "wins": int((graded["result"] == "win").sum()),
+        "losses": int((graded["result"] == "loss").sum()),
+        "pushes": int((graded["result"] == "push").sum()),
+        "win_rate": round((graded["result"] == "win").sum() / len(graded), 4) if len(graded) > 0 else 0.0,
+    }
+
+
+def roi_by_market(df: pd.DataFrame) -> list[dict[str, Any]]:
+    """Compute ROI grouped by market_type.
+    
+    Returns:
+        List of market segments with ROI, win_rate, sample_size
+    """
+    if df.empty or "market_type" not in df.columns:
+        return []
+    
+    # Only graded picks
+    graded = df[df["result"].isin(["win", "loss", "push"])].copy()
+    
+    if graded.empty:
+        return []
+    
+    results = []
+    for market_type, group in graded.groupby("market_type"):
+        segment = _compute_segment_stats(group, str(market_type))
+        results.append(segment)
+    
+    # Sort by ROI descending
+    return sorted(results, key=lambda x: x["roi"], reverse=True)
+
+
+def roi_by_prop_type(df: pd.DataFrame) -> list[dict[str, Any]]:
+    """Compute ROI by prop type (player_points, rebounds, assists, etc).
+    
+    Similar to market_type but with cleaner naming.
+    """
+    return roi_by_market(df)
+
+
+def roi_by_confidence_bucket(df: pd.DataFrame) -> list[dict[str, Any]]:
+    """Compute ROI grouped by confidence buckets.
+    
+    Buckets:
+    - 0.55-0.65: Lower confidence
+    - 0.65-0.75: Medium confidence
+    - 0.75-0.85: Higher confidence
+    - 0.85+: Elite confidence
+    
+    Returns:
+        List of confidence segments with ROI, win_rate, sample_size
+    """
+    if df.empty or "confidence" not in df.columns:
+        return []
+    
+    # Only graded picks
+    graded = df[df["result"].isin(["win", "loss", "push"])].copy()
+    
+    if graded.empty:
+        return []
+    
+    results = []
+    for low, high, label in CONFIDENCE_BUCKETS:
+        mask = (graded["confidence"] >= low) & (graded["confidence"] < high)
+        bucket_df = graded[mask]
+        
+        if len(bucket_df) == 0:
+            continue
+        
+        segment = _compute_segment_stats(bucket_df, f"confidence_{label}")
+        results.append(segment)
+    
+    # Sort by ROI descending
+    return sorted(results, key=lambda x: x["roi"], reverse=True)
+
+
+def roi_by_edge_bucket(df: pd.DataFrame) -> list[dict[str, Any]]:
+    """Compute ROI grouped by edge buckets.
+    
+    Buckets:
+    - small_0-3pct: 0-3% edge
+    - medium_3-6pct: 3-6% edge
+    - large_6pct_plus: 6%+ edge
+    
+    Returns:
+        List of edge segments with ROI, win_rate, sample_size
+    """
+    if df.empty or "edge" not in df.columns:
+        return []
+    
+    # Only graded picks
+    graded = df[df["result"].isin(["win", "loss", "push"])].copy()
+    
+    if graded.empty:
+        return []
+    
+    results = []
+    for low, high, label in EDGE_BUCKETS:
+        mask = (graded["edge"] >= low) & (graded["edge"] < high)
+        bucket_df = graded[mask]
+        
+        if len(bucket_df) == 0:
+            continue
+        
+        segment = _compute_segment_stats(bucket_df, f"edge_{label}")
+        results.append(segment)
+    
+    # Sort by ROI descending
+    return sorted(results, key=lambda x: x["roi"], reverse=True)
+
+
+def worst_performing_segments(df: pd.DataFrame) -> list[dict[str, Any]]:
+    """Return segments with negative ROI and sample_size >= MIN_SAMPLE_SIZE.
+    
+    These are candidates for elimination or further investigation.
+    """
+    all_segments = []
+    
+    # Collect all segment types
+    all_segments.extend(roi_by_market(df))
+    all_segments.extend(roi_by_confidence_bucket(df))
+    all_segments.extend(roi_by_edge_bucket(df))
+    
+    # Filter for negative ROI and sufficient sample size
+    worst = [
+        seg for seg in all_segments
+        if seg["roi"] < 0 and seg["sample_size"] >= MIN_SAMPLE_SIZE
+    ]
+    
+    # Sort by ROI ascending (worst first)
+    return sorted(worst, key=lambda x: x["roi"])
+
+
+def best_performing_segments(df: pd.DataFrame) -> list[dict[str, Any]]:
+    """Return segments with highest ROI and sample_size >= MIN_SAMPLE_SIZE.
+    
+    These are patterns to double-down on.
+    """
+    all_segments = []
+    
+    # Collect all segment types
+    all_segments.extend(roi_by_market(df))
+    all_segments.extend(roi_by_confidence_bucket(df))
+    all_segments.extend(roi_by_edge_bucket(df))
+    
+    # Filter for positive ROI and sufficient sample size
+    best = [
+        seg for seg in all_segments
+        if seg["roi"] > 0 and seg["sample_size"] >= MIN_SAMPLE_SIZE
+    ]
+    
+    # Sort by ROI descending (best first)
+    return sorted(best, key=lambda x: x["roi"], reverse=True)
+
+
+def _compute_segment_stats(group: pd.DataFrame, segment_name: str) -> dict[str, Any]:
+    """Compute statistics for a segment (market, bucket, etc).
+    
+    Args:
+        group: DataFrame subset for this segment
+        segment_name: Name identifier for this segment
+        
+    Returns:
+        Dictionary with segment statistics
+    """
+    total_stake = group["stake"].sum() if "stake" in group.columns else 0
+    total_pl = group["profit_loss"].sum() if "profit_loss" in group.columns else 0
+    
+    sample_size = len(group)
+    wins = int((group["result"] == "win").sum()) if "result" in group.columns else 0
+    losses = int((group["result"] == "loss").sum()) if "result" in group.columns else 0
+    pushes = int((group["result"] == "push").sum()) if "result" in group.columns else 0
+    
+    # Calculate win rate (excluding pushes)
+    graded_count = wins + losses
+    win_rate = wins / graded_count if graded_count > 0 else 0.0
+    
+    # Calculate ROI
+    roi = (total_pl / total_stake) if total_stake > 0 else 0.0
+    
+    # Calculate average confidence if available
+    avg_confidence = group["confidence"].mean() if "confidence" in group.columns else None
+    
+    # Calculate average edge if available
+    avg_edge = group["edge"].mean() if "edge" in group.columns else None
+    
+    return {
+        "segment": segment_name,
+        "roi": round(roi, 4),
+        "roi_percent": round(roi * 100, 2),
+        "profit_loss": round(total_pl, 2),
+        "total_stake": round(total_stake, 2),
+        "sample_size": sample_size,
+        "wins": wins,
+        "losses": losses,
+        "pushes": pushes,
+        "win_rate": round(win_rate, 4),
+        "avg_confidence": round(avg_confidence, 4) if avg_confidence is not None else None,
+        "avg_edge": round(avg_edge, 4) if avg_edge is not None else None,
+        "statistically_significant": sample_size >= MIN_SAMPLE_SIZE,
+    }
+
+
+def generate_performance_report(df: pd.DataFrame | None = None) -> dict[str, Any]:
+    """Generate a comprehensive performance report.
+    
+    Args:
+        df: Optional DataFrame. If None, loads from pick_history.csv
+        
+    Returns:
+        Dictionary containing full performance analysis
+    """
+    if df is None:
+        df = load_pick_history()
+    
+    if df.empty:
+        return {
+            "error": "No pick history data available",
+            "overall": {},
+            "by_market": [],
+            "by_confidence": [],
+            "by_edge": [],
+            "worst_segments": [],
+            "best_segments": [],
+        }
+    
+    report = {
+        "overall": compute_overall_roi(df),
+        "by_market": roi_by_market(df),
+        "by_prop_type": roi_by_prop_type(df),
+        "by_confidence_bucket": roi_by_confidence_bucket(df),
+        "by_edge_bucket": roi_by_edge_bucket(df),
+        "worst_performing_segments": worst_performing_segments(df),
+        "best_performing_segments": best_performing_segments(df),
+        "recommendations": _generate_recommendations(df),
+    }
+    
+    return report
+
+
+def _generate_recommendations(df: pd.DataFrame) -> list[str]:
+    """Generate actionable recommendations based on performance analysis."""
+    recommendations = []
+    
+    overall = compute_overall_roi(df)
+    worst = worst_performing_segments(df)
+    best = best_performing_segments(df)
+    
+    # Overall performance check
+    if overall["roi"] < -0.05:
+        recommendations.append("CRITICAL: Overall ROI is significantly negative. Consider paper trading only.")
+    elif overall["roi"] < 0:
+        recommendations.append("WARNING: Overall ROI is negative. Review position sizing and filters.")
+    elif overall["roi"] > 0.05:
+        recommendations.append("POSITIVE: Overall ROI exceeds 5%. Current strategy is profitable.")
+    
+    # Worst segments elimination
+    if worst:
+        for seg in worst[:3]:  # Top 3 worst
+            recommendations.append(
+                f"ELIMINATE: {seg['segment']} has {seg['roi_percent']:.1f}% ROI "
+                f"over {seg['sample_size']} picks"
+            )
+    
+    # Best segments double-down
+    if best:
+        for seg in best[:3]:  # Top 3 best
+            recommendations.append(
+                f"DOUBLE-DOWN: {seg['segment']} has +{seg['roi_percent']:.1f}% ROI "
+                f"over {seg['sample_size']} picks"
+            )
+    
+    # Sample size warnings
+    if overall["sample_size"] < MIN_SAMPLE_SIZE:
+        recommendations.append(
+            f"INSUFFICIENT DATA: Only {overall['sample_size']} graded picks. "
+            f"Need at least {MIN_SAMPLE_SIZE} for statistical significance."
+        )
+    
+    return recommendations
+
+
+def save_performance_report(report: dict[str, Any], output_path: str | Path | None = None) -> Path:
+    """Save performance report to JSON file.
+    
+    Args:
+        report: Performance report dictionary
+        output_path: Optional output path. Defaults to outputs/diagnostics/performance_report_<date>.json
+        
+    Returns:
+        Path to saved file
+    """
+    if output_path is None:
+        date_str = pd.Timestamp.now().strftime("%Y-%m-%d")
+        output_dir = ROOT_DIR / "outputs" / "diagnostics"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"performance_report_{date_str}.json"
+    else:
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    with open(output_path, "w") as f:
+        json.dump(report, f, indent=2, default=str)
+    
+    print(f"Performance report saved to: {output_path}")
+    return output_path
+
+
+if __name__ == "__main__":
+    # Quick test
+    df = load_pick_history()
+    report = generate_performance_report(df)
+    save_performance_report(report)
+    print(json.dumps(report, indent=2, default=str))
