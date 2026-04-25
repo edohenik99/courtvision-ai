@@ -27,8 +27,9 @@ from courtvision.runtime_audit import (
     get_elite_rejection_reason,
 )
 from courtvision.scoring import CandidateScoringPolicy
-from courtvision.config import EliteThresholds
+from courtvision.config import EliteThresholds, DEFAULT_BANKROLL
 from courtvision.selection import build_operator_boards
+from courtvision.betting.kelly import compute_kelly_fraction
 from courtvision.selection.operator_boards import assign_candidate_lanes
 
 
@@ -820,6 +821,14 @@ class PredictionPipeline:
             else:
                 qualification_reason = "stat_only_qualified"
 
+            # Compute Kelly stake fraction for bet sizing
+            stake_fraction = compute_kelly_fraction(
+                edge=edge_pct,
+                odds=float(odds) if odds else 1.91,
+                confidence=float(confidence) if confidence else 0.0,
+            )
+            recommended_bet = round(DEFAULT_BANKROLL * stake_fraction, 2)
+
             return {
                 "prediction_date": self.config.prediction_date,
                 "player_name": str(player_row.get("player_name", "")),
@@ -827,25 +836,10 @@ class PredictionPipeline:
                 "player_id": player_row.get("player_id"),
                 "team": str(player_row.get("team_abbr", "")),
                 "team_abbr": str(player_row.get("team_abbr", "")),
-                "opponent": opp_abbr if 'opp_abbr' in dir() else "OPP",
-                "market_type": normalized_market,
-                "selection": "over" if edge > 0 else "under",
-                "sportsbook_line": line,
-                "model_projection": projection,
-                "projection_support_status": support_status,
-                "edge": edge,
-                "edge_pct": edge_pct,
-                "confidence": confidence,
-                "quality_score": scoring_result.get("quality_score", 0.0),
-                "selection_score": scoring_result.get("selection_score", 0.0),
-                "odds": odds,
-                "is_elite": scoring_result.get("is_elite", False),
-                "qualification_reason": qualification_reason,
-                "is_live_market": is_live_market,
-                "synthetic_line": synthetic_line,
-                "line_source": "live_market" if is_live_market and not synthetic_line else "partial_fill",
                 "source_lane": "live_market_candidate" if is_live_market and not synthetic_line else "partial_fill_candidate",
                 "pre_rejection_reason": pre_rejection_reason,
+                "stake_fraction": stake_fraction,
+                "recommended_bet": recommended_bet,
                 **injury_metadata,
             }
 

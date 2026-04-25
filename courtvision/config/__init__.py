@@ -64,6 +64,10 @@ class EliteThresholds:
         return cls()
 
 
+# Kelly betting configuration
+DEFAULT_BANKROLL = 1000
+
+
 @dataclass(slots=True)
 class Settings:
     api_key: str
