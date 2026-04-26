@@ -137,53 +137,57 @@ if (Test-Path $auditSummary) {
     Write-Host "  [WARNING] Audit summary not found: $auditSummary" -ForegroundColor Yellow
 }
 
-# Check board row counts from runtime operator outputs
-$boardsDir = "outputs\runtime\boards\$Date"
-$operatorDir = "outputs\runtime\operator"
-$eliteCsv = Join-Path $boardsDir "elite.csv"
-$fullMarketCsv = Join-Path $boardsDir "full_market.csv"
-$statOnlyCsv = Join-Path $boardsDir "stat_only.csv"
+# Robust CSV row counter.
+# Bug fix: the previous implementation used
+#   (Get-Content <file> | Measure-Object).Line
+# which is *not* populated unless `-Line` is passed. The result was $null,
+# and `$null -le 1` evaluates to $true, so every board was reported as
+# 0 picks even when the CSV contained 10+ rows. We now count non-empty
+# data lines explicitly and never count the header as a pick.
+function Get-CsvRowCount {
+    param([Parameter(Mandatory)] [string] $Path)
+    if (-not (Test-Path $Path)) { return -1 }   # -1 sentinel = file missing
+    $lines = @(Get-Content -Path $Path -ErrorAction SilentlyContinue)
+    if ($null -eq $lines -or $lines.Count -le 1) { return 0 }
+    # Skip the header (line 0) and any trailing blank lines.
+    $dataLines = $lines | Select-Object -Skip 1 | Where-Object { $_ -and $_.Trim().Length -gt 0 }
+    return @($dataLines).Count
+}
 
-# Also check operator dir (actual save location)
+# The pipeline always writes to outputs\runtime\operator\<board>_$Date.csv.
+# (The legacy outputs\runtime\boards\$Date\*.csv layout has been removed.)
+$operatorDir = "outputs\runtime\operator"
 $eliteOperatorCsv = Join-Path $operatorDir "elite_board_$Date.csv"
 $fullMarketOperatorCsv = Join-Path $operatorDir "full_market_board_$Date.csv"
 $statOnlyOperatorCsv = Join-Path $operatorDir "stat_only_board_$Date.csv"
 
 Write-Host "`n  Board Summary:" -ForegroundColor Cyan
 
-$eliteCount = 0
-$fullMarketCount = 0
-$statOnlyCount = 0
-
-# Check operator files (actual location)
-if (Test-Path $eliteOperatorCsv) {
-    $eliteLines = (Get-Content $eliteOperatorCsv | Measure-Object).Line
-    $eliteCount = if ($eliteLines -le 1) { 0 } else { $eliteLines - 1 }  # Handle empty files
+$eliteCount = Get-CsvRowCount $eliteOperatorCsv
+if ($eliteCount -lt 0) {
+    Write-Host "    Elite board:      [MISSING] $eliteOperatorCsv" -ForegroundColor Yellow
+    $eliteCount = 0
+} else {
     Write-Host "    Elite board:      $eliteCount picks ($eliteOperatorCsv)" -ForegroundColor $(if ($eliteCount -gt 0) { "Green" } else { "Yellow" })
     if ($eliteCount -eq 0) {
         Write-Host "    [WARNING] Elite board is empty (all candidates filtered out)" -ForegroundColor Yellow
     }
-} else {
-    Write-Host "    Elite board:      [MISSING] $eliteOperatorCsv" -ForegroundColor Yellow
-    $eliteCount = 0
 }
 
-if (Test-Path $fullMarketOperatorCsv) {
-    $fullLines = (Get-Content $fullMarketOperatorCsv | Measure-Object).Line
-    $fullMarketCount = if ($fullLines -le 1) { 0 } else { $fullLines - 1 }
-    Write-Host "    Full market:      $fullMarketCount picks" -ForegroundColor $(if ($fullMarketCount -gt 0) { "Green" } else { "Yellow" })
-} else {
+$fullMarketCount = Get-CsvRowCount $fullMarketOperatorCsv
+if ($fullMarketCount -lt 0) {
     Write-Host "    Full market:      [MISSING] $fullMarketOperatorCsv" -ForegroundColor Yellow
     $fullMarketCount = 0
+} else {
+    Write-Host "    Full market:      $fullMarketCount picks" -ForegroundColor $(if ($fullMarketCount -gt 0) { "Green" } else { "Yellow" })
 }
 
-if (Test-Path $statOnlyOperatorCsv) {
-    $statLines = (Get-Content $statOnlyOperatorCsv | Measure-Object).Line
-    $statOnlyCount = if ($statLines -le 1) { 0 } else { $statLines - 1 }
-    Write-Host "    Stat only:        $statOnlyCount picks" -ForegroundColor $(if ($statOnlyCount -gt 0) { "Green" } else { "Yellow" })
-} else {
+$statOnlyCount = Get-CsvRowCount $statOnlyOperatorCsv
+if ($statOnlyCount -lt 0) {
     Write-Host "    Stat only:        [MISSING] $statOnlyOperatorCsv" -ForegroundColor Yellow
     $statOnlyCount = 0
+} else {
+    Write-Host "    Stat only:        $statOnlyCount picks" -ForegroundColor $(if ($statOnlyCount -gt 0) { "Green" } else { "Yellow" })
 }
 
 # Summary line
