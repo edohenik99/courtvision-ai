@@ -83,6 +83,17 @@ from courtvision.config import EliteThresholds
 
 try:
     from balldontlie import BalldontlieAPI
+    # The balldontlie SDK ships with a stray `print(response)` inside
+    # base.py::_get_paginated_list that dumps the full raw API payload
+    # (~40k chars per page) to stdout on every paginated call. We
+    # neutralize it once at import time so the runtime log stays
+    # readable. This only suppresses that single SDK print, not our
+    # own structured [STAGE]/[COUNT]/[DIAGNOSIS] diagnostics.
+    try:
+        import balldontlie.base as _bdl_base  # type: ignore
+        _bdl_base.print = lambda *_a, **_k: None  # type: ignore[attr-defined]
+    except Exception:
+        pass
 except Exception:
     BalldontlieAPI = None
 
@@ -881,46 +892,33 @@ class BallDontLieClient:
                 type(sample_row.get("player")),
                 sorted(sample_row.keys()),
             )
-        # DEBUG: Print detailed lookup diagnostics before normalization
+        # Compact lookup-vs-odds intersection summary (replaces previous
+        # per-row [DEBUG_ODDS]/[DEBUG_INTERSECTION]/[DEBUG_JOIN] dumps).
         lookup_size = len(player_lookup) if player_lookup else 0
-        sample_lookup_keys = list(player_lookup.keys())[:10] if player_lookup else []
-        sample_odds_ids = []
-        sample_odds_id_types = []
+        sample_odds_ids: list[Any] = []
         for sample in data[:10]:
             if isinstance(sample, dict) and "player_id" in sample:
-                pid = sample["player_id"]
-                sample_odds_ids.append(pid)
-                sample_odds_id_types.append(type(pid).__name__)
-        
-        print(f"[DEBUG_ODDS] sample_odds_player_ids={sample_odds_ids}", flush=True)
-        print(f"[DEBUG_ODDS] sample_odds_player_id_types={sample_odds_id_types}", flush=True)
-        
-        # Calculate intersection
+                sample_odds_ids.append(sample["player_id"])
+        intersection_count = 0
         if player_lookup and sample_odds_ids:
-            odds_ids_int = set()
+            odds_ids_int: set[int] = set()
             for pid in sample_odds_ids:
                 try:
                     odds_ids_int.add(int(pid))
                 except (ValueError, TypeError):
                     pass
-            lookup_keys_int = set()
+            lookup_keys_int: set[int] = set()
             for k in player_lookup.keys():
                 try:
                     lookup_keys_int.add(int(k))
                 except (ValueError, TypeError):
                     pass
-            intersection = odds_ids_int & lookup_keys_int
-            print(f"[DEBUG_INTERSECTION] odds_ids_sample={list(odds_ids_int)[:10]}", flush=True)
-            print(f"[DEBUG_INTERSECTION] lookup_keys_sample={list(lookup_keys_int)[:10]}", flush=True)
-            print(f"[DEBUG_INTERSECTION] intersection_count={len(intersection)}", flush=True)
-        
-        # Check if each sample odds player_id is in lookup
-        for pid in sample_odds_ids[:5]:
-            # Try both int and str lookup
-            in_lookup_int = pid in player_lookup if player_lookup else False
-            in_lookup_str = str(pid) in player_lookup if player_lookup else False
-            in_lookup_int_pid = int(pid) in player_lookup if player_lookup and isinstance(pid, str) and pid.isdigit() else False
-            print(f"[DEBUG_JOIN] odds_pid={pid} (type={type(pid).__name__}) in_lookup={in_lookup_int or in_lookup_str or in_lookup_int_pid}", flush=True)
+            intersection_count = len(odds_ids_int & lookup_keys_int)
+        print(
+            f"[COUNT] odds_lookup_join lookup_size={lookup_size} "
+            f"sample_odds_ids={len(sample_odds_ids)} sample_intersection={intersection_count}",
+            flush=True,
+        )
         
         for prop in data:
             if diagnostics is not None:
@@ -1071,34 +1069,28 @@ class BallDontLieClient:
         player_id = self._coerce_int(raw_player_id)
         player_id_str = str(raw_player_id) if raw_player_id is not None else None
         
-        # [DEBUG_JOIN] diagnostics for first 5 rows - use a simple approach with static counter
-        if not hasattr(self, '_debug_join_counter'):
-            self._debug_join_counter = 0
-        
-        # Look up player identity from pre-built lookup (primary source)
-        # Try both int and str keys to handle type mismatches
-        resolved_identity = {}
+        # Look up player identity from pre-built lookup (primary source).
+        # Try both int and str keys to handle type mismatches.
+        resolved_identity: dict[str, Any] = {}
         lookup_hit = False
         if player_lookup and player_id is not None:
             resolved_identity = player_lookup.get(player_id, {})
             lookup_hit = bool(resolved_identity)
-            if not resolved_identity and player_id_str:
+            if not lookup_hit and player_id_str:
                 resolved_identity = player_lookup.get(player_id_str, {})
                 lookup_hit = bool(resolved_identity)
-        
-        # Print [DEBUG_JOIN] for first 5 rows
-        if self._debug_join_counter < 5:
-            print(f"[DEBUG_JOIN] raw_player_id={raw_player_id} (type={type(raw_player_id).__name__})")
-            print(f"[DEBUG_JOIN] coerced_player_id={player_id}")
-            print(f"[DEBUG_JOIN] lookup_size={len(player_lookup) if player_lookup else 0}")
-            print(f"[DEBUG_JOIN] lookup_hit={lookup_hit}")
-            self._debug_join_counter += 1
-        
+
         player_name = str(resolved_identity.get("player_name") or "").strip()
-        
-        # Print [DEBUG_JOIN] resolved name
-        if self._debug_join_counter <= 5:
-            print(f"[DEBUG_JOIN] resolved_player_name={player_name}")
+
+        # One-shot summary on the first call instead of per-row debug spam.
+        if not getattr(self, "_player_join_logged", False):
+            self._player_join_logged = True
+            print(
+                f"[COUNT] player_join_first_row raw_player_id={raw_player_id} "
+                f"coerced={player_id} lookup_size={len(player_lookup) if player_lookup else 0} "
+                f"lookup_hit={lookup_hit} resolved_name={player_name!r}",
+                flush=True,
+            )
         
         # If lookup failed, preserve player_id and record diagnostic, but don't silently fail
         if not player_name:
@@ -1258,21 +1250,18 @@ class BallDontLieClient:
         game_ids: Sequence[int] | None = None,
     ) -> dict[int, dict[str, Any]]:
         logger = logging.getLogger("courtvision_ai")
-        print("[DEBUG_LOOKUP] === FUNCTION ENTRY ===", flush=True)
-        print(f"[DEBUG_LOOKUP] ENTRY api_key={'set' if self.api_key else 'unset'} BalldontlieAPI={BalldontlieAPI}", flush=True)
         if not self.api_key or BalldontlieAPI is None:
-            print("[DEBUG_LOOKUP] EARLY_RETURN: missing api_key or BalldontlieAPI", flush=True)
+            print("[DIAGNOSIS] player_lookup early-exit: missing api_key or BalldontlieAPI", flush=True)
             return {}
 
         try:
             games = self.get_games(game_date)
         except Exception as exc:
-            print(f"[DEBUG_LOOKUP] EARLY_RETURN: get_games failed: {exc}", flush=True)
             print(f"[WARNING] get_odds_player_lookup_games_failed game_date={game_date} error={exc}", flush=True)
             return {}
 
         if games.empty:
-            print("[DEBUG_LOOKUP] EARLY_RETURN: games.empty=True", flush=True)
+            print("[DIAGNOSIS] player_lookup early-exit: get_games returned empty", flush=True)
             return {}
 
         requested_game_ids = {
@@ -1295,17 +1284,14 @@ class BallDontLieClient:
                 if team_id is not None:
                     team_ids.add(team_id)
 
-        print(f"[DEBUG_LOOKUP] team_ids={sorted(team_ids)}", flush=True)
+        print(f"[COUNT] player_lookup_team_ids={len(team_ids)}", flush=True)
         if not team_ids:
-            print("[DEBUG_LOOKUP] EARLY_RETURN: team_ids empty", flush=True)
             print(f"[WARNING] get_odds_player_lookup_missing_team_ids game_date={game_date} requested_game_ids={sorted(requested_game_ids)}", flush=True)
             return {}
 
         try:
             api = BalldontlieAPI(api_key=self.api_key)
-            print("[DEBUG_LOOKUP] SDK initialized successfully", flush=True)
         except Exception as exc:
-            print(f"[DEBUG_LOOKUP] EARLY_RETURN: SDK init failed: {exc}", flush=True)
             print(f"[WARNING] get_odds_player_lookup_sdk_failed error={exc}", flush=True)
             return {}
 
@@ -1365,14 +1351,10 @@ class BallDontLieClient:
                 break
             cursor = next_cursor
 
-        # Hard diagnostics for lookup
+        # Summary diagnostics for lookup (full sample retained in logger.info below)
         sample_keys = list(lookup.keys())[:5]
-        sample_values = [lookup.get(k, {}) for k in sample_keys]
-        print(f"[DEBUG_LOOKUP] SUCCESS player_lookup_size={len(lookup)}", flush=True)
-        print(f"[DEBUG_LOOKUP] sample_lookup_keys={sample_keys}", flush=True)
-        print(f"[DEBUG_LOOKUP] sample_lookup_key_types={[type(k).__name__ for k in sample_keys]}", flush=True)
-        print(f"[DEBUG_LOOKUP] sample_lookup_values={sample_values}", flush=True)
-        
+        print(f"[COUNT] player_lookup_built entries={len(lookup)} sample_keys={sample_keys}", flush=True)
+
         logger.info(
             "get_odds_player_lookup game_date=%s team_ids=%s lookup_entries=%d sample=%s",
             game_date,
@@ -1383,7 +1365,6 @@ class BallDontLieClient:
                 limit=5,
             ),
         )
-        print(f"[DEBUG_LOOKUP] RETURNING lookup with {len(lookup)} entries", flush=True)
         return lookup
 
     def _normalize_market_row(
