@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,6 +51,10 @@ from courtvision.betting.kelly import (  # noqa: E402  (path-bootstrapped above)
 
 REQUIRED_COLUMNS: tuple[str, ...] = ("odds", "confidence")
 EDGE_COLUMN_PREFERENCE: tuple[str, ...] = ("edge_pct", "edge")
+
+# Default daily exposure cap as a fraction of bankroll. Overridable via
+# COURTVISION_MAX_DAILY_EXPOSURE env var or --max-daily-exposure CLI flag.
+DEFAULT_MAX_DAILY_EXPOSURE: float = 0.08
 
 
 @dataclass
@@ -247,18 +252,48 @@ def _write_stakes(output_path: Path, stakes: list[StakeRow], bankroll: float, pr
             })
 
 
+def _resolve_max_daily_exposure(cli_value: float | None) -> float:
+    """CLI > env var > default."""
+    if cli_value is not None:
+        return float(cli_value)
+    env_value = os.getenv("COURTVISION_MAX_DAILY_EXPOSURE")
+    if env_value:
+        try:
+            return float(env_value)
+        except ValueError:
+            raise SystemExit(
+                f"[KELLY][FATAL] COURTVISION_MAX_DAILY_EXPOSURE is not a number: {env_value!r}"
+            )
+    return DEFAULT_MAX_DAILY_EXPOSURE
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Compute Kelly stakes from the daily elite board.")
     parser.add_argument("--prediction-date", required=True, help="Slate date in YYYY-MM-DD format.")
     parser.add_argument("--bankroll", type=float, default=1000.0, help="Bankroll in dollars (default: 1000).")
     parser.add_argument("--input-csv", default=None, help="Override path to the elite board CSV.")
     parser.add_argument("--output-csv", default=None, help="Override path to the stakes output CSV.")
+    parser.add_argument(
+        "--max-daily-exposure",
+        type=float,
+        default=None,
+        help=(
+            "Cap on total daily stake as a fraction of bankroll "
+            f"(default: {DEFAULT_MAX_DAILY_EXPOSURE}, or COURTVISION_MAX_DAILY_EXPOSURE env var)."
+        ),
+    )
     args = parser.parse_args(argv)
 
     prediction_date = args.prediction_date
     bankroll = float(args.bankroll)
     if bankroll <= 0:
         raise SystemExit(f"[KELLY][FATAL] Bankroll must be > 0, got {bankroll}")
+
+    max_daily_exposure = _resolve_max_daily_exposure(args.max_daily_exposure)
+    if max_daily_exposure <= 0 or max_daily_exposure > 1.0:
+        raise SystemExit(
+            f"[KELLY][FATAL] max_daily_exposure must be in (0, 1], got {max_daily_exposure}"
+        )
 
     input_path, output_path = _resolve_paths(prediction_date, args.input_csv, args.output_csv)
 
@@ -293,7 +328,30 @@ def main(argv: list[str] | None = None) -> int:
         for reason, n in sorted(reason_counts.items(), key=lambda kv: -kv[1]):
             _log(f"skipped_reason {reason}={n}")
 
-    # Per-pick stakes
+    # ---- Daily exposure cap -------------------------------------------------
+    # If the sum of eligible Kelly stakes exceeds bankroll * max_daily_exposure,
+    # scale every eligible stake_amount/stake_fraction proportionally. This
+    # preserves the relative Kelly weights while bounding total daily risk.
+    raw_total_exposure = round(sum(s.stake_amount for s in eligible), 2)
+    max_daily_exposure_amount = round(bankroll * max_daily_exposure, 2)
+    if raw_total_exposure > max_daily_exposure_amount and raw_total_exposure > 0:
+        exposure_scale_factor = max_daily_exposure_amount / raw_total_exposure
+        for s in eligible:
+            s.stake_amount = round(s.stake_amount * exposure_scale_factor, 2)
+            s.stake_fraction = round(s.stake_fraction * exposure_scale_factor, 6)
+            if s.edge_pct is not None:
+                s.expected_value = round(s.stake_amount * float(s.edge_pct), 2)
+    else:
+        exposure_scale_factor = 1.0
+
+    _log(f"raw_total_exposure=${raw_total_exposure:.2f}")
+    _log(
+        f"max_daily_exposure={max_daily_exposure:.4f} "
+        f"(${max_daily_exposure_amount:.2f} of ${bankroll:.2f} bankroll)"
+    )
+    _log(f"exposure_scale_factor={exposure_scale_factor:.4f}")
+
+    # Per-pick stakes (post-scaling)
     for s in eligible:
         _log(
             f"stake player={s.player_name!r} market={s.market_type} sel={s.selection} "
@@ -306,6 +364,7 @@ def main(argv: list[str] | None = None) -> int:
     total_ev = round(sum(s.expected_value for s in eligible), 2)
     avg_stake = round(total_exposure / len(eligible), 2) if eligible else 0.0
     exposure_pct = round(100.0 * total_exposure / bankroll, 2) if bankroll > 0 else 0.0
+    _log(f"final_total_exposure=${total_exposure:.2f} ({exposure_pct:.2f}% of bankroll)")
 
     _log(f"bankroll_used=${bankroll:.2f}")
     _log(f"total_exposure=${total_exposure:.2f} ({exposure_pct:.2f}% of bankroll)")
