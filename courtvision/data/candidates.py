@@ -215,6 +215,10 @@ def score_player_markets(
             int(pid): group for pid, group in working_odds.groupby("player_id")
             if pd.notna(pid) and int(pid) > 0
         }
+    print(f"[DEBUG_MATCH] odds_player_id_lookup_size={len(player_id_lookup)}", flush=True)
+    if player_id_lookup:
+        sample_odds_pids = list(player_id_lookup.keys())[:5]
+        print(f"[DEBUG_MATCH] sample_odds_player_ids={sample_odds_pids}", flush=True)
 
     coverage_by_market: dict[str, dict[str, int]] = defaultdict(
         lambda: {"candidate_count": 0, "matched_count": 0, "missing_market_lines_count": 0, "unsupported_count": 0}
@@ -240,6 +244,21 @@ def score_player_markets(
     # Track match diagnostics
     total_players = 0
     matched_players = 0
+    baseline_player_ids: list[int] = []
+    
+    # Collect baseline player_ids for intersection analysis
+    for _, player_row in players_df.iterrows():
+        pid = int(player_row.get("player_id", 0) or 0)
+        if pid > 0:
+            baseline_player_ids.append(pid)
+    
+    # Calculate intersection
+    odds_player_ids = set(player_id_lookup.keys())
+    baseline_ids_set = set(baseline_player_ids)
+    intersection = odds_player_ids & baseline_ids_set
+    print(f"[DEBUG_INTERSECTION] odds_player_ids={len(odds_player_ids)}, baseline_ids={len(baseline_ids_set)}, intersection={len(intersection)}", flush=True)
+    print(f"[DEBUG_INTERSECTION] sample_baseline_ids={baseline_player_ids[:5]}", flush=True)
+    print(f"[DEBUG_INTERSECTION] sample_intersection={list(intersection)[:5]}", flush=True)
 
     for _, player_row in players_df.iterrows():
         player_name = str(player_row.get("player_name", "")).strip()
@@ -270,6 +289,8 @@ def score_player_markets(
 
         # Try player_id matching first (more reliable)
         if player_id > 0 and player_id in player_id_lookup:
+            if total_players <= 5:  # Debug first 5 players
+                print(f"[DEBUG_MATCH] player_id={player_id} MATCHED in lookup", flush=True)
             player_market_rows = player_id_lookup[player_id].copy()
             exact_name_rows = player_market_rows.copy()
             matched_players += 1
@@ -557,20 +578,40 @@ def score_player_markets(
     for rc in rejected_candidates:
         reason = rc.get("rejection_reason", "unknown")
         rejection_reasons[reason] += 1
-    logger.info(
-        "rejection_breakdown_by_reason %s",
-        [{"reason": reason, "count": count} for reason, count in sorted(rejection_reasons.items(), key=lambda x: -x[1])],
-    )
+    rejection_breakdown = [
+        {"reason": reason, "count": count}
+        for reason, count in sorted(rejection_reasons.items(), key=lambda x: -x[1])
+    ]
+    logger.info("rejection_breakdown_by_reason %s", rejection_breakdown)
+    print(f"[COUNT] rejection_breakdown={rejection_breakdown}", flush=True)
 
-    # Sample unmatched players for debugging
+    # Diagnostics for low baseline-coverage runs.
+    #
+    # Note: a low `match_rate` (baseline players whose props the books posted
+    # tonight) is *not* a data-quality signal. Many baseline players simply do
+    # not play, or no vendor lists props for them. Discarding all already-
+    # accepted candidates in that case is a stale kill-switch from when the
+    # upstream odds normalizer was returning unresolved rows. Keep the
+    # diagnostics so coverage drops are still visible, but do not nuke the
+    # candidates that scored cleanly. Downstream elite admission/qualification
+    # remains the authoritative safety layer.
     if match_rate < 50 and total_players > 0:
-        # Log sample player names from each side
         sample_players = players_df["player_name"].head(5).tolist() if "player_name" in players_df.columns else []
-        sample_odds_players = working_odds["player_name"].head(5).tolist() if "player_name" in working_odds.columns else []
-        logger.warning(
-            "low_match_rate_detected sample_players=%s sample_odds_players=%s",
-            sample_players,
-            sample_odds_players,
+        odds_with_names = working_odds["player_name"].notna().sum() if "player_name" in working_odds.columns else 0
+
+        print(f"[COUNT] total_players={total_players}", flush=True)
+        print(f"[COUNT] matched_players={matched_players}", flush=True)
+        print(f"[COUNT] match_rate={match_rate:.1f}%", flush=True)
+        print(f"[COUNT] odds_rows_with_player_name={odds_with_names}", flush=True)
+        print(f"[COUNT] odds_rows_total={len(working_odds)}", flush=True)
+        print(f"[COUNT] accepted_candidates_pre_return={len(accepted_candidates)}", flush=True)
+        print(f"[COUNT] rejected_candidates_pre_return={len(rejected_candidates)}", flush=True)
+        print(f"[DIAGNOSIS] Low baseline coverage (informational, not fatal)", flush=True)
+        print(f"  Sample players from baselines: {sample_players}", flush=True)
+        print(
+            f"[WARNING] Low baseline coverage: {matched_players}/{total_players} players matched, "
+            f"odds rows={len(working_odds)} — keeping {len(accepted_candidates)} accepted candidates",
+            flush=True,
         )
 
     return accepted_candidates, rejected_candidates

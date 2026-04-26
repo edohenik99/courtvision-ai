@@ -407,7 +407,7 @@ class BallDontLieClient:
         # Build player lookup so the adapter can resolve player_name from player_id
         try:
             player_lookup = self._build_player_prop_identity_lookup(
-                game_date, requested_game_ids=game_ids or []
+                game_date, game_ids=game_ids or []
             )
         except Exception as exc:
             logger.warning("player_lookup_build_failed error=%s", exc)
@@ -4425,6 +4425,16 @@ class CourtVisionAI:
                 valid["over_odds"] = None
             if "under_odds" not in valid.columns:
                 valid["under_odds"] = None
+
+            # The BDL adapter expands one over/under API row into side-specific
+            # rows. Preserve side prices in the legacy columns too, because some
+            # downstream scoring/diagnostic paths still inspect over_odds or
+            # under_odds instead of the generic odds column.
+            if "selection" in valid.columns and "odds" in valid.columns:
+                over_mask = valid["selection"].astype(str).str.lower().eq("over")
+                under_mask = valid["selection"].astype(str).str.lower().eq("under")
+                valid.loc[over_mask, "over_odds"] = valid.loc[over_mask, "odds"]
+                valid.loc[under_mask, "under_odds"] = valid.loc[under_mask, "odds"]
             return valid
         return normalize_odds_frame(
             df,

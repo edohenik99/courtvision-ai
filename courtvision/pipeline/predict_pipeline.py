@@ -221,6 +221,12 @@ class PredictionPipeline:
         """Run the complete prediction pipeline."""
         self.logger.info("prediction_start date=%s games=%d odds=%d",
                         self.config.prediction_date, len(games), len(odds))
+        
+        # [COUNT] Stage telemetry - initial inputs
+        players_count = len(player_baselines) if player_baselines is not None else 0
+        print(f"[COUNT] games_fetched={len(games)}")
+        print(f"[COUNT] players_loaded={players_count}")
+        print(f"[COUNT] odds_rows={len(odds)}")
 
         # Initialize result
         result = PredictionResult(prediction_date=self.config.prediction_date)
@@ -279,6 +285,10 @@ class PredictionPipeline:
             is_player_inactive_fn=is_player_inactive_fn,
         )
 
+        # [COUNT] Raw candidates from universe build
+        print(f"[COUNT] raw_candidates={len(candidates)}")
+        print(f"[COUNT] raw_rejected={len(rejected)}")
+        
         self.logger.info("candidates_built accepted=%d rejected=%d", len(candidates), len(rejected))
 
         # Stage-level diagnostics: rejection breakdown
@@ -311,6 +321,8 @@ class PredictionPipeline:
                 self.logger.info("sample_low_confidence_values %s (threshold=0.35)", sample_conf)
 
         if not candidates:
+            print("[COUNT] pipeline_exit=no_candidates")
+            print("[DIAGNOSIS] Zero candidates after universe build - check data sources and filters")
             result.injury_context = injury_context
             result.summary = self._build_empty_summary(games, odds)
             return result
@@ -836,6 +848,24 @@ class PredictionPipeline:
                 "player_id": player_row.get("player_id"),
                 "team": str(player_row.get("team_abbr", "")),
                 "team_abbr": str(player_row.get("team_abbr", "")),
+                "market_type": normalized_market,
+                "selection": str(market_row.get("selection", "")) if not market_row.empty else "",
+                "sportsbook_line": line,
+                "line": line,
+                "model_projection": projection,
+                "projection": projection,
+                "projection_support_status": support_status,
+                "edge": edge,
+                "edge_pct": edge_pct,
+                "confidence": confidence,
+                "quality_score": scoring_result.get("quality_score", 0.0),
+                "selection_score": scoring_result.get("selection_score", 0.0),
+                "is_elite": scoring_result.get("is_elite", False),
+                "odds": int(odds),
+                "is_live_market": is_live_market,
+                "synthetic_line": synthetic_line,
+                "qualification_reason": qualification_reason,
+                "line_source": "live_market" if is_live_market and not synthetic_line else "synthetic",
                 "source_lane": "live_market_candidate" if is_live_market and not synthetic_line else "partial_fill_candidate",
                 "pre_rejection_reason": pre_rejection_reason,
                 "stake_fraction": stake_fraction,
