@@ -718,6 +718,22 @@ class PredictionPipeline:
             len(injury_context.get("teams", {})),
         )
 
+        # ---- Combo-projection feasibility audit (diagnostic only) ----------
+        # These multi-stat markets (points+rebounds, points+assists,
+        # rebounds+assists, points+rebounds+assists) are NOT yet wired into
+        # candidate selection. Here we walk today's baseline universe once
+        # and count how many players we *could* project for each combo
+        # market under the current rules:
+        #   supported       : every component stat present AND min_avg >= 24
+        #   partial_support : every component stat present BUT min_avg < 24
+        #   unsupported     : at least one component stat missing
+        # The aggregate counts are emitted as [COUNT] lines so we can size
+        # the multi-market expansion before turning it on.
+        try:
+            self._emit_combo_projection_audit(player_baselines)
+        except Exception as exc:  # never let diagnostics break the pipeline
+            self.logger.warning("combo_projection_audit_failed error=%s", exc)
+
         def is_inactive(player_name: str) -> bool:
             if is_player_inactive_fn:
                 return is_player_inactive_fn(player_name)
@@ -1154,6 +1170,113 @@ class PredictionPipeline:
             projection = _nan_safe_to_float(player_row.get(recent_col), 0.0) or 0.0
 
         return max(projection, 0.0)
+
+    # ---- Combo (multi-stat) projections -------------------------------------
+    # These markets are *not* enabled for candidate selection yet. The helper
+    # below is intentionally read-only diagnostic plumbing: it lets us measure
+    # how many players in today's baseline universe could be projected for a
+    # combo market, without touching PRIMARY_PLAYER_MARKETS or
+    # FULLY_MODELED_MARKETS. When we later flip the switch to enable combo
+    # markets, the same helper can be invoked from build_candidate_row.
+    COMBO_PROJECTION_MARKETS: dict[str, tuple[str, ...]] = {
+        "player_points_rebounds": ("pts_avg", "reb_avg"),
+        "player_points_assists": ("pts_avg", "ast_avg"),
+        "player_rebounds_assists": ("reb_avg", "ast_avg"),
+        "player_points_rebounds_assists": ("pts_avg", "reb_avg", "ast_avg"),
+    }
+    COMBO_MIN_MINUTES: float = 24.0
+
+    def _compute_combo_projection(
+        self,
+        player_row: pd.Series,
+        market_type: str,
+    ) -> tuple[float | None, str]:
+        """Compute a combo (multi-stat) projection and its support status.
+
+        Returns
+        -------
+        (projection_value, status)
+            projection_value : float | None
+                The summed average across the configured component stats.
+                None when at least one component is missing.
+            status : str
+                One of:
+                  - ``"supported"``       : every component stat is present
+                                            AND ``min_avg`` >= COMBO_MIN_MINUTES.
+                  - ``"partial_support"`` : every component stat is present
+                                            BUT ``min_avg`` < COMBO_MIN_MINUTES
+                                            (still returns a numeric projection).
+                  - ``"unsupported"``     : at least one component stat is
+                                            missing on the baseline row.
+
+        This helper performs **no** bucketing of the result into the
+        candidate selector. It is wired only into the diagnostic [COUNT]
+        emission inside `_build_candidate_universe`.
+        """
+        components = self.COMBO_PROJECTION_MARKETS.get(market_type)
+        if not components:
+            return None, "unsupported"
+
+        values: list[float] = []
+        for col in components:
+            raw = _nan_safe_to_float(player_row.get(col))
+            if raw is None:
+                # Missing component => unsupported, regardless of minutes.
+                return None, "unsupported"
+            values.append(float(raw))
+
+        projection = sum(values)
+        minutes_avg = _nan_safe_to_float(player_row.get("min_avg"), 0.0) or 0.0
+        if minutes_avg < self.COMBO_MIN_MINUTES:
+            return projection, "partial_support"
+        return projection, "supported"
+
+    def _emit_combo_projection_audit(self, player_baselines: pd.DataFrame) -> None:
+        """Emit [COUNT] lines summarizing combo-projection feasibility.
+
+        Walks ``player_baselines`` once per configured combo market and
+        aggregates the per-status counts. Combo markets are NOT added to
+        ``PRIMARY_PLAYER_MARKETS`` or ``FULLY_MODELED_MARKETS`` here -
+        this is purely diagnostic plumbing. Emits:
+
+            [COUNT] combo_projection_supported=<N>
+            [COUNT] combo_projection_rejected=<N>
+            [COUNT] combo_projection_breakdown=[ ... per-market dicts ... ]
+
+        ``rejected`` aggregates ``partial_support`` + ``unsupported``
+        because both are currently disqualified from candidate selection
+        (any component missing OR minutes_avg < 24).
+        """
+        if player_baselines is None or player_baselines.empty:
+            print("[COUNT] combo_projection_supported=0", flush=True)
+            print("[COUNT] combo_projection_rejected=0", flush=True)
+            return
+
+        breakdown: list[dict[str, Any]] = []
+        total_supported = 0
+        total_rejected = 0
+        for market_type in self.COMBO_PROJECTION_MARKETS:
+            counts = {"supported": 0, "partial_support": 0, "unsupported": 0}
+            for _, player_row in player_baselines.iterrows():
+                _, status = self._compute_combo_projection(player_row, market_type)
+                counts[status] = counts.get(status, 0) + 1
+            supported = counts["supported"]
+            rejected = counts["partial_support"] + counts["unsupported"]
+            total_supported += supported
+            total_rejected += rejected
+            breakdown.append(
+                {
+                    "market_type": market_type,
+                    "supported": supported,
+                    "partial_support": counts["partial_support"],
+                    "unsupported": counts["unsupported"],
+                }
+            )
+
+        print(f"[COUNT] combo_projection_supported={total_supported}", flush=True)
+        print(f"[COUNT] combo_projection_rejected={total_rejected}", flush=True)
+        print(f"[COUNT] combo_projection_breakdown={breakdown}", flush=True)
+        self.logger.info("combo_projection_audit %s", breakdown)
 
     def _write_market_availability_audit(
         self,
