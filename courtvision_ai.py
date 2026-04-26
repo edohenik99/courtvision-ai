@@ -439,6 +439,21 @@ class BallDontLieClient:
         )
         print(f"[COUNT] normalized_columns={list(normalized.columns)}", flush=True)
         print(f"[COUNT] normalized_rows={len(normalized)}", flush=True)
+        if not normalized.empty:
+            raw_prop_counts = (
+                normalized["raw_prop_type"].fillna("").astype(str).value_counts().to_dict()
+                if "raw_prop_type" in normalized.columns
+                else {}
+            )
+            raw_market_type_counts = (
+                normalized["raw_market_type"].fillna("").astype(str).value_counts().to_dict()
+                if "raw_market_type" in normalized.columns
+                else {}
+            )
+            unsupported_milestone_count = int(raw_market_type_counts.get("milestone", 0))
+            print(f"[COUNT] odds_by_raw_prop_type={raw_prop_counts}", flush=True)
+            print(f"[COUNT] odds_by_market_type={raw_market_type_counts}", flush=True)
+            print(f"[COUNT] unsupported_milestone_count={unsupported_milestone_count}", flush=True)
 
         if normalized.empty:
             self.last_odds_status = "empty_response"
@@ -2241,6 +2256,9 @@ class CourtVisionAI:
         live_mask = self._boolish_series(df, "is_live_market", True)
         synthetic_mask = self._boolish_series(df, "synthetic_line", False)
         out = df[live_mask & ~synthetic_mask].copy()
+        raw_market_type = out.get("raw_market_type", pd.Series("", index=out.index)).fillna("").astype(str).str.strip().str.lower()
+        selection = out.get("selection", pd.Series("", index=out.index)).fillna("").astype(str).str.strip().str.lower()
+        out = out[raw_market_type.ne("milestone") & selection.ne("milestone")].copy()
         if "line_source" in out.columns:
             source = out["line_source"].fillna("").astype(str).str.strip().str.lower()
             out = out[(source == "") | (source == "live_market")].copy()
@@ -4787,6 +4805,10 @@ class CourtVisionAI:
                 confidence=0.5,  # placeholder
                 injury_context=injury_context,
             )
+            raw_prop_type = str(market_row.get("raw_prop_type", "") or "")
+            raw_market_type = str(market_row.get("raw_market_type", market_row.get("market.type", "")) or "")
+            if raw_market_type.strip().lower() == "milestone" or str(market_row.get("selection", "") or "").strip().lower() == "milestone":
+                continue
 
             sportsbook_line = float(line_value)
             selection = "over" if projection > sportsbook_line else "under"
@@ -4821,7 +4843,11 @@ class CourtVisionAI:
                 selection=selection,
                 prediction_date=prediction_date,
                 odds=odds,
-                extra_fields=injury_metadata,
+                extra_fields={
+                    **injury_metadata,
+                    "raw_prop_type": raw_prop_type,
+                    "raw_market_type": raw_market_type,
+                },
             )
 
             if result["qualified"]:

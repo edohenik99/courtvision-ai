@@ -317,6 +317,45 @@ class TestPredictionPipeline:
         assert not player_points.empty
         assert int(player_points.iloc[0]["odds"]) == expected_odds
 
+    def test_raw_prop_type_is_preserved_through_candidate_row(self):
+        """Raw provider prop type should survive into candidate/output rows."""
+        config = PredictionConfig(prediction_date="2024-01-15")
+        pipeline = PredictionPipeline(config)
+
+        games = pd.DataFrame([{
+            "game_id": 1,
+            "home_team_abbr": "LAL",
+            "visitor_team_abbr": "BOS",
+        }])
+        odds = pd.DataFrame([{
+            "game_id": 1,
+            "player_id": 123,
+            "player_name": "LeBron James",
+            "raw_prop_type": "points",
+            "raw_market_type": "over_under",
+            "market_type": "player_points",
+            "line": 25.5,
+            "odds": -110,
+            "selection": "over",
+            "is_live": True,
+        }])
+        baselines = pd.DataFrame([{
+            "player_name": "LeBron James",
+            "team_abbr": "LAL",
+            "player_id": 123,
+            "pts_avg": 27.0,
+            "pts_recent": 28.0,
+            "min_avg": 35.0,
+        }])
+
+        result = pipeline.run(games, odds, baselines)
+
+        assert not result.merged_market_props.empty
+        row = result.merged_market_props.iloc[0]
+        assert row["market_type"] == "player_points"
+        assert row["raw_prop_type"] == "points"
+        assert row["raw_market_type"] == "over_under"
+
     def test_board_selection_trace_explains_live_gate_admission(self, caplog):
         """Live candidates with line_source should be admitted (live-gate fix)."""
         config = PredictionConfig(

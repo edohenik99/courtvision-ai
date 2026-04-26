@@ -37,6 +37,14 @@ def _selection_identity_frame(df: pd.DataFrame) -> set[tuple[Any, ...]]:
     return identities
 
 
+def _non_milestone_mask(df: pd.DataFrame) -> pd.Series:
+    if df.empty:
+        return pd.Series(dtype=bool)
+    raw_market_type = df.get("raw_market_type", pd.Series("", index=df.index)).fillna("").astype(str).str.strip().str.lower()
+    selection = df.get("selection", pd.Series("", index=df.index)).fillna("").astype(str).str.strip().str.lower()
+    return raw_market_type.ne("milestone") & selection.ne("milestone")
+
+
 def compute_board_diversity_metrics(board_df: pd.DataFrame) -> dict[str, Any]:
     """Compute diversity metrics for a board.
 
@@ -238,13 +246,22 @@ def build_operator_boards(
     ] = "selection_live_gate_filtered"
 
     # Filter using the SAME unified mask used for eligibility marking
-    live_candidates_df = prepared_df[unified_live_mask].copy()
+    milestone_mask = ~_non_milestone_mask(prepared_df)
+    if milestone_mask.any():
+        prepared_df.loc[
+            prepared_df["selection_rejection_reason"].eq("") & milestone_mask,
+            "selection_rejection_reason",
+        ] = "unsupported_milestone_market"
+
+    live_candidates_df = prepared_df[unified_live_mask & ~milestone_mask].copy()
+    unsupported_milestone_count = int(milestone_mask.sum())
 
     final_board_construction: dict[str, Any] = {"elite": {}, "full_market": {}}
     final_board_construction["required_selector_columns"] = required_selector_diagnostics
 
     final_board_construction["elite"]["input_count"] = len(prepared_df)
     final_board_construction["elite"]["post_live_market_gate_count"] = len(live_candidates_df)
+    final_board_construction["elite"]["unsupported_milestone_count"] = unsupported_milestone_count
     final_board_construction["elite"]["diagnostic_live_flag_count"] = int(diagnostic_live_mask.sum())
     final_board_construction["elite"]["qualification_reason_missing_count"] = int(
         qualification_reason_series.fillna("").astype(str).str.strip().eq("").sum()
@@ -252,6 +269,7 @@ def build_operator_boards(
 
     final_board_construction["full_market"]["input_count"] = len(prepared_df)
     final_board_construction["full_market"]["post_live_market_gate_count"] = len(live_candidates_df)
+    final_board_construction["full_market"]["unsupported_milestone_count"] = unsupported_milestone_count
     final_board_construction["full_market"]["diagnostic_live_flag_count"] = int(diagnostic_live_mask.sum())
 
     elite_df = select_elite_board(live_candidates_df)

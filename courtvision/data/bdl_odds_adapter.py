@@ -18,6 +18,7 @@ import math
 from typing import Any, Callable, Optional
 
 import pandas as pd
+from courtvision.markets.prop_types import canonical_market_type_from_prop_type
 
 
 REQUIRED_COLUMNS: tuple[str, ...] = (
@@ -25,6 +26,7 @@ REQUIRED_COLUMNS: tuple[str, ...] = (
     "player_name",
     "raw_market_name",
     "raw_prop_type",
+    "raw_market_type",
     "market_type",
     "selection",
     "line",
@@ -172,12 +174,23 @@ def _resolve_market_type(
     market_type_mapper: Optional[Callable[[Any], Optional[str]]],
 ) -> Optional[str]:
     value = raw_prop_type if not _is_missing(raw_prop_type) else raw_market_name
-    if market_type_mapper is None:
-        return _clean_text(value)
-    mapped = market_type_mapper(value)
+
+    mapped: Optional[str] = None
+    if market_type_mapper is not None:
+        mapped = market_type_mapper(value)
+        if mapped is None and raw_market_name is not value:
+            mapped = market_type_mapper(raw_market_name)
+
+    # Fall back to canonical provider prop-type mapping when caller mapper
+    # cannot resolve the value.
+    if mapped is None:
+        mapped = canonical_market_type_from_prop_type(value)
     if mapped is None and raw_market_name is not value:
-        mapped = market_type_mapper(raw_market_name)
-    return _clean_text(mapped)
+        mapped = canonical_market_type_from_prop_type(raw_market_name)
+
+    # Last resort: keep clean text so diagnostics can still surface unknown
+    # provider values rather than dropping them silently.
+    return _clean_text(mapped if mapped is not None else value)
 
 
 def _unresolved_reason(player_name: Any, line: Any, market_type: Any, odds: Any) -> Optional[str]:
@@ -238,13 +251,15 @@ def normalize_bdl_player_props(
         market_type = _resolve_market_type(raw_prop_type, raw_market_name, market_type_mapper)
         vendor = _clean_text(_lookup_value(row, "vendor", "bookmaker", "sportsbook")) or ""
         line, line_source = _resolve_line(row)
-        market_shape = (_clean_text(_lookup_value(row, "market.type")) or "over_under").lower()
+        raw_market_type = _clean_text(_lookup_value(row, "market.type")) or "over_under"
+        market_shape = raw_market_type.lower()
 
         base = {
             "player_id": player_id,
             "player_name": player_name,
             "raw_market_name": raw_market_name,
             "raw_prop_type": raw_prop_type,
+            "raw_market_type": raw_market_type,
             "market_type": market_type,
             "line": line,
             "vendor": vendor,

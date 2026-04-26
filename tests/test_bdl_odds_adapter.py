@@ -51,6 +51,7 @@ def test_line_value_is_mapped_to_line():
     assert row["line"] == 25.5
     assert row["line_source"] == "line_value"
     assert row["raw_prop_type"] == "points"
+    assert row["raw_market_type"] == "over_under"
     assert row["raw_market_name"] == "points"
     assert row["player_name"] == "LeBron James"
     assert row["vendor"] == "draftkings"
@@ -75,6 +76,7 @@ def test_milestone_row_uses_market_odds():
     row = out.iloc[0]
     assert row["odds"] == 200.0
     assert row["selection"] == "milestone"
+    assert row["raw_market_type"] == "milestone"
 
 
 def test_missing_line_value_does_not_crash_and_marks_unresolved():
@@ -182,6 +184,25 @@ def test_market_type_mapper_canonicalizes_prop_type():
         raw, player_lookup=_basic_lookup(), market_type_mapper=mapper
     )
     assert out.iloc[0]["market_type"] == "player_points"
+
+
+def test_points_market_type_canonicalization_unchanged_without_mapper():
+    raw = _flatten([
+        {
+            "id": 1,
+            "game_id": 100,
+            "player_id": 246,
+            "vendor": "draftkings",
+            "prop_type": "points",
+            "line_value": "25.5",
+            "market": {"type": "over_under", "over_odds": -110, "under_odds": -110},
+        }
+    ])
+
+    out = normalize_bdl_player_props(raw, player_lookup=_basic_lookup())
+
+    assert set(out["market_type"]) == {"player_points"}
+    assert set(out["raw_prop_type"]) == {"points"}
 
 
 def test_required_columns_always_present():

@@ -155,7 +155,12 @@ def _build_stake_row(row: dict[str, str], edge_col: str, bankroll: float) -> Sta
 
     skip_reason = ""
     eligible = True
-    if raw_american is None:
+    raw_market_type = str(row.get("raw_market_type", row.get("market.type", "")) or "").strip().lower()
+    selection = str(row.get("selection", "") or "").strip().lower()
+    if raw_market_type == "milestone" or selection == "milestone":
+        skip_reason = "unsupported_milestone_market"
+        eligible = False
+    elif raw_american is None:
         skip_reason = "missing_or_invalid_odds"
         eligible = False
     elif decimal_odds is None or decimal_odds <= 1.0:

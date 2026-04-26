@@ -120,12 +120,18 @@ def test_build_operator_boards_with_candidates():
             "market_type": "player_points",
             "entity_name": "LeBron James O25.5",
             "qualification_reason": "live_market_fill",
+            "is_live_market": True,
+            "synthetic_line": False,
+            "line_source": "live_market",
             "quality_score": 0.85,
         },
         {
             "market_type": "player_points",
             "entity_name": "Kevin Durant O27.5",
             "qualification_reason": "live_market_fill",
+            "is_live_market": True,
+            "synthetic_line": False,
+            "line_source": "live_market",
             "quality_score": 0.80,
         },
     ])
@@ -147,6 +153,55 @@ def test_build_operator_boards_with_candidates():
     assert len(full_market_df) == 2  # Top 2 per market
     assert traces["elite"]["input_count"] == 2
     assert traces["elite"]["selected_count"] == 1
+
+
+def test_milestone_market_excluded_from_betting_boards():
+    candidates = pd.DataFrame([
+        {
+            "market_type": "player_points",
+            "raw_prop_type": "points",
+            "raw_market_type": "over_under",
+            "entity_name": "LeBron James O25.5",
+            "qualification_reason": "live_market_qualified",
+            "is_live_market": True,
+            "synthetic_line": False,
+            "line_source": "live_market",
+            "selection_score": 0.90,
+            "quality_score": 0.85,
+        },
+        {
+            "market_type": "player_points",
+            "raw_prop_type": "points",
+            "raw_market_type": "milestone",
+            "entity_name": "LeBron James 30+",
+            "qualification_reason": "live_market_qualified",
+            "is_live_market": True,
+            "synthetic_line": False,
+            "line_source": "live_market",
+            "selection": "milestone",
+            "selection_score": 0.99,
+            "quality_score": 0.95,
+        },
+    ])
+
+    def mock_elite_select(df):
+        return df.copy()
+
+    def mock_top_per_market(df, limit):
+        return df.head(limit).copy()
+
+    elite_df, full_market_df, traces = build_operator_boards(
+        candidates,
+        select_elite_board=mock_elite_select,
+        select_top_per_market=mock_top_per_market,
+    )
+
+    assert len(elite_df) == 1
+    assert len(full_market_df) == 1
+    assert elite_df.iloc[0]["raw_market_type"] == "over_under"
+    assert full_market_df.iloc[0]["raw_market_type"] == "over_under"
+    assert traces["elite"]["unsupported_milestone_count"] == 1
+    assert traces["full_market"]["unsupported_milestone_count"] == 1
 
 
 def test_assign_candidate_lanes_summary():

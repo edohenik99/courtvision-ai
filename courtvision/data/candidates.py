@@ -138,6 +138,12 @@ def _normalize_market_rows(player_market_rows: pd.DataFrame) -> pd.DataFrame:
     return rows
 
 
+def _is_milestone_market_row(row: pd.Series) -> bool:
+    raw_market_type = str(row.get("raw_market_type", row.get("market.type", "")) or "").strip().lower()
+    selection = str(row.get("selection", "") or "").strip().lower()
+    return raw_market_type == "milestone" or selection == "milestone"
+
+
 def _summarize_market_rows(rows: pd.DataFrame, limit: int = 5) -> list[dict[str, Any]]:
     if rows is None or rows.empty:
         return []
@@ -206,6 +212,13 @@ def score_player_markets(
             working_odds["_team_abbr"] = working_odds["team"].fillna("").astype(str).str.strip().str.upper()
 
     working_odds = _normalize_market_rows(working_odds)
+    unsupported_milestone_count = 0
+    if not working_odds.empty:
+        milestone_mask = working_odds.apply(_is_milestone_market_row, axis=1)
+        unsupported_milestone_count = int(milestone_mask.sum())
+        if unsupported_milestone_count:
+            working_odds = working_odds[~milestone_mask].copy()
+    print(f"[COUNT] unsupported_milestone_count={unsupported_milestone_count}", flush=True)
 
     # Prefer player_id matching - create lookup if player_id available
     player_id_lookup: dict[int, pd.DataFrame] = {}

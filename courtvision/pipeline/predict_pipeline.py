@@ -227,6 +227,17 @@ class PredictionPipeline:
         print(f"[COUNT] games_fetched={len(games)}")
         print(f"[COUNT] players_loaded={players_count}")
         print(f"[COUNT] odds_rows={len(odds)}")
+        if isinstance(odds, pd.DataFrame) and not odds.empty:
+            if "raw_prop_type" in odds.columns:
+                odds_by_raw_prop_type = odds["raw_prop_type"].fillna("").astype(str).value_counts().to_dict()
+                print(f"[COUNT] odds_by_raw_prop_type={odds_by_raw_prop_type}", flush=True)
+            if "raw_market_type" in odds.columns:
+                odds_by_market_type = odds["raw_market_type"].fillna("").astype(str).value_counts().to_dict()
+            elif "market.type" in odds.columns:
+                odds_by_market_type = odds["market.type"].fillna("").astype(str).value_counts().to_dict()
+            else:
+                odds_by_market_type = {}
+            print(f"[COUNT] odds_by_market_type={odds_by_market_type}", flush=True)
 
         # Initialize result
         result = PredictionResult(prediction_date=self.config.prediction_date)
@@ -793,6 +804,8 @@ class PredictionPipeline:
 
             # Get the first market row for line/odds
             market_row = market_rows.iloc[0] if not market_rows.empty else pd.Series()
+            raw_prop_type = str(market_row.get("raw_prop_type", "") or "") if not market_row.empty else ""
+            raw_market_type = str(market_row.get("raw_market_type", market_row.get("market.type", "")) or "") if not market_row.empty else ""
 
             # Get base projection
             projection = self._compute_projection(
@@ -897,6 +910,8 @@ class PredictionPipeline:
                 "team": str(player_row.get("team_abbr", "")),
                 "team_abbr": str(player_row.get("team_abbr", "")),
                 "market_type": normalized_market,
+                "raw_prop_type": raw_prop_type,
+                "raw_market_type": raw_market_type,
                 "selection": str(market_row.get("selection", "")) if not market_row.empty else "",
                 "sportsbook_line": line,
                 "line": line,
