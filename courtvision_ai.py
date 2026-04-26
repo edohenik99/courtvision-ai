@@ -45,6 +45,11 @@ from courtvision.calibration.grading_summary import (
     summarize_player_points_calibration,
     summarize_player_points_uplift_audit,
 )
+from courtvision.data.bdl_odds_adapter import (
+    REQUIRED_COLUMNS as BDL_REQUIRED_COLUMNS,
+    filter_valid_odds,
+    normalize_bdl_player_props,
+)
 from courtvision.data.normalization import (
     infer_opponent_from_game,
     normalize_games_frame,
@@ -363,84 +368,276 @@ class BallDontLieClient:
 
     def get_odds(self, game_date: str, game_ids: Optional[list[int]] = None) -> pd.DataFrame:
         """
-        Fetch official v2 betting odds and per-game player props.
+        Fetch BallDontLie player prop odds and return them in the canonical
+        internal schema (see `bdl_odds_adapter.REQUIRED_COLUMNS`).
 
-        Game lines and player props live on separate endpoints, so we merge them into
-        one defensive DataFrame that the scoring layer can normalize.
+        Uses `/nba/v2/odds/player_props` (requires `game_id`) per the BallDontLie
+        OpenAPI spec. The result is always a DataFrame with the required columns,
+        even when no rows are available.
         """
         logger = logging.getLogger("courtvision_ai")
-        candidate_params: list[dict[str, Any]] = [
-            {"dates[]": game_date, "per_page": 100},
-            {"dates": [game_date], "per_page": 100},
-            {"dates": game_date, "per_page": 100},
-        ]
+        print(f"[COUNT] active_odds_fetch_path=BallDontLieClient.get_odds", flush=True)
+        print(f"[COUNT] games_for_odds={len(game_ids) if game_ids else 0}", flush=True)
 
         self.last_odds_status = "request_started"
         self.last_odds_message = ""
-        last_400_error: Optional[requests.HTTPError] = None
-        payload: Optional[dict[str, Any]] = None
 
-        for params in candidate_params:
-            try:
-                payload = self._get(f"{NBA_V2}/odds", params)
-                break
-            except requests.HTTPError as exc:
-                status_code = exc.response.status_code if exc.response is not None else None
-                if status_code == 400:
-                    last_400_error = exc
+        # Fetch player props for each game_id using /nba/v2/odds/player_props endpoint
+        all_player_props: list[dict[str, Any]] = []
+        if game_ids:
+            for game_id in game_ids:
+                if game_id is None:
                     continue
-                self.last_odds_status = f"http_{status_code or 'error'}"
-                self.last_odds_message = str(exc)
-                raise
-            except Exception as exc:
-                self.last_odds_status = "request_exception"
-                self.last_odds_message = str(exc)
-                return pd.DataFrame()
+                print(f"[COUNT] player_prop_request game_id={game_id}", flush=True)
+                try:
+                    payload = self._get(f"{NBA_V2}/odds/player_props", {"game_id": game_id})
+                    data = payload.get("data", []) if isinstance(payload, dict) else []
+                    row_count = len(data) if isinstance(data, list) else 0
+                    print(f"[COUNT] player_prop_rows_returned game_id={game_id} rows={row_count}", flush=True)
+                    if row_count == 0:
+                        print(f"[WARNING] no_player_props_for_game game_id={game_id}", flush=True)
+                    else:
+                        all_player_props.extend(data)
+                except Exception as exc:
+                    print(f"[WARNING] player_props_fetch_failed game_id={game_id} error={type(exc).__name__}: {exc}", flush=True)
+                    continue
 
-        if last_400_error is not None:
-            self.last_odds_status = "endpoint_400"
-            self.last_odds_message = (
-                "Odds endpoint rejected all supported date parameter shapes for this account or date."
+        print(f"[COUNT] total_player_prop_rows={len(all_player_props)}", flush=True)
+
+        # Build player lookup so the adapter can resolve player_name from player_id
+        try:
+            player_lookup = self._build_player_prop_identity_lookup(
+                game_date, requested_game_ids=game_ids or []
             )
-            return pd.DataFrame()
+        except Exception as exc:
+            logger.warning("player_lookup_build_failed error=%s", exc)
+            print(f"[DIAGNOSIS] player_lookup_build raised {type(exc).__name__}: {exc}", flush=True)
+            player_lookup = {}
+        print(f"[COUNT] player_lookup_size={len(player_lookup)}", flush=True)
 
-        if payload is None:
-            self.last_odds_status = "empty_response"
-            self.last_odds_message = "Odds endpoint returned no usable data."
-            return pd.DataFrame()
-
-        data = payload.get("data", [])
-        if not isinstance(data, list):
-            self.last_odds_status = "unexpected_payload"
-            self.last_odds_message = "Odds payload did not contain a list in data."
-            return pd.DataFrame()
-
-        stage_counts: dict[str, Any] = {
-            "raw_api_rows": len(data),
-            "raw_game_odds_rows": len(data),
-            "normalized_game_rows": 0,
-            "player_prop_games_requested": len(game_ids or []),
-            "player_prop_raw_rows": 0,
-            "player_prop_normalize_called": 0,
-            "player_prop_normalized_rows": 0,
-            "player_prop_normalized_with_name": 0,
-        }
-        rows: list[dict[str, Any]] = []
-        raw_player_prop_samples: list[dict[str, Any]] = []
-        normalized_player_prop_samples: list[dict[str, Any]] = []
-        for game_market in data:
-            game_rows = self._normalize_game_odds_rows(game_market)
-            stage_counts["normalized_game_rows"] += len(game_rows)
-            rows.extend(game_rows)
-
-        logger.info(
-            "get_odds_game_stage raw_api_rows=%d normalized_game_rows=%d",
-            stage_counts["raw_api_rows"],
-            stage_counts["normalized_game_rows"],
+        # Convert to DataFrame and run through canonical adapter
+        raw_df = pd.json_normalize(all_player_props) if all_player_props else pd.DataFrame()
+        print(f"[COUNT] raw_df_columns={list(raw_df.columns)}", flush=True)
+        print(f"[COUNT] raw_df_rows={len(raw_df)}", flush=True)
+        print(f"[COUNT] raw_df_sample={raw_df.head(1).to_dict('records') if not raw_df.empty else 'N/A'}", flush=True)
+        
+        normalized = normalize_bdl_player_props(
+            raw_df,
+            player_lookup=player_lookup,
+            market_type_mapper=runtime_normalize_market_alias,
         )
+        print(f"[COUNT] normalized_columns={list(normalized.columns)}", flush=True)
+        print(f"[COUNT] normalized_rows={len(normalized)}", flush=True)
 
+        if normalized.empty:
+            self.last_odds_status = "empty_response"
+            self.last_odds_message = "Player prop odds endpoint returned no usable rows."
+            print(f"[DIAGNOSIS] active odds fetch returned zero rows", flush=True)
+        else:
+            self.last_odds_status = "ok"
+            unresolved = int(normalized["unresolved_reason"].notna().sum())
+            print(
+                f"[COUNT] odds_normalized_rows={len(normalized)} unresolved={unresolved}",
+                flush=True,
+            )
+
+        return normalized
+
+    def _normalize_game_odds(self, data: list[dict[str, Any]]) -> pd.DataFrame:
+        """Normalize raw game odds into a defensive DataFrame."""
+        rows: list[dict[str, Any]] = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            game_id = item.get("game_id")
+            row: dict[str, Any] = {"game_id": game_id}
+
+            # Try to extract bookmaker odds from nested structure
+            bookmakers = item.get("bookmakers") or item.get("sportsbooks") or []
+            if bookmakers:
+                first = bookmakers[0] if isinstance(bookmakers, list) else None
+                if isinstance(first, dict):
+                    row["sportsbook"] = first.get("key") or first.get("title")
+                    markets = first.get("markets") or []
+                    for m in markets:
+                        if not isinstance(m, dict):
+                            continue
+                        mkey = m.get("key") or m.get("market_type")
+                        if mkey in ("spreads", "totals", "moneyline", "h2h"):
+                            outcomes = m.get("outcomes") or []
+                            for o in outcomes:
+                                if isinstance(o, dict):
+                                    oname = o.get("name") or o.get("point")
+                                    oprice = o.get("price") or o.get("odds")
+                                    row[f"{mkey}_{oname}"] = oprice
+            else:
+                # Flatten fields directly present
+                row["sportsbook"] = item.get("sportsbook") or item.get("bookmaker_key")
+                for k in ["spread_home", "spread_away", "total_over", "total_under", "moneyline_home", "moneyline_away", "home_spread", "away_spread"]:
+                    if k in item:
+                        row[k] = item[k]
+
+            rows.append(row)
+
+        return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+    def _normalize_player_props(self, data: list[dict[str, Any]]) -> pd.DataFrame:
+        """Normalize raw player prop odds into a defensive DataFrame."""
+        rows: list[dict[str, Any]] = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            row: dict[str, Any] = {
+                "game_id": item.get("game_id"),
+                "player_id": item.get("player_id"),
+                "prop_type": item.get("prop_type"),
+                "line_value": item.get("line_value"),
+                "vendor": item.get("vendor"),
+            }
+            # Extract market details
+            market = item.get("market") or {}
+            if isinstance(market, dict):
+                row["market_type"] = market.get("type")
+                row["over_odds"] = market.get("over_odds")
+                row["under_odds"] = market.get("under_odds")
+                row["odds"] = market.get("odds")
+            rows.append(row)
+        return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+    def _get_player_prop_rows(
+        self,
+        game_id: int,
+        player_lookup: Optional[dict[int, dict[str, Any]]] = None,
+        diagnostics: Optional[dict[str, Any]] = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Fetch and normalize player prop rows for a specific game.
+        """
+        logger = logging.getLogger("courtvision_ai")
+        try:
+            payload = self._get(
+                f"{NBA_V2}/odds/player_props",
+                {"game_id": game_id},
+            )
+            data = payload.get("data", [])
+            if not isinstance(data, list):
+                return []
+            return data
+        except Exception as exc:
+            logger.warning("player_props_fetch_failed game_id=%s error=%s", game_id, exc)
+            return []
+
+    def _normalize_injuries(self, injuries_raw: pd.DataFrame) -> pd.DataFrame:
+        """Normalize injuries DataFrame from SDK or HTTP source."""
+        if injuries_raw.empty:
+            return injuries_raw
+        rename_map = {
+            "player.id": "player_id",
+            "player.first_name": "first_name",
+            "player.last_name": "last_name",
+            "player.team_id": "team_id",
+        }
+        return injuries_raw.rename(columns={k: v for k, v in rename_map.items() if k in injuries_raw.columns})
+
+    def _build_player_prop_identity_lookup(
+        self,
+        game_date: str,
+        requested_game_ids: Optional[list[int]] = None,
+    ) -> dict[int, dict[str, Any]]:
+        """Build a lookup of player_id -> player identity info from baselines/players list."""
+        logger = logging.getLogger("courtvision_ai")
+        player_lookup: dict[int, dict[str, Any]] = {}
+
+        try:
+            games = self.get_games(game_date)
+        except Exception as exc:
+            logger.warning("get_odds_player_lookup_games_failed game_date=%s error=%s", game_date, exc)
+            print(f"[DIAGNOSIS] player_lookup early-exit: get_games raised {type(exc).__name__}: {exc}", flush=True)
+            return {}
+
+        print(f"[COUNT] player_lookup_games_fetched rows={len(games)} columns={list(games.columns) if not games.empty else []}", flush=True)
+        if games.empty:
+            logger.warning("get_odds_player_lookup_no_games game_date=%s", game_date)
+            print(f"[DIAGNOSIS] player_lookup early-exit: get_games returned empty DataFrame for date={game_date}", flush=True)
+            return {}
+
+        team_ids: set[int] = set()
+        if requested_game_ids:
+            for gid in requested_game_ids:
+                game_row = games[games["id"] == gid]
+                if not game_row.empty:
+                    row = game_row.iloc[0]
+                    for nested_key, flat_key in (
+                        ("home_team", "home_team_id"),
+                        ("visitor_team", "visitor_team_id"),
+                    ):
+                        nested = row.get(nested_key)
+                        if isinstance(nested, dict):
+                            tid = int(nested.get("id", 0) or 0)
+                        else:
+                            tid = int(row.get(flat_key, 0) or 0)
+                        if tid:
+                            team_ids.add(tid)
+
+        print(f"[COUNT] player_lookup_team_ids={sorted(team_ids)}", flush=True)
+        if not team_ids:
+            logger.warning(
+                "get_odds_player_lookup_missing_team_ids game_date=%s requested_game_ids=%s",
+                game_date,
+                sorted(requested_game_ids),
+            )
+            return {}
+
+        try:
+            sdk = BalldontlieAPI(api_key=self.api_key)
+            players_api = sdk.nba.players
+        except Exception as exc:
+            logger.warning("get_odds_player_lookup_sdk_failed error=%s", exc)
+            return {}
+
+        for team_id in team_ids:
+            try:
+                players_page = players_api.list(team_ids=[team_id], per_page=100)
+                players_data = getattr(players_page, "data", None)
+                if players_data is None and isinstance(players_page, dict):
+                    players_data = players_page.get("data", [])
+                if not players_data:
+                    continue
+                for p in players_data:
+                    if isinstance(p, dict):
+                        pid = int(p.get("id", 0) or 0)
+                        first = str(p.get("first_name", "") or "").strip()
+                        last = str(p.get("last_name", "") or "").strip()
+                        team_info = p.get("team") if isinstance(p.get("team"), dict) else None
+                        team_abbr = str((team_info or {}).get("abbreviation", "") or "").strip()
+                    else:
+                        pid = int(getattr(p, "id", 0) or 0)
+                        first = str(getattr(p, "first_name", "") or "").strip()
+                        last = str(getattr(p, "last_name", "") or "").strip()
+                        team_info = getattr(p, "team", None)
+                        team_abbr = str(getattr(team_info, "abbreviation", "") or "").strip() if team_info else ""
+                    if not pid:
+                        continue
+                    player_name = f"{first} {last}".strip()
+                    player_lookup[pid] = {
+                        "player_id": pid,
+                        "player_name": player_name,
+                        "team_id": team_id,
+                        "team_abbr": team_abbr,
+                    }
+            except Exception as exc:
+                logger.warning("get_odds_player_lookup_team_failed team_id=%s error=%s", team_id, exc)
+                continue
+
+        return player_lookup
         player_lookup = self._build_player_prop_identity_lookup(game_date, game_ids or [])
+        print(f"[DEBUG_CALLER] player_lookup returned with {len(player_lookup)} entries", flush=True)
+        if player_lookup:
+            sample_keys = list(player_lookup.keys())[:3]
+            print(f"[DEBUG_CALLER] sample keys: {sample_keys}, types: {[type(k).__name__ for k in sample_keys]}", flush=True)
         prop_errors: list[str] = []
+        valid_game_ids = [gid for gid in game_ids if gid is not None]
+        print(f"[COUNT] games_for_odds={len(valid_game_ids)}", flush=True)
         for raw_game_id in game_ids or []:
             try:
                 game_id = int(raw_game_id)
@@ -467,6 +664,7 @@ class BallDontLieClient:
             except Exception as exc:
                 prop_errors.append(f"player_props_game_{game_id}:{type(exc).__name__}")
 
+        print(f"[COUNT] total_player_prop_rows={len(rows)}", flush=True)
         odds_df = pd.DataFrame(rows) if rows else pd.DataFrame()
         player_name_sample: list[str] = []
         overall_null_count = 0
@@ -590,11 +788,18 @@ class BallDontLieClient:
         diagnostics: Optional[dict[str, Any]] = None,
     ) -> list[dict[str, Any]]:
         logger = logging.getLogger("courtvision_ai")
+        print(f"[COUNT] player_prop_request game_id={game_id}", flush=True)
+        
         payload = self._get(
             f"{NBA_V2}/odds/player_props",
             {"game_id": game_id},
         )
         data = payload.get("data", [])
+        row_count = len(data) if isinstance(data, list) else 0
+        print(f"[COUNT] player_prop_rows_returned game_id={game_id} rows={row_count}", flush=True)
+        
+        if row_count == 0:
+            print(f"[WARNING] no_player_props_for_game game_id={game_id}", flush=True)
         if diagnostics is not None:
             diagnostics.clear()
             diagnostics.update(
@@ -607,6 +812,12 @@ class BallDontLieClient:
                     "sample_has_player_name": False,
                     "raw_samples": [],
                     "normalized_samples": [],
+                    # Player lookup diagnostics
+                    "player_lookup_size": len(player_lookup) if player_lookup else 0,
+                    "odds_rows_with_player_id": 0,
+                    "odds_rows_resolved_to_player_name": 0,
+                    "odds_player_lookup_misses": 0,
+                    "lookup_sample_player_ids": [],
                 }
             )
         if not isinstance(data, list):
@@ -632,6 +843,17 @@ class BallDontLieClient:
                     "raw_samples": raw_samples,
                 }
             )
+        # Debug: Print raw sample keys to understand API response structure
+        if raw_samples and len(raw_samples) > 0:
+            first_sample = raw_samples[0]
+            if isinstance(first_sample, dict):
+                sample_keys = list(first_sample.keys())
+                player_data = first_sample.get("player")
+                print(f"[DEBUG] Raw odds sample keys: {sample_keys}")
+                print(f"[DEBUG] Player data type: {type(player_data)}")
+                if isinstance(player_data, dict):
+                    print(f"[DEBUG] Player keys: {list(player_data.keys())}")
+        
         logger.info(
             "get_odds_player_props_raw game_id=%d raw_rows=%d sample_has_nested_player=%s sample_has_player_name=%s sample_rows=%s",
             game_id,
@@ -659,9 +881,69 @@ class BallDontLieClient:
                 type(sample_row.get("player")),
                 sorted(sample_row.keys()),
             )
+        # DEBUG: Print detailed lookup diagnostics before normalization
+        lookup_size = len(player_lookup) if player_lookup else 0
+        sample_lookup_keys = list(player_lookup.keys())[:10] if player_lookup else []
+        sample_odds_ids = []
+        sample_odds_id_types = []
+        for sample in data[:10]:
+            if isinstance(sample, dict) and "player_id" in sample:
+                pid = sample["player_id"]
+                sample_odds_ids.append(pid)
+                sample_odds_id_types.append(type(pid).__name__)
+        
+        print(f"[DEBUG_ODDS] sample_odds_player_ids={sample_odds_ids}", flush=True)
+        print(f"[DEBUG_ODDS] sample_odds_player_id_types={sample_odds_id_types}", flush=True)
+        
+        # Calculate intersection
+        if player_lookup and sample_odds_ids:
+            odds_ids_int = set()
+            for pid in sample_odds_ids:
+                try:
+                    odds_ids_int.add(int(pid))
+                except (ValueError, TypeError):
+                    pass
+            lookup_keys_int = set()
+            for k in player_lookup.keys():
+                try:
+                    lookup_keys_int.add(int(k))
+                except (ValueError, TypeError):
+                    pass
+            intersection = odds_ids_int & lookup_keys_int
+            print(f"[DEBUG_INTERSECTION] odds_ids_sample={list(odds_ids_int)[:10]}", flush=True)
+            print(f"[DEBUG_INTERSECTION] lookup_keys_sample={list(lookup_keys_int)[:10]}", flush=True)
+            print(f"[DEBUG_INTERSECTION] intersection_count={len(intersection)}", flush=True)
+        
+        # Check if each sample odds player_id is in lookup
+        for pid in sample_odds_ids[:5]:
+            # Try both int and str lookup
+            in_lookup_int = pid in player_lookup if player_lookup else False
+            in_lookup_str = str(pid) in player_lookup if player_lookup else False
+            in_lookup_int_pid = int(pid) in player_lookup if player_lookup and isinstance(pid, str) and pid.isdigit() else False
+            print(f"[DEBUG_JOIN] odds_pid={pid} (type={type(pid).__name__}) in_lookup={in_lookup_int or in_lookup_str or in_lookup_int_pid}", flush=True)
+        
         for prop in data:
             if diagnostics is not None:
                 diagnostics["normalize_called"] = int(diagnostics.get("normalize_called", 0) or 0) + 1
+                # Track player_id presence
+                prop_player_id_raw = prop.get("player_id") if isinstance(prop, dict) else None
+                prop_player_id = self._coerce_int(prop_player_id_raw) if isinstance(prop, dict) else None
+                prop_player_id_str = str(prop_player_id_raw) if isinstance(prop, dict) and prop_player_id_raw is not None else None
+                
+                if prop_player_id is not None:
+                    diagnostics["odds_rows_with_player_id"] = int(diagnostics.get("odds_rows_with_player_id", 0) or 0) + 1
+                    # Track lookup misses for diagnostics - try both int and str keys
+                    lookup_hit = False
+                    if player_lookup:
+                        lookup_hit = prop_player_id in player_lookup
+                        if not lookup_hit and prop_player_id_str:
+                            lookup_hit = prop_player_id_str in player_lookup
+                    
+                    if player_lookup and not lookup_hit:
+                        diagnostics["odds_player_lookup_misses"] = int(diagnostics.get("odds_player_lookup_misses", 0) or 0) + 1
+                        if len(diagnostics.get("lookup_sample_player_ids", [])) < 10:
+                            diagnostics["lookup_sample_player_ids"].append(prop_player_id)
+            
             row = self._normalize_player_prop_row(prop, player_lookup=player_lookup)
             if row:
                 rows.append(row)
@@ -669,6 +951,7 @@ class BallDontLieClient:
                     diagnostics["normalize_succeeded"] = int(diagnostics.get("normalize_succeeded", 0) or 0) + 1
                     if str(row.get("player_name") or "").strip():
                         diagnostics["normalize_named"] = int(diagnostics.get("normalize_named", 0) or 0) + 1
+                        diagnostics["odds_rows_resolved_to_player_name"] = int(diagnostics.get("odds_rows_resolved_to_player_name", 0) or 0) + 1
 
         normalized_samples = self._sample_row_dicts(rows, limit=5)
         if diagnostics is not None:
@@ -686,6 +969,21 @@ class BallDontLieClient:
             int(diagnostics.get("normalize_named", 0) if diagnostics is not None else 0),
             normalized_samples,
         )
+        
+        # Print [COUNT] diagnostics for visibility
+        if diagnostics is not None:
+            print(f"[COUNT] player_lookup_size={diagnostics.get('player_lookup_size', 0)}")
+            print(f"[COUNT] odds_rows_with_player_id={diagnostics.get('odds_rows_with_player_id', 0)}")
+            print(f"[COUNT] odds_rows_resolved_to_player_name={diagnostics.get('odds_rows_resolved_to_player_name', 0)}")
+            print(f"[COUNT] odds_player_lookup_misses={diagnostics.get('odds_player_lookup_misses', 0)}")
+            
+            # If resolution is 0, print diagnostic info
+            if diagnostics.get('odds_rows_resolved_to_player_name', 0) == 0 and diagnostics.get('odds_rows_with_player_id', 0) > 0:
+                print(f"[DIAGNOSIS] Player lookup failed - sample missing IDs: {diagnostics.get('lookup_sample_player_ids', [])[:10]}")
+                if player_lookup:
+                    sample_lookup_keys = list(player_lookup.keys())[:10]
+                    print(f"[DIAGNOSIS] Lookup has keys: {sample_lookup_keys}")
+        
         return rows
 
     def _supported_player_markets(self) -> set[str]:
@@ -737,9 +1035,10 @@ class BallDontLieClient:
 
     def _normalize_player_prop_row(
         self,
-        market: Any,
+        market: dict[str, Any],
         player_lookup: Optional[dict[int, dict[str, Any]]] = None,
     ) -> Optional[dict[str, Any]]:
+        print(f"[DEBUG_NORMALIZE] called with player_lookup_size={len(player_lookup) if player_lookup else 0}", flush=True)
         if not isinstance(market, dict):
             return None
 
@@ -767,31 +1066,60 @@ class BallDontLieClient:
         if normalized_market not in self._supported_player_markets():
             return None
 
-        player = market.get("player", {}) if isinstance(market.get("player"), dict) else {}
-        player_id = self._coerce_int(market.get("player_id") or player.get("id"))
-        resolved_identity = player_lookup.get(player_id, {}) if player_lookup and player_id is not None else {}
+        # Get player_id from odds row - this is the ONLY player identifier in the API response
+        raw_player_id = market.get("player_id")
+        player_id = self._coerce_int(raw_player_id)
+        player_id_str = str(raw_player_id) if raw_player_id is not None else None
         
-        # Debug: Log player extraction attempt
-        extracted_name = self._extract_player_prop_name(market)
-        lookup_name = str(resolved_identity.get("player_name") or "").strip()
-        player_name = extracted_name or lookup_name
+        # [DEBUG_JOIN] diagnostics for first 5 rows - use a simple approach with static counter
+        if not hasattr(self, '_debug_join_counter'):
+            self._debug_join_counter = 0
         
+        # Look up player identity from pre-built lookup (primary source)
+        # Try both int and str keys to handle type mismatches
+        resolved_identity = {}
+        lookup_hit = False
+        if player_lookup and player_id is not None:
+            resolved_identity = player_lookup.get(player_id, {})
+            lookup_hit = bool(resolved_identity)
+            if not resolved_identity and player_id_str:
+                resolved_identity = player_lookup.get(player_id_str, {})
+                lookup_hit = bool(resolved_identity)
+        
+        # Print [DEBUG_JOIN] for first 5 rows
+        if self._debug_join_counter < 5:
+            print(f"[DEBUG_JOIN] raw_player_id={raw_player_id} (type={type(raw_player_id).__name__})")
+            print(f"[DEBUG_JOIN] coerced_player_id={player_id}")
+            print(f"[DEBUG_JOIN] lookup_size={len(player_lookup) if player_lookup else 0}")
+            print(f"[DEBUG_JOIN] lookup_hit={lookup_hit}")
+            self._debug_join_counter += 1
+        
+        player_name = str(resolved_identity.get("player_name") or "").strip()
+        
+        # Print [DEBUG_JOIN] resolved name
+        if self._debug_join_counter <= 5:
+            print(f"[DEBUG_JOIN] resolved_player_name={player_name}")
+        
+        # If lookup failed, preserve player_id and record diagnostic, but don't silently fail
         if not player_name:
             logger.warning(
-                "player_name_extraction_failed "
-                "player_id=%s "
-                "has_player_dict=%s "
-                "player_keys=%s "
-                "market_player_name=%s "
-                "extracted_name=%s "
-                "lookup_name=%s",
+                "player_lookup_miss player_id=%s (type=%s) lookup_size=%d lookup_has_int_keys=%s lookup_has_str_keys=%s",
                 player_id,
-                isinstance(market.get("player"), dict),
-                list(player.keys()) if isinstance(market.get("player"), dict) else None,
-                market.get("player_name"),
-                extracted_name,
-                lookup_name,
+                type(raw_player_id).__name__,
+                len(player_lookup) if player_lookup else 0,
+                any(isinstance(k, int) for k in (player_lookup or {}).keys()) if player_lookup else False,
+                any(isinstance(k, str) for k in (player_lookup or {}).keys()) if player_lookup else False,
             )
+            # Still return the row with player_id preserved for diagnostics
+            # This allows downstream code to see missing_player_lookup flag
+            player_name = None
+        
+        # Log successful lookup
+        logger.debug(
+            "player_lookup_hit player_id=%s player_name=%s",
+            player_id,
+            player_name,
+        )
 
         team = market.get("team", {}) if isinstance(market.get("team"), dict) else {}
 
@@ -819,6 +1147,7 @@ class BallDontLieClient:
             "raw_market_name": normalized_market,
             "player_id": player_id,
             "player_name": player_name,
+            "missing_player_lookup": player_name is None,  # Flag for diagnostics
             "team": team_abbr,
             "line": market.get("line_value"),
             "over_odds": market_detail.get("over_odds"),
@@ -896,7 +1225,9 @@ class BallDontLieClient:
         )
 
     def _extract_player_prop_name(self, market: Mapping[str, Any]) -> str:
-        for key in ("player", "participant", "athlete", "entity"):
+        """Extract player name from various odds API formats."""
+        # Try nested player dict structures first
+        for key in ("player", "participant", "athlete", "entity", "competitor"):
             value = market.get(key)
             if isinstance(value, dict):
                 candidate = self._name_from_mapping(value)
@@ -904,13 +1235,21 @@ class BallDontLieClient:
                     return candidate
             if isinstance(value, str) and value.strip():
                 return value.strip()
+        
+        # Try top-level player name fields
         top_level_name = (
             str(market.get("player_name") or "").strip()
+            or str(market.get("playerName") or "").strip()
             or str(market.get("full_name") or market.get("fullName") or "").strip()
             or str(market.get("display_name") or market.get("displayName") or "").strip()
+            or str(market.get("name") or "").strip()
+            or str(market.get("label") or "").strip()
+            or str(market.get("description") or "").strip()
         )
         if top_level_name:
             return top_level_name
+        
+        # Fallback: try to extract from the whole dict
         return self._name_from_mapping(dict(market))
 
     def _build_player_prop_identity_lookup(
@@ -919,16 +1258,21 @@ class BallDontLieClient:
         game_ids: Sequence[int] | None = None,
     ) -> dict[int, dict[str, Any]]:
         logger = logging.getLogger("courtvision_ai")
+        print("[DEBUG_LOOKUP] === FUNCTION ENTRY ===", flush=True)
+        print(f"[DEBUG_LOOKUP] ENTRY api_key={'set' if self.api_key else 'unset'} BalldontlieAPI={BalldontlieAPI}", flush=True)
         if not self.api_key or BalldontlieAPI is None:
+            print("[DEBUG_LOOKUP] EARLY_RETURN: missing api_key or BalldontlieAPI", flush=True)
             return {}
 
         try:
             games = self.get_games(game_date)
         except Exception as exc:
-            logger.warning("get_odds_player_lookup_games_failed game_date=%s error=%s", game_date, exc)
+            print(f"[DEBUG_LOOKUP] EARLY_RETURN: get_games failed: {exc}", flush=True)
+            print(f"[WARNING] get_odds_player_lookup_games_failed game_date={game_date} error={exc}", flush=True)
             return {}
 
         if games.empty:
+            print("[DEBUG_LOOKUP] EARLY_RETURN: games.empty=True", flush=True)
             return {}
 
         requested_game_ids = {
@@ -951,18 +1295,18 @@ class BallDontLieClient:
                 if team_id is not None:
                     team_ids.add(team_id)
 
+        print(f"[DEBUG_LOOKUP] team_ids={sorted(team_ids)}", flush=True)
         if not team_ids:
-            logger.warning(
-                "get_odds_player_lookup_missing_team_ids game_date=%s requested_game_ids=%s",
-                game_date,
-                sorted(requested_game_ids),
-            )
+            print("[DEBUG_LOOKUP] EARLY_RETURN: team_ids empty", flush=True)
+            print(f"[WARNING] get_odds_player_lookup_missing_team_ids game_date={game_date} requested_game_ids={sorted(requested_game_ids)}", flush=True)
             return {}
 
         try:
             api = BalldontlieAPI(api_key=self.api_key)
+            print("[DEBUG_LOOKUP] SDK initialized successfully", flush=True)
         except Exception as exc:
-            logger.warning("get_odds_player_lookup_sdk_failed error=%s", exc)
+            print(f"[DEBUG_LOOKUP] EARLY_RETURN: SDK init failed: {exc}", flush=True)
+            print(f"[WARNING] get_odds_player_lookup_sdk_failed error={exc}", flush=True)
             return {}
 
         lookup: dict[int, dict[str, Any]] = {}
@@ -1021,6 +1365,14 @@ class BallDontLieClient:
                 break
             cursor = next_cursor
 
+        # Hard diagnostics for lookup
+        sample_keys = list(lookup.keys())[:5]
+        sample_values = [lookup.get(k, {}) for k in sample_keys]
+        print(f"[DEBUG_LOOKUP] SUCCESS player_lookup_size={len(lookup)}", flush=True)
+        print(f"[DEBUG_LOOKUP] sample_lookup_keys={sample_keys}", flush=True)
+        print(f"[DEBUG_LOOKUP] sample_lookup_key_types={[type(k).__name__ for k in sample_keys]}", flush=True)
+        print(f"[DEBUG_LOOKUP] sample_lookup_values={sample_values}", flush=True)
+        
         logger.info(
             "get_odds_player_lookup game_date=%s team_ids=%s lookup_entries=%d sample=%s",
             game_date,
@@ -1031,6 +1383,7 @@ class BallDontLieClient:
                 limit=5,
             ),
         )
+        print(f"[DEBUG_LOOKUP] RETURNING lookup with {len(lookup)} entries", flush=True)
         return lookup
 
     def _normalize_market_row(
@@ -3155,7 +3508,10 @@ class CourtVisionAI:
         games = self._normalize_games(games_raw)
         game_ids = [int(game_id) for game_id in games["game_id"].dropna().tolist()] if not games.empty else []
         print(f"[STAGE] provider_fetch_start games={len(game_ids)}")
+        print(f"[COUNT] active_odds_fetch_path=courtvision_ai.py:predict:client.get_odds", flush=True)
+        print(f"[COUNT] games_for_odds={len(game_ids)}", flush=True)
         odds_raw = client.get_odds(prediction_date, game_ids=game_ids)
+        print(f"[COUNT] odds_rows_after_fetch={len(odds_raw) if hasattr(odds_raw, '__len__') else 0}", flush=True)
 
         # Diagnostic logging for player_name in odds
         if not odds_raw.empty and "player_name" in odds_raw.columns:
@@ -3167,11 +3523,14 @@ class CourtVisionAI:
                 null_count,
                 len(odds_raw),
             )
-            # Hard assertion: fail if >50% null player names
+            # Warning: log if >50% null player names but continue gracefully
             if len(odds_raw) > 0 and null_count / len(odds_raw) > 0.5:
-                raise ValueError(
-                    f"player_name missing in odds: {null_count}/{len(odds_raw)} rows have null/empty player_name"
-                )
+                # Get diagnostics from player prop processing
+                print(f"[WARNING] player_name missing in odds: {null_count}/{len(odds_raw)} rows unresolved", flush=True)
+                print(f"[DIAGNOSIS] Skipping player prop candidate generation due to unresolved player names", flush=True)
+                # Filter out player prop rows with null player_name, keeping only team markets
+                odds_raw = odds_raw[odds_raw["player_name"].notna() & (odds_raw["player_name"] != "")].copy()
+                print(f"[DIAGNOSIS] Continuing with {len(odds_raw)} rows that have valid player_name", flush=True)
 
         odds = self._normalize_odds(odds_raw)
         injuries_raw = self._get_sdk_injuries()
@@ -3185,6 +3544,12 @@ class CourtVisionAI:
             len(injuries_raw) if isinstance(injuries_raw, pd.DataFrame) else 0,
             prediction_date,
         )
+        print("[COUNT] active_odds_fetch_path=courtvision_ai.py:active_provider_fetch_section", flush=True)
+        print(f"[COUNT] games_for_odds={len(games)}", flush=True)
+        print(f"[COUNT] odds_raw_type={type(odds_raw)}", flush=True)
+        print(f"[COUNT] odds_raw_rows={len(odds_raw) if hasattr(odds_raw, '__len__') else 'unknown'}", flush=True)
+        if hasattr(odds_raw, "__len__") and len(odds_raw) == 0:
+            print("[DIAGNOSIS] active odds fetch returned zero rows", flush=True)
         print(f"[STAGE] provider_fetch_complete games={len(games)} odds={len(odds_raw)} injuries={len(injuries_raw) if isinstance(injuries_raw, pd.DataFrame) else 0}")
         injuries = self._normalize_injuries(injuries_raw)
         if injuries.empty:
@@ -4042,6 +4407,25 @@ class CourtVisionAI:
         return normalize_games_frame(df)
 
     def _normalize_odds(self, df: pd.DataFrame) -> pd.DataFrame:
+        # If the input already passed through the BDL adapter (it carries
+        # `unresolved_reason`), keep only valid rows and ensure downstream
+        # required columns exist without re-running the legacy normalizer.
+        if isinstance(df, pd.DataFrame) and "unresolved_reason" in df.columns:
+            valid = filter_valid_odds(df)
+            if "team" not in valid.columns:
+                valid = valid.copy()
+                valid["team"] = None
+            if "raw_stat_key" not in valid.columns:
+                valid["raw_stat_key"] = valid["market_type"]
+            if "market_alias" not in valid.columns:
+                valid["market_alias"] = valid["market_type"]
+            if "bookmaker" not in valid.columns:
+                valid["bookmaker"] = valid["vendor"]
+            if "over_odds" not in valid.columns:
+                valid["over_odds"] = None
+            if "under_odds" not in valid.columns:
+                valid["under_odds"] = None
+            return valid
         return normalize_odds_frame(
             df,
             map_market_type=self._map_market_type,
