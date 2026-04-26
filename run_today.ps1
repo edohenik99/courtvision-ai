@@ -38,6 +38,7 @@ $KellyStakesScript = Join-Path $ScriptRoot "scripts\run_kelly_stakes.py"
 $PostRunTrackingScript = Join-Path $ScriptRoot "scripts\post_run_tracking.py"
 $GradeCompletedScript = Join-Path $ScriptRoot "scripts\grade_completed_picks.py"
 $MarketShadowScript = Join-Path $ScriptRoot "scripts\market_shadow_grading.py"
+$DailySummaryScript = Join-Path $ScriptRoot "scripts\write_daily_summary.py"
 
 # Bankroll override: read $env:COURTVISION_BANKROLL when set, else default.
 $KellyBankroll = if ($env:COURTVISION_BANKROLL) { $env:COURTVISION_BANKROLL } else { "1000" }
@@ -288,6 +289,18 @@ if ($validationPassed) {
                 }
             } catch {
                 "Market shadow grading exception: " + $_.Exception.Message | Out-File $GradeLog -Append
+            }
+        }
+
+        if (Test-Path $DailySummaryScript) {
+            "`n--- Daily summary ---" | Out-File $GradeLog -Append
+            try {
+                & $PyExe @PyArgsPrefix $DailySummaryScript --prediction-date $Date 2>&1 | Tee-Object -FilePath $GradeLog -Append
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Host "  [WARNING] Daily summary failed (exit code: $LASTEXITCODE)" -ForegroundColor Yellow
+                }
+            } catch {
+                "Daily summary exception: " + $_.Exception.Message | Out-File $GradeLog -Append
             }
         }
     }

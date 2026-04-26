@@ -24,6 +24,7 @@ from courtvision.scoring import CandidateScoringPolicy
 from courtvision.injuries import InjuryEngine
 from courtvision.market import MarketEvaluator
 from scripts.market_shadow_grading import build_market_shadow_grading
+from scripts.write_daily_summary import write_daily_summary_outputs
 
 
 class TestPredictionConfig:
@@ -530,6 +531,94 @@ class TestPredictionPipeline:
         assert by_market["player_rebounds"]["hit_rate"] == 0.0
         assert by_market["player_rebounds"]["roi"] == -1.0
         assert by_market["player_assists"]["pending_picks"] == 1
+
+    def test_daily_summary_includes_operator_sections(self):
+        runtime_root = Path("test_outputs") / "daily_summary_runtime"
+        shutil.rmtree(runtime_root, ignore_errors=True)
+        (runtime_root / "operator").mkdir(parents=True, exist_ok=True)
+        (runtime_root / "diagnostics").mkdir(parents=True, exist_ok=True)
+
+        pd.DataFrame([
+            {
+                "prediction_date": "2024-01-15",
+                "player_name": "Points Star",
+                "market_type": "player_points",
+                "selection": "over",
+                "sportsbook_line": 20.5,
+                "odds": -110,
+                "edge": 2.5,
+                "confidence": 0.80,
+                "quality_score": 90.0,
+            },
+        ]).to_csv(runtime_root / "operator" / "elite_board_2024-01-15.csv", index=False)
+        pd.DataFrame([
+            {
+                "prediction_date": "2024-01-15",
+                "player_name": "Points Star",
+                "market_type": "player_points",
+                "selection": "over",
+                "line": 20.5,
+                "american_odds": -110,
+                "edge_pct": 0.12,
+                "stake_amount": 8.50,
+                "expected_value": 1.02,
+                "eligible": True,
+            },
+        ]).to_csv(runtime_root / "operator" / "kelly_stakes_2024-01-15.csv", index=False)
+        pd.DataFrame([
+            {"market_type": "player_points", "player_name": "Points Star"},
+            {"market_type": "player_rebounds", "player_name": "Rebound Star"},
+        ]).to_csv(runtime_root / "operator" / "full_market_board_2024-01-15.csv", index=False)
+        (runtime_root / "diagnostics" / "market_shadow_grading_2024-01-15.json").write_text(
+            json.dumps(
+                {
+                    "totals": {
+                        "total_picks": 2,
+                        "graded_picks": 1,
+                        "pending_picks": 1,
+                        "hit_rate": 1.0,
+                    },
+                    "markets": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        (runtime_root / "diagnostics" / "market_performance_readiness_2024-01-15.json").write_text(
+            json.dumps(
+                {
+                    "markets": [
+                        {
+                            "market_type": "player_rebounds",
+                            "count": 1,
+                            "avg_confidence": 0.7,
+                            "avg_quality_score": 75.0,
+                        }
+                    ],
+                    "rejection_count_by_market_type_reason": {
+                        "player_rebounds": {"market_gate_minutes_lt_24": 2}
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        output_path, metadata = write_daily_summary_outputs(
+            prediction_date="2024-01-15",
+            runtime_root=runtime_root,
+        )
+
+        text = output_path.read_text(encoding="utf-8")
+        assert output_path.name == "daily_summary_2024-01-15.txt"
+        assert "Elite Picks" in text
+        assert "Kelly Stakes" in text
+        assert "Total exposure: $8.50" in text
+        assert "Expected EV: $1.02" in text
+        assert "Full-Market Market Counts" in text
+        assert "- player_rebounds: 1" in text
+        assert "Shadow Grading Totals" in text
+        assert "Pending grading count: 1" in text
+        assert "Elite board locked to player_points only." in text
+        assert metadata["full_market_counts"] == {"player_points": 1, "player_rebounds": 1}
 
     def test_board_selection_trace_explains_live_gate_admission(self, caplog):
         """Live candidates with line_source should be admitted (live-gate fix)."""
