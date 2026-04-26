@@ -27,8 +27,12 @@ if (-not $PSScriptRoot) {
 Set-Location $PSScriptRoot
 
 $ValidateRuntimeScript = Join-Path $PSScriptRoot "scripts\validate_runtime_outputs.py"
+$KellyStakesScript = Join-Path $PSScriptRoot "scripts\run_kelly_stakes.py"
 $PostRunTrackingScript = Join-Path $PSScriptRoot "scripts\post_run_tracking.py"
 $GradeCompletedScript = Join-Path $PSScriptRoot "scripts\grade_completed_picks.py"
+
+# Bankroll override: read $env:COURTVISION_BANKROLL when set, else default.
+$KellyBankroll = if ($env:COURTVISION_BANKROLL) { $env:COURTVISION_BANKROLL } else { "1000" }
 
 # Resolve the Python interpreter explicitly to avoid Windows picking up a
 # bare `python` that points at a 3.14 install with missing dependencies.
@@ -200,6 +204,35 @@ $validationPassed = $true
 & $PyExe @PyArgsPrefix $ValidateRuntimeScript $Date
 if ($LASTEXITCODE -ne 0) {
     $validationPassed = $false
+}
+
+# ---------------------------------------------------------------------------
+# Kelly stakes: pipeline -> validation -> KELLY -> grading
+# Reads outputs\runtime\operator\elite_board_<Date>.csv and writes
+# outputs\runtime\operator\kelly_stakes_<Date>.csv. Failure here does not
+# abort grading, but the operator gets a clear console error and a non-zero
+# exit code is preserved at the end of the run.
+# ---------------------------------------------------------------------------
+$kellyOutputCsv = Join-Path $operatorDir "kelly_stakes_$Date.csv"
+$kellyExitCode = 0
+if ($validationPassed -and $eliteCount -gt 0) {
+    Write-Host "`n[2.5/3] Computing Kelly stakes (bankroll=$KellyBankroll)..." -ForegroundColor Yellow
+    & $PyExe @PyArgsPrefix $KellyStakesScript --prediction-date $Date --bankroll $KellyBankroll
+    $kellyExitCode = $LASTEXITCODE
+    if ($kellyExitCode -ne 0) {
+        Write-Host "  [ERROR] Kelly stakes step failed (exit code: $kellyExitCode)" -ForegroundColor Red
+        "[ERROR] Kelly stakes step failed (exit code: $kellyExitCode) at $(Get-Date)" | Out-File $RunLog -Append
+        $validationPassed = $false
+    } elseif (-not (Test-Path $kellyOutputCsv)) {
+        Write-Host "  [ERROR] Kelly stakes output not found: $kellyOutputCsv" -ForegroundColor Red
+        $kellyExitCode = 1
+        $validationPassed = $false
+    } else {
+        $kellyRows = Get-CsvRowCount $kellyOutputCsv
+        Write-Host "  [OK] Kelly stakes: $kellyRows rows -> $kellyOutputCsv" -ForegroundColor Green
+    }
+} elseif ($eliteCount -le 0) {
+    Write-Host "`n[2.5/3] Skipping Kelly: elite board is empty." -ForegroundColor Yellow
 }
 
 # Persist picks and grade pending history if validation passed and picks exist
