@@ -23,6 +23,7 @@ from courtvision.pipeline import (
 from courtvision.scoring import CandidateScoringPolicy
 from courtvision.injuries import InjuryEngine
 from courtvision.market import MarketEvaluator
+from scripts.market_shadow_grading import build_market_shadow_grading
 
 
 class TestPredictionConfig:
@@ -450,6 +451,85 @@ class TestPredictionPipeline:
         assert payload["kelly_locked_to"] == ["player_points"]
         assert payload["full_market_by_market_type"]["player_points_rebounds"]["count"] == 1
         assert payload["rejection_count_by_market_type_reason"]["player_rebounds"]["market_gate_minutes_lt_24"] == 1
+
+    def test_market_shadow_grading_summarizes_full_market_by_market(self):
+        runtime_root = Path("test_outputs") / "market_shadow_runtime"
+        history_root = Path("test_outputs") / "market_shadow_history"
+        shutil.rmtree(runtime_root, ignore_errors=True)
+        shutil.rmtree(history_root, ignore_errors=True)
+        (runtime_root / "operator").mkdir(parents=True, exist_ok=True)
+        (runtime_root / "history").mkdir(parents=True, exist_ok=True)
+
+        pd.DataFrame([
+            {
+                "prediction_date": "2024-01-15",
+                "player_name": "Points Star",
+                "market_type": "player_points",
+                "selection": "over",
+                "sportsbook_line": 20.5,
+                "edge": 2.5,
+                "confidence": 0.80,
+                "quality_score": 90.0,
+                "odds": -110,
+            },
+            {
+                "prediction_date": "2024-01-15",
+                "player_name": "Rebound Star",
+                "market_type": "player_rebounds",
+                "selection": "under",
+                "sportsbook_line": 9.5,
+                "edge": 1.0,
+                "confidence": 0.70,
+                "quality_score": 75.0,
+                "odds": 120,
+            },
+            {
+                "prediction_date": "2024-01-15",
+                "player_name": "Pending Assist",
+                "market_type": "player_assists",
+                "selection": "over",
+                "sportsbook_line": 5.5,
+                "edge": 0.8,
+                "confidence": 0.65,
+                "quality_score": 70.0,
+                "odds": -105,
+            },
+        ]).to_csv(runtime_root / "operator" / "full_market_board_2024-01-15.csv", index=False)
+
+        pd.DataFrame([
+            {
+                "prediction_date": "2024-01-15",
+                "player_name": "Points Star",
+                "market_type": "player_points",
+                "selection": "over",
+                "sportsbook_line": 20.5,
+                "result_status": "hit",
+            },
+            {
+                "prediction_date": "2024-01-15",
+                "player_name": "Rebound Star",
+                "market_type": "player_rebounds",
+                "selection": "under",
+                "sportsbook_line": 9.5,
+                "result_status": "miss",
+            },
+        ]).to_csv(runtime_root / "history" / "graded_picks_2024-01-15.csv", index=False)
+
+        payload = build_market_shadow_grading(
+            prediction_date="2024-01-15",
+            runtime_root=runtime_root,
+            history_root=history_root,
+        )
+
+        by_market = {row["market_type"]: row for row in payload["markets"]}
+        assert payload["totals"]["total_picks"] == 3
+        assert payload["totals"]["graded_picks"] == 2
+        assert payload["totals"]["pending_picks"] == 1
+        assert by_market["player_points"]["hit_rate"] == 1.0
+        assert by_market["player_points"]["roi"] == 0.909091
+        assert by_market["player_rebounds"]["hit_rate"] == 0.0
+        assert by_market["player_rebounds"]["roi"] == -1.0
+        assert by_market["player_assists"]["pending_picks"] == 1
 
     def test_board_selection_trace_explains_live_gate_admission(self, caplog):
         """Live candidates with line_source should be admitted (live-gate fix)."""

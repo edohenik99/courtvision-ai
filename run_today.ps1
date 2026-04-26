@@ -37,6 +37,7 @@ $ValidateRuntimeScript = Join-Path $ScriptRoot "scripts\validate_runtime_outputs
 $KellyStakesScript = Join-Path $ScriptRoot "scripts\run_kelly_stakes.py"
 $PostRunTrackingScript = Join-Path $ScriptRoot "scripts\post_run_tracking.py"
 $GradeCompletedScript = Join-Path $ScriptRoot "scripts\grade_completed_picks.py"
+$MarketShadowScript = Join-Path $ScriptRoot "scripts\market_shadow_grading.py"
 
 # Bankroll override: read $env:COURTVISION_BANKROLL when set, else default.
 $KellyBankroll = if ($env:COURTVISION_BANKROLL) { $env:COURTVISION_BANKROLL } else { "1000" }
@@ -275,6 +276,18 @@ if ($validationPassed) {
                 & $PyExe @PyArgsPrefix $GradeCompletedScript 2>&1 | Tee-Object -FilePath $GradeLog -Append
             } catch {
                 "Grade script exception: " + $_.Exception.Message | Out-File $GradeLog -Append
+            }
+        }
+
+        if (Test-Path $MarketShadowScript) {
+            "`n--- Market shadow grading ---" | Out-File $GradeLog -Append
+            try {
+                & $PyExe @PyArgsPrefix $MarketShadowScript --prediction-date $Date 2>&1 | Tee-Object -FilePath $GradeLog -Append
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Host "  [WARNING] Market shadow grading failed (exit code: $LASTEXITCODE)" -ForegroundColor Yellow
+                }
+            } catch {
+                "Market shadow grading exception: " + $_.Exception.Message | Out-File $GradeLog -Append
             }
         }
     }

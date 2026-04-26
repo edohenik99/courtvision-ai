@@ -1,0 +1,332 @@
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import sys
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+
+RESULT_HIT = "hit"
+RESULT_MISS = "miss"
+RESULT_PUSH = "push"
+RESULT_PENDING = "pending"
+
+
+def _safe_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    try:
+        parsed = float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(parsed) or math.isinf(parsed):
+        return None
+    return parsed
+
+
+def _safe_text(value: Any) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if text.lower() in {"nan", "none", "null"}:
+        return ""
+    return text
+
+
+def _read_csv(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path)
+    except Exception:
+        return pd.DataFrame()
+
+
+def _line_value(row: pd.Series) -> float | None:
+    for col in ("sportsbook_line", "line", "line_value"):
+        if col in row.index:
+            value = _safe_float(row.get(col))
+            if value is not None:
+                return value
+    return None
+
+
+def _player_name(row: pd.Series) -> str:
+    return _safe_text(row.get("player_name")) or _safe_text(row.get("entity_name"))
+
+
+def _market_type(row: pd.Series) -> str:
+    return _safe_text(row.get("market_type")) or _safe_text(row.get("market"))
+
+
+def _identity(row: pd.Series) -> tuple[str, str, str, str]:
+    line = _line_value(row)
+    line_key = "" if line is None else f"{line:.4f}"
+    return (
+        _player_name(row).lower(),
+        _market_type(row).lower(),
+        _safe_text(row.get("selection") or row.get("side")).lower(),
+        line_key,
+    )
+
+
+def _normalize_result(value: Any) -> str:
+    text = _safe_text(value).lower()
+    if text in {"hit", "win", "won", "true", "1"}:
+        return RESULT_HIT
+    if text in {"miss", "loss", "lost", "false", "0"}:
+        return RESULT_MISS
+    if text == "push":
+        return RESULT_PUSH
+    return RESULT_PENDING
+
+
+def _direct_result(row: pd.Series) -> str:
+    for col in ("result_status", "graded_result", "result"):
+        if col in row.index:
+            result = _normalize_result(row.get(col))
+            if result != RESULT_PENDING:
+                return result
+    if "hit" in row.index:
+        hit_value = row.get("hit")
+        if _safe_text(hit_value) != "":
+            return _normalize_result(hit_value)
+    return RESULT_PENDING
+
+
+def _graded_lookup(runtime_root: Path, history_root: Path, prediction_date: str) -> dict[tuple[str, str, str, str], str]:
+    sources = [
+        runtime_root / "history" / f"graded_picks_{prediction_date}.csv",
+        runtime_root / "research" / f"grading_results_{prediction_date}.csv",
+        history_root / "pick_history.csv",
+    ]
+    lookup: dict[tuple[str, str, str, str], str] = {}
+    for path in sources:
+        df = _read_csv(path)
+        if df.empty:
+            continue
+        if "prediction_date" in df.columns:
+            df = df[df["prediction_date"].astype(str) == str(prediction_date)].copy()
+        for _, row in df.iterrows():
+            result = _direct_result(row)
+            if result == RESULT_PENDING:
+                continue
+            key = _identity(row)
+            if key[0] and key[1]:
+                lookup[key] = result
+    return lookup
+
+
+def _american_profit_for_unit_stake(odds: Any) -> float | None:
+    american = _safe_float(odds)
+    if american is None or american == 0:
+        return None
+    if american > 0:
+        return american / 100.0
+    return 100.0 / abs(american)
+
+
+def _roi_for_group(group: pd.DataFrame) -> float | None:
+    profit = 0.0
+    graded_bets = 0
+    for _, row in group.iterrows():
+        result = _safe_text(row.get("_shadow_result"))
+        if result not in {RESULT_HIT, RESULT_MISS}:
+            continue
+        win_profit = _american_profit_for_unit_stake(row.get("odds"))
+        if win_profit is None:
+            continue
+        graded_bets += 1
+        profit += win_profit if result == RESULT_HIT else -1.0
+    if graded_bets == 0:
+        return None
+    return round(profit / graded_bets, 6)
+
+
+def _numeric_avg(group: pd.DataFrame, col: str) -> float | None:
+    if col not in group.columns:
+        return None
+    values = pd.to_numeric(group[col], errors="coerce").dropna()
+    if values.empty:
+        return None
+    return round(float(values.mean()), 6)
+
+
+def build_market_shadow_grading(
+    *,
+    prediction_date: str,
+    runtime_root: str | Path = "outputs/runtime",
+    history_root: str | Path = "data/history",
+) -> dict[str, Any]:
+    runtime_root = Path(runtime_root)
+    history_root = Path(history_root)
+    full_market_path = runtime_root / "operator" / f"full_market_board_{prediction_date}.csv"
+    full_market_df = _read_csv(full_market_path)
+
+    if full_market_df.empty:
+        rows: list[dict[str, Any]] = []
+    else:
+        lookup = _graded_lookup(runtime_root, history_root, prediction_date)
+        working = full_market_df.copy()
+        results: list[str] = []
+        for _, row in working.iterrows():
+            direct = _direct_result(row)
+            if direct != RESULT_PENDING:
+                results.append(direct)
+                continue
+            results.append(lookup.get(_identity(row), RESULT_PENDING))
+        working["_shadow_result"] = results
+
+        rows = []
+        for market_type, group in working.groupby("market_type", sort=True):
+            hits = int(group["_shadow_result"].eq(RESULT_HIT).sum())
+            misses = int(group["_shadow_result"].eq(RESULT_MISS).sum())
+            pushes = int(group["_shadow_result"].eq(RESULT_PUSH).sum())
+            pending = int(group["_shadow_result"].eq(RESULT_PENDING).sum())
+            graded_picks = hits + misses + pushes
+            hit_denominator = hits + misses
+            rows.append(
+                {
+                    "market_type": str(market_type),
+                    "total_picks": int(len(group)),
+                    "graded_picks": graded_picks,
+                    "pending_picks": pending,
+                    "hit_rate": round(hits / hit_denominator, 6) if hit_denominator else None,
+                    "avg_edge": _numeric_avg(group, "edge"),
+                    "avg_confidence": _numeric_avg(group, "confidence"),
+                    "avg_quality_score": _numeric_avg(group, "quality_score"),
+                    "roi": _roi_for_group(group),
+                    "hits": hits,
+                    "misses": misses,
+                    "pushes": pushes,
+                }
+            )
+
+    totals = {
+        "total_picks": int(sum(row["total_picks"] for row in rows)),
+        "graded_picks": int(sum(row["graded_picks"] for row in rows)),
+        "pending_picks": int(sum(row["pending_picks"] for row in rows)),
+    }
+    hit_rows = sum(int(row.get("hits", 0)) for row in rows)
+    miss_rows = sum(int(row.get("misses", 0)) for row in rows)
+    totals["hit_rate"] = round(hit_rows / (hit_rows + miss_rows), 6) if (hit_rows + miss_rows) else None
+
+    return {
+        "prediction_date": prediction_date,
+        "source": str(full_market_path),
+        "scope": "full_market_shadow_grading",
+        "elite_locked_to": ["player_points"],
+        "kelly_locked_to": ["player_points"],
+        "totals": totals,
+        "markets": rows,
+    }
+
+
+def render_market_shadow_report(payload: dict[str, Any]) -> str:
+    lines = [
+        f"Market Shadow Report - {payload.get('prediction_date')}",
+        "=" * 72,
+        "Scope: full-market board diagnostics only. Elite and Kelly remain player_points only.",
+        "",
+    ]
+    totals = payload.get("totals", {})
+    lines.append(
+        "Totals: "
+        f"total={totals.get('total_picks', 0)} "
+        f"graded={totals.get('graded_picks', 0)} "
+        f"pending={totals.get('pending_picks', 0)} "
+        f"hit_rate={_format_pct(totals.get('hit_rate'))}"
+    )
+    lines.append("")
+    header = (
+        f"{'Market':34} {'Total':>5} {'Graded':>6} {'Pending':>7} "
+        f"{'Hit%':>7} {'AvgEdge':>8} {'AvgConf':>8} {'AvgQual':>8} {'ROI':>8}"
+    )
+    lines.append(header)
+    lines.append("-" * len(header))
+    for row in payload.get("markets", []):
+        lines.append(
+            f"{str(row.get('market_type', '')):34} "
+            f"{int(row.get('total_picks', 0)):5d} "
+            f"{int(row.get('graded_picks', 0)):6d} "
+            f"{int(row.get('pending_picks', 0)):7d} "
+            f"{_format_pct(row.get('hit_rate')):>7} "
+            f"{_format_num(row.get('avg_edge')):>8} "
+            f"{_format_num(row.get('avg_confidence')):>8} "
+            f"{_format_num(row.get('avg_quality_score')):>8} "
+            f"{_format_pct(row.get('roi')):>8}"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _format_num(value: Any) -> str:
+    number = _safe_float(value)
+    return "n/a" if number is None else f"{number:.3f}"
+
+
+def _format_pct(value: Any) -> str:
+    number = _safe_float(value)
+    return "n/a" if number is None else f"{number * 100:.1f}%"
+
+
+def write_market_shadow_outputs(
+    *,
+    prediction_date: str,
+    runtime_root: str | Path = "outputs/runtime",
+    history_root: str | Path = "data/history",
+) -> tuple[Path, Path, dict[str, Any]]:
+    runtime_root = Path(runtime_root)
+    payload = build_market_shadow_grading(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+    diagnostics_path = runtime_root / "diagnostics" / f"market_shadow_grading_{prediction_date}.json"
+    report_path = runtime_root / "operator" / f"market_shadow_report_{prediction_date}.txt"
+    diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    diagnostics_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    report_path.write_text(render_market_shadow_report(payload), encoding="utf-8")
+    return diagnostics_path, report_path, payload
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Write full-market shadow grading by market type.")
+    parser.add_argument("--prediction-date", required=True)
+    parser.add_argument("--runtime-root", default="outputs/runtime")
+    parser.add_argument("--history-root", default="data/history")
+    args = parser.parse_args(argv)
+    diagnostics_path, report_path, payload = write_market_shadow_outputs(
+        prediction_date=args.prediction_date,
+        runtime_root=args.runtime_root,
+        history_root=args.history_root,
+    )
+    totals = payload.get("totals", {})
+    print(f"market_shadow_grading_json={diagnostics_path}")
+    print(f"market_shadow_report_txt={report_path}")
+    print(
+        "market_shadow_totals "
+        f"total={totals.get('total_picks', 0)} "
+        f"graded={totals.get('graded_picks', 0)} "
+        f"pending={totals.get('pending_picks', 0)}"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
