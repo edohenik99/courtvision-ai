@@ -7,6 +7,9 @@ delegates correctly to specialized modules.
 from __future__ import annotations
 
 import logging
+import json
+import shutil
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -355,6 +358,98 @@ class TestPredictionPipeline:
         assert row["market_type"] == "player_points"
         assert row["raw_prop_type"] == "points"
         assert row["raw_market_type"] == "over_under"
+
+    def test_non_points_readiness_gates_and_diagnostics_keep_elite_points_only(self):
+        out_dir = Path("test_outputs") / "market_readiness_pipeline"
+        shutil.rmtree(out_dir, ignore_errors=True)
+        config = PredictionConfig(prediction_date="2024-01-15", out_dir=str(out_dir))
+        pipeline = PredictionPipeline(config)
+
+        games = pd.DataFrame([{
+            "game_id": 1,
+            "home_team_abbr": "LAL",
+            "visitor_team_abbr": "BOS",
+        }])
+        odds = pd.DataFrame([
+            {
+                "game_id": 1,
+                "player_id": 123,
+                "player_name": "Points Star",
+                "raw_prop_type": "points",
+                "raw_market_type": "over_under",
+                "market_type": "player_points",
+                "line": 20.5,
+                "odds": -110,
+                "selection": "over",
+                "is_live": True,
+            },
+            {
+                "game_id": 1,
+                "player_id": 124,
+                "player_name": "Combo Star",
+                "raw_prop_type": "points_rebounds",
+                "raw_market_type": "over_under",
+                "market_type": "player_points_rebounds",
+                "line": 28.5,
+                "odds": -110,
+                "selection": "over",
+                "is_live": True,
+            },
+            {
+                "game_id": 1,
+                "player_id": 125,
+                "player_name": "Low Minutes Rebounder",
+                "raw_prop_type": "rebounds",
+                "raw_market_type": "over_under",
+                "market_type": "player_rebounds",
+                "line": 5.5,
+                "odds": -110,
+                "selection": "over",
+                "is_live": True,
+            },
+        ])
+        baselines = pd.DataFrame([
+            {
+                "player_name": "Points Star",
+                "team_abbr": "LAL",
+                "player_id": 123,
+                "pts_avg": 24.0,
+                "reb_avg": 4.0,
+                "ast_avg": 5.0,
+                "min_avg": 34.0,
+            },
+            {
+                "player_name": "Combo Star",
+                "team_abbr": "LAL",
+                "player_id": 124,
+                "pts_avg": 22.0,
+                "reb_avg": 10.0,
+                "ast_avg": 4.0,
+                "min_avg": 30.0,
+            },
+            {
+                "player_name": "Low Minutes Rebounder",
+                "team_abbr": "LAL",
+                "player_id": 125,
+                "pts_avg": 8.0,
+                "reb_avg": 8.0,
+                "ast_avg": 1.0,
+                "min_avg": 20.0,
+            },
+        ])
+
+        result = pipeline.run(games, odds, baselines)
+
+        assert set(result.elite_props["market_type"]) == {"player_points"}
+        assert "player_points_rebounds" in set(result.full_market_props["market_type"])
+        assert "player_rebounds" not in set(result.full_market_props["market_type"])
+
+        readiness_path = out_dir / "runtime" / "diagnostics" / "market_performance_readiness_2024-01-15.json"
+        payload = json.loads(readiness_path.read_text(encoding="utf-8"))
+        assert payload["elite_locked_to"] == ["player_points"]
+        assert payload["kelly_locked_to"] == ["player_points"]
+        assert payload["full_market_by_market_type"]["player_points_rebounds"]["count"] == 1
+        assert payload["rejection_count_by_market_type_reason"]["player_rebounds"]["market_gate_minutes_lt_24"] == 1
 
     def test_board_selection_trace_explains_live_gate_admission(self, caplog):
         """Live candidates with line_source should be admitted (live-gate fix)."""

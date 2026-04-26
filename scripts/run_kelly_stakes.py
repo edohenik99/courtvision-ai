@@ -157,7 +157,11 @@ def _build_stake_row(row: dict[str, str], edge_col: str, bankroll: float) -> Sta
     eligible = True
     raw_market_type = str(row.get("raw_market_type", row.get("market.type", "")) or "").strip().lower()
     selection = str(row.get("selection", "") or "").strip().lower()
-    if raw_market_type == "milestone" or selection == "milestone":
+    market_type = str(row.get("market_type", "") or "").strip().lower()
+    if market_type and market_type != "player_points":
+        skip_reason = "kelly_points_only_market_lock"
+        eligible = False
+    elif raw_market_type == "milestone" or selection == "milestone":
         skip_reason = "unsupported_milestone_market"
         eligible = False
     elif raw_american is None:

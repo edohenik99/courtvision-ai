@@ -15,6 +15,10 @@ PRIMARY_PLAYER_MARKETS = {
     "player_points",
     "player_rebounds",
     "player_assists",
+    "player_points_rebounds",
+    "player_points_assists",
+    "player_rebounds_assists",
+    "player_points_rebounds_assists",
     "player_3pt_made",
     "player_steals",
     "player_blocks",
@@ -395,7 +399,17 @@ def score_player_markets(
             # Handle unsupported markets (build_candidate_row returned None)
             if candidate_row is None:
                 # Determine rejection reason based on market type
-                if market in ("player_rebounds", "player_assists", "player_3pt_made", "player_steals", "player_blocks"):
+                if market in (
+                    "player_rebounds",
+                    "player_assists",
+                    "player_points_rebounds",
+                    "player_points_assists",
+                    "player_rebounds_assists",
+                    "player_points_rebounds_assists",
+                    "player_3pt_made",
+                    "player_steals",
+                    "player_blocks",
+                ):
                     rejection_reason = "unsupported_projection_market"
                     support_status = "unsupported_market"
                 elif market == "player_points":

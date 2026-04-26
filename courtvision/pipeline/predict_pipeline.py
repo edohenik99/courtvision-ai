@@ -154,6 +154,15 @@ class PredictionPipeline:
     8. Export outputs
     """
 
+    FULL_MARKET_READINESS_GATES: dict[str, dict[str, float]] = {
+        "player_rebounds": {"min_minutes": 24.0, "min_confidence": 0.60},
+        "player_assists": {"min_minutes": 24.0, "min_confidence": 0.60},
+        "player_points_rebounds": {"min_minutes": 28.0, "min_confidence": 0.70},
+        "player_points_assists": {"min_minutes": 28.0, "min_confidence": 0.70},
+        "player_rebounds_assists": {"min_minutes": 28.0, "min_confidence": 0.70},
+        "player_points_rebounds_assists": {"min_minutes": 28.0, "min_confidence": 0.70},
+    }
+
     def __init__(
         self,
         config: PredictionConfig,
@@ -703,6 +712,11 @@ class PredictionPipeline:
                 elite_df=elite_df,
                 rejected_rows=rejected if isinstance(rejected, list) else [],
             )
+            self._write_market_performance_readiness(
+                prediction_date=self.config.prediction_date,
+                full_market_df=full_market_df,
+                rejected_rows=rejected if isinstance(rejected, list) else [],
+            )
         except Exception as e:
             self.logger.warning("market_availability_audit_write_failed %s", str(e))
 
@@ -755,6 +769,10 @@ class PredictionPipeline:
             "player_points",
             "player_rebounds",
             "player_assists",
+            "player_points_rebounds",
+            "player_points_assists",
+            "player_rebounds_assists",
+            "player_points_rebounds_assists",
             "player_3pt_made",
             "player_steals",
             "player_blocks",
@@ -808,10 +826,17 @@ class PredictionPipeline:
             raw_market_type = str(market_row.get("raw_market_type", market_row.get("market.type", "")) or "") if not market_row.empty else ""
 
             # Get base projection
-            projection = self._compute_projection(
-                player_row=player_row,
-                market_type=normalized_market,
-            )
+            if normalized_market in self.COMBO_PROJECTION_MARKETS:
+                projection, combo_support_status = self._compute_combo_projection(
+                    player_row,
+                    normalized_market,
+                )
+            else:
+                projection = self._compute_projection(
+                    player_row=player_row,
+                    market_type=normalized_market,
+                )
+                combo_support_status = ""
 
             # Get base confidence
             confidence = self._compute_confidence(
@@ -823,6 +848,12 @@ class PredictionPipeline:
             support_status, reject_reason = _get_projection_support_status(
                 normalized_market, projection
             )
+            if normalized_market in self.COMBO_PROJECTION_MARKETS:
+                if combo_support_status != "supported":
+                    support_status = combo_support_status or "unsupported_market"
+                    reject_reason = "unsupported_projection_market"
+                else:
+                    support_status = "modeled"
 
             # If unsupported market, return None to trigger rejection
             if reject_reason:
@@ -918,6 +949,7 @@ class PredictionPipeline:
                 "model_projection": projection,
                 "projection": projection,
                 "projection_support_status": support_status,
+                "minutes_avg": _nan_safe_to_float(player_row.get("min_avg")),
                 "edge": edge,
                 "edge_pct": edge_pct,
                 "confidence": confidence,
@@ -962,6 +994,25 @@ class PredictionPipeline:
             # Apply thresholds
             edge = _nan_safe_to_float(candidate_row.get("edge"), 0.0) or 0.0
             confidence = _nan_safe_to_float(candidate_row.get("confidence"), 0.0) or 0.0
+            normalized_market = normalize_market_alias(market) or str(market or candidate_row.get("market_type", "")).strip()
+            gate = self.FULL_MARKET_READINESS_GATES.get(normalized_market)
+            if gate:
+                minutes_avg = _nan_safe_to_float(
+                    candidate_row.get("minutes_avg")
+                    if candidate_row.get("minutes_avg") is not None
+                    else (player_row.get("min_avg") if player_row is not None else None),
+                    0.0,
+                ) or 0.0
+                if minutes_avg < gate["min_minutes"]:
+                    candidate_row["pre_rejection_reason"] = (
+                        f"market_gate_minutes_lt_{gate['min_minutes']:g}"
+                    )
+                    return None
+                if confidence < gate["min_confidence"]:
+                    candidate_row["pre_rejection_reason"] = (
+                        f"market_gate_confidence_lt_{gate['min_confidence']:.2f}"
+                    )
+                    return None
 
             if abs(edge) < self.config.min_edge:
                 return None
@@ -1352,6 +1403,87 @@ class PredictionPipeline:
             ),
             encoding="utf-8",
         )
+
+    def _write_market_performance_readiness(
+        self,
+        prediction_date: str,
+        full_market_df: pd.DataFrame,
+        rejected_rows: list[dict[str, Any]],
+    ) -> None:
+        diagnostics_dir = Path(self.config.out_dir) / "runtime" / "diagnostics"
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+
+        selected_by_market: dict[str, dict[str, Any]] = {}
+        if (
+            isinstance(full_market_df, pd.DataFrame)
+            and not full_market_df.empty
+            and "market_type" in full_market_df.columns
+        ):
+            working = full_market_df.copy()
+            for col in ("edge", "confidence", "quality_score"):
+                if col in working.columns:
+                    working[col] = pd.to_numeric(working[col], errors="coerce")
+            for market_type, group in working.groupby("market_type", sort=True):
+                payload: dict[str, Any] = {"count": int(len(group))}
+                for source_col, output_key in (
+                    ("edge", "avg_edge"),
+                    ("confidence", "avg_confidence"),
+                    ("quality_score", "avg_quality_score"),
+                ):
+                    if source_col in group.columns:
+                        value = group[source_col].mean()
+                        payload[output_key] = None if pd.isna(value) else round(float(value), 6)
+                    else:
+                        payload[output_key] = None
+                selected_by_market[str(market_type)] = payload
+
+        reject_df = pd.DataFrame(rejected_rows) if rejected_rows else pd.DataFrame()
+        rejection_counts: dict[str, dict[str, int]] = {}
+        if not reject_df.empty and {"market_type", "rejection_reason"}.issubset(reject_df.columns):
+            for (market_type, reason), count in reject_df.groupby(["market_type", "rejection_reason"]).size().items():
+                market_key = str(market_type or "")
+                reason_key = str(reason or "unknown")
+                rejection_counts.setdefault(market_key, {})[reason_key] = int(count)
+
+        markets = sorted(set(selected_by_market) | set(rejection_counts))
+        market_rows = []
+        for market_type in markets:
+            selected = selected_by_market.get(
+                market_type,
+                {
+                    "count": 0,
+                    "avg_edge": None,
+                    "avg_confidence": None,
+                    "avg_quality_score": None,
+                },
+            )
+            gate = self.FULL_MARKET_READINESS_GATES.get(market_type)
+            row = {
+                "market_type": market_type,
+                "full_market_count": int(selected.get("count", 0)),
+                "avg_edge": selected.get("avg_edge"),
+                "avg_confidence": selected.get("avg_confidence"),
+                "avg_quality_score": selected.get("avg_quality_score"),
+                "rejection_count_by_reason": rejection_counts.get(market_type, {}),
+            }
+            if gate:
+                row["min_minutes_gate"] = gate["min_minutes"]
+                row["min_confidence_gate"] = gate["min_confidence"]
+            market_rows.append(row)
+
+        payload = {
+            "prediction_date": prediction_date,
+            "scope": "full_market_board_quality_tracking",
+            "elite_locked_to": ["player_points"],
+            "kelly_locked_to": ["player_points"],
+            "market_gates": self.FULL_MARKET_READINESS_GATES,
+            "full_market_by_market_type": selected_by_market,
+            "rejection_count_by_market_type_reason": rejection_counts,
+            "markets": market_rows,
+        }
+        json_path = diagnostics_dir / f"market_performance_readiness_{prediction_date}.json"
+        json_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+        print(f"[COUNT] market_performance_readiness_path={json_path}", flush=True)
 
     def _compute_confidence(
         self,
