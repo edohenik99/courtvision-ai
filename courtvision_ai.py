@@ -143,6 +143,7 @@ _load_env_file()
 
 NBA_V1 = os.getenv("BALLDONTLIE_V1_BASE_URL", "https://api.balldontlie.io/v1").rstrip("/")
 NBA_V2 = os.getenv("BALLDONTLIE_V2_BASE_URL", "https://api.balldontlie.io/v2").rstrip("/")
+logger = logging.getLogger("courtvision_ai")
 
 
 def _to_str_dict(data: pd.Series | dict[Any, Any]) -> dict[str, Any]:
@@ -1082,6 +1083,8 @@ class BallDontLieClient:
         # Get player_id from odds row - this is the ONLY player identifier in the API response
         raw_player_id = market.get("player_id")
         player_id = self._coerce_int(raw_player_id)
+        if player_id is None:
+            return None
         player_id_str = str(raw_player_id) if raw_player_id is not None else None
         
         # Look up player identity from pre-built lookup (primary source).
@@ -1455,6 +1458,9 @@ class BallDontLieClient:
             "side": side,
             "selection": selection,
         }
+
+
+CourtVisionAIClient = BallDontLieClient
 
 
 class ProviderClientAdapter:
