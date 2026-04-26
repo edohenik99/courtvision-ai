@@ -525,7 +525,7 @@ class PredictionPipeline:
             
             # Final selection: take top N after caps applied
             elite_size = self.config.elite_size if hasattr(self.config, 'elite_size') else 10
-            selected_df = capped_df.head(elite_size)
+            selected_df = capped_df.head(elite_size).copy()
             selection_stage_trace["elite"]["candidate_count_after_backfill"] = len(selected_df)
             
             # Recalculate max exposure from ACTUAL final selection (not full capped_df)
