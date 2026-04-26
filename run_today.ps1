@@ -21,15 +21,22 @@ $GradeLog = Join-Path $LogsDir "grading_$Date.log"
 # process exits 0. We check $LASTEXITCODE explicitly after every native call.
 $ErrorActionPreference = "Continue"
 
-if (-not $PSScriptRoot) {
-    $PSScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+# Use a private $ScriptRoot variable instead of reassigning the automatic
+# $PSScriptRoot (which PSScriptAnalyzer flags as PSAvoidAssignmentToAutomaticVariable).
+# Prefer the automatic $PSScriptRoot when the script is dot-sourced or run
+# normally; fall back to deriving it from $MyInvocation when it's empty
+# (e.g. when the file is piped or invoked via Invoke-Expression).
+$ScriptRoot = if ($PSScriptRoot) {
+    $PSScriptRoot
+} else {
+    Split-Path -Parent $MyInvocation.MyCommand.Path
 }
-Set-Location $PSScriptRoot
+Set-Location $ScriptRoot
 
-$ValidateRuntimeScript = Join-Path $PSScriptRoot "scripts\validate_runtime_outputs.py"
-$KellyStakesScript = Join-Path $PSScriptRoot "scripts\run_kelly_stakes.py"
-$PostRunTrackingScript = Join-Path $PSScriptRoot "scripts\post_run_tracking.py"
-$GradeCompletedScript = Join-Path $PSScriptRoot "scripts\grade_completed_picks.py"
+$ValidateRuntimeScript = Join-Path $ScriptRoot "scripts\validate_runtime_outputs.py"
+$KellyStakesScript = Join-Path $ScriptRoot "scripts\run_kelly_stakes.py"
+$PostRunTrackingScript = Join-Path $ScriptRoot "scripts\post_run_tracking.py"
+$GradeCompletedScript = Join-Path $ScriptRoot "scripts\grade_completed_picks.py"
 
 # Bankroll override: read $env:COURTVISION_BANKROLL when set, else default.
 $KellyBankroll = if ($env:COURTVISION_BANKROLL) { $env:COURTVISION_BANKROLL } else { "1000" }
@@ -37,7 +44,7 @@ $KellyBankroll = if ($env:COURTVISION_BANKROLL) { $env:COURTVISION_BANKROLL } el
 # Resolve the Python interpreter explicitly to avoid Windows picking up a
 # bare `python` that points at a 3.14 install with missing dependencies.
 # Order: project venv -> py launcher 3.13 -> hard error.
-$VenvPython = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
+$VenvPython = Join-Path $ScriptRoot ".venv\Scripts\python.exe"
 $PyExe = $null
 $PyArgsPrefix = @()
 
