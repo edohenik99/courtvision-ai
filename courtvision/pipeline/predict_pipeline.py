@@ -606,10 +606,42 @@ class PredictionPipeline:
                 "selection_rejection_reasons %s",
                 selection_trace["selection_rejection_reasons"],
             )
-        if selection_trace.get("qualified_but_not_selected_rows"):
-            self.logger.warning(
-                "qualified_but_not_selected_rows_sample %s",
-                selection_trace["qualified_but_not_selected_rows"],
+        qualified_unselected = selection_trace.get("qualified_but_not_selected_rows") or []
+        if qualified_unselected:
+            # Emit as structured stdout [COUNT] lines instead of a stderr
+            # warning. These rows are a normal informational summary of
+            # candidates that passed quality filters but lost the final
+            # board cap; surfacing them via logger.warning routed them to
+            # stderr and PowerShell rendered them as a NativeCommandError.
+            sample_keys = (
+                "player_name",
+                "market_type",
+                "selection",
+                "edge",
+                "confidence",
+                "selection_score",
+                "selection_rejection_reason",
+            )
+            compact_sample = []
+            for row in qualified_unselected[:3]:
+                if isinstance(row, dict):
+                    compact_sample.append({k: row.get(k) for k in sample_keys if k in row})
+                else:
+                    compact_sample.append(row)
+            print(
+                f"[COUNT] qualified_but_not_selected_rows={len(qualified_unselected)}",
+                flush=True,
+            )
+            print(
+                f"[COUNT] qualified_but_not_selected_sample={compact_sample}",
+                flush=True,
+            )
+            # Keep the full payload available for offline debugging via
+            # the standard info log (file/handler-bound, not stderr).
+            self.logger.info(
+                "qualified_but_not_selected_rows_full_sample count=%d rows=%s",
+                len(qualified_unselected),
+                qualified_unselected,
             )
 
         # Assign lanes for diagnostic purposes

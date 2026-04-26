@@ -215,10 +215,12 @@ def score_player_markets(
             int(pid): group for pid, group in working_odds.groupby("player_id")
             if pd.notna(pid) and int(pid) > 0
         }
-    print(f"[DEBUG_MATCH] odds_player_id_lookup_size={len(player_id_lookup)}", flush=True)
-    if player_id_lookup:
-        sample_odds_pids = list(player_id_lookup.keys())[:5]
-        print(f"[DEBUG_MATCH] sample_odds_player_ids={sample_odds_pids}", flush=True)
+    sample_odds_pids = list(player_id_lookup.keys())[:5] if player_id_lookup else []
+    print(
+        f"[COUNT] odds_player_id_lookup size={len(player_id_lookup)} "
+        f"sample_ids={sample_odds_pids}",
+        flush=True,
+    )
 
     coverage_by_market: dict[str, dict[str, int]] = defaultdict(
         lambda: {"candidate_count": 0, "matched_count": 0, "missing_market_lines_count": 0, "unsupported_count": 0}
@@ -252,13 +254,16 @@ def score_player_markets(
         if pid > 0:
             baseline_player_ids.append(pid)
     
-    # Calculate intersection
+    # Calculate intersection between odds player_ids and baseline player_ids.
     odds_player_ids = set(player_id_lookup.keys())
     baseline_ids_set = set(baseline_player_ids)
     intersection = odds_player_ids & baseline_ids_set
-    print(f"[DEBUG_INTERSECTION] odds_player_ids={len(odds_player_ids)}, baseline_ids={len(baseline_ids_set)}, intersection={len(intersection)}", flush=True)
-    print(f"[DEBUG_INTERSECTION] sample_baseline_ids={baseline_player_ids[:5]}", flush=True)
-    print(f"[DEBUG_INTERSECTION] sample_intersection={list(intersection)[:5]}", flush=True)
+    print(
+        f"[COUNT] odds_baseline_intersection "
+        f"odds_ids={len(odds_player_ids)} baseline_ids={len(baseline_ids_set)} "
+        f"intersection={len(intersection)} sample_intersection={list(intersection)[:5]}",
+        flush=True,
+    )
 
     for _, player_row in players_df.iterrows():
         player_name = str(player_row.get("player_name", "")).strip()
@@ -287,10 +292,8 @@ def score_player_markets(
         player_market_rows = pd.DataFrame()
         matched_by_id = False
 
-        # Try player_id matching first (more reliable)
+        # Try player_id matching first (more reliable).
         if player_id > 0 and player_id in player_id_lookup:
-            if total_players <= 5:  # Debug first 5 players
-                print(f"[DEBUG_MATCH] player_id={player_id} MATCHED in lookup", flush=True)
             player_market_rows = player_id_lookup[player_id].copy()
             exact_name_rows = player_market_rows.copy()
             matched_players += 1
