@@ -21,6 +21,7 @@ from courtvision.betting.performance import (
     _compute_segment_stats,
     generate_performance_report,
     save_performance_report,
+    normalize_pick_history_schema,
     MIN_SAMPLE_SIZE,
 )
 
@@ -44,6 +45,97 @@ class TestLoadPickHistory:
         assert len(df) == 2
         assert "date" in df.columns
         assert "profit_loss" in df.columns
+
+
+class TestNormalizePickHistorySchema:
+    """Test schema normalization for various column naming conventions."""
+
+    def test_prediction_date_to_date(self):
+        """Test that prediction_date is mapped to date."""
+        df = pd.DataFrame({
+            "prediction_date": ["2024-01-01", "2024-01-02"],
+            "player_name": ["A", "B"],
+        })
+        result = normalize_pick_history_schema(df)
+        assert "date" in result.columns
+        assert pd.api.types.is_datetime64_any_dtype(result["date"])
+
+    def test_market_to_market_type(self):
+        """Test that market is mapped to market_type."""
+        df = pd.DataFrame({
+            "player_name": ["A", "B"],
+            "market": ["points", "rebounds"],
+            "result_status": ["hit", "miss"],
+            "stake_fraction": [0.01, 0.01],
+            "odds": [1.91, 1.91],
+        })
+        result = normalize_pick_history_schema(df)
+        assert "market_type" in result.columns
+        assert result["market_type"].iloc[0] == "points"
+
+    def test_result_status_normalization(self):
+        """Test that result_status values are normalized to win/loss/push."""
+        df = pd.DataFrame({
+            "player_name": ["A", "B", "C", "D"],
+            "result_status": ["hit", "miss", "push", "pending"],
+            "stake_fraction": [0.01, 0.01, 0.01, 0.01],
+            "odds": [1.91, 1.91, 1.91, 1.91],
+        })
+        result = normalize_pick_history_schema(df)
+        assert "result" in result.columns
+        assert result["result"].iloc[0] == "win"  # hit -> win
+        assert result["result"].iloc[1] == "loss"  # miss -> loss
+        assert result["result"].iloc[2] == "push"  # push -> push
+
+    def test_prop_type_to_market_type(self):
+        """Test that prop_type is mapped to market_type."""
+        df = pd.DataFrame({
+            "player_name": ["A"],
+            "prop_type": ["player_points"],
+        })
+        result = normalize_pick_history_schema(df)
+        assert "market_type" in result.columns
+        assert result["market_type"].iloc[0] == "player_points"
+
+    def test_stake_fraction_calculation(self):
+        """Test that stake_fraction is converted to dollar stake."""
+        from courtvision.config import DEFAULT_BANKROLL
+        df = pd.DataFrame({
+            "player_name": ["A"],
+            "stake_fraction": [0.02],
+        })
+        result = normalize_pick_history_schema(df)
+        assert "stake" in result.columns
+        expected_stake = DEFAULT_BANKROLL * 0.02
+        assert result["stake"].iloc[0] == expected_stake
+
+    def test_missing_result_not_crash(self):
+        """Test that missing result column doesn't crash - allows ungraded mode."""
+        df = pd.DataFrame({
+            "player_name": ["A", "B"],
+            "market": ["points", "rebounds"],
+            "stake_fraction": [0.01, 0.01],
+            "odds": [1.91, 1.91],
+        })
+        result = normalize_pick_history_schema(df)
+        # Should not crash and should have result column (possibly NaN)
+        assert "result" in result.columns
+
+    def test_profit_loss_calculation(self):
+        """Test that profit_loss is calculated from result/stake/odds."""
+        df = pd.DataFrame({
+            "player_name": ["A", "B"],
+            "result_status": ["hit", "miss"],
+            "stake_fraction": [0.01, 0.01],
+            "odds": [1.91, 1.91],
+        })
+        result = normalize_pick_history_schema(df)
+        assert "profit_loss" in result.columns
+        # First row: win with 1.91 odds, stake = 0.01 * 1000 = 10
+        # profit = 10 * (1.91 - 1) = 9.1
+        assert result["profit_loss"].iloc[0] > 0
+        # Second row: loss
+        assert result["profit_loss"].iloc[1] < 0
 
 
 class TestCalculateProfitLoss:
