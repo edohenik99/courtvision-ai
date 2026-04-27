@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from courtvision_ai import _build_elite_decision_report_text, _build_report_text
 from courtvision.context.manual_player_context import (
     apply_manual_player_context,
     load_manual_player_context,
@@ -97,3 +98,50 @@ def test_manual_context_invalid_numeric_reports_warning_without_crash(tmp_path: 
     assert any("invalid numeric value for projection_adjustment" in warning for warning in load_diag["warnings"])
     assert output_path.name == "manual_context_2024-01-15.json"
     assert payload["passive_mode"] is True
+
+
+def test_elite_reports_include_manual_context_fields() -> None:
+    elite_df = pd.DataFrame(
+        [
+            {
+                "player_name": "Jalen Green",
+                "entity_name": "Jalen Green",
+                "market_type": "player_points",
+                "selection": "over",
+                "sportsbook_line": 19.5,
+                "model_projection": 22.9,
+                "edge": 3.4,
+                "confidence": 0.8,
+                "manual_status": "active",
+                "manual_minutes_limit": "",
+                "manual_projection_adjustment": 0.0,
+                "manual_confidence_adjustment": 0.0,
+                "manual_context_reason": "manual test row only",
+                "manual_context_applied": False,
+            }
+        ]
+    )
+
+    decision_report = _build_elite_decision_report_text("2026-04-27", elite_df)
+    top_report = _build_report_text(
+        prediction_date="2026-04-27",
+        fit_metrics=None,
+        summary={},
+        elite_df=elite_df,
+        full_market_df=pd.DataFrame(),
+        all_stats_df=pd.DataFrame(),
+        team_board_df=pd.DataFrame(),
+        strike_df=pd.DataFrame(),
+        predictive_lines_df=pd.DataFrame(),
+        sgp_df=pd.DataFrame(),
+        grading_df=pd.DataFrame(),
+        near_miss_df=pd.DataFrame(),
+    )
+
+    for text in (decision_report, top_report):
+        assert "manual_status=active" in text
+        assert "manual_projection_adjustment=0.0" in text
+        assert "manual_confidence_adjustment=0.0" in text
+        assert "manual_context_reason=manual test row only" in text
+        assert "manual_context_applied=False" in text
+    assert "manual_context_mode=passive_diagnostic_only" in decision_report

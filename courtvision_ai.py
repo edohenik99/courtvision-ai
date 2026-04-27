@@ -6890,7 +6890,40 @@ def _build_report_text(
         lines.append("Odds Diagnostics")
         for key, value in summary["odds_diagnostics"].items():
             lines.append(f"{key}: {value}")
-        lines.append("")
+    lines.append("")
+
+    def _safe_report_text(value: Any) -> str:
+        if value is None:
+            return ""
+        try:
+            if pd.isna(value):
+                return ""
+        except (TypeError, ValueError):
+            pass
+        text = str(value).strip()
+        return "" if text.lower() in {"nan", "none", "null"} else text
+
+    def _has_manual_context(row: pd.Series) -> bool:
+        for col in [
+            "manual_status",
+            "manual_minutes_limit",
+            "manual_projection_adjustment",
+            "manual_confidence_adjustment",
+            "manual_context_reason",
+        ]:
+            if col in row.index and _safe_report_text(row.get(col)):
+                return True
+        return False
+
+    def _manual_context_bits(row: pd.Series) -> list[str]:
+        return [
+            f"manual_status={_safe_report_text(row.get('manual_status')) or 'n/a'}",
+            f"manual_minutes_limit={_safe_report_text(row.get('manual_minutes_limit')) or 'n/a'}",
+            f"manual_projection_adjustment={_safe_report_text(row.get('manual_projection_adjustment')) or 'n/a'}",
+            f"manual_confidence_adjustment={_safe_report_text(row.get('manual_confidence_adjustment')) or 'n/a'}",
+            f"manual_context_reason={_safe_report_text(row.get('manual_context_reason')) or 'n/a'}",
+            f"manual_context_applied={_safe_report_text(row.get('manual_context_applied')) or 'False'}",
+        ]
 
     def _append_section(title: str, df: pd.DataFrame, limit: int = 10) -> None:
         lines.append(title)
@@ -6924,6 +6957,8 @@ def _build_report_text(
                     bits.insert(1, f"line={row.get('sportsbook_line', '')}")
                 if "reason" in row and str(row.get("reason", "")):
                     bits.append(f"reason={row.get('reason', '')}")
+            if title == "Elite Board" and _has_manual_context(row):
+                bits.extend(_manual_context_bits(row))
             lines.append(f"{label} | " + " | ".join(bits))
         lines.append("")
 
@@ -6956,6 +6991,57 @@ def _build_report_text(
             lines.append(f"{grade}: {count}")
 
     return "\n".join(lines)
+
+
+def _build_elite_decision_report_text(prediction_date: str, elite_df: pd.DataFrame) -> str:
+    lines = [f"Elite Decision Report - {prediction_date}", ""]
+    if elite_df.empty:
+        lines.append("No elite picks.")
+        return "\n".join(lines) + "\n"
+
+    def _safe(value: Any) -> str:
+        if value is None:
+            return ""
+        try:
+            if pd.isna(value):
+                return ""
+        except (TypeError, ValueError):
+            pass
+        text = str(value).strip()
+        return "" if text.lower() in {"nan", "none", "null"} else text
+
+    def _has_context(row: pd.Series) -> bool:
+        return any(
+            _safe(row.get(col))
+            for col in [
+                "manual_status",
+                "manual_minutes_limit",
+                "manual_projection_adjustment",
+                "manual_confidence_adjustment",
+                "manual_context_reason",
+            ]
+        )
+
+    rows_with_context = 0
+    for _, row in elite_df.iterrows():
+        player = _safe(row.get("player_name")) or _safe(row.get("entity_name")) or "Unknown"
+        market = _safe(row.get("market_type")) or "unknown"
+        selection = _safe(row.get("selection")) or "n/a"
+        line = _safe(row.get("sportsbook_line")) or _safe(row.get("line")) or "n/a"
+        lines.append(f"{player} | market={market} | selection={selection} | line={line}")
+        if _has_context(row):
+            rows_with_context += 1
+            lines.append(f"  manual_status={_safe(row.get('manual_status')) or 'n/a'}")
+            lines.append(f"  manual_minutes_limit={_safe(row.get('manual_minutes_limit')) or 'n/a'}")
+            lines.append(f"  manual_projection_adjustment={_safe(row.get('manual_projection_adjustment')) or 'n/a'}")
+            lines.append(f"  manual_confidence_adjustment={_safe(row.get('manual_confidence_adjustment')) or 'n/a'}")
+            lines.append(f"  manual_context_reason={_safe(row.get('manual_context_reason')) or 'n/a'}")
+            lines.append(f"  manual_context_applied={_safe(row.get('manual_context_applied')) or 'False'}")
+        lines.append("")
+
+    lines.append(f"elite_picks_with_manual_context={rows_with_context}")
+    lines.append("manual_context_mode=passive_diagnostic_only")
+    return "\n".join(lines) + "\n"
 
 
 def _write_cli_outputs(
@@ -7120,6 +7206,13 @@ def _write_cli_outputs(
     }
     paths["model_metrics"].write_text(json.dumps(metrics_payload, indent=2), encoding="utf-8")
     paths["board_diagnostics_json"].write_text(json.dumps(board_diagnostics, indent=2), encoding="utf-8")
+    paths["elite_decision_report"].write_text(
+        _build_elite_decision_report_text(
+            prediction_date=prediction_date,
+            elite_df=elite_df,
+        ),
+        encoding="utf-8",
+    )
     paths["top_plays_report"].write_text(
         _build_report_text(
             prediction_date=prediction_date,

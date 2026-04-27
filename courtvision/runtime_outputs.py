@@ -33,6 +33,7 @@ class OutputLayoutPolicy:
             "game_edges": self._lane_file("research", f"game_edges_{prediction_date}.csv"),
             "model_metrics": self._lane_file("research", f"model_metrics_{prediction_date}.json"),
             "top_plays_report": self._lane_file("operator", f"top_plays_report_{prediction_date}.txt"),
+            "elite_decision_report": self._lane_file("operator", f"elite_decision_report_{prediction_date}.txt"),
             "elite_board": self._lane_file("operator", f"elite_board_{prediction_date}.csv"),
             "full_market_board": self._lane_file("operator", f"full_market_board_{prediction_date}.csv"),
             "sgp_board": self._lane_file("operator", f"sgp_board_{prediction_date}.csv"),

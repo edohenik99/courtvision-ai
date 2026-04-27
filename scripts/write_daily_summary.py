@@ -113,6 +113,30 @@ def _pick_line(row: pd.Series) -> str:
     )
 
 
+def _has_manual_context(row: pd.Series) -> bool:
+    for col in (
+        "manual_status",
+        "manual_minutes_limit",
+        "manual_projection_adjustment",
+        "manual_confidence_adjustment",
+        "manual_context_reason",
+    ):
+        if col in row.index and _safe_text(row.get(col)):
+            return True
+    return False
+
+
+def _manual_context_lines(row: pd.Series) -> list[str]:
+    return [
+        f"  manual_status: {_safe_text(row.get('manual_status')) or 'n/a'}",
+        f"  manual_minutes_limit: {_safe_text(row.get('manual_minutes_limit')) or 'n/a'}",
+        f"  manual_projection_adjustment: {_safe_text(row.get('manual_projection_adjustment')) or 'n/a'}",
+        f"  manual_confidence_adjustment: {_safe_text(row.get('manual_confidence_adjustment')) or 'n/a'}",
+        f"  manual_context_reason: {_safe_text(row.get('manual_context_reason')) or 'n/a'}",
+        f"  manual_context_applied: {_safe_text(row.get('manual_context_applied')) or 'False'}",
+    ]
+
+
 def _kelly_line(row: pd.Series) -> str:
     player = _safe_text(row.get("player_name")) or "Unknown"
     market = _safe_text(row.get("market_type")) or "unknown"
@@ -176,6 +200,8 @@ def build_daily_summary(
     else:
         for _, row in _sort_for_display(elite_df).iterrows():
             lines.append(_pick_line(row))
+            if _has_manual_context(row):
+                lines.extend(_manual_context_lines(row))
 
     lines.extend(["", "Kelly Stakes", "-" * 72])
     if kelly_eligible.empty:
