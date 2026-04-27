@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+import inspect
 import logging
 from typing import Any, Callable
 
@@ -194,6 +195,40 @@ def score_player_markets(
     accepted_candidates: list[dict[str, Any]] = []
     rejected_candidates: list[dict[str, Any]] = []
 
+    def _call_reject_candidate(
+        *,
+        player_row: pd.Series,
+        market: str | None,
+        reason: str,
+        team: str | None = None,
+        projection_support_status: str | None = None,
+    ) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {
+            "player_row": player_row,
+            "market": market,
+            "reason": reason,
+            "team": team,
+        }
+        status = str(projection_support_status or "").strip()
+        try:
+            signature = inspect.signature(reject_candidate_fn)
+            accepts_status = (
+                "projection_support_status" in signature.parameters
+                or any(
+                    param.kind == inspect.Parameter.VAR_KEYWORD
+                    for param in signature.parameters.values()
+                )
+            )
+        except (TypeError, ValueError):
+            accepts_status = True
+        if accepts_status:
+            kwargs["projection_support_status"] = status
+
+        row = reject_candidate_fn(**kwargs)
+        if isinstance(row, dict) and status:
+            row.setdefault("projection_support_status", status)
+        return row
+
     if players_df is None or players_df.empty:
         return accepted_candidates, rejected_candidates
 
@@ -293,7 +328,7 @@ def score_player_markets(
 
         if is_player_inactive(player_name):
             rejected_candidates.append(
-                reject_candidate_fn(
+                _call_reject_candidate(
                     player_row=player_row,
                     market=None,
                     reason="player_ruled_out_or_doubtful",
@@ -425,7 +460,7 @@ def score_player_markets(
                 projection_support_breakdown[support_status] += 1
 
                 rejected_candidates.append(
-                    reject_candidate_fn(
+                    _call_reject_candidate(
                         player_row=player_row,
                         market=market,
                         reason=rejection_reason,
@@ -455,7 +490,7 @@ def score_player_markets(
                     else:
                         reason = "edge_and_confidence_below_threshold"
                 rejected_candidates.append(
-                    reject_candidate_fn(
+                    _call_reject_candidate(
                         player_row=player_row,
                         market=market,
                         reason=reason,
@@ -493,7 +528,7 @@ def score_player_markets(
                     coverage_by_market[market]["unsupported_count"] += 1
                     coverage_by_team[team]["unsupported_count"] += 1
                     rejected_candidates.append(
-                        reject_candidate_fn(
+                        _call_reject_candidate(
                             player_row=player_row,
                             market=market,
                             reason="unsupported_projection_market",
@@ -525,7 +560,7 @@ def score_player_markets(
                     coverage_by_market[market]["missing_market_lines_count"] += 1
                     coverage_by_team[team]["missing_market_lines_count"] += 1
                     rejected_candidates.append(
-                        reject_candidate_fn(
+                        _call_reject_candidate(
                             player_row=player_row,
                             market=market,
                             reason=reason,

@@ -205,6 +205,8 @@ class TestMissingMarketLinesFix:
                 "edge": 1.0,
                 "confidence": 0.7,
                 "odds": -110,
+                "projection_support_status": "modeled",
+                "pre_rejection_reason": "missing_market_lines",
             }
 
         def score_candidate_fn(*, candidate_row, partial_fill=False, **kwargs):
@@ -233,10 +235,11 @@ class TestMissingMarketLinesFix:
 
         assert accepted
         assert any(row["rejection_reason"] == "missing_market_lines" for row in rejected)
+        assert any(row.get("projection_support_status") == "modeled" for row in rejected)
         assert "market_coverage_by_type" in caplog.text
         assert "market_coverage_by_team" in caplog.text
-        assert "top_players_no_market_lines" in caplog.text
-        assert "sample_unmatched_market_comparisons" in caplog.text
+        assert "top_missing_coverage_causes" in caplog.text
+        assert "rejection_breakdown_by_reason" in caplog.text
 
     def test_rejection_reasons_diverse(self):
         """Verify rejection breakdown has multiple reasons, not all missing_market_lines."""
