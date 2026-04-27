@@ -12,6 +12,7 @@ from courtvision.selection import (
     classify_candidate_lane,
     classify_candidates_batch,
 )
+from courtvision.runtime_audit import get_elite_rejection_reason
 
 
 def test_classify_candidate_lane_live_market():
@@ -25,6 +26,19 @@ def test_classify_candidate_lane_live_market():
     lane, reason = classify_candidate_lane(row, ["player_points"])
     assert lane == "elite"
     assert reason == "live_market_qualified"
+
+
+def test_directional_validation_rejects_wrong_side_points_picks():
+    base = {
+        "market_type": "player_points",
+        "sportsbook_line": 24.5,
+        "odds": -110,
+    }
+
+    assert get_elite_rejection_reason({**base, "selection": "over", "edge_pct": 0.10}) is None
+    assert get_elite_rejection_reason({**base, "selection": "under", "edge_pct": -0.10}) is None
+    assert get_elite_rejection_reason({**base, "selection": "over", "edge_pct": -0.10}) == "reject_negative_edge_direction"
+    assert get_elite_rejection_reason({**base, "selection": "under", "edge_pct": 0.10}) == "reject_negative_edge_direction"
 
 
 def test_classify_candidate_lane_stat_only():

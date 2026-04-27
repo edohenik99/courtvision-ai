@@ -19,7 +19,7 @@ Inputs
 - bankroll (parameter, default 1000.0)
 
 Required columns on the input CSV: ``odds`` (American), ``confidence``,
-and one of ``edge_pct``/``edge``. Missing required columns abort with a
+and one of ``side_edge_pct``/``edge_pct``/``edge``. Missing required columns abort with a
 clear error.
 
 Output
@@ -50,7 +50,7 @@ from courtvision.betting.kelly import (  # noqa: E402  (path-bootstrapped above)
 )
 
 REQUIRED_COLUMNS: tuple[str, ...] = ("odds", "confidence")
-EDGE_COLUMN_PREFERENCE: tuple[str, ...] = ("edge_pct", "edge")
+EDGE_COLUMN_PREFERENCE: tuple[str, ...] = ("side_edge_pct", "edge_pct", "edge")
 
 # Default daily exposure cap as a fraction of bankroll. Overridable via
 # COURTVISION_MAX_DAILY_EXPOSURE env var or --max-daily-exposure CLI flag.
@@ -66,6 +66,7 @@ class StakeRow:
     american_odds: int | None
     decimal_odds: float | None
     edge_pct: float | None
+    side_edge_pct: float | None
     confidence: float | None
     stake_fraction: float
     stake_amount: float
@@ -151,6 +152,7 @@ def _build_stake_row(row: dict[str, str], edge_col: str, bankroll: float) -> Sta
     decimal_odds = _american_to_decimal(raw_american) if raw_american is not None else None
     confidence = _to_float(row.get("confidence"))
     edge_pct_raw = _to_float(row.get(edge_col))
+    side_edge_pct_raw = _to_float(row.get("side_edge_pct"))
     line = _to_float(row.get("line") or row.get("sportsbook_line"))
 
     skip_reason = ""
@@ -210,6 +212,7 @@ def _build_stake_row(row: dict[str, str], edge_col: str, bankroll: float) -> Sta
         american_odds=int(raw_american) if raw_american is not None else None,
         decimal_odds=round(decimal_odds, 4) if decimal_odds is not None else None,
         edge_pct=round(edge_pct_raw, 6) if edge_pct_raw is not None else None,
+        side_edge_pct=round(side_edge_pct_raw, 6) if side_edge_pct_raw is not None else None,
         confidence=round(confidence, 4) if confidence is not None else None,
         stake_fraction=stake_fraction,
         stake_amount=stake_amount,
@@ -230,6 +233,7 @@ def _write_stakes(output_path: Path, stakes: list[StakeRow], bankroll: float, pr
         "american_odds",
         "decimal_odds",
         "edge_pct",
+        "side_edge_pct",
         "confidence",
         "stake_fraction",
         "stake_amount",
@@ -251,6 +255,7 @@ def _write_stakes(output_path: Path, stakes: list[StakeRow], bankroll: float, pr
                 "american_odds": "" if s.american_odds is None else s.american_odds,
                 "decimal_odds": "" if s.decimal_odds is None else s.decimal_odds,
                 "edge_pct": "" if s.edge_pct is None else s.edge_pct,
+                "side_edge_pct": "" if s.side_edge_pct is None else s.side_edge_pct,
                 "confidence": "" if s.confidence is None else s.confidence,
                 "stake_fraction": s.stake_fraction,
                 "stake_amount": s.stake_amount,
@@ -328,6 +333,12 @@ def main(argv: list[str] | None = None) -> int:
     skipped = [s for s in stakes if not s.eligible]
 
     _log(f"eligible_picks={len(eligible)} skipped_picks={len(skipped)}")
+    eligible_side_counts: dict[str, int] = {}
+    for s in eligible:
+        side = str(s.selection or "").strip().lower()
+        eligible_side_counts[side] = eligible_side_counts.get(side, 0) + 1
+    print(f"[COUNT] kelly_over_rows={int(eligible_side_counts.get('over', 0))}", flush=True)
+    print(f"[COUNT] kelly_under_rows={int(eligible_side_counts.get('under', 0))}", flush=True)
 
     # Aggregate skip reasons
     if skipped:

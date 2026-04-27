@@ -201,6 +201,7 @@ def score_player_markets(
         market: str | None,
         reason: str,
         team: str | None = None,
+        selection: str | None = None,
         projection_support_status: str | None = None,
     ) -> dict[str, Any]:
         kwargs: dict[str, Any] = {
@@ -210,6 +211,7 @@ def score_player_markets(
             "team": team,
         }
         status = str(projection_support_status or "").strip()
+        selection_value = str(selection or "").strip().lower()
         try:
             signature = inspect.signature(reject_candidate_fn)
             accepts_status = (
@@ -219,14 +221,26 @@ def score_player_markets(
                     for param in signature.parameters.values()
                 )
             )
+            accepts_selection = (
+                "selection" in signature.parameters
+                or any(
+                    param.kind == inspect.Parameter.VAR_KEYWORD
+                    for param in signature.parameters.values()
+                )
+            )
         except (TypeError, ValueError):
             accepts_status = True
+            accepts_selection = True
         if accepts_status:
             kwargs["projection_support_status"] = status
+        if accepts_selection:
+            kwargs["selection"] = selection_value
 
         row = reject_candidate_fn(**kwargs)
         if isinstance(row, dict) and status:
             row.setdefault("projection_support_status", status)
+        if isinstance(row, dict) and selection_value:
+            row.setdefault("selection", selection_value)
         return row
 
     if players_df is None or players_df.empty:
@@ -286,6 +300,9 @@ def score_player_markets(
     missing_coverage_causes: Counter[str] = Counter()
     market_alias_audit: Counter[tuple[str, str]] = Counter()
     skipped_none_candidates: int = 0
+    normalized_side_counts: Counter[str] = Counter()
+    candidate_side_counts: Counter[str] = Counter()
+    qualified_side_counts: Counter[str] = Counter()
     # Market match rate tracking
     market_match_counts: dict[str, dict[str, int]] = defaultdict(lambda: {"attempted": 0, "matched": 0})
 
@@ -294,6 +311,9 @@ def score_player_markets(
             raw_market = str(row.get("_raw_market", row.get("market", "")) or "").strip()
             normalized_market = str(row.get("market", "") or "").strip()
             market_alias_audit[(raw_market, normalized_market)] += 1
+            selection = str(row.get("selection", "") or "").strip().lower()
+            if selection in {"over", "under"}:
+                normalized_side_counts[selection] += 1
 
     # Track match diagnostics
     total_players = 0
@@ -407,7 +427,8 @@ def score_player_markets(
             if len(unmatched_samples) < 10:
                 unmatched_samples.append(unmatched_detail)
 
-        # Score all live player markets first.
+        # Score all live player markets first. BallDontLie over/under rows are
+        # side-specific, so materialize one candidate per player/market/side.
         for market in sorted(available_markets):
             market_match_counts[market]["attempted"] += 1
             if market not in PRIMARY_PLAYER_MARKETS:
@@ -415,91 +436,116 @@ def score_player_markets(
                 continue
 
             market_match_counts[market]["matched"] += 1
-            coverage_by_market[market]["candidate_count"] += 1
-            coverage_by_market[market]["matched_count"] += 1
-            coverage_by_team[team]["candidate_count"] += 1
-            coverage_by_team[team]["matched_count"] += 1
 
             market_rows = player_market_rows[
                 player_market_rows["market"].astype(str).str.strip() == market
             ].copy()
 
-            candidate_row = build_candidate_row(
-                player_row=player_row,
-                market=market,
-                market_rows=market_rows,
-                partial_fill=False,
-            )
+            side_groups: list[tuple[str, pd.DataFrame]] = []
+            if not market_rows.empty and "selection" in market_rows.columns:
+                side_values = market_rows["selection"].fillna("").astype(str).str.strip().str.lower()
+                seen_sides: set[str] = set()
+                for selection in side_values.tolist():
+                    if selection in seen_sides:
+                        continue
+                    seen_sides.add(selection)
+                    side_group = market_rows[side_values == selection].copy()
+                    side_groups.append((selection, side_group))
+            if not side_groups:
+                side_groups = [("", market_rows)]
 
-            # Handle unsupported markets (build_candidate_row returned None)
-            if candidate_row is None:
-                # Determine rejection reason based on market type
-                if market in (
-                    "player_rebounds",
-                    "player_assists",
-                    "player_points_rebounds",
-                    "player_points_assists",
-                    "player_rebounds_assists",
-                    "player_points_rebounds_assists",
-                    "player_3pt_made",
-                    "player_steals",
-                    "player_blocks",
-                ):
-                    rejection_reason = "unsupported_projection_market"
-                    support_status = "unsupported_market"
-                elif market == "player_points":
-                    rejection_reason = "invalid_projection_output"
-                    support_status = "projection_missing"
-                else:
-                    rejection_reason = "unsupported_market_type"
-                    support_status = "unsupported_market"
+            for selection, side_market_rows in side_groups:
+                coverage_by_market[market]["candidate_count"] += 1
+                coverage_by_market[market]["matched_count"] += 1
+                coverage_by_team[team]["candidate_count"] += 1
+                coverage_by_team[team]["matched_count"] += 1
 
-                # Track unsupported counts
-                coverage_by_market[market]["unsupported_count"] += 1
-                coverage_by_team[team]["unsupported_count"] += 1
-                projection_support_breakdown[support_status] += 1
-
-                rejected_candidates.append(
-                    _call_reject_candidate(
-                        player_row=player_row,
-                        market=market,
-                        reason=rejection_reason,
-                        team=team,
-                        projection_support_status=support_status,
-                    )
+                candidate_row = build_candidate_row(
+                    player_row=player_row,
+                    market=market,
+                    market_rows=side_market_rows,
+                    partial_fill=False,
                 )
-                continue
 
-            scored = score_candidate_fn(
-                candidate_row=candidate_row,
-                player_row=player_row,
-                market=market,
-                market_rows=market_rows,
-                partial_fill=False,
-            )
-
-            if scored is None:
-                reason = str(candidate_row.get("pre_rejection_reason", "") or "").strip()
-                if not reason:
-                    edge = _safe_float(candidate_row.get("edge"), 0.0)
-                    confidence = _safe_float(candidate_row.get("confidence"), 0.0)
-                    if abs(edge) < 0.5:
-                        reason = "market_supported_but_failed_quality"
-                    elif confidence < 0.35:
-                        reason = "market_supported_but_failed_confidence"
+                # Handle unsupported markets (build_candidate_row returned None)
+                if candidate_row is None:
+                    # Determine rejection reason based on market type
+                    if market in (
+                        "player_rebounds",
+                        "player_assists",
+                        "player_points_rebounds",
+                        "player_points_assists",
+                        "player_rebounds_assists",
+                        "player_points_rebounds_assists",
+                        "player_3pt_made",
+                        "player_steals",
+                        "player_blocks",
+                    ):
+                        rejection_reason = "unsupported_projection_market"
+                        support_status = "unsupported_market"
+                    elif market == "player_points":
+                        rejection_reason = "invalid_projection_output"
+                        support_status = "projection_missing"
                     else:
-                        reason = "edge_and_confidence_below_threshold"
-                rejected_candidates.append(
-                    _call_reject_candidate(
-                        player_row=player_row,
-                        market=market,
-                        reason=reason,
-                        team=team,
-                        projection_support_status=candidate_row.get("projection_support_status", ""),
+                        rejection_reason = "unsupported_market_type"
+                        support_status = "unsupported_market"
+
+                    # Track unsupported counts
+                    coverage_by_market[market]["unsupported_count"] += 1
+                    coverage_by_team[team]["unsupported_count"] += 1
+                    projection_support_breakdown[support_status] += 1
+
+                    rejected_candidates.append(
+                        _call_reject_candidate(
+                            player_row=player_row,
+                            market=market,
+                            reason=rejection_reason,
+                            team=team,
+                            selection=selection,
+                            projection_support_status=support_status,
+                        )
                     )
+                    continue
+
+                candidate_selection = str(candidate_row.get("selection", selection) or "").strip().lower()
+                if candidate_selection in {"over", "under"}:
+                    candidate_side_counts[candidate_selection] += 1
+
+                scored = score_candidate_fn(
+                    candidate_row=candidate_row,
+                    player_row=player_row,
+                    market=market,
+                    market_rows=side_market_rows,
+                    partial_fill=False,
                 )
-            else:
-                accepted_candidates.append(scored)
+
+                if scored is None:
+                    reason = str(candidate_row.get("pre_rejection_reason", "") or "").strip()
+                    if not reason:
+                        side_edge = _safe_float(candidate_row.get("side_edge"), None)
+                        edge = _safe_float(candidate_row.get("edge"), 0.0)
+                        edge_for_threshold = side_edge if side_edge is not None else abs(edge)
+                        confidence = _safe_float(candidate_row.get("confidence"), 0.0)
+                        if edge_for_threshold < 0.5:
+                            reason = "market_supported_but_failed_quality"
+                        elif confidence < 0.35:
+                            reason = "market_supported_but_failed_confidence"
+                        else:
+                            reason = "edge_and_confidence_below_threshold"
+                    rejected_candidates.append(
+                        _call_reject_candidate(
+                            player_row=player_row,
+                            market=market,
+                            reason=reason,
+                            team=team,
+                            selection=candidate_selection,
+                            projection_support_status=candidate_row.get("projection_support_status", ""),
+                        )
+                    )
+                else:
+                    if candidate_selection in {"over", "under"}:
+                        qualified_side_counts[candidate_selection] += 1
+                    accepted_candidates.append(scored)
 
         # Handle partial-fill candidates for missing markets.
         if allow_partial_fill:
@@ -649,6 +695,12 @@ def score_player_markets(
     ]
     logger.info("rejection_breakdown_by_reason %s", rejection_breakdown)
     print(f"[COUNT] rejection_breakdown={rejection_breakdown}", flush=True)
+    print(f"[COUNT] normalized_over_rows={int(normalized_side_counts.get('over', 0))}", flush=True)
+    print(f"[COUNT] normalized_under_rows={int(normalized_side_counts.get('under', 0))}", flush=True)
+    print(f"[COUNT] candidate_over_rows={int(candidate_side_counts.get('over', 0))}", flush=True)
+    print(f"[COUNT] candidate_under_rows={int(candidate_side_counts.get('under', 0))}", flush=True)
+    print(f"[COUNT] qualified_over_rows={int(qualified_side_counts.get('over', 0))}", flush=True)
+    print(f"[COUNT] qualified_under_rows={int(qualified_side_counts.get('under', 0))}", flush=True)
 
     # Diagnostics for low baseline-coverage runs.
     #

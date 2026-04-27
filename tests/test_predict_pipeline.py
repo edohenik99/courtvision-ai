@@ -23,6 +23,7 @@ from courtvision.pipeline import (
 from courtvision.scoring import CandidateScoringPolicy
 from courtvision.injuries import InjuryEngine
 from courtvision.market import MarketEvaluator
+from courtvision.data.candidates import score_player_markets
 from scripts.market_shadow_grading import build_market_shadow_grading
 from scripts.write_daily_summary import write_daily_summary_outputs
 
@@ -321,6 +322,174 @@ class TestPredictionPipeline:
         ].copy()
         assert not player_points.empty
         assert int(player_points.iloc[0]["odds"]) == expected_odds
+
+    def test_over_under_rows_materialize_two_side_candidates(self):
+        players = pd.DataFrame([{
+            "player_name": "Two Way Player",
+            "team_abbr": "LAL",
+            "player_id": 123,
+        }])
+        odds = pd.DataFrame([
+            {
+                "player_id": 123,
+                "player_name": "Two Way Player",
+                "team_abbr": "LAL",
+                "market_type": "player_points",
+                "selection": "over",
+                "line": 21.5,
+                "odds": -110,
+            },
+            {
+                "player_id": 123,
+                "player_name": "Two Way Player",
+                "team_abbr": "LAL",
+                "market_type": "player_points",
+                "selection": "under",
+                "line": 21.5,
+                "odds": -110,
+            },
+        ])
+
+        def build_candidate_row(*, player_row, market, market_rows, partial_fill=False):
+            market_row = market_rows.iloc[0]
+            return {
+                "player_name": player_row["player_name"],
+                "market_type": market,
+                "selection": market_row["selection"],
+                "edge": 1.0,
+                "side_edge": 1.0,
+                "confidence": 0.7,
+                "projection_support_status": "modeled",
+            }
+
+        accepted, rejected = score_player_markets(
+            players_df=players,
+            odds_df=odds,
+            is_player_inactive=lambda _: False,
+            build_candidate_row=build_candidate_row,
+            score_candidate_fn=lambda **kwargs: kwargs["candidate_row"],
+            reject_candidate_fn=lambda **kwargs: {
+                "market_type": kwargs.get("market"),
+                "rejection_reason": kwargs.get("reason"),
+            },
+            allow_partial_fill=False,
+        )
+
+        assert not rejected
+        assert [row["selection"] for row in accepted] == ["over", "under"]
+
+    def test_over_and_under_keep_raw_edge_and_side_edge(self):
+        config = PredictionConfig(prediction_date="2024-01-15", enable_partial_fill=False)
+        pipeline = PredictionPipeline(config)
+        games = pd.DataFrame([{
+            "game_id": 1,
+            "home_team_abbr": "LAL",
+            "visitor_team_abbr": "BOS",
+        }])
+        odds = pd.DataFrame([
+            {
+                "game_id": 1,
+                "player_id": 123,
+                "player_name": "Over Player",
+                "raw_market_type": "over_under",
+                "market_type": "player_points",
+                "line": 24.5,
+                "odds": -110,
+                "selection": "over",
+                "is_live": True,
+            },
+            {
+                "game_id": 1,
+                "player_id": 124,
+                "player_name": "Under Player",
+                "raw_market_type": "over_under",
+                "market_type": "player_points",
+                "line": 24.5,
+                "odds": -110,
+                "selection": "under",
+                "is_live": True,
+            },
+        ])
+        baselines = pd.DataFrame([
+            {
+                "player_name": "Over Player",
+                "team_abbr": "LAL",
+                "player_id": 123,
+                "pts_avg": 27.0,
+                "pts_recent": 27.0,
+                "min_avg": 34.0,
+            },
+            {
+                "player_name": "Under Player",
+                "team_abbr": "BOS",
+                "player_id": 124,
+                "pts_avg": 22.0,
+                "pts_recent": 22.0,
+                "min_avg": 34.0,
+            },
+        ])
+
+        result = pipeline.run(games, odds, baselines)
+        by_selection = result.merged_market_props.set_index("selection")
+
+        assert by_selection.loc["over", "edge"] > 0
+        assert by_selection.loc["over", "side_edge"] > 0
+        assert by_selection.loc["under", "edge"] < 0
+        assert by_selection.loc["under", "side_edge"] > 0
+        assert by_selection.loc["under", "side_edge_pct"] > 0
+
+    def test_wrong_side_candidates_are_rejected_by_direction(self):
+        config = PredictionConfig(prediction_date="2024-01-15", enable_partial_fill=False)
+        pipeline = PredictionPipeline(config)
+        games = pd.DataFrame([{
+            "game_id": 1,
+            "home_team_abbr": "LAL",
+            "visitor_team_abbr": "BOS",
+        }])
+        odds = pd.DataFrame([
+            {
+                "game_id": 1,
+                "player_id": 123,
+                "player_name": "Wrong Over",
+                "market_type": "player_points",
+                "line": 24.5,
+                "odds": -110,
+                "selection": "over",
+                "is_live": True,
+            },
+            {
+                "game_id": 1,
+                "player_id": 124,
+                "player_name": "Wrong Under",
+                "market_type": "player_points",
+                "line": 24.5,
+                "odds": -110,
+                "selection": "under",
+                "is_live": True,
+            },
+        ])
+        baselines = pd.DataFrame([
+            {
+                "player_name": "Wrong Over",
+                "team_abbr": "LAL",
+                "player_id": 123,
+                "pts_avg": 22.0,
+                "pts_recent": 22.0,
+                "min_avg": 34.0,
+            },
+            {
+                "player_name": "Wrong Under",
+                "team_abbr": "BOS",
+                "player_id": 124,
+                "pts_avg": 27.0,
+                "pts_recent": 27.0,
+                "min_avg": 34.0,
+            },
+        ])
+
+        result = pipeline.run(games, odds, baselines)
+
+        assert result.merged_market_props.empty
 
     def test_raw_prop_type_is_preserved_through_candidate_row(self):
         """Raw provider prop type should survive into candidate/output rows."""

@@ -94,6 +94,10 @@ def compute_selection_score(row: Mapping[str, Any]) -> dict[str, Any]:
     selection = str(enriched.get("selection", "")).strip().lower()
     sportsbook_line = to_float(enriched.get("sportsbook_line")) or 0.0
     edge_abs = to_float(enriched.get("edge_abs")) or 0.0
+    side_edge_pct_raw = to_float(enriched.get("side_edge_pct"))
+    if side_edge_pct_raw is None:
+        side_edge = to_float(enriched.get("side_edge"))
+        side_edge_pct_raw = (side_edge / sportsbook_line) if side_edge is not None and sportsbook_line else None
 
     # Compute edge metrics
     edge_result = compute_edge(market_type, edge_abs, sportsbook_line, enriched.get("odds"))
@@ -141,7 +145,11 @@ def compute_selection_score(row: Mapping[str, Any]) -> dict[str, Any]:
 
     # Compute selection_score for ranking (edge + confidence + quality)
     # Compute selection_score for ranking (edge + confidence + quality)
-    edge_component = max(float(edge_pct), 0.0)  # Only reward positive edge
+    side_edge_component = side_edge_pct_raw if side_edge_pct_raw is not None else (float(edge_pct) / 100.0)
+    if abs(float(side_edge_component)) <= 1.0:
+        side_edge_component *= 100.0
+    side_edge_component = max(min(float(side_edge_component), 15.0), -5.0)
+    edge_component = max(float(side_edge_component), 0.0)  # Only reward positive side edge
     confidence_value = float(confidence_result["adjusted_confidence"])
     confidence_component = confidence_value * 100.0 # Scale to 0-100
     quality_component = float(quality_score)
@@ -149,6 +157,7 @@ def compute_selection_score(row: Mapping[str, Any]) -> dict[str, Any]:
 
     return {
         "edge_pct": round(float(edge_pct), 4),
+        "side_edge_pct": round(float(side_edge_pct_raw), 6) if side_edge_pct_raw is not None else None,
         "player_tier_weight": round(float(tier_weight), 4),
         "favorite_bias_factor": round(float(bias_factor), 4),
         "historical_confidence_multiplier": round(float(historical_multiplier), 4),

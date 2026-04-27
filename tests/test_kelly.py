@@ -6,6 +6,7 @@ to ensure proper conservative stake sizing based on edge, odds, and confidence.
 
 import pytest
 from courtvision.betting.kelly import compute_kelly_fraction, compute_recommended_bet, MAX_STAKE_FRACTION, MIN_CONFIDENCE_THRESHOLD
+from scripts.run_kelly_stakes import _build_stake_row, _validate_columns
 
 
 class TestConservativeKellyLogic:
@@ -138,6 +139,28 @@ class TestConservativeKellyLogic:
         if '.' in result_str:
             decimal_places = len(result_str.split('.')[1])
             assert decimal_places <= 4, f"Result should have at most 4 decimal places: {result}"
+
+    def test_kelly_stake_runner_accepts_valid_under_side_edge(self):
+        fieldnames = ["player_name", "market_type", "selection", "odds", "confidence", "edge_pct", "side_edge_pct"]
+        edge_col = _validate_columns(fieldnames)
+        row = {
+            "player_name": "Under Player",
+            "market_type": "player_points",
+            "selection": "under",
+            "line": "24.5",
+            "odds": "-110",
+            "confidence": "0.75",
+            "edge_pct": "-0.10",
+            "side_edge_pct": "0.10",
+        }
+
+        stake = _build_stake_row(row, edge_col, bankroll=1000.0)
+
+        assert edge_col == "side_edge_pct"
+        assert stake.eligible is True
+        assert stake.edge_pct == 0.10
+        assert stake.side_edge_pct == 0.10
+        assert stake.stake_amount > 0
 
 
 class TestConfigConstants:

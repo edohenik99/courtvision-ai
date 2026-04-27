@@ -247,6 +247,10 @@ class PredictionPipeline:
             else:
                 odds_by_market_type = {}
             print(f"[COUNT] odds_by_market_type={odds_by_market_type}", flush=True)
+            if "selection" in odds.columns:
+                normalized_selection_counts = odds["selection"].fillna("").astype(str).str.strip().str.lower().value_counts().to_dict()
+                print(f"[COUNT] normalized_over_rows={int(normalized_selection_counts.get('over', 0))}", flush=True)
+                print(f"[COUNT] normalized_under_rows={int(normalized_selection_counts.get('under', 0))}", flush=True)
 
         # Initialize result
         result = PredictionResult(prediction_date=self.config.prediction_date)
@@ -618,6 +622,22 @@ class PredictionPipeline:
             select_elite_board=select_elite_board,
             select_top_per_market=select_top_per_market,
         )
+        if "selection" in candidates_df.columns:
+            qualified_selection_counts = candidates_df["selection"].fillna("").astype(str).str.strip().str.lower().value_counts().to_dict()
+            print(f"[COUNT] qualified_over_rows={int(qualified_selection_counts.get('over', 0))}", flush=True)
+            print(f"[COUNT] qualified_under_rows={int(qualified_selection_counts.get('under', 0))}", flush=True)
+        if "selection" in full_market_df.columns:
+            full_market_selection_counts = full_market_df["selection"].fillna("").astype(str).str.strip().str.lower().value_counts().to_dict()
+        else:
+            full_market_selection_counts = {}
+        print(f"[COUNT] full_market_over_rows={int(full_market_selection_counts.get('over', 0))}", flush=True)
+        print(f"[COUNT] full_market_under_rows={int(full_market_selection_counts.get('under', 0))}", flush=True)
+        if "selection" in elite_df.columns:
+            elite_selection_counts = elite_df["selection"].fillna("").astype(str).str.strip().str.lower().value_counts().to_dict()
+        else:
+            elite_selection_counts = {}
+        print(f"[COUNT] elite_over_rows={int(elite_selection_counts.get('over', 0))}", flush=True)
+        print(f"[COUNT] elite_under_rows={int(elite_selection_counts.get('under', 0))}", flush=True)
         selection_trace.setdefault("elite", {}).update(selection_stage_trace["elite"])
         selection_trace.setdefault("full_market", {}).update(selection_stage_trace["full_market"])
         self.logger.info("board_selection_trace %s", selection_trace)
@@ -895,6 +915,10 @@ class PredictionPipeline:
             # Compute edge
             edge = projection - line
             edge_pct = (edge / line) if line else 0.0
+            selection = str(market_row.get("selection", "")) if not market_row.empty else ""
+            selection_normalized = selection.strip().lower()
+            side_edge = -edge if selection_normalized == "under" else edge
+            side_edge_pct = (side_edge / line) if line else 0.0
 
             # Score the candidate
             scoring_input = {
@@ -903,9 +927,13 @@ class PredictionPipeline:
                 "line": line,
                 "edge": edge,
                 "edge_pct": edge_pct,
+                "side_edge": side_edge,
+                "side_edge_pct": side_edge_pct,
+                "edge_abs": max(float(side_edge), 0.0),
                 "confidence": confidence,
                 "player_name": str(player_row.get("player_name", "")),
                 "team": str(player_row.get("team_abbr", "")),
+                "selection": selection,
                 "minutes_avg": _nan_safe_to_float(player_row.get("min_avg")),
                 "minutes_recent": _nan_safe_to_float(player_row.get("min_recent")),
                 "is_live_market": bool(market_row.get("is_live", True)) if not market_row.empty else not partial_fill,
@@ -952,6 +980,8 @@ class PredictionPipeline:
                 "minutes_avg": _nan_safe_to_float(player_row.get("min_avg")),
                 "edge": edge,
                 "edge_pct": edge_pct,
+                "side_edge": side_edge,
+                "side_edge_pct": side_edge_pct,
                 "confidence": confidence,
                 "quality_score": scoring_result.get("quality_score", 0.0),
                 "selection_score": scoring_result.get("selection_score", 0.0),
@@ -993,6 +1023,9 @@ class PredictionPipeline:
         ) -> dict[str, Any] | None:
             # Apply thresholds
             edge = _nan_safe_to_float(candidate_row.get("edge"), 0.0) or 0.0
+            side_edge = _nan_safe_to_float(candidate_row.get("side_edge"), edge)
+            if side_edge is None:
+                side_edge = edge
             confidence = _nan_safe_to_float(candidate_row.get("confidence"), 0.0) or 0.0
             normalized_market = normalize_market_alias(market) or str(market or candidate_row.get("market_type", "")).strip()
             gate = self.FULL_MARKET_READINESS_GATES.get(normalized_market)
@@ -1014,7 +1047,10 @@ class PredictionPipeline:
                     )
                     return None
 
-            if abs(edge) < self.config.min_edge:
+            if side_edge <= 0:
+                candidate_row["pre_rejection_reason"] = "reject_negative_edge_direction"
+                return None
+            if side_edge < self.config.min_edge:
                 return None
             if confidence < self.config.min_confidence:
                 return None
