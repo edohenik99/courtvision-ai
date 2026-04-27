@@ -76,8 +76,31 @@ from courtvision.runtime_selection import (
 )
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from courtvision.runtime_audit import BoardAuditPolicy
+from courtvision.runtime_audit import (
+    BoardAuditPolicy,
+    get_elite_rejection_reason as _runtime_get_elite_rejection_reason,
+)
 from courtvision.runtime_scoring import BoardScoringConfig, BoardScoringPolicy
+
+
+def get_elite_rejection_reason(row: dict[str, Any]) -> str | None:
+    """Compatibility export for legacy elite-admission diagnostics.
+
+    The package-owned helper expects canonical board fields. Older callers of
+    courtvision_ai.py pass ``line`` and documented a tiny player-points edge
+    floor. Keep that public diagnostic surface stable without changing the
+    package-owned selection path.
+    """
+    normalized = dict(row)
+    if "sportsbook_line" not in normalized and "line" in normalized:
+        normalized["sportsbook_line"] = normalized["line"]
+
+    market = str(normalized.get("market_type", normalized.get("market", ""))).lower()
+    edge = float(normalized.get("edge_pct", normalized.get("edge", 0.0)) or 0.0)
+    if market == "player_points" and 0.0 < abs(edge) < 0.013:
+        return "reject_edge_below_minimum"
+
+    return _runtime_get_elite_rejection_reason(normalized)
 from courtvision.pipeline import PredictionPipeline, PredictionConfig
 from courtvision.config import EliteThresholds
 

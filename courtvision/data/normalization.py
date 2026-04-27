@@ -354,10 +354,13 @@ def normalize_games_schema(games_raw: pd.DataFrame) -> pd.DataFrame:
     if "status" not in games.columns:
         games["status"] = "unknown"
 
-    # Keep original raw columns for debugging (prefixed with raw_)
+    # Keep original raw columns for debugging (prefixed with raw_).
+    # Preserve even columns that also participate in canonical extraction so
+    # callers can inspect the source payload after normalization.
     for col in games_raw.columns:
-        if col not in games.columns:
-            games[f"raw_{col}"] = games_raw[col]
+        raw_col = f"raw_{col}"
+        if raw_col not in games.columns:
+            games[raw_col] = games_raw[col]
 
     return games.reset_index(drop=True)
 

@@ -187,7 +187,7 @@ class ReportBuilder:
         Args:
             window: Rolling window configuration
         """
-        self.window = window or RollingWindow()
+        self.window = window or RollingWindow(min_samples=1)
         self.pick_history: list[dict] = []
 
     def add_pick(
