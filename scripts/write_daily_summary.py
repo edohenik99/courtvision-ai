@@ -139,6 +139,7 @@ def build_daily_summary(
     full_market_df = _read_csv(operator_dir / f"full_market_board_{prediction_date}.csv", warnings)
     shadow = _read_json(diagnostics_dir / f"market_shadow_grading_{prediction_date}.json", warnings)
     readiness = _read_json(diagnostics_dir / f"market_performance_readiness_{prediction_date}.json", warnings)
+    manual_context = _read_json(diagnostics_dir / f"manual_context_{prediction_date}.json", warnings)
 
     kelly_eligible = (
         kelly_df[kelly_df["eligible"].map(_is_truthy)].copy()
@@ -199,9 +200,29 @@ def build_daily_summary(
     lines.append(f"- hit rate: {_format_pct(shadow_totals.get('hit_rate'))}")
     lines.append(f"Pending grading count: {pending_grading}")
 
+    lines.extend(["", "Manual Context", "-" * 72])
+    if manual_context:
+        file_found = _is_truthy(manual_context.get("file_found"))
+        rows = int(manual_context.get("rows") or 0)
+        matches = int(manual_context.get("candidate_matches") or 0)
+        lines.append(f"- file found: {str(file_found).lower()}")
+        lines.append(f"- rows: {rows}")
+        lines.append(f"- candidate matches: {matches}")
+        lines.append("- passive mode: true")
+        if manual_context.get("warnings"):
+            for warning in manual_context.get("warnings") or []:
+                lines.append(f"- warning: {warning}")
+    else:
+        lines.append("- file found: false")
+        lines.append("- candidate matches: 0")
+        lines.append("- passive mode: true")
+
     lines.extend(["", "Warnings / Readiness Notes", "-" * 72])
     lines.append("- Elite board locked to player_points only.")
     lines.append("- Kelly stakes locked to player_points only.")
+    if manual_context:
+        matches = int(manual_context.get("candidate_matches") or 0)
+        lines.append(f"- Manual player context is diagnostic only; matched candidates: {matches}.")
     non_points = sum(count for market, count in counts.items() if market != "player_points")
     if non_points:
         lines.append(f"- {non_points} non-points full-market picks are diagnostic/readiness only.")
@@ -230,6 +251,7 @@ def build_daily_summary(
         "full_market_counts": dict(sorted(counts.items())),
         "shadow_totals": shadow_totals,
         "pending_grading_count": pending_grading,
+        "manual_context": manual_context,
         "warnings": warnings,
     }
     return "\n".join(lines) + "\n", metadata

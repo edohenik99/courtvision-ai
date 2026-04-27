@@ -1,0 +1,2 @@
+prediction_date,player_name,team,status,minutes_limit,projection_adjustment,confidence_adjustment,reason
+2026-04-27,Example Player,EX,questionable,28,-1.5,-0.05,Example operator note for passive diagnostics

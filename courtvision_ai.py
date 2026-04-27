@@ -103,6 +103,11 @@ def get_elite_rejection_reason(row: dict[str, Any]) -> str | None:
     return _runtime_get_elite_rejection_reason(normalized)
 from courtvision.pipeline import PredictionPipeline, PredictionConfig
 from courtvision.config import EliteThresholds
+from courtvision.context import (
+    apply_manual_player_context,
+    load_manual_player_context,
+    write_manual_context_diagnostics,
+)
 
 try:
     from balldontlie import BalldontlieAPI
@@ -3745,6 +3750,18 @@ class CourtVisionAI:
             elite_df = result.elite_props.copy() if not result.elite_props.empty else pd.DataFrame()
             full_market_df = result.full_market_props.copy() if not result.full_market_props.empty else pd.DataFrame()
             qualified_pool_df = result.merged_market_props.copy() if not result.merged_market_props.empty else pd.DataFrame()
+            (
+                qualified_pool_df,
+                elite_df,
+                full_market_df,
+                manual_context_diagnostics,
+                manual_context_path,
+            ) = self._attach_manual_player_context(
+                prediction_date=prediction_date,
+                qualified_pool_df=qualified_pool_df,
+                elite_df=elite_df,
+                full_market_df=full_market_df,
+            )
             rejected_df = pd.DataFrame()
             grading_df, grading_summary = self._grade_history(prediction_date=prediction_date)
             grading_bucket_summary = summarize_graded_props(grading_df.to_dict("records")) if not grading_df.empty else summarize_graded_props([])
@@ -3766,6 +3783,13 @@ class CourtVisionAI:
             summary["elite_count"] = int(len(elite_df))
             summary["full_market_count"] = int(len(full_market_df))
             summary["markets_evaluated"] = int(len(qualified_pool_df))
+            summary["manual_context_diagnostics_path"] = str(manual_context_path)
+            summary["manual_context"] = {
+                "file_found": bool(manual_context_diagnostics.get("file_found", False)),
+                "rows": int(manual_context_diagnostics.get("rows", 0) or 0),
+                "candidate_matches": int(manual_context_diagnostics.get("candidate_matches", 0) or 0),
+                "passive_mode": True,
+            }
             injury_diagnostics = self._build_injury_context_diagnostics(
                 prediction_date=prediction_date,
                 injury_source=injury_source,
@@ -3955,6 +3979,18 @@ class CourtVisionAI:
         sgp_df = self._apply_board_audit_frame(sgp_df) if not sgp_df.empty else sgp_df
         team_board_df = self._apply_board_audit_frame(team_board_df) if not team_board_df.empty else team_board_df
         near_miss_df = self._apply_board_audit_frame(near_miss_df) if not near_miss_df.empty else near_miss_df
+        (
+            prepared_selected_df,
+            elite_df,
+            full_market_df,
+            manual_context_diagnostics,
+            manual_context_path,
+        ) = self._attach_manual_player_context(
+            prediction_date=prediction_date,
+            qualified_pool_df=prepared_selected_df,
+            elite_df=elite_df,
+            full_market_df=full_market_df,
+        )
         graded_df, grading_summary = self._grade_history(prediction_date=prediction_date)
         grading_bucket_summary = summarize_graded_props(graded_df.to_dict("records")) if not graded_df.empty else summarize_graded_props([])
 
@@ -4002,6 +4038,13 @@ class CourtVisionAI:
             "grading_rows": int(len(graded_df)),
             "near_miss_count": int(len(near_miss_df)),
             "rejected_count": int(len(rejected_df)),
+            "manual_context_diagnostics_path": str(manual_context_path),
+            "manual_context": {
+                "file_found": bool(manual_context_diagnostics.get("file_found", False)),
+                "rows": int(manual_context_diagnostics.get("rows", 0) or 0),
+                "candidate_matches": int(manual_context_diagnostics.get("candidate_matches", 0) or 0),
+                "passive_mode": True,
+            },
             "top_qualification_reasons": board_diagnostics.get("qualified_by_reason", [])[:8],
             "top_rejection_reasons": reason_counts.head(8).to_dict(orient="records"),
             "final_board_construction": board_diagnostics.get("final_board_construction", {}),
@@ -5488,6 +5531,36 @@ class CourtVisionAI:
         print(f"[INJURY] baseline_player_matches={int(payload.get('baseline_player_matches', 0) or 0)}", flush=True)
         print(f"[INJURY] candidate_player_matches={int(payload.get('candidate_player_matches', 0) or 0)}", flush=True)
         print(f"[INJURY] nonzero_candidate_impacts={int(payload.get('nonzero_candidate_impacts', 0) or 0)}", flush=True)
+
+    def _attach_manual_player_context(
+        self,
+        *,
+        prediction_date: str,
+        qualified_pool_df: pd.DataFrame,
+        elite_df: pd.DataFrame,
+        full_market_df: pd.DataFrame,
+    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, Any], Path]:
+        manual_context, load_diagnostics = load_manual_player_context(prediction_date)
+        qualified_pool_df, candidate_diagnostics = apply_manual_player_context(qualified_pool_df, manual_context)
+        elite_df, _ = apply_manual_player_context(elite_df, manual_context)
+        full_market_df, _ = apply_manual_player_context(full_market_df, manual_context)
+        diagnostics_path, diagnostics_payload = write_manual_context_diagnostics(
+            prediction_date=prediction_date,
+            runtime_root=self.runtime_dir,
+            load_diagnostics=load_diagnostics,
+            candidate_diagnostics=candidate_diagnostics,
+            context_rows=manual_context,
+        )
+        print(
+            f"[CONTEXT] manual_context_file_found={str(bool(diagnostics_payload.get('file_found'))).lower()}",
+            flush=True,
+        )
+        print(f"[CONTEXT] manual_context_rows={int(diagnostics_payload.get('rows', 0) or 0)}", flush=True)
+        print(
+            f"[CONTEXT] manual_context_candidate_matches={int(diagnostics_payload.get('candidate_matches', 0) or 0)}",
+            flush=True,
+        )
+        return qualified_pool_df, elite_df, full_market_df, diagnostics_payload, diagnostics_path
 
     def _injury_status_weight(self, status: Any) -> float:
         status_key = str(status or "").strip().lower()

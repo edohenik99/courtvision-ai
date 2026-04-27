@@ -770,6 +770,18 @@ class TestPredictionPipeline:
             ),
             encoding="utf-8",
         )
+        (runtime_root / "diagnostics" / "manual_context_2024-01-15.json").write_text(
+            json.dumps(
+                {
+                    "file_found": True,
+                    "rows": 1,
+                    "candidate_matches": 1,
+                    "passive_mode": True,
+                    "warnings": [],
+                }
+            ),
+            encoding="utf-8",
+        )
 
         output_path, metadata = write_daily_summary_outputs(
             prediction_date="2024-01-15",
@@ -786,8 +798,12 @@ class TestPredictionPipeline:
         assert "- player_rebounds: 1" in text
         assert "Shadow Grading Totals" in text
         assert "Pending grading count: 1" in text
+        assert "Manual Context" in text
+        assert "- candidate matches: 1" in text
         assert "Elite board locked to player_points only." in text
+        assert "Manual player context is diagnostic only; matched candidates: 1." in text
         assert metadata["full_market_counts"] == {"player_points": 1, "player_rebounds": 1}
+        assert metadata["manual_context"]["candidate_matches"] == 1
 
     def test_board_selection_trace_explains_live_gate_admission(self, caplog):
         """Live candidates with line_source should be admitted (live-gate fix)."""
