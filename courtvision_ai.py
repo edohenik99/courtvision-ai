@@ -3561,16 +3561,65 @@ class CourtVisionAI:
                 print(f"[DIAGNOSIS] Continuing with {len(odds_raw)} rows that have valid player_name", flush=True)
 
         odds = self._normalize_odds(odds_raw)
-        injuries_raw = self._get_sdk_injuries()
+        sdk_injuries_raw = self._get_sdk_injuries()
+        sdk_raw_rows = len(sdk_injuries_raw) if isinstance(sdk_injuries_raw, pd.DataFrame) else 0
+        sdk_injuries = self._normalize_injuries(sdk_injuries_raw) if isinstance(sdk_injuries_raw, pd.DataFrame) else pd.DataFrame()
+        sdk_normalized_rows = len(sdk_injuries) if isinstance(sdk_injuries, pd.DataFrame) else 0
+        sdk_identity_coverage = self._injury_identity_coverage(sdk_injuries_raw)
+        sdk_unusable_reason = ""
+        if sdk_raw_rows > 0 and sdk_normalized_rows == 0:
+            sdk_unusable_reason = "raw_rows_without_normalized_rows"
+        if sdk_raw_rows > 0 and sdk_identity_coverage == 0:
+            sdk_unusable_reason = (
+                f"{sdk_unusable_reason};identity_coverage_zero"
+                if sdk_unusable_reason
+                else "identity_coverage_zero"
+            )
+
+        http_fallback_attempted = sdk_raw_rows == 0 or bool(sdk_unusable_reason)
+        http_injuries_raw = pd.DataFrame()
+        http_injuries = pd.DataFrame()
+        http_raw_rows = 0
+        http_normalized_rows = 0
         injury_source = "sdk"
-        if not isinstance(injuries_raw, pd.DataFrame) or injuries_raw.empty:
-            injuries_raw = client.get_injuries(prediction_date)
-            injury_source = "http"
+        injuries_raw = sdk_injuries_raw if isinstance(sdk_injuries_raw, pd.DataFrame) else pd.DataFrame()
+        injuries = sdk_injuries
+        if http_fallback_attempted:
+            http_injuries_raw = client.get_injuries(prediction_date)
+            http_raw_rows = len(http_injuries_raw) if isinstance(http_injuries_raw, pd.DataFrame) else 0
+            http_injuries = self._normalize_injuries(http_injuries_raw) if isinstance(http_injuries_raw, pd.DataFrame) else pd.DataFrame()
+            http_normalized_rows = len(http_injuries) if isinstance(http_injuries, pd.DataFrame) else 0
+            if http_normalized_rows > 0:
+                injuries_raw = http_injuries_raw
+                injuries = http_injuries
+                injury_source = "http"
+            elif sdk_normalized_rows > 0:
+                injuries_raw = sdk_injuries_raw
+                injuries = sdk_injuries
+                injury_source = "sdk"
+            else:
+                injuries_raw = http_injuries_raw if isinstance(http_injuries_raw, pd.DataFrame) and not http_injuries_raw.empty else sdk_injuries_raw
+                injuries = pd.DataFrame()
+                injury_source = "http_failed" if http_raw_rows == 0 else "http_unusable"
+
+        print(f"[INJURY] sdk_raw_rows={sdk_raw_rows}", flush=True)
+        print(f"[INJURY] sdk_normalized_rows={sdk_normalized_rows}", flush=True)
+        print(f"[INJURY] sdk_identity_coverage={sdk_identity_coverage}", flush=True)
+        print(f"[INJURY] sdk_unusable_reason={sdk_unusable_reason or 'none'}", flush=True)
+        print(f"[INJURY] http_fallback_attempted={str(bool(http_fallback_attempted)).lower()}", flush=True)
+        print(f"[INJURY] http_raw_rows={http_raw_rows}", flush=True)
+        print(f"[INJURY] http_normalized_rows={http_normalized_rows}", flush=True)
         self.logger.info(
-            "injury_fetch_complete source=%s rows=%s prediction_date=%s",
+            "injury_fetch_complete source=%s rows=%s prediction_date=%s sdk_raw=%d sdk_normalized=%d sdk_identity_coverage=%d http_attempted=%s http_raw=%d http_normalized=%d",
             injury_source,
             len(injuries_raw) if isinstance(injuries_raw, pd.DataFrame) else 0,
             prediction_date,
+            sdk_raw_rows,
+            sdk_normalized_rows,
+            sdk_identity_coverage,
+            bool(http_fallback_attempted),
+            http_raw_rows,
+            http_normalized_rows,
         )
         print("[COUNT] active_odds_fetch_path=courtvision_ai.py:active_provider_fetch_section", flush=True)
         print(f"[COUNT] games_for_odds={len(games)}", flush=True)
@@ -3579,7 +3628,6 @@ class CourtVisionAI:
         if hasattr(odds_raw, "__len__") and len(odds_raw) == 0:
             print("[DIAGNOSIS] active odds fetch returned zero rows", flush=True)
         print(f"[STAGE] provider_fetch_complete games={len(games)} odds={len(odds_raw)} injuries={len(injuries_raw) if isinstance(injuries_raw, pd.DataFrame) else 0}")
-        injuries = self._normalize_injuries(injuries_raw)
         if injuries.empty:
             self.logger.warning(
                 "injury_data_empty_after_normalization prediction_date=%s source=%s",
@@ -3718,6 +3766,34 @@ class CourtVisionAI:
             summary["elite_count"] = int(len(elite_df))
             summary["full_market_count"] = int(len(full_market_df))
             summary["markets_evaluated"] = int(len(qualified_pool_df))
+            injury_diagnostics = self._build_injury_context_diagnostics(
+                prediction_date=prediction_date,
+                injury_source=injury_source,
+                injuries_raw=injuries_raw,
+                injuries=injuries,
+                games=games,
+                player_baselines=player_baselines,
+                candidate_df=qualified_pool_df,
+                injury_context=result.injury_context,
+                fetch_diagnostics={
+                    "sdk_raw_rows": sdk_raw_rows,
+                    "sdk_normalized_rows": sdk_normalized_rows,
+                    "sdk_identity_coverage": sdk_identity_coverage,
+                    "sdk_unusable_reason": sdk_unusable_reason or "",
+                    "http_fallback_attempted": bool(http_fallback_attempted),
+                    "http_raw_rows": http_raw_rows,
+                    "http_normalized_rows": http_normalized_rows,
+                    "http_identity_coverage": self._injury_identity_coverage(http_injuries_raw),
+                    "http_raw_columns": [str(c) for c in http_injuries_raw.columns.tolist()] if isinstance(http_injuries_raw, pd.DataFrame) else [],
+                    "http_normalized_columns": [str(c) for c in http_injuries.columns.tolist()] if isinstance(http_injuries, pd.DataFrame) else [],
+                    "sdk_raw_columns": [str(c) for c in sdk_injuries_raw.columns.tolist()] if isinstance(sdk_injuries_raw, pd.DataFrame) else [],
+                    "sdk_normalized_columns": [str(c) for c in sdk_injuries.columns.tolist()] if isinstance(sdk_injuries, pd.DataFrame) else [],
+                },
+            )
+            self._emit_injury_context_diagnostics(injury_diagnostics)
+            injury_json_path, injury_report_path = self._write_injury_context_diagnostics(injury_diagnostics)
+            summary["injury_context_diagnostics_path"] = str(injury_json_path)
+            summary["injury_context_report_path"] = str(injury_report_path)
             self._log_run(
                 {
                     "run_type": "predict",
@@ -5133,6 +5209,285 @@ class CourtVisionAI:
 
     def _normalize_injuries(self, injuries_raw: pd.DataFrame) -> pd.DataFrame:
         return normalize_injuries_frame(injuries_raw)
+
+    def _series_nonempty_count(self, df: pd.DataFrame, columns: Sequence[str]) -> int:
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            return 0
+        mask = pd.Series(False, index=df.index)
+        for col in columns:
+            if col not in df.columns:
+                continue
+            values = df[col]
+            if col.endswith("_id") or col.endswith(".id") or col in {"player_id", "team_id"}:
+                mask = mask | pd.to_numeric(values, errors="coerce").notna()
+            else:
+                mask = mask | values.fillna("").astype(str).str.strip().ne("")
+        return int(mask.sum())
+
+    def _id_set(self, df: pd.DataFrame, columns: Sequence[str]) -> set[int]:
+        ids: set[int] = set()
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            return ids
+        for col in columns:
+            if col not in df.columns:
+                continue
+            numeric = pd.to_numeric(df[col], errors="coerce").dropna()
+            ids.update(int(value) for value in numeric.tolist() if int(value) > 0)
+        return ids
+
+    def _text_set(self, df: pd.DataFrame, columns: Sequence[str]) -> set[str]:
+        values: set[str] = set()
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            return values
+        for col in columns:
+            if col not in df.columns:
+                continue
+            values.update(
+                str(value).strip().upper()
+                for value in df[col].dropna().tolist()
+                if str(value).strip()
+            )
+        return values
+
+    def _nonzero_count(self, df: pd.DataFrame, column: str) -> int:
+        if not isinstance(df, pd.DataFrame) or df.empty or column not in df.columns:
+            return 0
+        values = pd.to_numeric(df[column], errors="coerce").fillna(0.0)
+        return int(values.ne(0.0).sum())
+
+    def _injury_identity_coverage(self, df: pd.DataFrame) -> int:
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            return 0
+        identity_columns = [
+            "player_id",
+            "player.id",
+            "player.first_name",
+            "player.last_name",
+            "player_name",
+            "team_id",
+            "team.id",
+            "player.team_id",
+            "team_abbr",
+            "team.abbreviation",
+        ]
+        mask = pd.Series(False, index=df.index)
+        for col in identity_columns:
+            if col not in df.columns:
+                continue
+            values = df[col]
+            if col in {"player_id", "player.id", "team_id", "team.id", "player.team_id"}:
+                mask = mask | pd.to_numeric(values, errors="coerce").notna()
+            else:
+                mask = mask | values.fillna("").astype(str).str.strip().ne("")
+        return int(mask.sum())
+
+    def _build_injury_context_diagnostics(
+        self,
+        *,
+        prediction_date: str,
+        injury_source: str,
+        injuries_raw: pd.DataFrame,
+        injuries: pd.DataFrame,
+        games: pd.DataFrame,
+        player_baselines: pd.DataFrame,
+        candidate_df: pd.DataFrame,
+        injury_context: Mapping[str, Any] | None,
+        fetch_diagnostics: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        raw_df = injuries_raw if isinstance(injuries_raw, pd.DataFrame) else pd.DataFrame()
+        norm_df = injuries if isinstance(injuries, pd.DataFrame) else pd.DataFrame()
+        games_df = games if isinstance(games, pd.DataFrame) else pd.DataFrame()
+        baselines_df = player_baselines if isinstance(player_baselines, pd.DataFrame) else pd.DataFrame()
+        candidates = candidate_df if isinstance(candidate_df, pd.DataFrame) else pd.DataFrame()
+
+        active_team_ids = self._id_set(games_df, ["home_team_id", "visitor_team_id"])
+        active_team_abbrs = self._text_set(games_df, ["home_team_abbr", "visitor_team_abbr"])
+        injury_player_ids = self._id_set(norm_df, ["player_id", "player.id"])
+        injury_team_ids = self._id_set(norm_df, ["team_id", "team.id", "player.team_id"])
+        injury_team_abbrs = self._text_set(norm_df, ["team_abbr", "team.abbreviation"])
+        baseline_player_ids = self._id_set(baselines_df, ["player_id"])
+        candidate_player_ids = self._id_set(candidates, ["player_id"])
+
+        active_team_id_matches = injury_team_ids & active_team_ids
+        active_team_abbr_matches = injury_team_abbrs & active_team_abbrs
+        baseline_player_matches = injury_player_ids & baseline_player_ids
+        candidate_player_matches = injury_player_ids & candidate_player_ids
+
+        raw_date_columns = [c for c in raw_df.columns if "date" in str(c).lower()] if not raw_df.empty else []
+        normalized_date_columns = [c for c in norm_df.columns if "date" in str(c).lower()] if not norm_df.empty else []
+        date_values: set[str] = set()
+        for frame, cols in ((raw_df, raw_date_columns), (norm_df, normalized_date_columns)):
+            for col in cols:
+                date_values.update(str(value)[:10] for value in frame[col].dropna().tolist() if str(value).strip())
+        has_date_columns = bool(raw_date_columns or normalized_date_columns)
+        date_matches = not has_date_columns or prediction_date in date_values
+
+        rows_with_player_id = self._series_nonempty_count(norm_df, ["player_id", "player.id"])
+        rows_with_team_id = self._series_nonempty_count(norm_df, ["team_id", "team.id", "player.team_id"])
+        rows_with_team_abbr = self._series_nonempty_count(norm_df, ["team_abbr", "team.abbreviation"])
+
+        nonzero_injury_impact = self._nonzero_count(candidates, "injury_impact_score")
+        nonzero_team_impact = self._nonzero_count(candidates, "team_injury_impact")
+        nonzero_opponent_impact = self._nonzero_count(candidates, "opponent_injury_impact")
+        if candidates.empty:
+            nonzero_candidate_impacts = 0
+        else:
+            impact_mask = (
+                pd.to_numeric(candidates.get("injury_impact_score", pd.Series(0.0, index=candidates.index)), errors="coerce").fillna(0.0).ne(0.0)
+                | pd.to_numeric(candidates.get("team_injury_impact", pd.Series(0.0, index=candidates.index)), errors="coerce").fillna(0.0).ne(0.0)
+                | pd.to_numeric(candidates.get("opponent_injury_impact", pd.Series(0.0, index=candidates.index)), errors="coerce").fillna(0.0).ne(0.0)
+            )
+            nonzero_candidate_impacts = int(impact_mask.sum())
+
+        mismatch_reasons: list[str] = []
+        if len(raw_df) > 0 and len(norm_df) == 0:
+            mismatch_reasons.append("unsupported injury schema")
+        if len(norm_df) > 0 and rows_with_player_id == 0:
+            mismatch_reasons.append("player_id mismatch")
+        if len(norm_df) > 0 and rows_with_team_id == 0:
+            mismatch_reasons.append("team_id mismatch")
+        if len(norm_df) > 0 and rows_with_team_abbr == 0:
+            mismatch_reasons.append("team_abbr missing")
+        if has_date_columns and not date_matches:
+            mismatch_reasons.append("date mismatch")
+        if len(norm_df) > 0 and not active_team_id_matches and not active_team_abbr_matches:
+            if rows_with_team_abbr == 0:
+                mismatch_reasons.append("team_abbr missing")
+            elif rows_with_team_id > 0:
+                mismatch_reasons.append("team_id mismatch")
+        if len(norm_df) > 0 and rows_with_player_id > 0 and not baseline_player_matches:
+            mismatch_reasons.append("player_id mismatch")
+
+        deduped_reasons: list[str] = []
+        for reason in mismatch_reasons:
+            if reason not in deduped_reasons:
+                deduped_reasons.append(reason)
+
+        context_team_count = 0
+        context_player_count = 0
+        if isinstance(injury_context, Mapping):
+            context_team_count = len(injury_context.get("teams", {}) or {})
+            context_player_count = len(injury_context.get("players", {}) or {})
+
+        payload = {
+            "prediction_date": prediction_date,
+            "injury_source": injury_source,
+            "raw_rows": int(len(raw_df)),
+            "normalized_rows": int(len(norm_df)),
+            "raw_columns": [str(c) for c in raw_df.columns.tolist()],
+            "normalized_columns": [str(c) for c in norm_df.columns.tolist()],
+            "rows_with_player_id": rows_with_player_id,
+            "rows_with_team_id": rows_with_team_id,
+            "rows_with_team_abbr": rows_with_team_abbr,
+            "rows_with_team_id_or_abbr": int(max(rows_with_team_id, rows_with_team_abbr)),
+            "active_slate_team_ids": sorted(active_team_ids),
+            "active_slate_team_abbrs": sorted(active_team_abbrs),
+            "injury_team_ids": sorted(injury_team_ids),
+            "injury_team_abbrs": sorted(injury_team_abbrs),
+            "active_team_matches": int(len(active_team_id_matches) + len(active_team_abbr_matches)),
+            "active_team_id_matches": sorted(active_team_id_matches),
+            "active_team_abbr_matches": sorted(active_team_abbr_matches),
+            "baseline_player_id_count": int(len(baseline_player_ids)),
+            "injury_player_id_count": int(len(injury_player_ids)),
+            "baseline_player_matches": int(len(baseline_player_matches)),
+            "candidate_player_id_count": int(len(candidate_player_ids)),
+            "candidate_player_matches": int(len(candidate_player_matches)),
+            "injury_context_team_count": int(context_team_count),
+            "injury_context_player_count": int(context_player_count),
+            "candidate_rows": int(len(candidates)),
+            "candidate_rows_with_nonzero_injury_impact_score": nonzero_injury_impact,
+            "candidate_rows_with_nonzero_team_injury_impact": nonzero_team_impact,
+            "candidate_rows_with_nonzero_opponent_injury_impact": nonzero_opponent_impact,
+            "nonzero_candidate_impacts": nonzero_candidate_impacts,
+            "has_date_columns": bool(has_date_columns),
+            "date_columns": sorted(set(raw_date_columns + normalized_date_columns)),
+            "date_values_sample": sorted(date_values)[:10],
+            "date_matches_prediction_date": bool(date_matches),
+            "mismatch_reasons": deduped_reasons,
+            "raw_sample": raw_df.head(3).to_dict("records") if not raw_df.empty else [],
+            "normalized_sample": norm_df.head(3).to_dict("records") if not norm_df.empty else [],
+        }
+        if fetch_diagnostics:
+            payload["fetch_diagnostics"] = dict(fetch_diagnostics)
+            if (
+                int(fetch_diagnostics.get("sdk_raw_rows", 0) or 0) > 0
+                and int(fetch_diagnostics.get("sdk_normalized_rows", 0) or 0) == 0
+                and int(fetch_diagnostics.get("http_normalized_rows", 0) or 0) == 0
+            ):
+                payload["recommended_provider_config_action"] = (
+                    "SDK injury rows were unusable and HTTP fallback did not produce normalized rows. "
+                    "Inspect BallDontLie injury endpoint schema/API plan and prefer direct HTTP fields "
+                    "with player/team identity before enabling injury context."
+                )
+        return payload
+
+    def _write_injury_context_diagnostics(self, payload: Mapping[str, Any]) -> tuple[Path, Path]:
+        prediction_date = str(payload.get("prediction_date") or "")
+        diagnostics_dir = self.out_dir / "runtime" / "diagnostics"
+        operator_dir = self.out_dir / "runtime" / "operator"
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        operator_dir.mkdir(parents=True, exist_ok=True)
+
+        json_path = diagnostics_dir / f"injury_context_diagnostics_{prediction_date}.json"
+        txt_path = operator_dir / f"injury_context_report_{prediction_date}.txt"
+        json_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+
+        lines = [
+            f"CourtVision Injury Context Diagnostics - {prediction_date}",
+            "",
+            "Fetch Fallback",
+            f"- SDK raw rows: {(payload.get('fetch_diagnostics') or {}).get('sdk_raw_rows', payload.get('raw_rows', 0))}",
+            f"- SDK normalized rows: {(payload.get('fetch_diagnostics') or {}).get('sdk_normalized_rows', payload.get('normalized_rows', 0))}",
+            f"- SDK identity coverage: {(payload.get('fetch_diagnostics') or {}).get('sdk_identity_coverage', 0)}",
+            f"- SDK unusable reason: {(payload.get('fetch_diagnostics') or {}).get('sdk_unusable_reason') or 'none'}",
+            f"- HTTP fallback attempted: {(payload.get('fetch_diagnostics') or {}).get('http_fallback_attempted', False)}",
+            f"- HTTP raw rows: {(payload.get('fetch_diagnostics') or {}).get('http_raw_rows', 0)}",
+            f"- HTTP normalized rows: {(payload.get('fetch_diagnostics') or {}).get('http_normalized_rows', 0)}",
+            "",
+            "Counts",
+            f"- raw injury rows: {payload.get('raw_rows', 0)}",
+            f"- normalized injury rows: {payload.get('normalized_rows', 0)}",
+            f"- rows with player_id: {payload.get('rows_with_player_id', 0)}",
+            f"- rows with team_id: {payload.get('rows_with_team_id', 0)}",
+            f"- rows with team_abbr: {payload.get('rows_with_team_abbr', 0)}",
+            f"- active slate team matches: {payload.get('active_team_matches', 0)}",
+            f"- baseline player ID matches: {payload.get('baseline_player_matches', 0)}",
+            f"- candidate player ID matches: {payload.get('candidate_player_matches', 0)}",
+            f"- candidate non-zero injury impacts: {payload.get('nonzero_candidate_impacts', 0)}",
+            "",
+            "Candidate Impact Columns",
+            f"- non-zero injury_impact_score: {payload.get('candidate_rows_with_nonzero_injury_impact_score', 0)}",
+            f"- non-zero team_injury_impact: {payload.get('candidate_rows_with_nonzero_team_injury_impact', 0)}",
+            f"- non-zero opponent_injury_impact: {payload.get('candidate_rows_with_nonzero_opponent_injury_impact', 0)}",
+            "",
+            "Mismatch Reasons",
+        ]
+        reasons = payload.get("mismatch_reasons") or []
+        lines.extend(f"- {reason}" for reason in reasons) if reasons else lines.append("- none detected")
+        lines.extend(
+            [
+                "",
+                f"Active teams: {payload.get('active_slate_team_abbrs', [])}",
+                f"Injury team abbreviations: {payload.get('injury_team_abbrs', [])}",
+                f"Date columns present: {payload.get('date_columns', [])}",
+                f"Date values sample: {payload.get('date_values_sample', [])}",
+                f"SDK raw keys: {(payload.get('fetch_diagnostics') or {}).get('sdk_raw_columns', payload.get('raw_columns', []))}",
+                f"HTTP raw keys: {(payload.get('fetch_diagnostics') or {}).get('http_raw_columns', [])}",
+                f"Recommended provider/config action: {payload.get('recommended_provider_config_action', 'none')}",
+                "",
+                f"JSON: {json_path}",
+            ]
+        )
+        txt_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return json_path, txt_path
+
+    def _emit_injury_context_diagnostics(self, payload: Mapping[str, Any]) -> None:
+        print(f"[INJURY] raw_rows={int(payload.get('raw_rows', 0) or 0)}", flush=True)
+        print(f"[INJURY] normalized_rows={int(payload.get('normalized_rows', 0) or 0)}", flush=True)
+        print(f"[INJURY] active_team_matches={int(payload.get('active_team_matches', 0) or 0)}", flush=True)
+        print(f"[INJURY] baseline_player_matches={int(payload.get('baseline_player_matches', 0) or 0)}", flush=True)
+        print(f"[INJURY] candidate_player_matches={int(payload.get('candidate_player_matches', 0) or 0)}", flush=True)
+        print(f"[INJURY] nonzero_candidate_impacts={int(payload.get('nonzero_candidate_impacts', 0) or 0)}", flush=True)
 
     def _injury_status_weight(self, status: Any) -> float:
         status_key = str(status or "").strip().lower()
