@@ -3815,11 +3815,15 @@ class CourtVisionAI:
             summary["game_context_report_path"] = str(game_context_report_path)
             summary["game_context"] = {
                 "rows": int(game_context_diagnostics.get("rows", 0) or 0),
+                "total_candidates": int(game_context_diagnostics.get("total_candidates", 0) or 0),
+                "candidates_with_game_id": int(game_context_diagnostics.get("candidates_with_game_id", 0) or 0),
                 "candidates_with_opponent": int(game_context_diagnostics.get("candidates_with_opponent", 0) or 0),
+                "candidates_with_home_away": int(game_context_diagnostics.get("candidates_with_home_away", 0) or 0),
                 "candidates_with_postseason": int(game_context_diagnostics.get("candidates_with_postseason", 0) or 0),
                 "candidates_with_rest_days": int(game_context_diagnostics.get("candidates_with_rest_days", 0) or 0),
                 "candidates_with_back_to_back": int(game_context_diagnostics.get("candidates_with_back_to_back", 0) or 0),
                 "candidates_with_def_rating": int(game_context_diagnostics.get("candidates_with_def_rating", 0) or 0),
+                "candidates_with_off_rating": int(game_context_diagnostics.get("candidates_with_off_rating", 0) or 0),
                 "candidates_with_pace": int(game_context_diagnostics.get("candidates_with_pace", 0) or 0),
                 "passive_mode": True,
             }
@@ -4099,11 +4103,15 @@ class CourtVisionAI:
             "game_context_report_path": str(game_context_report_path),
             "game_context": {
                 "rows": int(game_context_diagnostics.get("rows", 0) or 0),
+                "total_candidates": int(game_context_diagnostics.get("total_candidates", 0) or 0),
+                "candidates_with_game_id": int(game_context_diagnostics.get("candidates_with_game_id", 0) or 0),
                 "candidates_with_opponent": int(game_context_diagnostics.get("candidates_with_opponent", 0) or 0),
+                "candidates_with_home_away": int(game_context_diagnostics.get("candidates_with_home_away", 0) or 0),
                 "candidates_with_postseason": int(game_context_diagnostics.get("candidates_with_postseason", 0) or 0),
                 "candidates_with_rest_days": int(game_context_diagnostics.get("candidates_with_rest_days", 0) or 0),
                 "candidates_with_back_to_back": int(game_context_diagnostics.get("candidates_with_back_to_back", 0) or 0),
                 "candidates_with_def_rating": int(game_context_diagnostics.get("candidates_with_def_rating", 0) or 0),
+                "candidates_with_off_rating": int(game_context_diagnostics.get("candidates_with_off_rating", 0) or 0),
                 "candidates_with_pace": int(game_context_diagnostics.get("candidates_with_pace", 0) or 0),
                 "passive_mode": True,
             },
@@ -5649,11 +5657,13 @@ class CourtVisionAI:
         if not frames:
             return pd.DataFrame()
         columns = list(dict.fromkeys(column for frame in frames for column in frame.columns.tolist()))
-        concat_frames = [
-            frame.dropna(axis=1, how="all")
-            for frame in frames
-            if not frame.empty and not frame.dropna(how="all").empty
-        ]
+        concat_frames = []
+        for frame in frames:
+            if frame.empty or frame.dropna(how="all").empty:
+                continue
+            cleaned = frame.dropna(axis=1, how="all")
+            if not cleaned.empty and len(cleaned.columns) > 0:
+                concat_frames.append(cleaned)
         if not concat_frames:
             return pd.DataFrame(columns=columns)
         combined = pd.concat(concat_frames, ignore_index=True, sort=False)
@@ -5705,12 +5715,15 @@ class CourtVisionAI:
             candidates=qualified_pool_df,
         )
         print(f"[CONTEXT] game_context_rows={int(payload.get('rows', 0) or 0)}", flush=True)
+        print(f"[CONTEXT] candidates_with_game_id={int(payload.get('candidates_with_game_id', 0) or 0)}", flush=True)
         print(f"[CONTEXT] candidates_with_opponent={int(payload.get('candidates_with_opponent', 0) or 0)}", flush=True)
+        print(f"[CONTEXT] candidates_with_home_away={int(payload.get('candidates_with_home_away', 0) or 0)}", flush=True)
         print(f"[CONTEXT] candidates_with_postseason={int(payload.get('candidates_with_postseason', 0) or 0)}", flush=True)
         print(f"[CONTEXT] candidates_with_rest_days={int(payload.get('candidates_with_rest_days', 0) or 0)}", flush=True)
         print(f"[CONTEXT] candidates_with_back_to_back={int(payload.get('candidates_with_back_to_back', 0) or 0)}", flush=True)
-        print(f"[CONTEXT] candidates_with_def_rating={int(payload.get('candidates_with_def_rating', 0) or 0)}", flush=True)
         print(f"[CONTEXT] candidates_with_pace={int(payload.get('candidates_with_pace', 0) or 0)}", flush=True)
+        print(f"[CONTEXT] candidates_with_def_rating={int(payload.get('candidates_with_def_rating', 0) or 0)}", flush=True)
+        print(f"[CONTEXT] candidates_with_off_rating={int(payload.get('candidates_with_off_rating', 0) or 0)}", flush=True)
         return qualified_pool_df, elite_df, full_market_df, payload, json_path, report_path
 
     def _injury_status_weight(self, status: Any) -> float:
@@ -6822,11 +6835,17 @@ class CourtVisionAI:
             df_nonempty = not df.empty and not df.dropna(how="all").empty
             if existing_nonempty and df_nonempty:
                 columns = list(dict.fromkeys([*existing.columns.tolist(), *df.columns.tolist()]))
-                concat_frames = [
-                    frame.dropna(axis=1, how="all")
-                    for frame in (existing, df)
-                    if not frame.empty and not frame.dropna(how="all").empty
-                ]
+                concat_frames = []
+                for frame in (existing, df):
+                    if frame.empty or frame.dropna(how="all").empty:
+                        continue
+                    cleaned = frame.dropna(axis=1, how="all")
+                    if not cleaned.empty and len(cleaned.columns) > 0:
+                        concat_frames.append(cleaned)
+                if not concat_frames:
+                    combined = df.copy()
+                    combined.to_csv(path, index=False)
+                    return
                 combined = pd.concat(concat_frames, ignore_index=True)
                 for column in columns:
                     if column not in combined.columns:

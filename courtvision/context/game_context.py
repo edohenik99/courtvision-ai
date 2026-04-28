@@ -7,24 +7,57 @@ from typing import Any
 import pandas as pd
 
 GAME_CONTEXT_COLUMNS: tuple[str, ...] = (
+    "game_id",
     "opponent",
     "home_away",
-    "game_id",
     "postseason",
-    "team_pace",
-    "opponent_pace",
-    "team_def_rating",
-    "opponent_def_rating",
-    "team_off_rating",
-    "opponent_off_rating",
     "rest_days",
     "opponent_rest_days",
+    "rest_edge",
     "is_back_to_back",
     "opponent_is_back_to_back",
+    "team_pace",
+    "opponent_pace",
+    "matchup_pace",
+    "team_off_rating",
+    "opponent_off_rating",
+    "team_def_rating",
+    "opponent_def_rating",
+    "team_net_rating",
+    "opponent_net_rating",
     "implied_team_total",
+    "opponent_implied_team_total",
     "game_total",
     "spread",
 )
+
+PACE_COLUMNS: tuple[str, ...] = ("team_pace", "pace", "possessions_per_game")
+OFF_RATING_COLUMNS: tuple[str, ...] = ("team_off_rating", "off_rating", "offensive_rating")
+DEF_RATING_COLUMNS: tuple[str, ...] = ("team_def_rating", "def_rating", "defensive_rating")
+NET_RATING_COLUMNS: tuple[str, ...] = ("team_net_rating", "net_rating")
+
+
+def _nullable(value: Any) -> Any:
+    return value if value is not None else pd.NA
+
+
+def _average(left: Any, right: Any) -> float | None:
+    left_value = _float(left)
+    right_value = _float(right)
+    if left_value is None or right_value is None:
+        return None
+    return (left_value + right_value) / 2.0
+
+
+def _net_rating(row: pd.Series | None) -> float | None:
+    explicit = _team_metric(row, NET_RATING_COLUMNS)
+    if explicit is not None:
+        return explicit
+    off_rating = _team_metric(row, OFF_RATING_COLUMNS)
+    def_rating = _team_metric(row, DEF_RATING_COLUMNS)
+    if off_rating is None or def_rating is None:
+        return None
+    return off_rating - def_rating
 
 
 def _text(value: Any) -> str:
@@ -213,21 +246,26 @@ def _team_metric(row: pd.Series | None, names: tuple[str, ...]) -> float | None:
 
 def _default_context() -> dict[str, Any]:
     return {
+        "game_id": pd.NA,
         "opponent": "",
         "home_away": "",
-        "game_id": pd.NA,
         "postseason": pd.NA,
-        "team_pace": pd.NA,
-        "opponent_pace": pd.NA,
-        "team_def_rating": pd.NA,
-        "opponent_def_rating": pd.NA,
-        "team_off_rating": pd.NA,
-        "opponent_off_rating": pd.NA,
         "rest_days": pd.NA,
         "opponent_rest_days": pd.NA,
+        "rest_edge": pd.NA,
         "is_back_to_back": pd.NA,
         "opponent_is_back_to_back": pd.NA,
+        "team_pace": pd.NA,
+        "opponent_pace": pd.NA,
+        "matchup_pace": pd.NA,
+        "team_off_rating": pd.NA,
+        "opponent_off_rating": pd.NA,
+        "team_def_rating": pd.NA,
+        "opponent_def_rating": pd.NA,
+        "team_net_rating": pd.NA,
+        "opponent_net_rating": pd.NA,
         "implied_team_total": pd.NA,
+        "opponent_implied_team_total": pd.NA,
         "game_total": pd.NA,
         "spread": pd.NA,
     }
@@ -249,13 +287,18 @@ def apply_game_context(
             out[column] = value
     diagnostics = {
         "rows": int(len(out)),
+        "total_candidates": int(len(out)),
+        "candidates_with_game_id": 0,
         "candidates_with_opponent": 0,
+        "candidates_with_home_away": 0,
         "candidates_with_postseason": 0,
         "candidates_with_rest_days": 0,
         "candidates_with_back_to_back": 0,
         "candidates_with_def_rating": 0,
+        "candidates_with_off_rating": 0,
         "candidates_with_pace": 0,
         "missing_fields": [],
+        "missing_fields_breakdown": {},
     }
     if out.empty:
         diagnostics["missing_fields"] = list(GAME_CONTEXT_COLUMNS)
@@ -302,12 +345,17 @@ def apply_game_context(
         opponent = _team_key(out.at[idx, "opponent"])
         team_row = teams.get(team)
         opp_row = teams.get(opponent)
-        out.at[idx, "team_pace"] = _team_metric(team_row, ("team_pace", "pace", "possessions_per_game"))
-        out.at[idx, "opponent_pace"] = _team_metric(opp_row, ("team_pace", "pace", "possessions_per_game"))
-        out.at[idx, "team_def_rating"] = _team_metric(team_row, ("team_def_rating", "def_rating", "defensive_rating"))
-        out.at[idx, "opponent_def_rating"] = _team_metric(opp_row, ("team_def_rating", "def_rating", "defensive_rating"))
-        out.at[idx, "team_off_rating"] = _team_metric(team_row, ("team_off_rating", "off_rating", "offensive_rating"))
-        out.at[idx, "opponent_off_rating"] = _team_metric(opp_row, ("team_off_rating", "off_rating", "offensive_rating"))
+        team_pace = _team_metric(team_row, PACE_COLUMNS)
+        opponent_pace = _team_metric(opp_row, PACE_COLUMNS)
+        out.at[idx, "team_pace"] = _nullable(team_pace)
+        out.at[idx, "opponent_pace"] = _nullable(opponent_pace)
+        out.at[idx, "matchup_pace"] = _nullable(_average(team_pace, opponent_pace))
+        out.at[idx, "team_off_rating"] = _nullable(_team_metric(team_row, OFF_RATING_COLUMNS))
+        out.at[idx, "opponent_off_rating"] = _nullable(_team_metric(opp_row, OFF_RATING_COLUMNS))
+        out.at[idx, "team_def_rating"] = _nullable(_team_metric(team_row, DEF_RATING_COLUMNS))
+        out.at[idx, "opponent_def_rating"] = _nullable(_team_metric(opp_row, DEF_RATING_COLUMNS))
+        out.at[idx, "team_net_rating"] = _nullable(_net_rating(team_row))
+        out.at[idx, "opponent_net_rating"] = _nullable(_net_rating(opp_row))
         team_rest = rest_lookup.get(team)
         opponent_rest = rest_lookup.get(opponent)
         out.at[idx, "rest_days"] = float(team_rest) if team_rest is not None else _team_metric(team_row, ("rest_days", "team_rest_days"))
@@ -316,14 +364,18 @@ def apply_game_context(
         )
         rest_days = _float(out.at[idx, "rest_days"])
         opp_rest_days = _float(out.at[idx, "opponent_rest_days"])
+        out.at[idx, "rest_edge"] = _nullable(rest_days - opp_rest_days if rest_days is not None and opp_rest_days is not None else None)
         out.at[idx, "is_back_to_back"] = bool(rest_days == 0.0) if rest_days is not None else pd.NA
         out.at[idx, "opponent_is_back_to_back"] = bool(opp_rest_days == 0.0) if opp_rest_days is not None else pd.NA
 
         market_payload = markets.get((_text(out.at[idx, "game_id"]), team), {})
+        opponent_market_payload = markets.get((_text(out.at[idx, "game_id"]), opponent), {})
         game_payload = markets.get((_text(out.at[idx, "game_id"]), ""), {})
         for column in ("implied_team_total", "spread"):
             if column in market_payload:
                 out.at[idx, column] = market_payload[column]
+        if "implied_team_total" in opponent_market_payload:
+            out.at[idx, "opponent_implied_team_total"] = opponent_market_payload["implied_team_total"]
         if "game_total" in game_payload:
             out.at[idx, "game_total"] = game_payload["game_total"]
 
@@ -356,16 +408,23 @@ def _coverage(df: pd.DataFrame) -> dict[str, Any]:
 
     coverage = {
         "rows": int(len(df)),
+        "total_candidates": int(len(df)),
+        "candidates_with_game_id": has_value("game_id"),
         "candidates_with_opponent": has_text("opponent"),
+        "candidates_with_home_away": has_text("home_away"),
         "candidates_with_postseason": has_value("postseason"),
         "candidates_with_rest_days": has_any(("rest_days", "opponent_rest_days")),
         "candidates_with_back_to_back": has_true(("is_back_to_back", "opponent_is_back_to_back")),
         "candidates_with_def_rating": has_any(("team_def_rating", "opponent_def_rating")),
+        "candidates_with_off_rating": has_any(("team_off_rating", "opponent_off_rating")),
         "candidates_with_pace": has_any(("team_pace", "opponent_pace")),
     }
-    coverage["missing_fields"] = [
-        column for column in GAME_CONTEXT_COLUMNS if column in df.columns and has_value(column) == 0
-    ]
+    coverage["missing_fields_breakdown"] = {
+        column: int(len(df) - has_value(column))
+        for column in GAME_CONTEXT_COLUMNS
+        if column in df.columns and has_value(column) < len(df)
+    }
+    coverage["missing_fields"] = list(coverage["missing_fields_breakdown"].keys())
     return coverage
 
 
@@ -398,17 +457,36 @@ def write_game_context_outputs(
     json_path = diagnostics_dir / f"game_context_{prediction_date}.json"
     txt_path = operator_dir / f"game_context_report_{prediction_date}.txt"
     json_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    sample_lines = []
+    for sample in payload["sample_rows"][:8]:
+        sample_lines.append(
+            "- "
+            f"{sample.get('player_name', '')} ({sample.get('team', '')} vs {sample.get('opponent', '')}, "
+            f"{sample.get('home_away', '')}): rest={sample.get('rest_days')} "
+            f"opp_rest={sample.get('opponent_rest_days')} pace={sample.get('matchup_pace')} "
+            f"postseason={sample.get('postseason')}"
+        )
     lines = [
         f"Game Context Diagnostics - {prediction_date}",
         "",
-        f"rows: {payload['rows']}",
+        "Coverage Summary",
+        f"total_candidates: {payload.get('total_candidates', payload.get('rows', 0))}",
+        f"game_context_rows: {payload['rows']}",
+        f"candidates_with_game_id: {payload.get('candidates_with_game_id', 0)}",
         f"candidates_with_opponent: {payload['candidates_with_opponent']}",
+        f"candidates_with_home_away: {payload.get('candidates_with_home_away', 0)}",
         f"candidates_with_postseason: {payload['candidates_with_postseason']}",
         f"candidates_with_rest_days: {payload['candidates_with_rest_days']}",
         f"candidates_with_back_to_back: {payload.get('candidates_with_back_to_back', 0)}",
-        f"candidates_with_def_rating: {payload['candidates_with_def_rating']}",
         f"candidates_with_pace: {payload['candidates_with_pace']}",
-        f"missing_fields: {payload['missing_fields']}",
+        f"candidates_with_def_rating: {payload['candidates_with_def_rating']}",
+        f"candidates_with_off_rating: {payload.get('candidates_with_off_rating', 0)}",
+        "",
+        "Missing Fields",
+        json.dumps(payload.get("missing_fields_breakdown", {}), indent=2, default=str),
+        "",
+        "Sample Rows",
+        *(sample_lines or ["- none"]),
         "",
         "Mode: passive diagnostics only. No projections, confidence, selection, elite, or Kelly logic changed.",
     ]
