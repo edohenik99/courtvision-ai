@@ -73,6 +73,7 @@ class StakeRow:
     expected_value: float
     eligible: bool
     skip_reason: str
+    context_caution_level: str
 
 
 def _log(msg: str) -> None:
@@ -219,6 +220,7 @@ def _build_stake_row(row: dict[str, str], edge_col: str, bankroll: float) -> Sta
         expected_value=expected_value,
         eligible=eligible,
         skip_reason=skip_reason,
+        context_caution_level=str(row.get("context_caution_level", "") or ""),
     )
 
 
@@ -241,6 +243,7 @@ def _write_stakes(output_path: Path, stakes: list[StakeRow], bankroll: float, pr
         "bankroll",
         "eligible",
         "skip_reason",
+        "context_caution_level",
     ]
     with output_path.open("w", encoding="utf-8", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=fieldnames)
@@ -263,6 +266,7 @@ def _write_stakes(output_path: Path, stakes: list[StakeRow], bankroll: float, pr
                 "bankroll": bankroll,
                 "eligible": s.eligible,
                 "skip_reason": s.skip_reason,
+                "context_caution_level": s.context_caution_level,
             })
 
 

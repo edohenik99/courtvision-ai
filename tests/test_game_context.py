@@ -324,6 +324,7 @@ def test_game_context_missing_pace_and_ratings_stay_null_and_report_missing() ->
     assert out.loc[0, "playoff_context_signal"] == "insufficient_data"
     assert out.loc[0, "overall_context_signal"] == "insufficient_data"
     assert out.loc[0, "context_pick_alignment"] == "insufficient_data"
+    assert out.loc[0, "context_caution_level"] == "insufficient_data"
     assert bool(out.loc[0, "context_preview_applied"]) is False
 
 
@@ -364,6 +365,7 @@ def test_game_context_preview_signals_are_passive_labels() -> None:
     assert row["playoff_context_signal"] == "neutral"
     assert row["overall_context_signal"] == "supports_over"
     assert row["context_pick_alignment"] == "aligned"
+    assert row["context_caution_level"] == "low"
     assert bool(row["context_preview_applied"]) is False
     assert row["projection"] == 18.0
     assert row["confidence"] == 0.7
@@ -393,5 +395,66 @@ def test_game_context_pick_alignment_rules() -> None:
     )
 
     by_selection = {row["selection"]: row["context_pick_alignment"] for _, row in out.iterrows()}
+    caution_by_selection = {row["selection"]: row["context_caution_level"] for _, row in out.iterrows()}
     assert by_selection["over"] == "aligned"
     assert by_selection["under"] == "conflicted"
+    assert caution_by_selection["over"] == "low"
+    assert caution_by_selection["under"] == "insufficient_data"
+
+
+def test_game_context_caution_flags_are_passive_labels() -> None:
+    candidates = pd.DataFrame(
+        [
+            {
+                "player_name": "Caution Player",
+                "team": "AAA",
+                "team_abbr": "AAA",
+                "game_id": 1,
+                "selection": "over",
+                "projection": 18.0,
+                "confidence": 0.7,
+                "selection_score": 55.0,
+            },
+            {
+                "player_name": "Neutral Player",
+                "team": "AAA",
+                "team_abbr": "AAA",
+                "game_id": 2,
+                "selection": "over",
+                "projection": 12.0,
+                "confidence": 0.6,
+                "selection_score": 40.0,
+            },
+        ]
+    )
+    games = pd.DataFrame(
+        [
+            {"game_id": 1, "home_team_abbr": "AAA", "visitor_team_abbr": "BBB", "postseason": True},
+            {"game_id": 2, "home_team_abbr": "AAA", "visitor_team_abbr": "CCC", "postseason": False},
+        ]
+    )
+    team_baselines = pd.DataFrame(
+        [
+            {"team_abbr": "AAA", "team_pace": 98.5, "team_def_rating": 114.0, "team_off_rating": 115.0},
+            {"team_abbr": "BBB", "team_pace": 98.0, "team_def_rating": 111.0, "team_off_rating": 119.0},
+            {"team_abbr": "CCC", "team_pace": 98.5, "team_def_rating": 114.0, "team_off_rating": 115.0},
+        ]
+    )
+
+    out, _ = apply_game_context(
+        candidates,
+        games=games,
+        team_baselines=team_baselines,
+        odds=pd.DataFrame(),
+    )
+
+    by_player = {row["player_name"]: row for _, row in out.iterrows()}
+    assert by_player["Caution Player"]["overall_context_signal"] == "supports_under"
+    assert by_player["Caution Player"]["context_pick_alignment"] == "conflicted"
+    assert by_player["Caution Player"]["context_caution_level"] == "high"
+    assert by_player["Neutral Player"]["overall_context_signal"] == "neutral"
+    assert by_player["Neutral Player"]["context_pick_alignment"] == "neutral"
+    assert by_player["Neutral Player"]["context_caution_level"] == "medium"
+    assert by_player["Caution Player"]["projection"] == 18.0
+    assert by_player["Caution Player"]["confidence"] == 0.7
+    assert by_player["Caution Player"]["selection_score"] == 55.0

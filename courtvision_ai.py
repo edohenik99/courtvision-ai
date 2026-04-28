@@ -3823,6 +3823,10 @@ class CourtVisionAI:
             summary["elite_count"] = int(len(elite_df))
             summary["full_market_count"] = int(len(full_market_df))
             summary["markets_evaluated"] = int(len(qualified_pool_df))
+            elite_caution_counts = self._context_caution_counts(elite_df)
+            summary["elite_high_caution_count"] = int(elite_caution_counts.get("high", 0))
+            summary["elite_medium_caution_count"] = int(elite_caution_counts.get("medium", 0))
+            summary["elite_low_caution_count"] = int(elite_caution_counts.get("low", 0))
             summary["manual_context_diagnostics_path"] = str(manual_context_path)
             summary["manual_context"] = {
                 "file_found": bool(manual_context_diagnostics.get("file_found", False)),
@@ -4103,6 +4107,9 @@ class CourtVisionAI:
             "selected_count": int(len(elite_df)),
             "elite_count": int(len(elite_df)),
             "full_market_count": int(len(full_market_df)),
+            "elite_high_caution_count": int(self._context_caution_counts(elite_df).get("high", 0)),
+            "elite_medium_caution_count": int(self._context_caution_counts(elite_df).get("medium", 0)),
+            "elite_low_caution_count": int(self._context_caution_counts(elite_df).get("low", 0)),
             "stat_only_count": int(len(stat_only_df)),
             "strike_count": int(len(strike_df)),
             "predictive_lines_count": int(len(predictive_lines_df)),
@@ -5829,6 +5836,7 @@ class CourtVisionAI:
             schedule_games=schedule_games,
         )
         elite_alignment_counts = self._context_alignment_counts(elite_df)
+        elite_caution_counts = self._context_caution_counts(elite_df)
         full_market_alignment_counts = self._context_alignment_counts(full_market_df)
         json_path, report_path, payload = write_game_context_outputs(
             prediction_date=prediction_date,
@@ -5849,6 +5857,9 @@ class CourtVisionAI:
         print(f"[CONTEXT] elite_context_aligned={elite_alignment_counts.get('aligned', 0)}", flush=True)
         print(f"[CONTEXT] elite_context_conflicted={elite_alignment_counts.get('conflicted', 0)}", flush=True)
         print(f"[CONTEXT] elite_context_neutral={elite_alignment_counts.get('neutral', 0)}", flush=True)
+        print(f"[CONTEXT] elite_high_caution_count={elite_caution_counts.get('high', 0)}", flush=True)
+        print(f"[CONTEXT] elite_medium_caution_count={elite_caution_counts.get('medium', 0)}", flush=True)
+        print(f"[CONTEXT] elite_low_caution_count={elite_caution_counts.get('low', 0)}", flush=True)
         print(f"[CONTEXT] full_market_context_aligned={full_market_alignment_counts.get('aligned', 0)}", flush=True)
         print(f"[CONTEXT] full_market_context_conflicted={full_market_alignment_counts.get('conflicted', 0)}", flush=True)
         print(f"[CONTEXT] full_market_context_neutral={full_market_alignment_counts.get('neutral', 0)}", flush=True)
@@ -5860,6 +5871,17 @@ class CourtVisionAI:
         if not isinstance(df, pd.DataFrame) or df.empty or "context_pick_alignment" not in df.columns:
             return counts
         series = df["context_pick_alignment"].fillna("insufficient_data").astype(str).str.strip().str.lower()
+        raw_counts = series.value_counts().to_dict()
+        for key in counts:
+            counts[key] = int(raw_counts.get(key, 0) or 0)
+        return counts
+
+    @staticmethod
+    def _context_caution_counts(df: pd.DataFrame) -> dict[str, int]:
+        counts = {"high": 0, "medium": 0, "low": 0, "insufficient_data": 0}
+        if not isinstance(df, pd.DataFrame) or df.empty or "context_caution_level" not in df.columns:
+            return counts
+        series = df["context_caution_level"].fillna("insufficient_data").astype(str).str.strip().str.lower()
         raw_counts = series.value_counts().to_dict()
         for key in counts:
             counts[key] = int(raw_counts.get(key, 0) or 0)
@@ -7365,17 +7387,22 @@ def _build_elite_decision_report_text(prediction_date: str, elite_df: pd.DataFra
                 "playoff_context_signal",
                 "overall_context_signal",
                 "context_pick_alignment",
+                "context_caution_level",
                 "context_preview_applied",
             ]
         )
 
     rows_with_context = 0
     rows_with_context_preview = 0
+    caution_counts = {"high": 0, "medium": 0, "low": 0}
     for _, row in elite_df.iterrows():
         player = _safe(row.get("player_name")) or _safe(row.get("entity_name")) or "Unknown"
         market = _safe(row.get("market_type")) or "unknown"
         selection = _safe(row.get("selection")) or "n/a"
         line = _safe(row.get("sportsbook_line")) or _safe(row.get("line")) or "n/a"
+        caution_level = (_safe(row.get("context_caution_level")) or "insufficient_data").lower()
+        if caution_level in caution_counts:
+            caution_counts[caution_level] += 1
         lines.append(f"{player} | market={market} | selection={selection} | line={line}")
         if _has_context(row):
             rows_with_context += 1
@@ -7393,12 +7420,16 @@ def _build_elite_decision_report_text(prediction_date: str, elite_df: pd.DataFra
             lines.append(f"  playoff_context_signal={_safe(row.get('playoff_context_signal')) or 'insufficient_data'}")
             lines.append(f"  overall_context_signal={_safe(row.get('overall_context_signal')) or 'insufficient_data'}")
             lines.append(f"  context_pick_alignment={_safe(row.get('context_pick_alignment')) or 'insufficient_data'}")
+            lines.append(f"  context_caution_level={caution_level}")
             lines.append(f"  context_preview_applied={_safe(row.get('context_preview_applied')) or 'False'}")
         lines.append("")
 
     lines.append(f"elite_picks_with_manual_context={rows_with_context}")
     lines.append("manual_context_mode=passive_diagnostic_only")
     lines.append(f"elite_picks_with_context_preview={rows_with_context_preview}")
+    lines.append(f"elite_high_caution_count={caution_counts['high']}")
+    lines.append(f"elite_medium_caution_count={caution_counts['medium']}")
+    lines.append(f"elite_low_caution_count={caution_counts['low']}")
     lines.append("context_preview_mode=passive_diagnostic_only")
     return "\n".join(lines) + "\n"
 

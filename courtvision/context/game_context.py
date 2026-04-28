@@ -35,6 +35,7 @@ GAME_CONTEXT_COLUMNS: tuple[str, ...] = (
     "playoff_context_signal",
     "overall_context_signal",
     "context_pick_alignment",
+    "context_caution_level",
     "context_preview_applied",
 )
 
@@ -145,6 +146,19 @@ def _context_pick_alignment(selection: Any, overall_context_signal: Any) -> str:
         return "aligned" if signal == "supports_over" else "conflicted" if signal == "supports_under" else "insufficient_data"
     if side == "under":
         return "aligned" if signal == "supports_under" else "conflicted" if signal == "supports_over" else "insufficient_data"
+    return "insufficient_data"
+
+
+def _context_caution_level(selection: Any, overall_context_signal: Any, context_pick_alignment: Any) -> str:
+    side = _text(selection).lower()
+    signal = _text(overall_context_signal).lower()
+    alignment = _text(context_pick_alignment).lower()
+    if alignment == "conflicted" and signal == "supports_under" and side == "over":
+        return "high"
+    if alignment == "neutral":
+        return "medium"
+    if alignment == "aligned":
+        return "low"
     return "insufficient_data"
 
 
@@ -362,6 +376,7 @@ def _default_context() -> dict[str, Any]:
         "playoff_context_signal": "insufficient_data",
         "overall_context_signal": "insufficient_data",
         "context_pick_alignment": "insufficient_data",
+        "context_caution_level": "insufficient_data",
         "context_preview_applied": False,
     }
 
@@ -500,6 +515,11 @@ def apply_game_context(
         out.at[idx, "context_pick_alignment"] = _context_pick_alignment(
             row.get("selection"),
             out.at[idx, "overall_context_signal"],
+        )
+        out.at[idx, "context_caution_level"] = _context_caution_level(
+            row.get("selection"),
+            out.at[idx, "overall_context_signal"],
+            out.at[idx, "context_pick_alignment"],
         )
         out.at[idx, "context_preview_applied"] = False
 

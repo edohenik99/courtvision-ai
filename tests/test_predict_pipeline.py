@@ -751,6 +751,7 @@ class TestPredictionPipeline:
                 "playoff_context_signal": "supports_under",
                 "overall_context_signal": "supports_under",
                 "context_pick_alignment": "conflicted",
+                "context_caution_level": "high",
                 "context_preview_applied": False,
             },
         ]).to_csv(runtime_root / "operator" / "elite_board_2024-01-15.csv", index=False)
@@ -766,6 +767,7 @@ class TestPredictionPipeline:
                 "stake_amount": 8.50,
                 "expected_value": 1.02,
                 "eligible": True,
+                "context_caution_level": "high",
             },
         ]).to_csv(runtime_root / "operator" / "kelly_stakes_2024-01-15.csv", index=False)
         pd.DataFrame([
@@ -945,10 +947,13 @@ class TestPredictionPipeline:
         assert "playoff_context_signal: supports_under" in text
         assert "overall_context_signal: supports_under" in text
         assert "context_pick_alignment: conflicted" in text
+        assert "context_caution_level: high" in text
         assert "context_preview_applied: False" in text
         assert "Context-Pick Alignment" in text
         assert "- elite: aligned=0, conflicted=1, neutral=0, insufficient_data=0" in text
+        assert "- elite caution: high=1, medium=0, low=0, insufficient_data=0" in text
         assert "- full_market: aligned=1, conflicted=0, neutral=1, insufficient_data=0" in text
+        assert "caution=high" in text
         assert "Context Alignment Performance" in text
         assert "- aligned: graded=1, pending=0, hit_rate=100.0%, roi=90.9%, status=ok" in text
         assert "- neutral/under: graded=0, pending=1, hit_rate=n/a, roi=n/a, status=insufficient_sample" in text
@@ -958,6 +963,9 @@ class TestPredictionPipeline:
         assert "Manual player context is diagnostic only; matched candidates: 1." in text
         assert metadata["full_market_counts"] == {"player_points": 1, "player_rebounds": 1}
         assert metadata["elite_context_alignment"]["conflicted"] == 1
+        assert metadata["elite_high_caution_count"] == 1
+        assert metadata["elite_medium_caution_count"] == 0
+        assert metadata["elite_low_caution_count"] == 0
         assert metadata["full_market_context_alignment"]["neutral"] == 1
         assert metadata["context_alignment_performance"]["by_alignment"]["aligned"]["hit_rate"] == 1.0
         assert metadata["manual_context"]["candidate_matches"] == 1

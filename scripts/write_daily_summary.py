@@ -147,6 +147,7 @@ def _has_context_preview(row: pd.Series) -> bool:
             "playoff_context_signal",
             "overall_context_signal",
             "context_pick_alignment",
+            "context_caution_level",
             "context_preview_applied",
         )
     )
@@ -160,6 +161,7 @@ def _context_preview_lines(row: pd.Series) -> list[str]:
         f"  playoff_context_signal: {_safe_text(row.get('playoff_context_signal')) or 'insufficient_data'}",
         f"  overall_context_signal: {_safe_text(row.get('overall_context_signal')) or 'insufficient_data'}",
         f"  context_pick_alignment: {_safe_text(row.get('context_pick_alignment')) or 'insufficient_data'}",
+        f"  context_caution_level: {_safe_text(row.get('context_caution_level')) or 'insufficient_data'}",
         f"  context_preview_applied: {_safe_text(row.get('context_preview_applied')) or 'False'}",
     ]
 
@@ -169,6 +171,17 @@ def _alignment_counts(df: pd.DataFrame) -> dict[str, int]:
     if df.empty or "context_pick_alignment" not in df.columns:
         return counts
     series = df["context_pick_alignment"].fillna("insufficient_data").astype(str).str.strip().str.lower()
+    raw_counts = series.value_counts().to_dict()
+    for key in counts:
+        counts[key] = int(raw_counts.get(key, 0) or 0)
+    return counts
+
+
+def _caution_counts(df: pd.DataFrame) -> dict[str, int]:
+    counts = {"high": 0, "medium": 0, "low": 0, "insufficient_data": 0}
+    if df.empty or "context_caution_level" not in df.columns:
+        return counts
+    series = df["context_caution_level"].fillna("insufficient_data").astype(str).str.strip().str.lower()
     raw_counts = series.value_counts().to_dict()
     for key in counts:
         counts[key] = int(raw_counts.get(key, 0) or 0)
@@ -195,7 +208,8 @@ def _kelly_line(row: pd.Series) -> str:
     stake = _format_money(_safe_float(row.get("stake_amount")))
     ev = _format_money(_safe_float(row.get("expected_value")))
     edge = _format_pct(row.get("edge_pct"))
-    return f"- {player}: {market} {side} {line} stake={stake} EV={ev} edge={edge}"
+    caution = _safe_text(row.get("context_caution_level")) or "insufficient_data"
+    return f"- {player}: {market} {side} {line} stake={stake} EV={ev} edge={edge} caution={caution}"
 
 
 def build_daily_summary(
@@ -232,6 +246,7 @@ def build_daily_summary(
     )
     counts = _market_counts(full_market_df)
     elite_alignment = _alignment_counts(elite_df)
+    elite_caution = _caution_counts(elite_df)
     full_market_alignment = _alignment_counts(full_market_df)
     shadow_totals = shadow.get("totals", {}) if isinstance(shadow, dict) else {}
     context_alignment_performance = (
@@ -276,6 +291,13 @@ def build_daily_summary(
         f"conflicted={full_market_alignment['conflicted']}, "
         f"neutral={full_market_alignment['neutral']}, "
         f"insufficient_data={full_market_alignment['insufficient_data']}"
+    )
+    lines.append(
+        "- elite caution: "
+        f"high={elite_caution['high']}, "
+        f"medium={elite_caution['medium']}, "
+        f"low={elite_caution['low']}, "
+        f"insufficient_data={elite_caution['insufficient_data']}"
     )
 
     lines.extend(["", "Kelly Stakes", "-" * 72])
@@ -362,6 +384,7 @@ def build_daily_summary(
     lines.append("- Elite board locked to player_points only.")
     lines.append("- Kelly stakes locked to player_points only.")
     lines.append("- Context preview signals are passive labels only and are not applied to projections or staking.")
+    lines.append("- Context caution levels are passive labels only and are not applied to selection or stake sizing.")
     if manual_context:
         matches = int(manual_context.get("candidate_matches") or 0)
         lines.append(f"- Manual player context is diagnostic only; matched candidates: {matches}.")
@@ -392,6 +415,10 @@ def build_daily_summary(
         "expected_ev": round(expected_ev, 2),
         "full_market_counts": dict(sorted(counts.items())),
         "elite_context_alignment": elite_alignment,
+        "elite_context_caution": elite_caution,
+        "elite_high_caution_count": elite_caution["high"],
+        "elite_medium_caution_count": elite_caution["medium"],
+        "elite_low_caution_count": elite_caution["low"],
         "full_market_context_alignment": full_market_alignment,
         "shadow_totals": shadow_totals,
         "context_alignment_performance": context_alignment_performance,

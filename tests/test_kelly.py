@@ -152,6 +152,7 @@ class TestConservativeKellyLogic:
             "confidence": "0.75",
             "edge_pct": "-0.10",
             "side_edge_pct": "0.10",
+            "context_caution_level": "high",
         }
 
         stake = _build_stake_row(row, edge_col, bankroll=1000.0)
@@ -160,6 +161,7 @@ class TestConservativeKellyLogic:
         assert stake.eligible is True
         assert stake.edge_pct == 0.10
         assert stake.side_edge_pct == 0.10
+        assert stake.context_caution_level == "high"
         assert stake.stake_amount > 0
 
 
