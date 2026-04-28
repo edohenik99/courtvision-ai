@@ -381,6 +381,24 @@ class BallDontLieClient:
         rows = payload.get("data", [])
         return pd.DataFrame(rows if isinstance(rows, list) else [])
 
+    def get_team_season_averages(
+        self,
+        *,
+        season: int,
+        season_type: str = "regular",
+        category: str = "general",
+        stats_type: str = "advanced",
+    ) -> pd.DataFrame:
+        rows = self.paginate(
+            f"{NBA_V1}/team_season_averages/{category}",
+            {
+                "season": int(season),
+                "season_type": season_type,
+                "type": stats_type,
+            },
+        )
+        return pd.DataFrame(rows)
+
     def get_injuries(self, game_date: Optional[str] = None) -> pd.DataFrame:
         endpoint_candidates: list[tuple[str, dict[str, Any]]] = []
         for base_url in [NBA_V1, NBA_V2]:
@@ -3543,6 +3561,7 @@ class CourtVisionAI:
         games_raw = client.get_games(prediction_date)
         games = self._normalize_games(games_raw)
         schedule_games = self._fetch_recent_game_schedule(client, prediction_date)
+        passive_team_context = self._fetch_passive_team_rating_context(client, prediction_date, games_raw)
         game_ids = [int(game_id) for game_id in games["game_id"].dropna().tolist()] if not games.empty else []
         print(f"[STAGE] provider_fetch_start games={len(game_ids)}")
         print(f"[COUNT] active_odds_fetch_path=courtvision_ai.py:predict:client.get_odds", flush=True)
@@ -3780,7 +3799,7 @@ class CourtVisionAI:
                 full_market_df=full_market_df,
                 games=games_raw if isinstance(games_raw, pd.DataFrame) and not games_raw.empty else games,
                 schedule_games=schedule_games,
-                team_baselines=team_baselines,
+                team_baselines=self._merge_passive_team_context(team_baselines, passive_team_context),
                 odds=odds,
             )
             rejected_df = pd.DataFrame()
@@ -4042,7 +4061,7 @@ class CourtVisionAI:
             full_market_df=full_market_df,
             games=games_raw if isinstance(games_raw, pd.DataFrame) and not games_raw.empty else games,
             schedule_games=schedule_games,
-            team_baselines=team_baselines,
+            team_baselines=self._merge_passive_team_context(team_baselines, passive_team_context),
             odds=odds,
         )
         graded_df, grading_summary = self._grade_history(prediction_date=prediction_date)
@@ -5671,6 +5690,107 @@ class CourtVisionAI:
             if column not in combined.columns:
                 combined[column] = pd.NA
         return combined.reindex(columns=columns)
+
+    @staticmethod
+    def _prediction_nba_season(prediction_date: str) -> int:
+        parsed = pd.to_datetime(str(prediction_date), errors="coerce")
+        if pd.isna(parsed):
+            return datetime.now().year
+        year = int(parsed.year)
+        return year if int(parsed.month) >= 10 else year - 1
+
+    @staticmethod
+    def _active_team_abbrs_from_games(games: pd.DataFrame) -> set[str]:
+        teams: set[str] = set()
+        if not isinstance(games, pd.DataFrame) or games.empty:
+            return teams
+        for _, row in games.iterrows():
+            for nested_name, flat_names in (
+                ("home_team", ("home_team_abbr", "home.abbreviation", "home_team.abbreviation")),
+                ("visitor_team", ("visitor_team_abbr", "away_team_abbr", "visitor.abbreviation", "visitor_team.abbreviation")),
+            ):
+                nested = row.get(nested_name) if nested_name in row.index and isinstance(row.get(nested_name), dict) else {}
+                value = str(nested.get("abbreviation") or "").strip().upper()
+                if not value:
+                    for flat_name in flat_names:
+                        flat_value = row.get(flat_name) if flat_name in row.index else None
+                        value = str(flat_value or "").strip().upper()
+                        if value and value.lower() not in {"nan", "none", "<na>"}:
+                            break
+                if value and value.lower() not in {"nan", "none", "<na>"}:
+                    teams.add(value)
+        return teams
+
+    def _fetch_passive_team_rating_context(
+        self,
+        client: Any,
+        prediction_date: str,
+        games: pd.DataFrame,
+    ) -> pd.DataFrame:
+        season = self._prediction_nba_season(prediction_date)
+        active_teams = self._active_team_abbrs_from_games(games)
+        try:
+            raw = client.get_team_season_averages(
+                season=season,
+                season_type="regular",
+                category="general",
+                stats_type="advanced",
+            )
+        except Exception as exc:
+            self.logger.warning("passive_team_rating_context_fetch_failed season=%s error=%s", season, exc)
+            print("[CONTEXT] team_rating_source=missing_fetch_failed", flush=True)
+            print("[CONTEXT] team_rating_rows=0", flush=True)
+            return pd.DataFrame()
+        rows: list[dict[str, Any]] = []
+        if isinstance(raw, pd.DataFrame) and not raw.empty:
+            for _, row in raw.iterrows():
+                team = row.get("team") if "team" in row.index and isinstance(row.get("team"), dict) else {}
+                stats = row.get("stats") if "stats" in row.index and isinstance(row.get("stats"), dict) else {}
+                abbr = str(team.get("abbreviation") or row.get("team_abbr") or "").strip().upper()
+                if not abbr:
+                    continue
+                rows.append(
+                    {
+                        "team_abbr": abbr,
+                        "team_pace": stats.get("pace"),
+                        "team_off_rating": stats.get("off_rating"),
+                        "team_def_rating": stats.get("def_rating"),
+                        "team_net_rating": stats.get("net_rating"),
+                        "team_rating_source": "balldontlie_team_season_averages_general_advanced",
+                        "team_rating_season": season,
+                        "team_rating_season_type": "regular",
+                    }
+                )
+        out = pd.DataFrame(rows)
+        if active_teams and not out.empty:
+            out = out[out["team_abbr"].isin(active_teams)].copy()
+        print("[CONTEXT] team_rating_source=balldontlie_team_season_averages_general_advanced", flush=True)
+        print(f"[CONTEXT] team_rating_rows={len(out)}", flush=True)
+        print(f"[CONTEXT] team_rating_active_team_matches={len(set(out.get('team_abbr', pd.Series(dtype=str)).astype(str)) & active_teams)}", flush=True)
+        return out
+
+    @staticmethod
+    def _merge_passive_team_context(team_baselines: pd.DataFrame, team_context: pd.DataFrame) -> pd.DataFrame:
+        base = team_baselines.copy() if isinstance(team_baselines, pd.DataFrame) else pd.DataFrame()
+        if not isinstance(team_context, pd.DataFrame) or team_context.empty or "team_abbr" not in team_context.columns:
+            return base
+        if base.empty or "team_abbr" not in base.columns:
+            return team_context.copy()
+        context_cols = [
+            "team_abbr",
+            "team_pace",
+            "team_off_rating",
+            "team_def_rating",
+            "team_net_rating",
+            "team_rating_source",
+            "team_rating_season",
+            "team_rating_season_type",
+        ]
+        context = team_context[[column for column in context_cols if column in team_context.columns]].copy()
+        overlap = [column for column in context.columns if column != "team_abbr" and column in base.columns]
+        if overlap:
+            base = base.drop(columns=overlap)
+        return base.merge(context, on="team_abbr", how="left")
 
     def _attach_game_context(
         self,
