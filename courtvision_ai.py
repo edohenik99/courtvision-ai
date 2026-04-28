@@ -6667,7 +6667,24 @@ class CourtVisionAI:
 
         if path.exists():
             existing = self._safe_read_csv(path)
-            combined = pd.concat([existing, df], ignore_index=True)
+            existing_nonempty = not existing.empty and not existing.dropna(how="all").empty
+            df_nonempty = not df.empty and not df.dropna(how="all").empty
+            if existing_nonempty and df_nonempty:
+                columns = list(dict.fromkeys([*existing.columns.tolist(), *df.columns.tolist()]))
+                concat_frames = [
+                    frame.dropna(axis=1, how="all")
+                    for frame in (existing, df)
+                    if not frame.empty and not frame.dropna(how="all").empty
+                ]
+                combined = pd.concat(concat_frames, ignore_index=True)
+                for column in columns:
+                    if column not in combined.columns:
+                        combined[column] = pd.NA
+                combined = combined.reindex(columns=columns)
+            elif existing_nonempty:
+                combined = existing.copy()
+            else:
+                combined = df.copy()
             combined.to_csv(path, index=False)
         else:
             df.to_csv(path, index=False)
