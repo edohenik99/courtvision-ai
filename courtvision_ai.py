@@ -5828,6 +5828,8 @@ class CourtVisionAI:
             prediction_date=prediction_date,
             schedule_games=schedule_games,
         )
+        elite_alignment_counts = self._context_alignment_counts(elite_df)
+        full_market_alignment_counts = self._context_alignment_counts(full_market_df)
         json_path, report_path, payload = write_game_context_outputs(
             prediction_date=prediction_date,
             runtime_root=self.runtime_dir,
@@ -5844,7 +5846,24 @@ class CourtVisionAI:
         print(f"[CONTEXT] candidates_with_pace={int(payload.get('candidates_with_pace', 0) or 0)}", flush=True)
         print(f"[CONTEXT] candidates_with_def_rating={int(payload.get('candidates_with_def_rating', 0) or 0)}", flush=True)
         print(f"[CONTEXT] candidates_with_off_rating={int(payload.get('candidates_with_off_rating', 0) or 0)}", flush=True)
+        print(f"[CONTEXT] elite_context_aligned={elite_alignment_counts.get('aligned', 0)}", flush=True)
+        print(f"[CONTEXT] elite_context_conflicted={elite_alignment_counts.get('conflicted', 0)}", flush=True)
+        print(f"[CONTEXT] elite_context_neutral={elite_alignment_counts.get('neutral', 0)}", flush=True)
+        print(f"[CONTEXT] full_market_context_aligned={full_market_alignment_counts.get('aligned', 0)}", flush=True)
+        print(f"[CONTEXT] full_market_context_conflicted={full_market_alignment_counts.get('conflicted', 0)}", flush=True)
+        print(f"[CONTEXT] full_market_context_neutral={full_market_alignment_counts.get('neutral', 0)}", flush=True)
         return qualified_pool_df, elite_df, full_market_df, payload, json_path, report_path
+
+    @staticmethod
+    def _context_alignment_counts(df: pd.DataFrame) -> dict[str, int]:
+        counts = {"aligned": 0, "conflicted": 0, "neutral": 0, "insufficient_data": 0}
+        if not isinstance(df, pd.DataFrame) or df.empty or "context_pick_alignment" not in df.columns:
+            return counts
+        series = df["context_pick_alignment"].fillna("insufficient_data").astype(str).str.strip().str.lower()
+        raw_counts = series.value_counts().to_dict()
+        for key in counts:
+            counts[key] = int(raw_counts.get(key, 0) or 0)
+        return counts
 
     def _injury_status_weight(self, status: Any) -> float:
         status_key = str(status or "").strip().lower()
@@ -7338,6 +7357,7 @@ def _build_elite_decision_report_text(prediction_date: str, elite_df: pd.DataFra
                 "rest_context_signal",
                 "playoff_context_signal",
                 "overall_context_signal",
+                "context_pick_alignment",
                 "context_preview_applied",
             ]
         )
@@ -7365,6 +7385,7 @@ def _build_elite_decision_report_text(prediction_date: str, elite_df: pd.DataFra
             lines.append(f"  rest_context_signal={_safe(row.get('rest_context_signal')) or 'insufficient_data'}")
             lines.append(f"  playoff_context_signal={_safe(row.get('playoff_context_signal')) or 'insufficient_data'}")
             lines.append(f"  overall_context_signal={_safe(row.get('overall_context_signal')) or 'insufficient_data'}")
+            lines.append(f"  context_pick_alignment={_safe(row.get('context_pick_alignment')) or 'insufficient_data'}")
             lines.append(f"  context_preview_applied={_safe(row.get('context_preview_applied')) or 'False'}")
         lines.append("")
 

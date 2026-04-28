@@ -34,6 +34,7 @@ GAME_CONTEXT_COLUMNS: tuple[str, ...] = (
     "rest_context_signal",
     "playoff_context_signal",
     "overall_context_signal",
+    "context_pick_alignment",
     "context_preview_applied",
 )
 
@@ -131,6 +132,20 @@ def _overall_signal(signals: tuple[str, ...]) -> str:
     if under_count > over_count:
         return "supports_under"
     return "neutral"
+
+
+def _context_pick_alignment(selection: Any, overall_context_signal: Any) -> str:
+    side = _text(selection).lower()
+    signal = _text(overall_context_signal).lower()
+    if signal in {"", "insufficient_data"}:
+        return "insufficient_data"
+    if signal == "neutral":
+        return "neutral"
+    if side == "over":
+        return "aligned" if signal == "supports_over" else "conflicted" if signal == "supports_under" else "insufficient_data"
+    if side == "under":
+        return "aligned" if signal == "supports_under" else "conflicted" if signal == "supports_over" else "insufficient_data"
+    return "insufficient_data"
 
 
 def _text(value: Any) -> str:
@@ -346,6 +361,7 @@ def _default_context() -> dict[str, Any]:
         "rest_context_signal": "insufficient_data",
         "playoff_context_signal": "insufficient_data",
         "overall_context_signal": "insufficient_data",
+        "context_pick_alignment": "insufficient_data",
         "context_preview_applied": False,
     }
 
@@ -481,6 +497,10 @@ def apply_game_context(
         out.at[idx, "overall_context_signal"] = _overall_signal(
             (pace_signal, defense_signal, rest_signal, playoff_signal)
         )
+        out.at[idx, "context_pick_alignment"] = _context_pick_alignment(
+            row.get("selection"),
+            out.at[idx, "overall_context_signal"],
+        )
         out.at[idx, "context_preview_applied"] = False
 
     diagnostics.update(_coverage(out))
@@ -574,6 +594,7 @@ def write_game_context_outputs(
             f"rest:{sample.get('rest_context_signal')} "
             f"playoff:{sample.get('playoff_context_signal')} "
             f"overall:{sample.get('overall_context_signal')} "
+            f"alignment:{sample.get('context_pick_alignment')} "
             f"applied:{sample.get('context_preview_applied')}"
         )
     lines = [

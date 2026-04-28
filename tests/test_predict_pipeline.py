@@ -641,6 +641,7 @@ class TestPredictionPipeline:
                 "confidence": 0.80,
                 "quality_score": 90.0,
                 "odds": -110,
+                "context_pick_alignment": "aligned",
             },
             {
                 "prediction_date": "2024-01-15",
@@ -652,6 +653,7 @@ class TestPredictionPipeline:
                 "confidence": 0.70,
                 "quality_score": 75.0,
                 "odds": 120,
+                "context_pick_alignment": "aligned",
             },
             {
                 "prediction_date": "2024-01-15",
@@ -663,6 +665,7 @@ class TestPredictionPipeline:
                 "confidence": 0.65,
                 "quality_score": 70.0,
                 "odds": -105,
+                "context_pick_alignment": "conflicted",
             },
         ]).to_csv(runtime_root / "operator" / "full_market_board_2024-01-15.csv", index=False)
 
@@ -700,6 +703,13 @@ class TestPredictionPipeline:
         assert by_market["player_rebounds"]["hit_rate"] == 0.0
         assert by_market["player_rebounds"]["roi"] == -1.0
         assert by_market["player_assists"]["pending_picks"] == 1
+        assert payload["totals"]["context_alignment"] == {
+            "aligned": 2,
+            "conflicted": 1,
+            "neutral": 0,
+            "insufficient_data": 0,
+        }
+        assert by_market["player_assists"]["context_alignment"]["conflicted"] == 1
 
     def test_daily_summary_includes_operator_sections(self):
         runtime_root = Path("test_outputs") / "daily_summary_runtime"
@@ -729,6 +739,7 @@ class TestPredictionPipeline:
                 "rest_context_signal": "supports_under",
                 "playoff_context_signal": "supports_under",
                 "overall_context_signal": "supports_under",
+                "context_pick_alignment": "conflicted",
                 "context_preview_applied": False,
             },
         ]).to_csv(runtime_root / "operator" / "elite_board_2024-01-15.csv", index=False)
@@ -747,8 +758,8 @@ class TestPredictionPipeline:
             },
         ]).to_csv(runtime_root / "operator" / "kelly_stakes_2024-01-15.csv", index=False)
         pd.DataFrame([
-            {"market_type": "player_points", "player_name": "Points Star"},
-            {"market_type": "player_rebounds", "player_name": "Rebound Star"},
+            {"market_type": "player_points", "player_name": "Points Star", "context_pick_alignment": "aligned"},
+            {"market_type": "player_rebounds", "player_name": "Rebound Star", "context_pick_alignment": "neutral"},
         ]).to_csv(runtime_root / "operator" / "full_market_board_2024-01-15.csv", index=False)
         (runtime_root / "diagnostics" / "market_shadow_grading_2024-01-15.json").write_text(
             json.dumps(
@@ -822,11 +833,17 @@ class TestPredictionPipeline:
         assert "rest_context_signal: supports_under" in text
         assert "playoff_context_signal: supports_under" in text
         assert "overall_context_signal: supports_under" in text
+        assert "context_pick_alignment: conflicted" in text
         assert "context_preview_applied: False" in text
+        assert "Context-Pick Alignment" in text
+        assert "- elite: aligned=0, conflicted=1, neutral=0, insufficient_data=0" in text
+        assert "- full_market: aligned=1, conflicted=0, neutral=1, insufficient_data=0" in text
         assert "Elite board locked to player_points only." in text
         assert "Context preview signals are passive labels only" in text
         assert "Manual player context is diagnostic only; matched candidates: 1." in text
         assert metadata["full_market_counts"] == {"player_points": 1, "player_rebounds": 1}
+        assert metadata["elite_context_alignment"]["conflicted"] == 1
+        assert metadata["full_market_context_alignment"]["neutral"] == 1
         assert metadata["manual_context"]["candidate_matches"] == 1
 
     def test_board_selection_trace_explains_live_gate_admission(self, caplog):

@@ -123,6 +123,7 @@ def test_elite_reports_include_manual_context_fields() -> None:
                 "rest_context_signal": "supports_under",
                 "playoff_context_signal": "supports_under",
                 "overall_context_signal": "supports_under",
+                "context_pick_alignment": "conflicted",
                 "context_preview_applied": False,
             }
         ]
@@ -156,5 +157,6 @@ def test_elite_reports_include_manual_context_fields() -> None:
     assert "rest_context_signal=supports_under" in decision_report
     assert "playoff_context_signal=supports_under" in decision_report
     assert "overall_context_signal=supports_under" in decision_report
+    assert "context_pick_alignment=conflicted" in decision_report
     assert "context_preview_applied=False" in decision_report
     assert "context_preview_mode=passive_diagnostic_only" in decision_report

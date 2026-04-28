@@ -93,6 +93,7 @@ def test_game_context_attaches_passive_fields_without_changing_scores(tmp_path) 
     assert row["rest_context_signal"] == "supports_over"
     assert row["playoff_context_signal"] == "supports_under"
     assert row["overall_context_signal"] == "supports_under"
+    assert row["context_pick_alignment"] == "insufficient_data"
     assert bool(row["context_preview_applied"]) is False
     assert row["projection"] == 22.5
     assert row["confidence"] == 0.8
@@ -322,6 +323,7 @@ def test_game_context_missing_pace_and_ratings_stay_null_and_report_missing() ->
     assert out.loc[0, "rest_context_signal"] == "insufficient_data"
     assert out.loc[0, "playoff_context_signal"] == "insufficient_data"
     assert out.loc[0, "overall_context_signal"] == "insufficient_data"
+    assert out.loc[0, "context_pick_alignment"] == "insufficient_data"
     assert bool(out.loc[0, "context_preview_applied"]) is False
 
 
@@ -336,6 +338,7 @@ def test_game_context_preview_signals_are_passive_labels() -> None:
                 "projection": 18.0,
                 "confidence": 0.7,
                 "selection_score": 55.0,
+                "selection": "over",
             }
         ]
     )
@@ -360,7 +363,35 @@ def test_game_context_preview_signals_are_passive_labels() -> None:
     assert row["rest_context_signal"] == "insufficient_data"
     assert row["playoff_context_signal"] == "neutral"
     assert row["overall_context_signal"] == "supports_over"
+    assert row["context_pick_alignment"] == "aligned"
     assert bool(row["context_preview_applied"]) is False
     assert row["projection"] == 18.0
     assert row["confidence"] == 0.7
     assert row["selection_score"] == 55.0
+
+
+def test_game_context_pick_alignment_rules() -> None:
+    candidates = pd.DataFrame(
+        [
+            {"player_name": "Over Player", "team": "AAA", "team_abbr": "AAA", "game_id": 1, "selection": "over"},
+            {"player_name": "Under Player", "team": "AAA", "team_abbr": "AAA", "game_id": 1, "selection": "under"},
+        ]
+    )
+    games = pd.DataFrame([{"game_id": 1, "home_team_abbr": "AAA", "visitor_team_abbr": "BBB", "postseason": False}])
+    team_baselines = pd.DataFrame(
+        [
+            {"team_abbr": "AAA", "team_pace": 103.0, "team_def_rating": 118.0, "team_off_rating": 119.0},
+            {"team_abbr": "BBB", "team_pace": 102.0, "team_def_rating": 119.0, "team_off_rating": 111.0},
+        ]
+    )
+
+    out, _ = apply_game_context(
+        candidates,
+        games=games,
+        team_baselines=team_baselines,
+        odds=pd.DataFrame(),
+    )
+
+    by_selection = {row["selection"]: row["context_pick_alignment"] for _, row in out.iterrows()}
+    assert by_selection["over"] == "aligned"
+    assert by_selection["under"] == "conflicted"

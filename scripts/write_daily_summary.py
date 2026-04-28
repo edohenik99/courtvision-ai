@@ -146,6 +146,7 @@ def _has_context_preview(row: pd.Series) -> bool:
             "rest_context_signal",
             "playoff_context_signal",
             "overall_context_signal",
+            "context_pick_alignment",
             "context_preview_applied",
         )
     )
@@ -158,8 +159,20 @@ def _context_preview_lines(row: pd.Series) -> list[str]:
         f"  rest_context_signal: {_safe_text(row.get('rest_context_signal')) or 'insufficient_data'}",
         f"  playoff_context_signal: {_safe_text(row.get('playoff_context_signal')) or 'insufficient_data'}",
         f"  overall_context_signal: {_safe_text(row.get('overall_context_signal')) or 'insufficient_data'}",
+        f"  context_pick_alignment: {_safe_text(row.get('context_pick_alignment')) or 'insufficient_data'}",
         f"  context_preview_applied: {_safe_text(row.get('context_preview_applied')) or 'False'}",
     ]
+
+
+def _alignment_counts(df: pd.DataFrame) -> dict[str, int]:
+    counts = {"aligned": 0, "conflicted": 0, "neutral": 0, "insufficient_data": 0}
+    if df.empty or "context_pick_alignment" not in df.columns:
+        return counts
+    series = df["context_pick_alignment"].fillna("insufficient_data").astype(str).str.strip().str.lower()
+    raw_counts = series.value_counts().to_dict()
+    for key in counts:
+        counts[key] = int(raw_counts.get(key, 0) or 0)
+    return counts
 
 
 def _kelly_line(row: pd.Series) -> str:
@@ -206,6 +219,8 @@ def build_daily_summary(
         else 0.0
     )
     counts = _market_counts(full_market_df)
+    elite_alignment = _alignment_counts(elite_df)
+    full_market_alignment = _alignment_counts(full_market_df)
     shadow_totals = shadow.get("totals", {}) if isinstance(shadow, dict) else {}
     pending_grading = int(shadow_totals.get("pending_picks") or 0)
 
@@ -229,6 +244,22 @@ def build_daily_summary(
                 lines.extend(_manual_context_lines(row))
             if _has_context_preview(row):
                 lines.extend(_context_preview_lines(row))
+
+    lines.extend(["", "Context-Pick Alignment", "-" * 72])
+    lines.append(
+        "- elite: "
+        f"aligned={elite_alignment['aligned']}, "
+        f"conflicted={elite_alignment['conflicted']}, "
+        f"neutral={elite_alignment['neutral']}, "
+        f"insufficient_data={elite_alignment['insufficient_data']}"
+    )
+    lines.append(
+        "- full_market: "
+        f"aligned={full_market_alignment['aligned']}, "
+        f"conflicted={full_market_alignment['conflicted']}, "
+        f"neutral={full_market_alignment['neutral']}, "
+        f"insufficient_data={full_market_alignment['insufficient_data']}"
+    )
 
     lines.extend(["", "Kelly Stakes", "-" * 72])
     if kelly_eligible.empty:
@@ -303,6 +334,8 @@ def build_daily_summary(
         "total_exposure": round(total_exposure, 2),
         "expected_ev": round(expected_ev, 2),
         "full_market_counts": dict(sorted(counts.items())),
+        "elite_context_alignment": elite_alignment,
+        "full_market_context_alignment": full_market_alignment,
         "shadow_totals": shadow_totals,
         "pending_grading_count": pending_grading,
         "manual_context": manual_context,

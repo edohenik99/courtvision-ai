@@ -165,6 +165,17 @@ def _numeric_avg(group: pd.DataFrame, col: str) -> float | None:
     return round(float(values.mean()), 6)
 
 
+def _alignment_counts(df: pd.DataFrame) -> dict[str, int]:
+    counts = {"aligned": 0, "conflicted": 0, "neutral": 0, "insufficient_data": 0}
+    if df.empty or "context_pick_alignment" not in df.columns:
+        return counts
+    series = df["context_pick_alignment"].fillna("insufficient_data").astype(str).str.strip().str.lower()
+    raw_counts = series.value_counts().to_dict()
+    for key in counts:
+        counts[key] = int(raw_counts.get(key, 0) or 0)
+    return counts
+
+
 def build_market_shadow_grading(
     *,
     prediction_date: str,
@@ -209,6 +220,7 @@ def build_market_shadow_grading(
                     "avg_confidence": _numeric_avg(group, "confidence"),
                     "avg_quality_score": _numeric_avg(group, "quality_score"),
                     "roi": _roi_for_group(group),
+                    "context_alignment": _alignment_counts(group),
                     "hits": hits,
                     "misses": misses,
                     "pushes": pushes,
@@ -223,6 +235,10 @@ def build_market_shadow_grading(
     hit_rows = sum(int(row.get("hits", 0)) for row in rows)
     miss_rows = sum(int(row.get("misses", 0)) for row in rows)
     totals["hit_rate"] = round(hit_rows / (hit_rows + miss_rows), 6) if (hit_rows + miss_rows) else None
+    totals["context_alignment"] = {
+        key: int(sum((row.get("context_alignment") or {}).get(key, 0) for row in rows))
+        for key in ("aligned", "conflicted", "neutral", "insufficient_data")
+    }
 
     return {
         "prediction_date": prediction_date,
@@ -251,9 +267,18 @@ def render_market_shadow_report(payload: dict[str, Any]) -> str:
         f"hit_rate={_format_pct(totals.get('hit_rate'))}"
     )
     lines.append("")
+    alignment = totals.get("context_alignment", {}) if isinstance(totals, dict) else {}
+    lines.append(
+        "Context alignment: "
+        f"aligned={int(alignment.get('aligned', 0) or 0)} "
+        f"conflicted={int(alignment.get('conflicted', 0) or 0)} "
+        f"neutral={int(alignment.get('neutral', 0) or 0)} "
+        f"insufficient_data={int(alignment.get('insufficient_data', 0) or 0)}"
+    )
+    lines.append("")
     header = (
         f"{'Market':34} {'Total':>5} {'Graded':>6} {'Pending':>7} "
-        f"{'Hit%':>7} {'AvgEdge':>8} {'AvgConf':>8} {'AvgQual':>8} {'ROI':>8}"
+        f"{'Hit%':>7} {'AvgEdge':>8} {'AvgConf':>8} {'AvgQual':>8} {'ROI':>8} {'Align':>7} {'Conflict':>8}"
     )
     lines.append(header)
     lines.append("-" * len(header))
@@ -267,7 +292,9 @@ def render_market_shadow_report(payload: dict[str, Any]) -> str:
             f"{_format_num(row.get('avg_edge')):>8} "
             f"{_format_num(row.get('avg_confidence')):>8} "
             f"{_format_num(row.get('avg_quality_score')):>8} "
-            f"{_format_pct(row.get('roi')):>8}"
+            f"{_format_pct(row.get('roi')):>8} "
+            f"{int((row.get('context_alignment') or {}).get('aligned', 0)):7d} "
+            f"{int((row.get('context_alignment') or {}).get('conflicted', 0)):8d}"
         )
     lines.append("")
     return "\n".join(lines)
@@ -329,4 +356,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
