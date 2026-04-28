@@ -104,8 +104,10 @@ def get_elite_rejection_reason(row: dict[str, Any]) -> str | None:
 from courtvision.pipeline import PredictionPipeline, PredictionConfig
 from courtvision.config import EliteThresholds
 from courtvision.context import (
+    apply_game_context,
     apply_manual_player_context,
     load_manual_player_context,
+    write_game_context_outputs,
     write_manual_context_diagnostics,
 )
 
@@ -3762,6 +3764,22 @@ class CourtVisionAI:
                 elite_df=elite_df,
                 full_market_df=full_market_df,
             )
+            (
+                qualified_pool_df,
+                elite_df,
+                full_market_df,
+                game_context_diagnostics,
+                game_context_path,
+                game_context_report_path,
+            ) = self._attach_game_context(
+                prediction_date=prediction_date,
+                qualified_pool_df=qualified_pool_df,
+                elite_df=elite_df,
+                full_market_df=full_market_df,
+                games=games_raw if isinstance(games_raw, pd.DataFrame) and not games_raw.empty else games,
+                team_baselines=team_baselines,
+                odds=odds,
+            )
             rejected_df = pd.DataFrame()
             grading_df, grading_summary = self._grade_history(prediction_date=prediction_date)
             grading_bucket_summary = summarize_graded_props(grading_df.to_dict("records")) if not grading_df.empty else summarize_graded_props([])
@@ -3788,6 +3806,17 @@ class CourtVisionAI:
                 "file_found": bool(manual_context_diagnostics.get("file_found", False)),
                 "rows": int(manual_context_diagnostics.get("rows", 0) or 0),
                 "candidate_matches": int(manual_context_diagnostics.get("candidate_matches", 0) or 0),
+                "passive_mode": True,
+            }
+            summary["game_context_diagnostics_path"] = str(game_context_path)
+            summary["game_context_report_path"] = str(game_context_report_path)
+            summary["game_context"] = {
+                "rows": int(game_context_diagnostics.get("rows", 0) or 0),
+                "candidates_with_opponent": int(game_context_diagnostics.get("candidates_with_opponent", 0) or 0),
+                "candidates_with_postseason": int(game_context_diagnostics.get("candidates_with_postseason", 0) or 0),
+                "candidates_with_rest_days": int(game_context_diagnostics.get("candidates_with_rest_days", 0) or 0),
+                "candidates_with_def_rating": int(game_context_diagnostics.get("candidates_with_def_rating", 0) or 0),
+                "candidates_with_pace": int(game_context_diagnostics.get("candidates_with_pace", 0) or 0),
                 "passive_mode": True,
             }
             injury_diagnostics = self._build_injury_context_diagnostics(
@@ -3911,7 +3940,7 @@ class CourtVisionAI:
 
         stat_only_df = self._build_stat_only_board(
             prediction_date=prediction_date,
-            games=games,
+            games=games_raw if isinstance(games_raw, pd.DataFrame) and not games_raw.empty else games,
             player_baselines=player_baselines,
             team_lookup=team_lookup,
             league_context=league_context,
@@ -3991,6 +4020,22 @@ class CourtVisionAI:
             elite_df=elite_df,
             full_market_df=full_market_df,
         )
+        (
+            prepared_selected_df,
+            elite_df,
+            full_market_df,
+            game_context_diagnostics,
+            game_context_path,
+            game_context_report_path,
+        ) = self._attach_game_context(
+            prediction_date=prediction_date,
+            qualified_pool_df=prepared_selected_df,
+            elite_df=elite_df,
+            full_market_df=full_market_df,
+            games=games,
+            team_baselines=team_baselines,
+            odds=odds,
+        )
         graded_df, grading_summary = self._grade_history(prediction_date=prediction_date)
         grading_bucket_summary = summarize_graded_props(graded_df.to_dict("records")) if not graded_df.empty else summarize_graded_props([])
 
@@ -4043,6 +4088,17 @@ class CourtVisionAI:
                 "file_found": bool(manual_context_diagnostics.get("file_found", False)),
                 "rows": int(manual_context_diagnostics.get("rows", 0) or 0),
                 "candidate_matches": int(manual_context_diagnostics.get("candidate_matches", 0) or 0),
+                "passive_mode": True,
+            },
+            "game_context_diagnostics_path": str(game_context_path),
+            "game_context_report_path": str(game_context_report_path),
+            "game_context": {
+                "rows": int(game_context_diagnostics.get("rows", 0) or 0),
+                "candidates_with_opponent": int(game_context_diagnostics.get("candidates_with_opponent", 0) or 0),
+                "candidates_with_postseason": int(game_context_diagnostics.get("candidates_with_postseason", 0) or 0),
+                "candidates_with_rest_days": int(game_context_diagnostics.get("candidates_with_rest_days", 0) or 0),
+                "candidates_with_def_rating": int(game_context_diagnostics.get("candidates_with_def_rating", 0) or 0),
+                "candidates_with_pace": int(game_context_diagnostics.get("candidates_with_pace", 0) or 0),
                 "passive_mode": True,
             },
             "top_qualification_reasons": board_diagnostics.get("qualified_by_reason", [])[:8],
@@ -5561,6 +5617,49 @@ class CourtVisionAI:
             flush=True,
         )
         return qualified_pool_df, elite_df, full_market_df, diagnostics_payload, diagnostics_path
+
+    def _attach_game_context(
+        self,
+        *,
+        prediction_date: str,
+        qualified_pool_df: pd.DataFrame,
+        elite_df: pd.DataFrame,
+        full_market_df: pd.DataFrame,
+        games: pd.DataFrame,
+        team_baselines: pd.DataFrame,
+        odds: pd.DataFrame,
+    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, Any], Path, Path]:
+        qualified_pool_df, diagnostics = apply_game_context(
+            qualified_pool_df,
+            games=games,
+            team_baselines=team_baselines,
+            odds=odds,
+        )
+        elite_df, _ = apply_game_context(
+            elite_df,
+            games=games,
+            team_baselines=team_baselines,
+            odds=odds,
+        )
+        full_market_df, _ = apply_game_context(
+            full_market_df,
+            games=games,
+            team_baselines=team_baselines,
+            odds=odds,
+        )
+        json_path, report_path, payload = write_game_context_outputs(
+            prediction_date=prediction_date,
+            runtime_root=self.runtime_dir,
+            diagnostics=diagnostics,
+            candidates=qualified_pool_df,
+        )
+        print(f"[CONTEXT] game_context_rows={int(payload.get('rows', 0) or 0)}", flush=True)
+        print(f"[CONTEXT] candidates_with_opponent={int(payload.get('candidates_with_opponent', 0) or 0)}", flush=True)
+        print(f"[CONTEXT] candidates_with_postseason={int(payload.get('candidates_with_postseason', 0) or 0)}", flush=True)
+        print(f"[CONTEXT] candidates_with_rest_days={int(payload.get('candidates_with_rest_days', 0) or 0)}", flush=True)
+        print(f"[CONTEXT] candidates_with_def_rating={int(payload.get('candidates_with_def_rating', 0) or 0)}", flush=True)
+        print(f"[CONTEXT] candidates_with_pace={int(payload.get('candidates_with_pace', 0) or 0)}", flush=True)
+        return qualified_pool_df, elite_df, full_market_df, payload, json_path, report_path
 
     def _injury_status_weight(self, status: Any) -> float:
         status_key = str(status or "").strip().lower()
@@ -7139,7 +7238,8 @@ def _write_cli_outputs(
     
     # [FINAL_ELITE_WRITER] runtime marker - actual final writer path
     elite_count = len(elite_df)
-    game_id_col = elite_df.get("game_id", pd.Series(dtype="int"))
+    passive_game_context = bool((summary.get("game_context") or {}).get("passive_mode")) if isinstance(summary.get("game_context"), dict) else False
+    game_id_col = pd.Series(dtype="int") if passive_game_context else elite_df.get("game_id", pd.Series(dtype="int"))
     market_type_col = elite_df.get("market_type", pd.Series(dtype="object"))
     
     # Calculate game exposure
