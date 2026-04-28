@@ -7329,7 +7329,21 @@ def _build_elite_decision_report_text(prediction_date: str, elite_df: pd.DataFra
             ]
         )
 
+    def _has_context_preview(row: pd.Series) -> bool:
+        return any(
+            col in row.index
+            for col in [
+                "pace_context_signal",
+                "defense_context_signal",
+                "rest_context_signal",
+                "playoff_context_signal",
+                "overall_context_signal",
+                "context_preview_applied",
+            ]
+        )
+
     rows_with_context = 0
+    rows_with_context_preview = 0
     for _, row in elite_df.iterrows():
         player = _safe(row.get("player_name")) or _safe(row.get("entity_name")) or "Unknown"
         market = _safe(row.get("market_type")) or "unknown"
@@ -7344,10 +7358,20 @@ def _build_elite_decision_report_text(prediction_date: str, elite_df: pd.DataFra
             lines.append(f"  manual_confidence_adjustment={_safe(row.get('manual_confidence_adjustment')) or 'n/a'}")
             lines.append(f"  manual_context_reason={_safe(row.get('manual_context_reason')) or 'n/a'}")
             lines.append(f"  manual_context_applied={_safe(row.get('manual_context_applied')) or 'False'}")
+        if _has_context_preview(row):
+            rows_with_context_preview += 1
+            lines.append(f"  pace_context_signal={_safe(row.get('pace_context_signal')) or 'insufficient_data'}")
+            lines.append(f"  defense_context_signal={_safe(row.get('defense_context_signal')) or 'insufficient_data'}")
+            lines.append(f"  rest_context_signal={_safe(row.get('rest_context_signal')) or 'insufficient_data'}")
+            lines.append(f"  playoff_context_signal={_safe(row.get('playoff_context_signal')) or 'insufficient_data'}")
+            lines.append(f"  overall_context_signal={_safe(row.get('overall_context_signal')) or 'insufficient_data'}")
+            lines.append(f"  context_preview_applied={_safe(row.get('context_preview_applied')) or 'False'}")
         lines.append("")
 
     lines.append(f"elite_picks_with_manual_context={rows_with_context}")
     lines.append("manual_context_mode=passive_diagnostic_only")
+    lines.append(f"elite_picks_with_context_preview={rows_with_context_preview}")
+    lines.append("context_preview_mode=passive_diagnostic_only")
     return "\n".join(lines) + "\n"
 
 

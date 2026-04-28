@@ -137,6 +137,31 @@ def _manual_context_lines(row: pd.Series) -> list[str]:
     ]
 
 
+def _has_context_preview(row: pd.Series) -> bool:
+    return any(
+        col in row.index
+        for col in (
+            "pace_context_signal",
+            "defense_context_signal",
+            "rest_context_signal",
+            "playoff_context_signal",
+            "overall_context_signal",
+            "context_preview_applied",
+        )
+    )
+
+
+def _context_preview_lines(row: pd.Series) -> list[str]:
+    return [
+        f"  pace_context_signal: {_safe_text(row.get('pace_context_signal')) or 'insufficient_data'}",
+        f"  defense_context_signal: {_safe_text(row.get('defense_context_signal')) or 'insufficient_data'}",
+        f"  rest_context_signal: {_safe_text(row.get('rest_context_signal')) or 'insufficient_data'}",
+        f"  playoff_context_signal: {_safe_text(row.get('playoff_context_signal')) or 'insufficient_data'}",
+        f"  overall_context_signal: {_safe_text(row.get('overall_context_signal')) or 'insufficient_data'}",
+        f"  context_preview_applied: {_safe_text(row.get('context_preview_applied')) or 'False'}",
+    ]
+
+
 def _kelly_line(row: pd.Series) -> str:
     player = _safe_text(row.get("player_name")) or "Unknown"
     market = _safe_text(row.get("market_type")) or "unknown"
@@ -202,6 +227,8 @@ def build_daily_summary(
             lines.append(_pick_line(row))
             if _has_manual_context(row):
                 lines.extend(_manual_context_lines(row))
+            if _has_context_preview(row):
+                lines.extend(_context_preview_lines(row))
 
     lines.extend(["", "Kelly Stakes", "-" * 72])
     if kelly_eligible.empty:
@@ -246,6 +273,7 @@ def build_daily_summary(
     lines.extend(["", "Warnings / Readiness Notes", "-" * 72])
     lines.append("- Elite board locked to player_points only.")
     lines.append("- Kelly stakes locked to player_points only.")
+    lines.append("- Context preview signals are passive labels only and are not applied to projections or staking.")
     if manual_context:
         matches = int(manual_context.get("candidate_matches") or 0)
         lines.append(f"- Manual player context is diagnostic only; matched candidates: {matches}.")

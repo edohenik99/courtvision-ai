@@ -118,6 +118,12 @@ def test_elite_reports_include_manual_context_fields() -> None:
                 "manual_confidence_adjustment": 0.0,
                 "manual_context_reason": "manual test row only",
                 "manual_context_applied": False,
+                "pace_context_signal": "supports_over",
+                "defense_context_signal": "neutral",
+                "rest_context_signal": "supports_under",
+                "playoff_context_signal": "supports_under",
+                "overall_context_signal": "supports_under",
+                "context_preview_applied": False,
             }
         ]
     )
@@ -145,3 +151,10 @@ def test_elite_reports_include_manual_context_fields() -> None:
         assert "manual_context_reason=manual test row only" in text
         assert "manual_context_applied=False" in text
     assert "manual_context_mode=passive_diagnostic_only" in decision_report
+    assert "pace_context_signal=supports_over" in decision_report
+    assert "defense_context_signal=neutral" in decision_report
+    assert "rest_context_signal=supports_under" in decision_report
+    assert "playoff_context_signal=supports_under" in decision_report
+    assert "overall_context_signal=supports_under" in decision_report
+    assert "context_preview_applied=False" in decision_report
+    assert "context_preview_mode=passive_diagnostic_only" in decision_report

@@ -29,6 +29,12 @@ GAME_CONTEXT_COLUMNS: tuple[str, ...] = (
     "opponent_implied_team_total",
     "game_total",
     "spread",
+    "pace_context_signal",
+    "defense_context_signal",
+    "rest_context_signal",
+    "playoff_context_signal",
+    "overall_context_signal",
+    "context_preview_applied",
 )
 
 PACE_COLUMNS: tuple[str, ...] = ("team_pace", "pace", "possessions_per_game")
@@ -58,6 +64,73 @@ def _net_rating(row: pd.Series | None) -> float | None:
     if off_rating is None or def_rating is None:
         return None
     return off_rating - def_rating
+
+
+def _pace_signal(team_pace: Any, opponent_pace: Any, matchup_pace: Any) -> str:
+    pace = _float(matchup_pace)
+    if pace is None:
+        pace = _average(team_pace, opponent_pace)
+    if pace is None:
+        pace = _float(team_pace) or _float(opponent_pace)
+    if pace is None:
+        return "insufficient_data"
+    if pace >= 100.0:
+        return "supports_over"
+    if pace <= 97.0:
+        return "supports_under"
+    return "neutral"
+
+
+def _defense_signal(opponent_def_rating: Any, opponent_net_rating: Any) -> str:
+    defense = _float(opponent_def_rating)
+    net = _float(opponent_net_rating)
+    if defense is None and net is None:
+        return "insufficient_data"
+    if (defense is not None and defense <= 112.0) or (net is not None and net >= 5.0):
+        return "supports_under"
+    if (defense is not None and defense >= 116.0) or (net is not None and net <= -5.0):
+        return "supports_over"
+    return "neutral"
+
+
+def _rest_signal(rest_days: Any, opponent_rest_days: Any, is_back_to_back: Any, opponent_is_back_to_back: Any) -> str:
+    rest = _float(rest_days)
+    opponent_rest = _float(opponent_rest_days)
+    team_b2b = _bool_or_none(is_back_to_back)
+    opponent_b2b = _bool_or_none(opponent_is_back_to_back)
+    if rest is None and opponent_rest is None and team_b2b is None and opponent_b2b is None:
+        return "insufficient_data"
+    if team_b2b is True or rest == 0.0:
+        return "supports_under"
+    if opponent_b2b is True and team_b2b is not True:
+        return "supports_over"
+    if rest is not None and opponent_rest is not None:
+        edge = rest - opponent_rest
+        if edge >= 2.0:
+            return "supports_over"
+        if edge <= -2.0:
+            return "supports_under"
+    return "neutral"
+
+
+def _playoff_signal(postseason: Any) -> str:
+    flag = _bool_or_none(postseason)
+    if flag is None:
+        return "insufficient_data"
+    return "supports_under" if flag else "neutral"
+
+
+def _overall_signal(signals: tuple[str, ...]) -> str:
+    useful = [signal for signal in signals if signal != "insufficient_data"]
+    if not useful:
+        return "insufficient_data"
+    over_count = useful.count("supports_over")
+    under_count = useful.count("supports_under")
+    if over_count > under_count:
+        return "supports_over"
+    if under_count > over_count:
+        return "supports_under"
+    return "neutral"
 
 
 def _text(value: Any) -> str:
@@ -268,6 +341,12 @@ def _default_context() -> dict[str, Any]:
         "opponent_implied_team_total": pd.NA,
         "game_total": pd.NA,
         "spread": pd.NA,
+        "pace_context_signal": "insufficient_data",
+        "defense_context_signal": "insufficient_data",
+        "rest_context_signal": "insufficient_data",
+        "playoff_context_signal": "insufficient_data",
+        "overall_context_signal": "insufficient_data",
+        "context_preview_applied": False,
     }
 
 
@@ -379,6 +458,31 @@ def apply_game_context(
         if "game_total" in game_payload:
             out.at[idx, "game_total"] = game_payload["game_total"]
 
+        pace_signal = _pace_signal(
+            out.at[idx, "team_pace"],
+            out.at[idx, "opponent_pace"],
+            out.at[idx, "matchup_pace"],
+        )
+        defense_signal = _defense_signal(
+            out.at[idx, "opponent_def_rating"],
+            out.at[idx, "opponent_net_rating"],
+        )
+        rest_signal = _rest_signal(
+            out.at[idx, "rest_days"],
+            out.at[idx, "opponent_rest_days"],
+            out.at[idx, "is_back_to_back"],
+            out.at[idx, "opponent_is_back_to_back"],
+        )
+        playoff_signal = _playoff_signal(out.at[idx, "postseason"])
+        out.at[idx, "pace_context_signal"] = pace_signal
+        out.at[idx, "defense_context_signal"] = defense_signal
+        out.at[idx, "rest_context_signal"] = rest_signal
+        out.at[idx, "playoff_context_signal"] = playoff_signal
+        out.at[idx, "overall_context_signal"] = _overall_signal(
+            (pace_signal, defense_signal, rest_signal, playoff_signal)
+        )
+        out.at[idx, "context_preview_applied"] = False
+
     diagnostics.update(_coverage(out))
     return out, diagnostics
 
@@ -464,7 +568,13 @@ def write_game_context_outputs(
             f"{sample.get('player_name', '')} ({sample.get('team', '')} vs {sample.get('opponent', '')}, "
             f"{sample.get('home_away', '')}): rest={sample.get('rest_days')} "
             f"opp_rest={sample.get('opponent_rest_days')} pace={sample.get('matchup_pace')} "
-            f"postseason={sample.get('postseason')}"
+            f"postseason={sample.get('postseason')} "
+            f"signals=pace:{sample.get('pace_context_signal')} "
+            f"defense:{sample.get('defense_context_signal')} "
+            f"rest:{sample.get('rest_context_signal')} "
+            f"playoff:{sample.get('playoff_context_signal')} "
+            f"overall:{sample.get('overall_context_signal')} "
+            f"applied:{sample.get('context_preview_applied')}"
         )
     lines = [
         f"Game Context Diagnostics - {prediction_date}",
@@ -487,6 +597,8 @@ def write_game_context_outputs(
         "",
         "Sample Rows",
         *(sample_lines or ["- none"]),
+        "",
+        "Preview signals are passive labels only and are not used in model math.",
         "",
         "Mode: passive diagnostics only. No projections, confidence, selection, elite, or Kelly logic changed.",
     ]

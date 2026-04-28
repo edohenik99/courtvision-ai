@@ -724,6 +724,12 @@ class TestPredictionPipeline:
                 "manual_confidence_adjustment": 0.00,
                 "manual_context_reason": "manual test row only",
                 "manual_context_applied": False,
+                "pace_context_signal": "supports_over",
+                "defense_context_signal": "neutral",
+                "rest_context_signal": "supports_under",
+                "playoff_context_signal": "supports_under",
+                "overall_context_signal": "supports_under",
+                "context_preview_applied": False,
             },
         ]).to_csv(runtime_root / "operator" / "elite_board_2024-01-15.csv", index=False)
         pd.DataFrame([
@@ -811,7 +817,14 @@ class TestPredictionPipeline:
         assert "manual_confidence_adjustment: 0.0" in text
         assert "manual_context_reason: manual test row only" in text
         assert "manual_context_applied: False" in text
+        assert "pace_context_signal: supports_over" in text
+        assert "defense_context_signal: neutral" in text
+        assert "rest_context_signal: supports_under" in text
+        assert "playoff_context_signal: supports_under" in text
+        assert "overall_context_signal: supports_under" in text
+        assert "context_preview_applied: False" in text
         assert "Elite board locked to player_points only." in text
+        assert "Context preview signals are passive labels only" in text
         assert "Manual player context is diagnostic only; matched candidates: 1." in text
         assert metadata["full_market_counts"] == {"player_points": 1, "player_rebounds": 1}
         assert metadata["manual_context"]["candidate_matches"] == 1

@@ -88,6 +88,12 @@ def test_game_context_attaches_passive_fields_without_changing_scores(tmp_path) 
     assert row["opponent_implied_team_total"] == 110.5
     assert row["game_total"] == 228.0
     assert row["spread"] == -3.5
+    assert row["pace_context_signal"] == "neutral"
+    assert row["defense_context_signal"] == "supports_under"
+    assert row["rest_context_signal"] == "supports_over"
+    assert row["playoff_context_signal"] == "supports_under"
+    assert row["overall_context_signal"] == "supports_under"
+    assert bool(row["context_preview_applied"]) is False
     assert row["projection"] == 22.5
     assert row["confidence"] == 0.8
     assert row["quality_score"] == 99.0
@@ -115,7 +121,9 @@ def test_game_context_attaches_passive_fields_without_changing_scores(tmp_path) 
     written = json.loads(json_path.read_text(encoding="utf-8"))
     assert written["projection_changed"] is False
     assert written["kelly_logic_changed"] is False
+    assert written["sample_rows"][0]["overall_context_signal"] == "supports_under"
     assert "Mode: passive diagnostics only" in report_path.read_text(encoding="utf-8")
+    assert "overall:supports_under" in report_path.read_text(encoding="utf-8")
 
 
 def test_game_context_derives_candidate_game_id_from_odds_without_selection_input() -> None:
@@ -309,3 +317,50 @@ def test_game_context_missing_pace_and_ratings_stay_null_and_report_missing() ->
     assert diagnostics["candidates_with_pace"] == 0
     assert diagnostics["candidates_with_def_rating"] == 0
     assert diagnostics["candidates_with_off_rating"] == 0
+    assert out.loc[0, "pace_context_signal"] == "insufficient_data"
+    assert out.loc[0, "defense_context_signal"] == "insufficient_data"
+    assert out.loc[0, "rest_context_signal"] == "insufficient_data"
+    assert out.loc[0, "playoff_context_signal"] == "insufficient_data"
+    assert out.loc[0, "overall_context_signal"] == "insufficient_data"
+    assert bool(out.loc[0, "context_preview_applied"]) is False
+
+
+def test_game_context_preview_signals_are_passive_labels() -> None:
+    candidates = pd.DataFrame(
+        [
+            {
+                "player_name": "Player A",
+                "team": "AAA",
+                "team_abbr": "AAA",
+                "game_id": 1,
+                "projection": 18.0,
+                "confidence": 0.7,
+                "selection_score": 55.0,
+            }
+        ]
+    )
+    games = pd.DataFrame([{"game_id": 1, "home_team_abbr": "AAA", "visitor_team_abbr": "BBB", "postseason": False}])
+    team_baselines = pd.DataFrame(
+        [
+            {"team_abbr": "AAA", "team_pace": 103.0, "team_def_rating": 118.0, "team_off_rating": 119.0},
+            {"team_abbr": "BBB", "team_pace": 102.0, "team_def_rating": 119.0, "team_off_rating": 111.0},
+        ]
+    )
+
+    out, _ = apply_game_context(
+        candidates,
+        games=games,
+        team_baselines=team_baselines,
+        odds=pd.DataFrame(),
+    )
+
+    row = out.iloc[0]
+    assert row["pace_context_signal"] == "supports_over"
+    assert row["defense_context_signal"] == "supports_over"
+    assert row["rest_context_signal"] == "insufficient_data"
+    assert row["playoff_context_signal"] == "neutral"
+    assert row["overall_context_signal"] == "supports_over"
+    assert bool(row["context_preview_applied"]) is False
+    assert row["projection"] == 18.0
+    assert row["confidence"] == 0.7
+    assert row["selection_score"] == 55.0
