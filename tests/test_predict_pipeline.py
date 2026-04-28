@@ -14,6 +14,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from courtvision.calibration.grading_summary import summarize_graded_props
 from courtvision.pipeline import (
     PredictionConfig,
     PredictionPipeline,
@@ -710,6 +711,16 @@ class TestPredictionPipeline:
             "insufficient_data": 0,
         }
         assert by_market["player_assists"]["context_alignment"]["conflicted"] == 1
+        alignment_perf = payload["context_alignment_performance"]
+        assert alignment_perf["status"] == "ok"
+        assert alignment_perf["by_alignment"]["aligned"]["graded_picks"] == 2
+        assert alignment_perf["by_alignment"]["aligned"]["hit_rate"] == 0.5
+        assert alignment_perf["by_alignment"]["aligned"]["roi"] == -0.045455
+        assert alignment_perf["by_alignment"]["conflicted"]["pending_picks"] == 1
+        assert alignment_perf["by_alignment"]["conflicted"]["status"] == "insufficient_sample"
+        assert alignment_perf["by_alignment_and_selection_side"]["aligned"]["over"]["hit_rate"] == 1.0
+        assert alignment_perf["by_alignment_and_selection_side"]["aligned"]["under"]["hit_rate"] == 0.0
+        assert alignment_perf["by_alignment_and_market_type"]["aligned"]["player_rebounds"]["roi"] == -1.0
 
     def test_daily_summary_includes_operator_sections(self):
         runtime_root = Path("test_outputs") / "daily_summary_runtime"
@@ -771,6 +782,106 @@ class TestPredictionPipeline:
                         "hit_rate": 1.0,
                     },
                     "markets": [],
+                    "context_alignment_performance": {
+                        "status": "ok",
+                        "by_alignment": {
+                            "aligned": {
+                                "total_picks": 1,
+                                "graded_picks": 1,
+                                "pending_picks": 0,
+                                "hits": 1,
+                                "misses": 0,
+                                "pushes": 0,
+                                "hit_rate": 1.0,
+                                "roi": 0.909091,
+                                "status": "ok",
+                            },
+                            "conflicted": {
+                                "total_picks": 0,
+                                "graded_picks": 0,
+                                "pending_picks": 0,
+                                "hits": 0,
+                                "misses": 0,
+                                "pushes": 0,
+                                "hit_rate": None,
+                                "roi": None,
+                                "status": "insufficient_sample",
+                            },
+                            "neutral": {
+                                "total_picks": 1,
+                                "graded_picks": 0,
+                                "pending_picks": 1,
+                                "hits": 0,
+                                "misses": 0,
+                                "pushes": 0,
+                                "hit_rate": None,
+                                "roi": None,
+                                "status": "insufficient_sample",
+                            },
+                        },
+                        "by_alignment_and_selection_side": {
+                            "aligned": {
+                                "over": {
+                                    "total_picks": 1,
+                                    "graded_picks": 1,
+                                    "pending_picks": 0,
+                                    "hit_rate": 1.0,
+                                    "roi": 0.909091,
+                                    "status": "ok",
+                                },
+                                "under": {
+                                    "total_picks": 0,
+                                    "graded_picks": 0,
+                                    "pending_picks": 0,
+                                    "hit_rate": None,
+                                    "roi": None,
+                                    "status": "insufficient_sample",
+                                },
+                            },
+                            "conflicted": {},
+                            "neutral": {
+                                "over": {
+                                    "total_picks": 0,
+                                    "graded_picks": 0,
+                                    "pending_picks": 0,
+                                    "hit_rate": None,
+                                    "roi": None,
+                                    "status": "insufficient_sample",
+                                },
+                                "under": {
+                                    "total_picks": 1,
+                                    "graded_picks": 0,
+                                    "pending_picks": 1,
+                                    "hit_rate": None,
+                                    "roi": None,
+                                    "status": "insufficient_sample",
+                                },
+                            },
+                        },
+                        "by_alignment_and_market_type": {
+                            "aligned": {
+                                "player_points": {
+                                    "total_picks": 1,
+                                    "graded_picks": 1,
+                                    "pending_picks": 0,
+                                    "hit_rate": 1.0,
+                                    "roi": 0.909091,
+                                    "status": "ok",
+                                }
+                            },
+                            "conflicted": {},
+                            "neutral": {
+                                "player_rebounds": {
+                                    "total_picks": 1,
+                                    "graded_picks": 0,
+                                    "pending_picks": 1,
+                                    "hit_rate": None,
+                                    "roi": None,
+                                    "status": "insufficient_sample",
+                                }
+                            },
+                        },
+                    },
                 }
             ),
             encoding="utf-8",
@@ -838,13 +949,43 @@ class TestPredictionPipeline:
         assert "Context-Pick Alignment" in text
         assert "- elite: aligned=0, conflicted=1, neutral=0, insufficient_data=0" in text
         assert "- full_market: aligned=1, conflicted=0, neutral=1, insufficient_data=0" in text
+        assert "Context Alignment Performance" in text
+        assert "- aligned: graded=1, pending=0, hit_rate=100.0%, roi=90.9%, status=ok" in text
+        assert "- neutral/under: graded=0, pending=1, hit_rate=n/a, roi=n/a, status=insufficient_sample" in text
+        assert "- aligned/player_points: graded=1, pending=0, hit_rate=100.0%, roi=90.9%, status=ok" in text
         assert "Elite board locked to player_points only." in text
         assert "Context preview signals are passive labels only" in text
         assert "Manual player context is diagnostic only; matched candidates: 1." in text
         assert metadata["full_market_counts"] == {"player_points": 1, "player_rebounds": 1}
         assert metadata["elite_context_alignment"]["conflicted"] == 1
         assert metadata["full_market_context_alignment"]["neutral"] == 1
+        assert metadata["context_alignment_performance"]["by_alignment"]["aligned"]["hit_rate"] == 1.0
         assert metadata["manual_context"]["candidate_matches"] == 1
+
+    def test_grading_summary_tracks_context_alignment_buckets(self):
+        summary = summarize_graded_props([
+            {
+                "market_type": "player_points",
+                "selection": "over",
+                "context_pick_alignment": "aligned",
+                "odds": -110,
+                "result": "win",
+            },
+            {
+                "market_type": "player_rebounds",
+                "selection": "under",
+                "context_pick_alignment": "conflicted",
+                "odds": 120,
+                "result": "loss",
+            },
+        ])
+
+        assert summary["by_context_pick_alignment"]["aligned"]["wins"] == 1
+        assert summary["by_context_pick_alignment"]["aligned"]["roi"] == 0.909091
+        assert summary["by_context_pick_alignment"]["conflicted"]["losses"] == 1
+        assert summary["by_context_pick_alignment"]["conflicted"]["roi"] == -1.0
+        assert summary["joint_context_alignment_side"]["aligned|over"]["win_rate"] == 1.0
+        assert summary["joint_context_alignment_market_type"]["conflicted|player_rebounds"]["losses"] == 1
 
     def test_board_selection_trace_explains_live_gate_admission(self, caplog):
         """Live candidates with line_source should be admitted (live-gate fix)."""

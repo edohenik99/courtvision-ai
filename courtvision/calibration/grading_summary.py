@@ -21,6 +21,9 @@ from .buckets import (
 from courtvision.runtime_selection import elite_points_risk_guard_reason
 
 
+CONTEXT_ALIGNMENT_VALUES = {"aligned", "conflicted", "neutral", "insufficient_data"}
+
+
 def _edge_bucket(edge_abs: float) -> str:
     """Categorize absolute edge into buckets for hit rate analysis.
     
@@ -63,12 +66,15 @@ def summarize_graded_props(graded_rows: Sequence[Any]) -> dict[str, Any]:
         "by_market_trust_weight_band": {},
         "by_edge_bucket": {},  # NEW: Hit rate by edge magnitude
         "by_qualification_reason": {},  # NEW: Hit rate by qualification reason
+        "by_context_pick_alignment": {},
         "joint_quality_confidence": {},
         "joint_prop_minutes": {},
         "joint_prop_side": {},
         "joint_prop_side_profile": {},
         "joint_line_band_side": {},
         "joint_source_lane_side": {},
+        "joint_context_alignment_side": {},
+        "joint_context_alignment_market_type": {},
     }
 
     for row in resolved_rows:
@@ -142,7 +148,18 @@ def summarize_graded_props(graded_rows: Sequence[Any]) -> dict[str, Any]:
             _joint_key(row["final_selection_source_lane"], row["selection_side"]),
             row,
         )
-        
+        _append_bucket(buckets["by_context_pick_alignment"], row["context_pick_alignment"], row)
+        _append_bucket(
+            buckets["joint_context_alignment_side"],
+            _joint_key(row["context_pick_alignment"], row["selection_side"]),
+            row,
+        )
+        _append_bucket(
+            buckets["joint_context_alignment_market_type"],
+            _joint_key(row["context_pick_alignment"], row["prop_type"]),
+            row,
+        )
+
         # NEW: Edge bucket for hit rate analysis
         edge_abs = float(row.get("edge_abs", abs(row.get("edge", 0.0))))
         _append_bucket(buckets["by_edge_bucket"], _edge_bucket(edge_abs), row)
@@ -172,6 +189,7 @@ def flatten_grading_summary(summary: Mapping[str, Any]) -> pd.DataFrame:
                 "losses": int(overall.get("losses", 0) or 0),
                 "pushes": int(overall.get("pushes", 0) or 0),
                 "win_rate": float(overall.get("win_rate", 0.0) or 0.0),
+                "roi": overall.get("roi"),
             }
         )
 
@@ -190,6 +208,7 @@ def flatten_grading_summary(summary: Mapping[str, Any]) -> pd.DataFrame:
                     "losses": int(metrics.get("losses", 0) or 0),
                     "pushes": int(metrics.get("pushes", 0) or 0),
                     "win_rate": float(metrics.get("win_rate", 0.0) or 0.0),
+                    "roi": metrics.get("roi"),
                 }
             )
 
@@ -337,6 +356,8 @@ def _normalize_graded_row(item: Any) -> dict[str, Any]:
         "market_trust_weight_band": _clean_text(
             row.get("market_trust_weight_band") or market_trust_weight_band(market_trust_value)
         ),
+        "context_pick_alignment": _context_alignment_value(row.get("context_pick_alignment")),
+        "odds": odds_value,
         "result": _result_value(row),
     }
     normalized["replay_identity_key"] = _replay_identity_key(row)
@@ -369,7 +390,7 @@ def _result_value(row: Mapping[str, Any]) -> str:
 def _metrics(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     total = len(rows)
     if total == 0:
-        return {"n": 0, "wins": 0, "losses": 0, "pushes": 0, "win_rate": 0.0}
+        return {"n": 0, "wins": 0, "losses": 0, "pushes": 0, "win_rate": 0.0, "roi": None}
 
     wins = sum(1 for row in rows if row.get("result") == "win")
     pushes = sum(1 for row in rows if row.get("result") == "push")
@@ -380,7 +401,34 @@ def _metrics(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "losses": int(losses),
         "pushes": int(pushes),
         "win_rate": round(float(wins / total), 4),
+        "roi": _roi(rows),
     }
+
+
+def _roi(rows: Sequence[Mapping[str, Any]]) -> float | None:
+    profit = 0.0
+    graded_bets = 0
+    for row in rows:
+        result = row.get("result")
+        if result not in {"win", "loss"}:
+            continue
+        win_profit = _american_profit_for_unit_stake(row.get("odds"))
+        if win_profit is None:
+            continue
+        graded_bets += 1
+        profit += win_profit if result == "win" else -1.0
+    if graded_bets == 0:
+        return None
+    return round(float(profit / graded_bets), 6)
+
+
+def _american_profit_for_unit_stake(value: Any) -> float | None:
+    american = to_float(value)
+    if american is None or american == 0:
+        return None
+    if american > 0:
+        return float(american / 100.0)
+    return float(100.0 / abs(american))
 
 
 def _metrics_with_deltas(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -460,6 +508,11 @@ def _clean_text(value: Any) -> str:
     if text.lower() in {"nan", "none", "<na>"}:
         return ""
     return text
+
+
+def _context_alignment_value(value: Any) -> str:
+    text = _clean_text(value).lower()
+    return text if text in CONTEXT_ALIGNMENT_VALUES else "insufficient_data"
 
 
 def _replay_identity_key(row: Mapping[str, Any]) -> str:

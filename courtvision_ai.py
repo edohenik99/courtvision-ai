@@ -6962,6 +6962,13 @@ class CourtVisionAI:
             "is_win": 1 if result == "win" else 0,
             "is_push": 1 if result == "push" else 0,
             "is_loss": 1 if result == "loss" else 0,
+            "context_pick_alignment": row.get("context_pick_alignment"),
+            "odds": row.get("odds") or row.get("offered_odds") or row.get("american_odds"),
+            "confidence": row.get("confidence"),
+            "quality_score": row.get("quality_score"),
+            "edge": row.get("edge"),
+            "edge_pct": row.get("edge_pct"),
+            "side_edge_pct": row.get("side_edge_pct"),
         }
 
     def _append_history(self, path: Path, df: pd.DataFrame) -> None:

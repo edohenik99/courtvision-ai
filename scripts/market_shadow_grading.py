@@ -18,6 +18,9 @@ RESULT_HIT = "hit"
 RESULT_MISS = "miss"
 RESULT_PUSH = "push"
 RESULT_PENDING = "pending"
+CONTEXT_ALIGNMENT_VALUES = ("aligned", "conflicted", "neutral", "insufficient_data")
+TRACKED_ALIGNMENT_VALUES = ("aligned", "conflicted", "neutral")
+TRACKED_SELECTION_SIDES = ("over", "under")
 
 
 def _safe_float(value: Any) -> float | None:
@@ -176,6 +179,107 @@ def _alignment_counts(df: pd.DataFrame) -> dict[str, int]:
     return counts
 
 
+def _alignment_value(value: Any) -> str:
+    text = _safe_text(value).lower()
+    return text if text in CONTEXT_ALIGNMENT_VALUES else "insufficient_data"
+
+
+def _selection_side(value: Any) -> str:
+    text = _safe_text(value).lower()
+    if text in TRACKED_SELECTION_SIDES:
+        return text
+    return "unknown"
+
+
+def _performance_for_group(group: pd.DataFrame) -> dict[str, Any]:
+    if group.empty or "_shadow_result" not in group.columns:
+        return {
+            "total_picks": 0,
+            "graded_picks": 0,
+            "pending_picks": 0,
+            "hits": 0,
+            "misses": 0,
+            "pushes": 0,
+            "hit_rate": None,
+            "roi": None,
+            "status": "insufficient_sample",
+        }
+
+    hits = int(group["_shadow_result"].eq(RESULT_HIT).sum())
+    misses = int(group["_shadow_result"].eq(RESULT_MISS).sum())
+    pushes = int(group["_shadow_result"].eq(RESULT_PUSH).sum())
+    pending = int(group["_shadow_result"].eq(RESULT_PENDING).sum())
+    hit_denominator = hits + misses
+    return {
+        "total_picks": int(len(group)),
+        "graded_picks": int(hits + misses + pushes),
+        "pending_picks": pending,
+        "hits": hits,
+        "misses": misses,
+        "pushes": pushes,
+        "hit_rate": round(hits / hit_denominator, 6) if hit_denominator else None,
+        "roi": _roi_for_group(group),
+        "status": "ok" if hit_denominator else "insufficient_sample",
+    }
+
+
+def _context_alignment_performance(working: pd.DataFrame) -> dict[str, Any]:
+    if working.empty:
+        return {
+            "status": "insufficient_sample",
+            "by_alignment": {key: _performance_for_group(pd.DataFrame()) for key in CONTEXT_ALIGNMENT_VALUES},
+            "by_alignment_and_selection_side": {
+                key: {side: _performance_for_group(pd.DataFrame()) for side in TRACKED_SELECTION_SIDES}
+                for key in TRACKED_ALIGNMENT_VALUES
+            },
+            "by_alignment_and_market_type": {key: {} for key in TRACKED_ALIGNMENT_VALUES},
+        }
+
+    scoped = working.copy()
+    if "context_pick_alignment" not in scoped.columns:
+        scoped["context_pick_alignment"] = "insufficient_data"
+    if "selection" not in scoped.columns and "side" in scoped.columns:
+        scoped["selection"] = scoped["side"]
+    scoped["_context_pick_alignment"] = scoped["context_pick_alignment"].map(_alignment_value)
+    scoped["_selection_side"] = scoped.get("selection", pd.Series("", index=scoped.index)).map(_selection_side)
+
+    by_alignment = {
+        key: _performance_for_group(scoped[scoped["_context_pick_alignment"].eq(key)])
+        for key in CONTEXT_ALIGNMENT_VALUES
+    }
+    by_alignment_and_selection_side = {
+        alignment: {
+            side: _performance_for_group(
+                scoped[
+                    scoped["_context_pick_alignment"].eq(alignment)
+                    & scoped["_selection_side"].eq(side)
+                ]
+            )
+            for side in TRACKED_SELECTION_SIDES
+        }
+        for alignment in TRACKED_ALIGNMENT_VALUES
+    }
+
+    by_alignment_and_market_type: dict[str, dict[str, Any]] = {key: {} for key in TRACKED_ALIGNMENT_VALUES}
+    market_series = scoped["market_type"] if "market_type" in scoped.columns else pd.Series("unknown", index=scoped.index)
+    scoped["_market_type"] = market_series.fillna("unknown").astype(str).str.strip().replace("", "unknown")
+    for alignment in TRACKED_ALIGNMENT_VALUES:
+        alignment_df = scoped[scoped["_context_pick_alignment"].eq(alignment)]
+        for market_type, group in alignment_df.groupby("_market_type", sort=True):
+            by_alignment_and_market_type[alignment][str(market_type)] = _performance_for_group(group)
+
+    graded_hit_miss = sum(
+        int(item.get("hits", 0) or 0) + int(item.get("misses", 0) or 0)
+        for item in by_alignment.values()
+    )
+    return {
+        "status": "ok" if graded_hit_miss else "insufficient_sample",
+        "by_alignment": by_alignment,
+        "by_alignment_and_selection_side": by_alignment_and_selection_side,
+        "by_alignment_and_market_type": by_alignment_and_market_type,
+    }
+
+
 def build_market_shadow_grading(
     *,
     prediction_date: str,
@@ -187,6 +291,7 @@ def build_market_shadow_grading(
     full_market_path = runtime_root / "operator" / f"full_market_board_{prediction_date}.csv"
     full_market_df = _read_csv(full_market_path)
 
+    working = pd.DataFrame()
     if full_market_df.empty:
         rows: list[dict[str, Any]] = []
     else:
@@ -237,8 +342,9 @@ def build_market_shadow_grading(
     totals["hit_rate"] = round(hit_rows / (hit_rows + miss_rows), 6) if (hit_rows + miss_rows) else None
     totals["context_alignment"] = {
         key: int(sum((row.get("context_alignment") or {}).get(key, 0) for row in rows))
-        for key in ("aligned", "conflicted", "neutral", "insufficient_data")
+        for key in CONTEXT_ALIGNMENT_VALUES
     }
+    context_alignment_performance = _context_alignment_performance(working)
 
     return {
         "prediction_date": prediction_date,
@@ -248,6 +354,7 @@ def build_market_shadow_grading(
         "kelly_locked_to": ["player_points"],
         "totals": totals,
         "markets": rows,
+        "context_alignment_performance": context_alignment_performance,
     }
 
 
@@ -276,6 +383,46 @@ def render_market_shadow_report(payload: dict[str, Any]) -> str:
         f"insufficient_data={int(alignment.get('insufficient_data', 0) or 0)}"
     )
     lines.append("")
+    performance = payload.get("context_alignment_performance", {})
+    by_alignment = performance.get("by_alignment", {}) if isinstance(performance, dict) else {}
+    lines.append("Context Alignment Performance")
+    if isinstance(performance, dict) and performance.get("status") == "insufficient_sample":
+        lines.append("No resolved graded hit/miss sample yet; context alignment performance is pending.")
+    for alignment_key in TRACKED_ALIGNMENT_VALUES:
+        lines.append(_performance_line(alignment_key, by_alignment.get(alignment_key, {})))
+    lines.append("")
+
+    by_side = (
+        performance.get("by_alignment_and_selection_side", {})
+        if isinstance(performance, dict)
+        else {}
+    )
+    lines.append("Context Alignment Performance by Selection Side")
+    for alignment_key in TRACKED_ALIGNMENT_VALUES:
+        side_payload = by_side.get(alignment_key, {}) if isinstance(by_side, dict) else {}
+        for side in TRACKED_SELECTION_SIDES:
+            item = side_payload.get(side, {}) if isinstance(side_payload, dict) else {}
+            if int(item.get("total_picks", 0) or 0) > 0:
+                lines.append(_performance_line(f"{alignment_key}/{side}", item))
+    lines.append("")
+
+    by_market = (
+        performance.get("by_alignment_and_market_type", {})
+        if isinstance(performance, dict)
+        else {}
+    )
+    lines.append("Context Alignment Performance by Market Type")
+    any_market_rows = False
+    for alignment_key in TRACKED_ALIGNMENT_VALUES:
+        market_payload = by_market.get(alignment_key, {}) if isinstance(by_market, dict) else {}
+        for market_type, item in sorted(market_payload.items()):
+            if int(item.get("total_picks", 0) or 0) > 0:
+                any_market_rows = True
+                lines.append(_performance_line(f"{alignment_key}/{market_type}", item))
+    if not any_market_rows:
+        lines.append("- n/a")
+    lines.append("")
+
     header = (
         f"{'Market':34} {'Total':>5} {'Graded':>6} {'Pending':>7} "
         f"{'Hit%':>7} {'AvgEdge':>8} {'AvgConf':>8} {'AvgQual':>8} {'ROI':>8} {'Align':>7} {'Conflict':>8}"
@@ -298,6 +445,19 @@ def render_market_shadow_report(payload: dict[str, Any]) -> str:
         )
     lines.append("")
     return "\n".join(lines)
+
+
+def _performance_line(label: str, item: Any) -> str:
+    payload = item if isinstance(item, dict) else {}
+    return (
+        f"- {label}: "
+        f"total={int(payload.get('total_picks', 0) or 0)} "
+        f"graded={int(payload.get('graded_picks', 0) or 0)} "
+        f"pending={int(payload.get('pending_picks', 0) or 0)} "
+        f"hit_rate={_format_pct(payload.get('hit_rate'))} "
+        f"roi={_format_pct(payload.get('roi'))} "
+        f"status={_safe_text(payload.get('status')) or 'insufficient_sample'}"
+    )
 
 
 def _format_num(value: Any) -> str:
@@ -351,6 +511,16 @@ def main(argv: list[str] | None = None) -> int:
         f"graded={totals.get('graded_picks', 0)} "
         f"pending={totals.get('pending_picks', 0)}"
     )
+    performance = payload.get("context_alignment_performance", {})
+    by_alignment = performance.get("by_alignment", {}) if isinstance(performance, dict) else {}
+    for alignment_key in TRACKED_ALIGNMENT_VALUES:
+        item = by_alignment.get(alignment_key, {}) if isinstance(by_alignment, dict) else {}
+        print(
+            f"[CONTEXT] graded_alignment_{alignment_key}="
+            f"{int(item.get('graded_picks', 0) or 0)} "
+            f"hit_rate={_format_pct(item.get('hit_rate'))} "
+            f"roi={_format_pct(item.get('roi'))}"
+        )
     return 0
 
 

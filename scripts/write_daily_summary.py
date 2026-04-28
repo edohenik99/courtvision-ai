@@ -175,6 +175,18 @@ def _alignment_counts(df: pd.DataFrame) -> dict[str, int]:
     return counts
 
 
+def _alignment_performance_line(label: str, item: Any) -> str:
+    payload = item if isinstance(item, dict) else {}
+    return (
+        f"- {label}: "
+        f"graded={int(payload.get('graded_picks', 0) or 0)}, "
+        f"pending={int(payload.get('pending_picks', 0) or 0)}, "
+        f"hit_rate={_format_pct(payload.get('hit_rate'))}, "
+        f"roi={_format_pct(payload.get('roi'))}, "
+        f"status={_safe_text(payload.get('status')) or 'insufficient_sample'}"
+    )
+
+
 def _kelly_line(row: pd.Series) -> str:
     player = _safe_text(row.get("player_name")) or "Unknown"
     market = _safe_text(row.get("market_type")) or "unknown"
@@ -222,6 +234,11 @@ def build_daily_summary(
     elite_alignment = _alignment_counts(elite_df)
     full_market_alignment = _alignment_counts(full_market_df)
     shadow_totals = shadow.get("totals", {}) if isinstance(shadow, dict) else {}
+    context_alignment_performance = (
+        shadow.get("context_alignment_performance", {})
+        if isinstance(shadow, dict)
+        else {}
+    )
     pending_grading = int(shadow_totals.get("pending_picks") or 0)
 
     readiness_markets = readiness.get("markets", []) if isinstance(readiness, dict) else []
@@ -284,6 +301,46 @@ def build_daily_summary(
     lines.append(f"- hit rate: {_format_pct(shadow_totals.get('hit_rate'))}")
     lines.append(f"Pending grading count: {pending_grading}")
 
+    lines.extend(["", "Context Alignment Performance", "-" * 72])
+    if not context_alignment_performance:
+        lines.append("- insufficient sample: no context alignment performance payload yet")
+    else:
+        by_alignment = context_alignment_performance.get("by_alignment", {})
+        for alignment_key in ("aligned", "conflicted", "neutral"):
+            item = by_alignment.get(alignment_key, {}) if isinstance(by_alignment, dict) else {}
+            lines.append(_alignment_performance_line(alignment_key, item))
+        if context_alignment_performance.get("status") == "insufficient_sample":
+            lines.append("- note: no resolved graded hit/miss sample yet; performance is pending.")
+
+        by_side = context_alignment_performance.get("by_alignment_and_selection_side", {})
+        side_lines: list[str] = []
+        if isinstance(by_side, dict):
+            for alignment_key in ("aligned", "conflicted", "neutral"):
+                side_payload = by_side.get(alignment_key, {})
+                if not isinstance(side_payload, dict):
+                    continue
+                for side in ("over", "under"):
+                    item = side_payload.get(side, {})
+                    if isinstance(item, dict) and int(item.get("total_picks", 0) or 0) > 0:
+                        side_lines.append(_alignment_performance_line(f"{alignment_key}/{side}", item))
+        if side_lines:
+            lines.append("By selection side:")
+            lines.extend(side_lines)
+
+        by_market = context_alignment_performance.get("by_alignment_and_market_type", {})
+        market_lines: list[str] = []
+        if isinstance(by_market, dict):
+            for alignment_key in ("aligned", "conflicted", "neutral"):
+                market_payload = by_market.get(alignment_key, {})
+                if not isinstance(market_payload, dict):
+                    continue
+                for market_type, item in sorted(market_payload.items()):
+                    if isinstance(item, dict) and int(item.get("total_picks", 0) or 0) > 0:
+                        market_lines.append(_alignment_performance_line(f"{alignment_key}/{market_type}", item))
+        if market_lines:
+            lines.append("By market type:")
+            lines.extend(market_lines)
+
     lines.extend(["", "Manual Context", "-" * 72])
     if manual_context:
         file_found = _is_truthy(manual_context.get("file_found"))
@@ -337,6 +394,7 @@ def build_daily_summary(
         "elite_context_alignment": elite_alignment,
         "full_market_context_alignment": full_market_alignment,
         "shadow_totals": shadow_totals,
+        "context_alignment_performance": context_alignment_performance,
         "pending_grading_count": pending_grading,
         "manual_context": manual_context,
         "warnings": warnings,
