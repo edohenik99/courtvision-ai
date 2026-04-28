@@ -151,3 +151,76 @@ def test_game_context_derives_candidate_game_id_from_odds_without_selection_inpu
     assert bool(out.loc[0, "postseason"]) is True
     assert diagnostics["candidates_with_opponent"] == 1
     assert diagnostics["candidates_with_postseason"] == 1
+
+
+def test_game_context_calculates_one_day_rest_from_schedule() -> None:
+    candidates = pd.DataFrame([{"player_name": "Player A", "team": "AAA", "team_abbr": "AAA", "game_id": 1}])
+    games = pd.DataFrame([{"game_id": 1, "home_team_abbr": "AAA", "visitor_team_abbr": "BBB"}])
+    schedule = pd.DataFrame(
+        [
+            {"id": 99, "date": "2026-04-26", "home_team": {"abbreviation": "AAA"}, "visitor_team": {"abbreviation": "CCC"}},
+            {"id": 98, "date": "2026-04-25", "home_team": {"abbreviation": "BBB"}, "visitor_team": {"abbreviation": "DDD"}},
+        ]
+    )
+
+    out, diagnostics = apply_game_context(
+        candidates,
+        games=games,
+        team_baselines=pd.DataFrame(),
+        odds=pd.DataFrame(),
+        prediction_date="2026-04-28",
+        schedule_games=schedule,
+    )
+
+    assert out.loc[0, "rest_days"] == 1.0
+    assert out.loc[0, "opponent_rest_days"] == 2.0
+    assert bool(out.loc[0, "is_back_to_back"]) is False
+    assert bool(out.loc[0, "opponent_is_back_to_back"]) is False
+    assert diagnostics["candidates_with_rest_days"] == 1
+    assert diagnostics["candidates_with_back_to_back"] == 0
+
+
+def test_game_context_calculates_back_to_back_from_schedule() -> None:
+    candidates = pd.DataFrame([{"player_name": "Player A", "team": "AAA", "team_abbr": "AAA", "game_id": 1}])
+    games = pd.DataFrame([{"game_id": 1, "home_team_abbr": "AAA", "visitor_team_abbr": "BBB"}])
+    schedule = pd.DataFrame(
+        [
+            {"id": 99, "date": "2026-04-27", "home_team": {"abbreviation": "AAA"}, "visitor_team": {"abbreviation": "CCC"}},
+        ]
+    )
+
+    out, diagnostics = apply_game_context(
+        candidates,
+        games=games,
+        team_baselines=pd.DataFrame(),
+        odds=pd.DataFrame(),
+        prediction_date="2026-04-28",
+        schedule_games=schedule,
+    )
+
+    assert out.loc[0, "rest_days"] == 0.0
+    assert bool(out.loc[0, "is_back_to_back"]) is True
+    assert pd.isna(out.loc[0, "opponent_rest_days"])
+    assert diagnostics["candidates_with_rest_days"] == 1
+    assert diagnostics["candidates_with_back_to_back"] == 1
+
+
+def test_game_context_missing_previous_game_leaves_rest_null() -> None:
+    candidates = pd.DataFrame([{"player_name": "Player A", "team": "AAA", "team_abbr": "AAA", "game_id": 1}])
+    games = pd.DataFrame([{"game_id": 1, "home_team_abbr": "AAA", "visitor_team_abbr": "BBB"}])
+
+    out, diagnostics = apply_game_context(
+        candidates,
+        games=games,
+        team_baselines=pd.DataFrame(),
+        odds=pd.DataFrame(),
+        prediction_date="2026-04-28",
+        schedule_games=pd.DataFrame(),
+    )
+
+    assert pd.isna(out.loc[0, "rest_days"])
+    assert pd.isna(out.loc[0, "opponent_rest_days"])
+    assert pd.isna(out.loc[0, "is_back_to_back"])
+    assert pd.isna(out.loc[0, "opponent_is_back_to_back"])
+    assert diagnostics["candidates_with_rest_days"] == 0
+    assert diagnostics["candidates_with_back_to_back"] == 0

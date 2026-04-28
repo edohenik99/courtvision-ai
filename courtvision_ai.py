@@ -18,6 +18,7 @@ import math
 import os
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
@@ -3541,6 +3542,7 @@ class CourtVisionAI:
 
         games_raw = client.get_games(prediction_date)
         games = self._normalize_games(games_raw)
+        schedule_games = self._fetch_recent_game_schedule(client, prediction_date)
         game_ids = [int(game_id) for game_id in games["game_id"].dropna().tolist()] if not games.empty else []
         print(f"[STAGE] provider_fetch_start games={len(game_ids)}")
         print(f"[COUNT] active_odds_fetch_path=courtvision_ai.py:predict:client.get_odds", flush=True)
@@ -3777,6 +3779,7 @@ class CourtVisionAI:
                 elite_df=elite_df,
                 full_market_df=full_market_df,
                 games=games_raw if isinstance(games_raw, pd.DataFrame) and not games_raw.empty else games,
+                schedule_games=schedule_games,
                 team_baselines=team_baselines,
                 odds=odds,
             )
@@ -3815,6 +3818,7 @@ class CourtVisionAI:
                 "candidates_with_opponent": int(game_context_diagnostics.get("candidates_with_opponent", 0) or 0),
                 "candidates_with_postseason": int(game_context_diagnostics.get("candidates_with_postseason", 0) or 0),
                 "candidates_with_rest_days": int(game_context_diagnostics.get("candidates_with_rest_days", 0) or 0),
+                "candidates_with_back_to_back": int(game_context_diagnostics.get("candidates_with_back_to_back", 0) or 0),
                 "candidates_with_def_rating": int(game_context_diagnostics.get("candidates_with_def_rating", 0) or 0),
                 "candidates_with_pace": int(game_context_diagnostics.get("candidates_with_pace", 0) or 0),
                 "passive_mode": True,
@@ -4032,7 +4036,8 @@ class CourtVisionAI:
             qualified_pool_df=prepared_selected_df,
             elite_df=elite_df,
             full_market_df=full_market_df,
-            games=games,
+            games=games_raw if isinstance(games_raw, pd.DataFrame) and not games_raw.empty else games,
+            schedule_games=schedule_games,
             team_baselines=team_baselines,
             odds=odds,
         )
@@ -4097,6 +4102,7 @@ class CourtVisionAI:
                 "candidates_with_opponent": int(game_context_diagnostics.get("candidates_with_opponent", 0) or 0),
                 "candidates_with_postseason": int(game_context_diagnostics.get("candidates_with_postseason", 0) or 0),
                 "candidates_with_rest_days": int(game_context_diagnostics.get("candidates_with_rest_days", 0) or 0),
+                "candidates_with_back_to_back": int(game_context_diagnostics.get("candidates_with_back_to_back", 0) or 0),
                 "candidates_with_def_rating": int(game_context_diagnostics.get("candidates_with_def_rating", 0) or 0),
                 "candidates_with_pace": int(game_context_diagnostics.get("candidates_with_pace", 0) or 0),
                 "passive_mode": True,
@@ -5618,6 +5624,44 @@ class CourtVisionAI:
         )
         return qualified_pool_df, elite_df, full_market_df, diagnostics_payload, diagnostics_path
 
+    def _fetch_recent_game_schedule(
+        self,
+        client: Any,
+        prediction_date: str,
+        *,
+        lookback_days: int = 7,
+    ) -> pd.DataFrame:
+        try:
+            slate_date = datetime.strptime(str(prediction_date), "%Y-%m-%d").date()
+        except ValueError:
+            return pd.DataFrame()
+
+        frames: list[pd.DataFrame] = []
+        for offset in range(1, int(lookback_days) + 1):
+            date_str = (slate_date - timedelta(days=offset)).isoformat()
+            try:
+                games = client.get_games(date_str)
+            except Exception as exc:
+                self.logger.warning("game_context_schedule_fetch_failed date=%s error=%s", date_str, exc)
+                continue
+            if isinstance(games, pd.DataFrame) and not games.empty:
+                frames.append(games.copy())
+        if not frames:
+            return pd.DataFrame()
+        columns = list(dict.fromkeys(column for frame in frames for column in frame.columns.tolist()))
+        concat_frames = [
+            frame.dropna(axis=1, how="all")
+            for frame in frames
+            if not frame.empty and not frame.dropna(how="all").empty
+        ]
+        if not concat_frames:
+            return pd.DataFrame(columns=columns)
+        combined = pd.concat(concat_frames, ignore_index=True, sort=False)
+        for column in columns:
+            if column not in combined.columns:
+                combined[column] = pd.NA
+        return combined.reindex(columns=columns)
+
     def _attach_game_context(
         self,
         *,
@@ -5626,6 +5670,7 @@ class CourtVisionAI:
         elite_df: pd.DataFrame,
         full_market_df: pd.DataFrame,
         games: pd.DataFrame,
+        schedule_games: pd.DataFrame,
         team_baselines: pd.DataFrame,
         odds: pd.DataFrame,
     ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, Any], Path, Path]:
@@ -5634,18 +5679,24 @@ class CourtVisionAI:
             games=games,
             team_baselines=team_baselines,
             odds=odds,
+            prediction_date=prediction_date,
+            schedule_games=schedule_games,
         )
         elite_df, _ = apply_game_context(
             elite_df,
             games=games,
             team_baselines=team_baselines,
             odds=odds,
+            prediction_date=prediction_date,
+            schedule_games=schedule_games,
         )
         full_market_df, _ = apply_game_context(
             full_market_df,
             games=games,
             team_baselines=team_baselines,
             odds=odds,
+            prediction_date=prediction_date,
+            schedule_games=schedule_games,
         )
         json_path, report_path, payload = write_game_context_outputs(
             prediction_date=prediction_date,
@@ -5657,6 +5708,7 @@ class CourtVisionAI:
         print(f"[CONTEXT] candidates_with_opponent={int(payload.get('candidates_with_opponent', 0) or 0)}", flush=True)
         print(f"[CONTEXT] candidates_with_postseason={int(payload.get('candidates_with_postseason', 0) or 0)}", flush=True)
         print(f"[CONTEXT] candidates_with_rest_days={int(payload.get('candidates_with_rest_days', 0) or 0)}", flush=True)
+        print(f"[CONTEXT] candidates_with_back_to_back={int(payload.get('candidates_with_back_to_back', 0) or 0)}", flush=True)
         print(f"[CONTEXT] candidates_with_def_rating={int(payload.get('candidates_with_def_rating', 0) or 0)}", flush=True)
         print(f"[CONTEXT] candidates_with_pace={int(payload.get('candidates_with_pace', 0) or 0)}", flush=True)
         return qualified_pool_df, elite_df, full_market_df, payload, json_path, report_path

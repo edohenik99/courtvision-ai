@@ -69,6 +69,16 @@ def _bool_or_none(value: Any) -> bool | None:
     return None
 
 
+def _date(value: Any) -> pd.Timestamp | None:
+    text = _text(value)
+    if not text:
+        return None
+    parsed = pd.to_datetime(text, errors="coerce", utc=True)
+    if pd.isna(parsed):
+        return None
+    return parsed.tz_convert(None).normalize()
+
+
 def _first(row: pd.Series | dict[str, Any] | None, names: tuple[str, ...]) -> Any:
     if row is None:
         return None
@@ -108,6 +118,40 @@ def _game_lookup(games: pd.DataFrame) -> dict[str, dict[str, Any]]:
             lookup[f"pair:{home}:{away}"] = payload
             lookup[f"pair:{away}:{home}"] = payload
     return lookup
+
+
+def _game_teams(row: pd.Series) -> tuple[str, str]:
+    home_nested = row.get("home_team") if "home_team" in row.index and isinstance(row.get("home_team"), dict) else {}
+    visitor_nested = row.get("visitor_team") if "visitor_team" in row.index and isinstance(row.get("visitor_team"), dict) else {}
+    home = _team_key(home_nested.get("abbreviation")) or _team_key(
+        _first(row, ("home_team_abbr", "home.abbreviation", "home_team.abbreviation"))
+    )
+    away = _team_key(visitor_nested.get("abbreviation")) or _team_key(
+        _first(row, ("visitor_team_abbr", "away_team_abbr", "visitor.abbreviation", "visitor_team.abbreviation"))
+    )
+    return home, away
+
+
+def _rest_days_lookup(schedule_games: pd.DataFrame, prediction_date: str) -> dict[str, int]:
+    slate_date = _date(prediction_date)
+    if slate_date is None or not isinstance(schedule_games, pd.DataFrame) or schedule_games.empty:
+        return {}
+    previous_dates: dict[str, pd.Timestamp] = {}
+    for _, row in schedule_games.iterrows():
+        game_date = _date(_first(row, ("date", "game_date", "datetime", "status")))
+        if game_date is None or game_date >= slate_date:
+            continue
+        home, away = _game_teams(row)
+        for team in (home, away):
+            if not team:
+                continue
+            current = previous_dates.get(team)
+            if current is None or game_date > current:
+                previous_dates[team] = game_date
+    return {
+        team: max(int((slate_date - previous_date).days) - 1, 0)
+        for team, previous_date in previous_dates.items()
+    }
 
 
 def _team_lookup(team_baselines: pd.DataFrame) -> dict[str, pd.Series]:
@@ -195,6 +239,8 @@ def apply_game_context(
     games: pd.DataFrame,
     team_baselines: pd.DataFrame,
     odds: pd.DataFrame,
+    prediction_date: str | None = None,
+    schedule_games: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     out = candidates.copy()
     defaults = _default_context()
@@ -206,6 +252,7 @@ def apply_game_context(
         "candidates_with_opponent": 0,
         "candidates_with_postseason": 0,
         "candidates_with_rest_days": 0,
+        "candidates_with_back_to_back": 0,
         "candidates_with_def_rating": 0,
         "candidates_with_pace": 0,
         "missing_fields": [],
@@ -218,6 +265,7 @@ def apply_game_context(
     teams = _team_lookup(team_baselines)
     markets = _market_lookup(odds)
     candidate_games = _candidate_game_lookup(odds)
+    rest_lookup = _rest_days_lookup(schedule_games if schedule_games is not None else pd.DataFrame(), prediction_date or "")
 
     for idx, row in out.iterrows():
         team = _team_key(_first(row, ("team", "team_abbr")))
@@ -260,8 +308,12 @@ def apply_game_context(
         out.at[idx, "opponent_def_rating"] = _team_metric(opp_row, ("team_def_rating", "def_rating", "defensive_rating"))
         out.at[idx, "team_off_rating"] = _team_metric(team_row, ("team_off_rating", "off_rating", "offensive_rating"))
         out.at[idx, "opponent_off_rating"] = _team_metric(opp_row, ("team_off_rating", "off_rating", "offensive_rating"))
-        out.at[idx, "rest_days"] = _team_metric(team_row, ("rest_days", "team_rest_days"))
-        out.at[idx, "opponent_rest_days"] = _team_metric(opp_row, ("rest_days", "team_rest_days"))
+        team_rest = rest_lookup.get(team)
+        opponent_rest = rest_lookup.get(opponent)
+        out.at[idx, "rest_days"] = float(team_rest) if team_rest is not None else _team_metric(team_row, ("rest_days", "team_rest_days"))
+        out.at[idx, "opponent_rest_days"] = (
+            float(opponent_rest) if opponent_rest is not None else _team_metric(opp_row, ("rest_days", "team_rest_days"))
+        )
         rest_days = _float(out.at[idx, "rest_days"])
         opp_rest_days = _float(out.at[idx, "opponent_rest_days"])
         out.at[idx, "is_back_to_back"] = bool(rest_days == 0.0) if rest_days is not None else pd.NA
@@ -294,11 +346,20 @@ def _coverage(df: pd.DataFrame) -> dict[str, Any]:
             mask = mask | df[column].map(lambda value: _text(value) != "")
         return int(mask.sum())
 
+    def has_true(columns: tuple[str, ...]) -> int:
+        if not all(column in df.columns for column in columns):
+            return 0
+        mask = pd.Series(False, index=df.index)
+        for column in columns:
+            mask = mask | df[column].map(lambda value: _text(value).lower() == "true")
+        return int(mask.sum())
+
     coverage = {
         "rows": int(len(df)),
         "candidates_with_opponent": has_text("opponent"),
         "candidates_with_postseason": has_value("postseason"),
         "candidates_with_rest_days": has_any(("rest_days", "opponent_rest_days")),
+        "candidates_with_back_to_back": has_true(("is_back_to_back", "opponent_is_back_to_back")),
         "candidates_with_def_rating": has_any(("team_def_rating", "opponent_def_rating")),
         "candidates_with_pace": has_any(("team_pace", "opponent_pace")),
     }
@@ -344,6 +405,7 @@ def write_game_context_outputs(
         f"candidates_with_opponent: {payload['candidates_with_opponent']}",
         f"candidates_with_postseason: {payload['candidates_with_postseason']}",
         f"candidates_with_rest_days: {payload['candidates_with_rest_days']}",
+        f"candidates_with_back_to_back: {payload.get('candidates_with_back_to_back', 0)}",
         f"candidates_with_def_rating: {payload['candidates_with_def_rating']}",
         f"candidates_with_pace: {payload['candidates_with_pace']}",
         f"missing_fields: {payload['missing_fields']}",
