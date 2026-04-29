@@ -307,3 +307,61 @@ def test_empty_artifacts_are_allowed_when_no_final_rows_and_no_previous_nonempty
     assert paths["grading_summary_json"].exists()
     payload = json.loads(paths["grading_summary_json"].read_text(encoding="utf-8"))
     assert payload["overall"]["n"] == 0
+
+
+def test_feedback_append_missing_grade_key_gets_canonical_grade_key(tmp_path: Path) -> None:
+    ai = CourtVisionAI.__new__(CourtVisionAI)
+    ai.feedback_path = tmp_path / "result_feedback.csv"
+    row = _feedback_row()
+    row["grade_key"] = ""
+
+    ai._append_history(ai.feedback_path, pd.DataFrame([row]))
+
+    written = pd.read_csv(ai.feedback_path)
+    assert len(written) == 1
+    assert written.iloc[0]["grade_key"] == _grade_key(row)
+
+
+def test_feedback_append_missing_grade_key_fields_is_skipped(tmp_path: Path, capsys) -> None:
+    ai = CourtVisionAI.__new__(CourtVisionAI)
+    ai.feedback_path = tmp_path / "result_feedback.csv"
+    row = _feedback_row()
+    row["grade_key"] = ""
+    row["entity_name"] = ""
+
+    ai._append_history(ai.feedback_path, pd.DataFrame([row]))
+
+    captured = capsys.readouterr()
+    assert "[GRADING] skipped_feedback_missing_grade_key=1" in captured.out
+    assert not ai.feedback_path.exists()
+
+
+def test_feedback_append_final_duplicate_grade_key_is_not_appended(tmp_path: Path) -> None:
+    ai = CourtVisionAI.__new__(CourtVisionAI)
+    ai.feedback_path = tmp_path / "result_feedback.csv"
+    existing = _feedback_row(result="win")
+    pd.DataFrame([existing]).to_csv(ai.feedback_path, index=False)
+    incoming = _feedback_row(result="win")
+    incoming["actual_value"] = 24.0
+
+    ai._append_history(ai.feedback_path, pd.DataFrame([incoming]))
+
+    written = pd.read_csv(ai.feedback_path)
+    assert len(written) == 1
+    assert written.iloc[0]["grade_key"] == existing["grade_key"]
+    assert float(written.iloc[0]["actual_value"]) == 22.0
+
+
+def test_feedback_append_unresolved_duplicate_grade_key_is_not_appended(tmp_path: Path) -> None:
+    ai = CourtVisionAI.__new__(CourtVisionAI)
+    ai.feedback_path = tmp_path / "result_feedback.csv"
+    existing = _feedback_row(result="unresolved")
+    pd.DataFrame([existing]).to_csv(ai.feedback_path, index=False)
+    incoming = _feedback_row(result="unresolved")
+    incoming["grade_key"] = ""
+
+    ai._append_history(ai.feedback_path, pd.DataFrame([incoming]))
+
+    written = pd.read_csv(ai.feedback_path)
+    assert len(written) == 1
+    assert written.iloc[0]["grade_key"] == existing["grade_key"]

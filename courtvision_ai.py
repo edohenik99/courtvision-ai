@@ -7122,6 +7122,11 @@ class CourtVisionAI:
     def _append_history(self, path: Path, df: pd.DataFrame) -> None:
         if df.empty:
             return
+        path = Path(path)
+        if self._is_feedback_history_path(path):
+            df = self._prepare_feedback_append_rows(path, df)
+            if df.empty:
+                return
 
         if path.exists():
             existing = self._safe_read_csv(path)
@@ -7141,9 +7146,6 @@ class CourtVisionAI:
                     combined.to_csv(path, index=False)
                     return
                 combined = pd.concat(concat_frames, ignore_index=True)
-                for column in columns:
-                    if column not in combined.columns:
-                        combined[column] = pd.NA
                 combined = combined.reindex(columns=columns)
             elif existing_nonempty:
                 combined = existing.copy()
@@ -7152,6 +7154,83 @@ class CourtVisionAI:
             combined.to_csv(path, index=False)
         else:
             df.to_csv(path, index=False)
+
+    def _is_feedback_history_path(self, path: Path) -> bool:
+        feedback_path = getattr(self, "feedback_path", None)
+        if feedback_path is not None:
+            try:
+                return Path(path).resolve() == Path(feedback_path).resolve()
+            except OSError:
+                return Path(path).name == Path(feedback_path).name
+        return Path(path).name == "result_feedback.csv"
+
+    @staticmethod
+    def _canonical_feedback_grade_key(row: Mapping[str, Any]) -> str:
+        required = ["prediction_date", "market_type", "entity_name", "selection", "sportsbook_line"]
+        values: list[str] = []
+        for column in required:
+            value = row.get(column)
+            if pd.isna(value):
+                return ""
+            text = str(value).strip()
+            if not text:
+                return ""
+            values.append(text)
+        return "|".join(values)
+
+    def _prepare_feedback_append_rows(self, path: Path, df: pd.DataFrame) -> pd.DataFrame:
+        prepared = df.copy()
+        if "grade_key" not in prepared.columns:
+            prepared["grade_key"] = ""
+        prepared["grade_key"] = prepared["grade_key"].fillna("").astype(str)
+        blank_key_mask = prepared["grade_key"].str.strip().eq("")
+        skipped_missing_key = 0
+        if blank_key_mask.any():
+            for idx, row in prepared.loc[blank_key_mask].iterrows():
+                grade_key = self._canonical_feedback_grade_key(row)
+                if grade_key:
+                    prepared.at[idx, "grade_key"] = grade_key
+                else:
+                    skipped_missing_key += 1
+                    prepared.at[idx, "grade_key"] = ""
+            prepared = prepared[prepared["grade_key"].astype(str).str.strip().ne("")].copy()
+        if skipped_missing_key:
+            print(f"[GRADING] skipped_feedback_missing_grade_key={skipped_missing_key}", flush=True)
+
+        if prepared.empty:
+            return prepared
+
+        incoming_result = _normalized_grading_result_series(prepared)
+        incoming_final_mask = incoming_result.isin(FINAL_GRADING_RESULTS)
+        if incoming_final_mask.any():
+            prepared = prepared.copy()
+            prepared["_normalized_result_for_dedupe"] = incoming_result.values
+            final_rows = prepared[prepared["_normalized_result_for_dedupe"].isin(FINAL_GRADING_RESULTS)].copy()
+            non_final_rows = prepared[~prepared["_normalized_result_for_dedupe"].isin(FINAL_GRADING_RESULTS)].copy()
+            final_rows = final_rows.drop_duplicates(subset=["grade_key"], keep="last")
+            prepared = pd.concat([non_final_rows, final_rows], ignore_index=True)
+            prepared = prepared.drop(columns=["_normalized_result_for_dedupe"], errors="ignore")
+
+        if path.exists():
+            existing = self._safe_read_csv(path)
+            if not existing.empty and "grade_key" in existing.columns:
+                existing = existing.copy()
+                existing["grade_key"] = existing["grade_key"].fillna("").astype(str)
+                existing_result = _normalized_grading_result_series(existing)
+                existing_final_keys = set(existing.loc[existing_result.isin(FINAL_GRADING_RESULTS), "grade_key"].astype(str))
+                existing_keys = set(existing["grade_key"].astype(str))
+                if existing_final_keys:
+                    incoming_result = _normalized_grading_result_series(prepared)
+                    duplicate_final_mask = incoming_result.isin(FINAL_GRADING_RESULTS) & prepared["grade_key"].astype(str).isin(existing_final_keys)
+                    if duplicate_final_mask.any():
+                        prepared = prepared[~duplicate_final_mask].copy()
+                if existing_keys and not prepared.empty:
+                    incoming_result = _normalized_grading_result_series(prepared)
+                    duplicate_non_final_mask = ~incoming_result.isin(FINAL_GRADING_RESULTS) & prepared["grade_key"].astype(str).isin(existing_keys)
+                    if duplicate_non_final_mask.any():
+                        prepared = prepared[~duplicate_non_final_mask].copy()
+
+        return prepared.reset_index(drop=True)
 
     def _safe_read_csv(self, path: Path) -> pd.DataFrame:
         if not path.exists():
