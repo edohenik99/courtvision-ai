@@ -7025,6 +7025,11 @@ class CourtVisionAI:
         ungraded_reason = ""
 
         if market_type in self.PLAYER_MARKETS:
+            if selection_side not in {"over", "under"}:
+                if diagnostics is not None:
+                    diagnostics["matched_pick"] = False
+                    diagnostics["ungraded_reason"] = "unsupported_grading_market"
+                return None
             stat_key = self.PLAYER_MARKETS[market_type]
             if stats.empty:
                 ungraded_reason = "player_stats_empty"

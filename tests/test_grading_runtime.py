@@ -180,6 +180,22 @@ def test_mixed_case_over_under_grade_correctly() -> None:
     assert under["result"] == "win"
 
 
+def test_milestone_player_prop_is_excluded_from_grading() -> None:
+    ai = CourtVisionAI.__new__(CourtVisionAI)
+    diagnostics: dict[str, object] = {}
+
+    graded = ai._grade_single_prediction(
+        _history_row(selection="milestone", line=20.5),
+        pd.DataFrame([{"player_name": "Alpha Player", "team_abbr": "BOS", "pts": 22.0}]),
+        [],
+        diagnostics=diagnostics,
+    )
+
+    assert graded is None
+    assert diagnostics["matched_pick"] is False
+    assert diagnostics["ungraded_reason"] == "unsupported_grading_market"
+
+
 def test_empty_grading_results_csv_is_valid_when_no_rows_gradeable(tmp_path: Path) -> None:
     paths = _write_grading_outputs(tmp_path, "2026-04-29", pd.DataFrame())
 
