@@ -4,9 +4,33 @@ Tests compute_kelly_fraction and compute_recommended_bet functions
 to ensure proper conservative stake sizing based on edge, odds, and confidence.
 """
 
+import csv
+
 import pytest
 from courtvision.betting.kelly import compute_kelly_fraction, compute_recommended_bet, MAX_STAKE_FRACTION, MIN_CONFIDENCE_THRESHOLD
-from scripts.run_kelly_stakes import _build_stake_row, _validate_columns
+from scripts.run_kelly_stakes import _build_stake_row, _validate_columns, main
+
+
+def _kelly_row(
+    *,
+    player_name: str = "Kelly Player",
+    selection: str = "over",
+    context_caution_level: str = "low",
+    edge: str = "0.10",
+    confidence: str = "0.75",
+    odds: str = "-110",
+) -> dict[str, str]:
+    return {
+        "player_name": player_name,
+        "market_type": "player_points",
+        "selection": selection,
+        "line": "20.5",
+        "odds": odds,
+        "confidence": confidence,
+        "edge_pct": edge,
+        "side_edge_pct": edge,
+        "context_caution_level": context_caution_level,
+    }
 
 
 class TestConservativeKellyLogic:
@@ -163,6 +187,75 @@ class TestConservativeKellyLogic:
         assert stake.side_edge_pct == 0.10
         assert stake.context_caution_level == "high"
         assert stake.stake_amount > 0
+
+    def test_high_caution_over_is_skipped_by_kelly(self):
+        fieldnames = ["player_name", "market_type", "selection", "odds", "confidence", "edge_pct", "side_edge_pct", "context_caution_level"]
+        edge_col = _validate_columns(fieldnames)
+
+        stake = _build_stake_row(_kelly_row(selection="over", context_caution_level="high"), edge_col, bankroll=1000.0)
+
+        assert stake.eligible is False
+        assert stake.skip_reason == "context_high_caution_over"
+        assert stake.stake_amount == 0
+        assert stake.stake_fraction == 0
+
+    def test_high_caution_under_is_not_skipped_by_context_over_rule(self):
+        fieldnames = ["player_name", "market_type", "selection", "odds", "confidence", "edge_pct", "side_edge_pct", "context_caution_level"]
+        edge_col = _validate_columns(fieldnames)
+
+        stake = _build_stake_row(_kelly_row(selection="under", context_caution_level="high"), edge_col, bankroll=1000.0)
+
+        assert stake.eligible is True
+        assert stake.skip_reason == ""
+        assert stake.stake_amount > 0
+
+    @pytest.mark.parametrize("level", ["medium", "low"])
+    def test_medium_low_caution_over_remains_eligible(self, level):
+        fieldnames = ["player_name", "market_type", "selection", "odds", "confidence", "edge_pct", "side_edge_pct", "context_caution_level"]
+        edge_col = _validate_columns(fieldnames)
+
+        stake = _build_stake_row(_kelly_row(selection="over", context_caution_level=level), edge_col, bankroll=1000.0)
+
+        assert stake.eligible is True
+        assert stake.skip_reason == ""
+        assert stake.stake_amount > 0
+
+    def test_existing_exposure_cap_still_works(self, tmp_path):
+        input_path = tmp_path / "elite_board.csv"
+        output_path = tmp_path / "kelly_stakes.csv"
+        rows = [
+            _kelly_row(player_name="A", selection="under", context_caution_level="high", edge="0.50", confidence="1.0", odds="-110"),
+            _kelly_row(player_name="B", selection="over", context_caution_level="low", edge="0.50", confidence="1.0", odds="-110"),
+            _kelly_row(player_name="C", selection="over", context_caution_level="high", edge="0.50", confidence="1.0", odds="-110"),
+        ]
+        with input_path.open("w", encoding="utf-8", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
+
+        rc = main(
+            [
+                "--prediction-date",
+                "2026-04-29",
+                "--bankroll",
+                "1000",
+                "--input-csv",
+                str(input_path),
+                "--output-csv",
+                str(output_path),
+                "--max-daily-exposure",
+                "0.01",
+            ]
+        )
+
+        assert rc == 0
+        out_rows = list(csv.DictReader(output_path.open("r", encoding="utf-8", newline="")))
+        assert len(out_rows) == 3
+        eligible_stakes = [float(row["stake_amount"]) for row in out_rows if row["eligible"] == "True"]
+        assert round(sum(eligible_stakes), 2) <= 10.0
+        skipped = {row["player_name"]: row for row in out_rows if row["eligible"] == "False"}
+        assert skipped["C"]["skip_reason"] == "context_high_caution_over"
+        assert float(skipped["C"]["stake_amount"]) == 0.0
 
 
 class TestConfigConstants:
