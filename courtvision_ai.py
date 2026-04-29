@@ -17,6 +17,7 @@ import logging
 import math
 import os
 import sys
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -6855,9 +6856,33 @@ class CourtVisionAI:
 
     def _grade_history(self, prediction_date: str, lookback_days: Optional[int] = None) -> tuple[pd.DataFrame, dict[str, Any]]:
         lookback_days = self.GRADE_LOOKBACK_DAYS if lookback_days is None else int(lookback_days)
+        diagnostics: dict[str, Any] = {
+            "pending_rows": 0,
+            "final_games_found": 0,
+            "player_stat_rows": 0,
+            "matched_picks": 0,
+            "graded_rows_written": 0,
+            "existing_feedback_final_rows": 0,
+            "existing_feedback_unresolved_rows": 0,
+            "reprocess_unresolved_rows": 0,
+            "skipped_final_feedback_rows": 0,
+            "ungraded_reason_counts": {},
+        }
+        ungraded_reasons: Counter[str] = Counter()
+
+        def finish(df: pd.DataFrame, summary: dict[str, Any]) -> tuple[pd.DataFrame, dict[str, Any]]:
+            diagnostics["graded_rows_written"] = int(len(df)) if isinstance(df, pd.DataFrame) else 0
+            diagnostics["ungraded_reason_counts"] = dict(sorted(ungraded_reasons.items()))
+            summary = dict(summary)
+            summary["diagnostics"] = dict(diagnostics)
+            summary["ungraded_reason_counts"] = diagnostics["ungraded_reason_counts"]
+            self._log_grading_diagnostics(diagnostics)
+            return df, summary
+
         history = self._safe_read_csv(self.prediction_history_path)
         if history.empty:
-            return pd.DataFrame(), {"graded_rows": 0, "window_days": lookback_days, "status": "no_history"}
+            ungraded_reasons["no_history"] += 1
+            return finish(pd.DataFrame(), {"graded_rows": 0, "window_days": lookback_days, "status": "no_history"})
 
         hist = history.copy()
         prediction_series = hist.get("prediction_date")
@@ -6872,17 +6897,49 @@ class CourtVisionAI:
         hist = hist[(hist["prediction_date"].notna()) & (hist["prediction_date"] >= start) & (hist["prediction_date"] < cutoff)].copy()
         hist["prediction_date_str"] = hist["prediction_date"].dt.strftime("%Y-%m-%d")
         if hist.empty:
-            return pd.DataFrame(), {"graded_rows": 0, "window_days": lookback_days, "status": "no_eligible_predictions"}
+            ungraded_reasons["no_eligible_predictions"] += 1
+            return finish(pd.DataFrame(), {"graded_rows": 0, "window_days": lookback_days, "status": "no_eligible_predictions"})
 
         existing_feedback = self._safe_read_csv(self.feedback_path)
+        eligible_before_feedback = int(len(hist))
+        hist["grade_key"] = hist.apply(lambda r: f"{r.get('prediction_date_str','')}|{r.get('market_type','')}|{r.get('entity_name','')}|{r.get('selection','')}|{r.get('sportsbook_line','')}", axis=1)
         if not existing_feedback.empty and "grade_key" in existing_feedback.columns:
-            graded_keys = set(existing_feedback["grade_key"].astype(str).tolist())
-            hist["grade_key"] = hist.apply(lambda r: f"{r.get('prediction_date_str','')}|{r.get('market_type','')}|{r.get('entity_name','')}|{r.get('selection','')}|{r.get('sportsbook_line','')}", axis=1)
-            hist = hist[~hist["grade_key"].astype(str).isin(graded_keys)].copy()
-        else:
-            hist["grade_key"] = hist.apply(lambda r: f"{r.get('prediction_date_str','')}|{r.get('market_type','')}|{r.get('entity_name','')}|{r.get('selection','')}|{r.get('sportsbook_line','')}", axis=1)
+            final_statuses = {"win", "loss", "push"}
+            feedback = existing_feedback.copy()
+            feedback["grade_key"] = feedback["grade_key"].astype(str)
+            feedback_result = (
+                feedback.get("result", pd.Series("", index=feedback.index))
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .str.lower()
+            )
+            if "graded_result" in feedback.columns:
+                graded_result = feedback["graded_result"].fillna("").astype(str).str.strip().str.lower()
+                feedback_result = feedback_result.mask(feedback_result.eq(""), graded_result)
+            feedback["_normalized_result"] = feedback_result.replace("", "unknown")
+            eligible_keys = set(hist["grade_key"].astype(str).tolist())
+            relevant_feedback = feedback[feedback["grade_key"].isin(eligible_keys)].copy()
+            final_feedback = relevant_feedback[relevant_feedback["_normalized_result"].isin(final_statuses)]
+            unresolved_feedback = relevant_feedback[relevant_feedback["_normalized_result"].eq("unresolved")]
+            final_keys = set(final_feedback["grade_key"].astype(str).tolist())
+            unresolved_keys = set(unresolved_feedback["grade_key"].astype(str).tolist()) - final_keys
+
+            diagnostics["existing_feedback_final_rows"] = int(len(final_feedback))
+            diagnostics["existing_feedback_unresolved_rows"] = int(len(unresolved_feedback))
+
+            final_mask = hist["grade_key"].astype(str).isin(final_keys)
+            unresolved_mask = hist["grade_key"].astype(str).isin(unresolved_keys)
+            diagnostics["skipped_final_feedback_rows"] = int(final_mask.sum())
+            diagnostics["reprocess_unresolved_rows"] = int((~final_mask & unresolved_mask).sum())
+            if diagnostics["skipped_final_feedback_rows"]:
+                ungraded_reasons["already_in_result_feedback_final"] += int(diagnostics["skipped_final_feedback_rows"])
+            hist = hist[~final_mask].copy()
+        diagnostics["pending_rows"] = int(len(hist))
         if hist.empty:
-            return pd.DataFrame(), {"graded_rows": 0, "window_days": lookback_days, "status": "already_graded"}
+            if not ungraded_reasons:
+                ungraded_reasons["already_in_result_feedback"] += eligible_before_feedback
+            return finish(pd.DataFrame(), {"graded_rows": 0, "window_days": lookback_days, "status": "already_graded"})
 
         client = self._get_client()
         results: list[dict[str, Any]] = []
@@ -6890,20 +6947,28 @@ class CourtVisionAI:
             date_str = str(raw_date_value)
             raw_stats = client.get_stats(date_str, date_str)
             stats = self._normalize_stats(raw_stats)
+            diagnostics["player_stat_rows"] += int(len(stats))
             raw_games = client.get_games(date_str)
+            diagnostics["final_games_found"] += self._count_final_games(raw_games)
             game_rows = [_to_str_dict(row) for row in raw_games.to_dict("records")] if isinstance(raw_games, pd.DataFrame) and not raw_games.empty else []
             for _, row in day_df.iterrows():
-                graded = self._grade_single_prediction(_to_str_dict(row), stats, game_rows)
+                row_diagnostics: dict[str, Any] = {}
+                graded = self._grade_single_prediction(_to_str_dict(row), stats, game_rows, diagnostics=row_diagnostics)
+                if row_diagnostics.get("matched_pick"):
+                    diagnostics["matched_picks"] += 1
+                reason = str(row_diagnostics.get("ungraded_reason") or "").strip()
+                if reason:
+                    ungraded_reasons[reason] += 1
                 if graded:
                     results.append(graded)
 
         graded_df = pd.DataFrame(results)
         if graded_df.empty:
-            return graded_df, {"graded_rows": 0, "window_days": lookback_days, "status": "no_resolved_results"}
+            return finish(graded_df, {"graded_rows": 0, "window_days": lookback_days, "status": "no_resolved_results"})
 
         self._append_history(self.feedback_path, graded_df)
         win_rate = pd.to_numeric(graded_df.get("is_win", pd.Series(dtype=float)), errors="coerce").fillna(0.0).mean() if not graded_df.empty else 0.0
-        return graded_df, {
+        return finish(graded_df, {
             "graded_rows": int(len(graded_df)),
             "window_days": lookback_days,
             "status": "ok",
@@ -6911,27 +6976,69 @@ class CourtVisionAI:
             "pushes": int(pd.to_numeric(graded_df.get("is_push", pd.Series(dtype=float)), errors="coerce").fillna(0.0).sum()),
             "losses": int(pd.to_numeric(graded_df.get("is_loss", pd.Series(dtype=float)), errors="coerce").fillna(0.0).sum()),
             "win_rate": round(float(win_rate), 4),
-        }
+        })
 
-    def _grade_single_prediction(self, row: Mapping[str, Any], stats: pd.DataFrame, game_rows: Sequence[Mapping[str, Any]]) -> Optional[dict[str, Any]]:
+    @staticmethod
+    def _count_final_games(raw_games: Any) -> int:
+        if not isinstance(raw_games, pd.DataFrame) or raw_games.empty:
+            return 0
+        count = 0
+        for _, row in raw_games.iterrows():
+            status = str(row.get("status", "") or "").strip().lower()
+            home_score = pd.to_numeric(pd.Series([row.get("home_team_score")]), errors="coerce").iloc[0]
+            visitor_score = pd.to_numeric(pd.Series([row.get("visitor_team_score")]), errors="coerce").iloc[0]
+            has_scores = pd.notna(home_score) and pd.notna(visitor_score)
+            nonzero_scores = has_scores and (float(home_score) != 0.0 or float(visitor_score) != 0.0)
+            if "final" in status or (nonzero_scores and status not in {"scheduled", "not started", "pre-game"}):
+                count += 1
+        return int(count)
+
+    @staticmethod
+    def _log_grading_diagnostics(diagnostics: Mapping[str, Any]) -> None:
+        print(f"[GRADING] pending_rows={int(diagnostics.get('pending_rows', 0) or 0)}", flush=True)
+        print(f"[GRADING] final_games_found={int(diagnostics.get('final_games_found', 0) or 0)}", flush=True)
+        print(f"[GRADING] player_stat_rows={int(diagnostics.get('player_stat_rows', 0) or 0)}", flush=True)
+        print(f"[GRADING] matched_picks={int(diagnostics.get('matched_picks', 0) or 0)}", flush=True)
+        print(f"[GRADING] graded_rows_written={int(diagnostics.get('graded_rows_written', 0) or 0)}", flush=True)
+        print(f"[GRADING] existing_feedback_final_rows={int(diagnostics.get('existing_feedback_final_rows', 0) or 0)}", flush=True)
+        print(f"[GRADING] existing_feedback_unresolved_rows={int(diagnostics.get('existing_feedback_unresolved_rows', 0) or 0)}", flush=True)
+        print(f"[GRADING] reprocess_unresolved_rows={int(diagnostics.get('reprocess_unresolved_rows', 0) or 0)}", flush=True)
+        print(f"[GRADING] skipped_final_feedback_rows={int(diagnostics.get('skipped_final_feedback_rows', 0) or 0)}", flush=True)
+        print(f"[GRADING] ungraded_reason_counts={diagnostics.get('ungraded_reason_counts', {})}", flush=True)
+
+    def _grade_single_prediction(
+        self,
+        row: Mapping[str, Any],
+        stats: pd.DataFrame,
+        game_rows: Sequence[Mapping[str, Any]],
+        diagnostics: Optional[dict[str, Any]] = None,
+    ) -> Optional[dict[str, Any]]:
         market_type = str(row.get("market_type", ""))
         selection = str(row.get("selection", ""))
+        selection_side = selection.strip().lower()
         line = float(self._to_float(row.get("sportsbook_line")) or 0.0)
         actual_value: Optional[float] = None
         result = "unresolved"
         team = str(row.get("team", ""))
         opponent = str(row.get("opponent", ""))
         entity_name = str(row.get("entity_name", ""))
+        ungraded_reason = ""
 
         if market_type in self.PLAYER_MARKETS:
             stat_key = self.PLAYER_MARKETS[market_type]
-            if not stats.empty:
+            if stats.empty:
+                ungraded_reason = "player_stats_empty"
+            else:
                 mask = stats.get("player_name", pd.Series("", index=stats.index)).astype(str).eq(entity_name)
                 if team:
                     mask = mask & stats.get("team_abbr", pd.Series("", index=stats.index)).astype(str).eq(team)
                 sample = stats[mask].copy()
                 if not sample.empty and stat_key in sample.columns:
                     actual_value = float(pd.to_numeric(sample[stat_key], errors="coerce").fillna(0.0).iloc[0])
+                elif sample.empty:
+                    ungraded_reason = "player_stat_match_missing"
+                else:
+                    ungraded_reason = "stat_column_missing"
         elif market_type == "moneyline":
             for g in game_rows:
                 home = g.get("home_team", {}) if isinstance(g.get("home_team"), dict) else {}
@@ -6943,6 +7050,8 @@ class CourtVisionAI:
                     away_score = self._to_float(g.get("visitor_team_score")) or 0.0
                     actual_value = 1.0 if ((selection == home_abbr and home_score > away_score) or (selection == away_abbr and away_score > home_score)) else 0.0
                     break
+            if actual_value is None:
+                ungraded_reason = "game_match_missing"
         elif market_type == "team_total":
             for g in game_rows:
                 home = g.get("home_team", {}) if isinstance(g.get("home_team"), dict) else {}
@@ -6955,19 +7064,31 @@ class CourtVisionAI:
                     elif team == away_abbr:
                         actual_value = float(self._to_float(g.get("visitor_team_score")) or 0.0)
                     break
+            if actual_value is None:
+                ungraded_reason = "game_match_missing"
+        else:
+            ungraded_reason = "unsupported_market_type"
 
         if actual_value is None:
+            if diagnostics is not None:
+                diagnostics["matched_pick"] = False
+                diagnostics["ungraded_reason"] = ungraded_reason or "actual_value_missing"
             return None
+        if diagnostics is not None:
+            diagnostics["matched_pick"] = True
 
         if market_type == "moneyline":
             result = "win" if actual_value >= 1.0 else "loss"
         else:
-            if selection == "Over":
+            if selection_side == "over":
                 result = "win" if actual_value > line else "push" if actual_value == line else "loss"
-            elif selection == "Under":
+            elif selection_side == "under":
                 result = "win" if actual_value < line else "push" if actual_value == line else "loss"
             else:
                 result = "unresolved"
+                ungraded_reason = "unrecognized_selection_side"
+        if diagnostics is not None and ungraded_reason:
+            diagnostics["ungraded_reason"] = ungraded_reason
 
         return {
             "grade_key": row.get("grade_key"),
@@ -7135,6 +7256,8 @@ def _write_grading_outputs(
     )
     paths = output_layout.grading_paths(prediction_date)
     _write_dataframe(paths["grading_results"], graded)
+    print(f"[GRADING] grading_results_path={paths['grading_results']}", flush=True)
+    print(f"[GRADING] graded_rows_written={int(len(graded))}", flush=True)
     paths["grading_summary_json"].write_text(json.dumps(summary_payload, indent=2), encoding="utf-8")
     paths["player_points_calibration_json"].write_text(
         json.dumps(
