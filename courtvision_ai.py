@@ -7209,6 +7209,85 @@ def _write_dataframe(path: Path, df: pd.DataFrame) -> None:
     safe_df.to_csv(path, index=False)
 
 
+FINAL_GRADING_RESULTS = {"win", "loss", "push"}
+
+
+def _normalized_grading_result_series(df: pd.DataFrame) -> pd.Series:
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.Series(dtype=str)
+    result = (
+        df.get("result", pd.Series("", index=df.index))
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.lower()
+    )
+    if "graded_result" in df.columns:
+        graded_result = df["graded_result"].fillna("").astype(str).str.strip().str.lower()
+        result = result.mask(result.eq(""), graded_result)
+    return result
+
+
+def _finalized_grading_rows(df: pd.DataFrame) -> pd.DataFrame:
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    normalized_result = _normalized_grading_result_series(out)
+    final_mask = normalized_result.isin(FINAL_GRADING_RESULTS)
+    out = out[final_mask].copy()
+    if out.empty:
+        return out
+    normalized_final = normalized_result[final_mask]
+    out["result"] = normalized_final.values
+    out["graded_result"] = normalized_final.values
+    return out.reset_index(drop=True)
+
+
+def _read_cumulative_grading_feedback(out_dir: Path, prediction_date: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    feedback_path = out_dir / "runtime" / "history" / "result_feedback.csv"
+    if not feedback_path.exists():
+        return pd.DataFrame(), pd.DataFrame()
+    try:
+        feedback = pd.read_csv(feedback_path, low_memory=False)
+    except Exception:
+        return pd.DataFrame(), pd.DataFrame()
+    if feedback.empty or "prediction_date" not in feedback.columns:
+        return pd.DataFrame(), pd.DataFrame()
+    date_rows = feedback[feedback["prediction_date"].astype(str) == str(prediction_date)].copy()
+    if date_rows.empty:
+        return date_rows, pd.DataFrame()
+    final_rows = _finalized_grading_rows(date_rows)
+    return date_rows.reset_index(drop=True), final_rows
+
+
+def _existing_grading_results_rows(path: Path) -> int:
+    if not path.exists():
+        return 0
+    try:
+        existing = pd.read_csv(path)
+    except Exception:
+        return 0
+    return int(len(existing)) if isinstance(existing, pd.DataFrame) else 0
+
+
+def _existing_grading_summary_rows(path: Path) -> int:
+    if not path.exists():
+        return 0
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return 0
+    if not isinstance(payload, Mapping):
+        return 0
+    overall = payload.get("overall", {})
+    if not isinstance(overall, Mapping):
+        return 0
+    try:
+        return int(overall.get("n", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _top_rows(df: pd.DataFrame, limit: int = 20) -> pd.DataFrame:
     if df.empty:
         return df
@@ -7233,12 +7312,21 @@ def _write_grading_outputs(
     verbose_outputs: bool = False,
 ) -> dict[str, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
-    graded = _cli_dataframe(grading_df)
-    summary_payload = (
-        dict(grading_bucket_summary)
-        if isinstance(grading_bucket_summary, dict)
-        else summarize_graded_props(graded.to_dict("records") if not graded.empty else [])
+    incremental_graded = _finalized_grading_rows(_cli_dataframe(grading_df))
+    cumulative_feedback_rows, cumulative_final_rows = _read_cumulative_grading_feedback(out_dir, prediction_date)
+    graded = cumulative_final_rows.copy() if not cumulative_final_rows.empty else incremental_graded.copy()
+
+    output_layout = OutputLayoutPolicy(
+        out_dir / "runtime",
+        OutputLayoutConfig(verbose_outputs=verbose_outputs),
     )
+    paths = output_layout.grading_paths(prediction_date)
+    existing_results_rows = _existing_grading_results_rows(paths["grading_results"])
+    existing_summary_rows = _existing_grading_summary_rows(paths["grading_summary_json"])
+    preserved_existing = bool(graded.empty and (existing_results_rows > 0 or existing_summary_rows > 0))
+
+    summary_payload = summarize_graded_props(graded.to_dict("records") if not graded.empty else [])
+    summary_rows = int(summary_payload.get("overall", {}).get("n", 0) or 0)
     summary_df = flatten_grading_summary(summary_payload)
     elite_rows = _cli_dataframe(elite_df) if isinstance(elite_df, pd.DataFrame) else pd.DataFrame()
     elite_records = elite_rows.to_dict("records") if not elite_rows.empty else None
@@ -7255,15 +7343,22 @@ def _write_grading_outputs(
         elite_records,
     )
 
-    output_layout = OutputLayoutPolicy(
-        out_dir / "runtime",
-        OutputLayoutConfig(verbose_outputs=verbose_outputs),
-    )
-    paths = output_layout.grading_paths(prediction_date)
-    _write_dataframe(paths["grading_results"], graded)
+    if not preserved_existing:
+        _write_dataframe(paths["grading_results"], graded)
+        paths["grading_summary_json"].write_text(json.dumps(summary_payload, indent=2), encoding="utf-8")
+        if "grading_summary_csv" in paths:
+            _write_dataframe(paths["grading_summary_csv"], summary_df)
+
+    grading_results_rows_written = existing_results_rows if preserved_existing else int(len(graded))
+    grading_summary_rows_written = existing_summary_rows if preserved_existing else summary_rows
     print(f"[GRADING] grading_results_path={paths['grading_results']}", flush=True)
-    print(f"[GRADING] graded_rows_written={int(len(graded))}", flush=True)
-    paths["grading_summary_json"].write_text(json.dumps(summary_payload, indent=2), encoding="utf-8")
+    print(f"[GRADING] incremental_graded_rows={int(len(incremental_graded))}", flush=True)
+    print(f"[GRADING] cumulative_feedback_rows_for_date={int(len(cumulative_feedback_rows))}", flush=True)
+    print(f"[GRADING] cumulative_final_rows_for_date={int(len(cumulative_final_rows))}", flush=True)
+    print(f"[GRADING] preserved_existing_nonempty_artifact={str(preserved_existing).lower()}", flush=True)
+    print(f"[GRADING] grading_results_rows_written={grading_results_rows_written}", flush=True)
+    print(f"[GRADING] grading_summary_rows_written={grading_summary_rows_written}", flush=True)
+    print(f"[GRADING] graded_rows_written={grading_results_rows_written}", flush=True)
     paths["player_points_calibration_json"].write_text(
         json.dumps(
             {
@@ -7276,8 +7371,6 @@ def _write_grading_outputs(
         ),
         encoding="utf-8",
     )
-    if "grading_summary_csv" in paths:
-        _write_dataframe(paths["grading_summary_csv"], summary_df)
     return paths
 
 

@@ -54,6 +54,30 @@ def _grade_key(row: dict[str, object]) -> str:
     )
 
 
+def _feedback_row(
+    *,
+    prediction_date: str = "2026-04-29",
+    player: str = "Alpha Player",
+    selection: str = "over",
+    line: float = 20.5,
+    result: str = "win",
+) -> dict[str, object]:
+    row = _history_row(player=player, selection=selection, line=line, prediction_date=prediction_date)
+    row.update(
+        {
+            "grade_key": _grade_key(row),
+            "actual_value": 22.0,
+            "result": result,
+            "graded_result": result,
+            "is_win": 1 if result == "win" else 0,
+            "is_push": 1 if result == "push" else 0,
+            "is_loss": 1 if result == "loss" else 0,
+            "graded_at": "2026-04-29T12:00:00+00:00",
+        }
+    )
+    return row
+
+
 def _make_ai(tmp_path: Path, history_rows: list[dict[str, object]], feedback_rows: list[dict[str, object]] | None = None) -> tuple[CourtVisionAI, FakeGradingClient]:
     ai = CourtVisionAI.__new__(CourtVisionAI)
     ai.prediction_history_path = tmp_path / "prediction_history.csv"
@@ -198,6 +222,86 @@ def test_milestone_player_prop_is_excluded_from_grading() -> None:
 
 def test_empty_grading_results_csv_is_valid_when_no_rows_gradeable(tmp_path: Path) -> None:
     paths = _write_grading_outputs(tmp_path, "2026-04-29", pd.DataFrame())
+
+    assert paths["grading_results"].exists()
+    assert paths["grading_summary_json"].exists()
+    payload = json.loads(paths["grading_summary_json"].read_text(encoding="utf-8"))
+    assert payload["overall"]["n"] == 0
+
+
+def test_nonempty_grading_results_is_not_overwritten_by_later_empty_incremental_run(tmp_path: Path) -> None:
+    date = "2026-04-29"
+    row = _feedback_row(prediction_date=date, result="win")
+    paths = _write_grading_outputs(tmp_path, date, pd.DataFrame([row]))
+
+    assert len(pd.read_csv(paths["grading_results"])) == 1
+
+    _write_grading_outputs(tmp_path, date, pd.DataFrame())
+
+    preserved = pd.read_csv(paths["grading_results"])
+    assert len(preserved) == 1
+    assert preserved.iloc[0]["result"] == "win"
+
+
+def test_grading_summary_is_not_reset_by_later_empty_incremental_run(tmp_path: Path) -> None:
+    date = "2026-04-29"
+    row = _feedback_row(prediction_date=date, result="loss")
+    paths = _write_grading_outputs(tmp_path, date, pd.DataFrame([row]))
+
+    _write_grading_outputs(tmp_path, date, pd.DataFrame())
+
+    payload = json.loads(paths["grading_summary_json"].read_text(encoding="utf-8"))
+    assert payload["overall"]["n"] == 1
+    assert payload["overall"]["losses"] == 1
+
+
+def test_cumulative_result_feedback_rows_are_exported_for_date(tmp_path: Path) -> None:
+    date = "2026-04-29"
+    feedback_path = tmp_path / "runtime" / "history" / "result_feedback.csv"
+    feedback_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        [
+            _feedback_row(prediction_date=date, player="Alpha Player", result="win"),
+            _feedback_row(prediction_date=date, player="Beta Player", result="loss"),
+            _feedback_row(prediction_date="2026-04-28", player="Gamma Player", result="win"),
+        ]
+    ).to_csv(feedback_path, index=False)
+
+    paths = _write_grading_outputs(tmp_path, date, pd.DataFrame())
+
+    exported = pd.read_csv(paths["grading_results"])
+    assert len(exported) == 2
+    assert sorted(exported["entity_name"].tolist()) == ["Alpha Player", "Beta Player"]
+    payload = json.loads(paths["grading_summary_json"].read_text(encoding="utf-8"))
+    assert payload["overall"]["n"] == 2
+    assert payload["overall"]["wins"] == 1
+    assert payload["overall"]["losses"] == 1
+
+
+def test_unresolved_feedback_rows_are_excluded_from_final_grading_summary(tmp_path: Path) -> None:
+    date = "2026-04-29"
+    feedback_path = tmp_path / "runtime" / "history" / "result_feedback.csv"
+    feedback_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        [
+            _feedback_row(prediction_date=date, player="Alpha Player", result="win"),
+            _feedback_row(prediction_date=date, player="Beta Player", result="unresolved"),
+        ]
+    ).to_csv(feedback_path, index=False)
+
+    paths = _write_grading_outputs(tmp_path, date, pd.DataFrame())
+
+    exported = pd.read_csv(paths["grading_results"])
+    assert len(exported) == 1
+    assert exported.iloc[0]["entity_name"] == "Alpha Player"
+    payload = json.loads(paths["grading_summary_json"].read_text(encoding="utf-8"))
+    assert payload["overall"]["n"] == 1
+
+
+def test_empty_artifacts_are_allowed_when_no_final_rows_and_no_previous_nonempty_artifact(tmp_path: Path) -> None:
+    date = "2026-04-29"
+
+    paths = _write_grading_outputs(tmp_path, date, pd.DataFrame())
 
     assert paths["grading_results"].exists()
     assert paths["grading_summary_json"].exists()
