@@ -55,6 +55,8 @@ EDGE_COLUMN_PREFERENCE: tuple[str, ...] = ("side_edge_pct", "edge_pct", "edge")
 # Default daily exposure cap as a fraction of bankroll. Overridable via
 # COURTVISION_MAX_DAILY_EXPOSURE env var or --max-daily-exposure CLI flag.
 DEFAULT_MAX_DAILY_EXPOSURE: float = 0.08
+MEDIUM_NEUTRAL_OVER_DAMPENER_FACTOR: float = 0.5
+MEDIUM_NEUTRAL_OVER_DAMPENER_REASON: str = "medium_neutral_over_dampener"
 
 
 @dataclass
@@ -75,6 +77,8 @@ class StakeRow:
     skip_reason: str
     context_caution_level: str
     context_pick_alignment: str
+    stake_dampener_reason: str
+    stake_dampener_factor: float
 
 
 def _log(msg: str) -> None:
@@ -149,6 +153,33 @@ def _validate_columns(fieldnames: list[str]) -> str:
     return edge_col
 
 
+def _medium_neutral_over_dampener(selection: str, context_caution_level: str, context_pick_alignment: str, eligible: bool) -> tuple[str, float]:
+    if (
+        eligible
+        and selection.strip().lower() == "over"
+        and context_caution_level.strip().lower() == "medium"
+        and context_pick_alignment.strip().lower() == "neutral"
+    ):
+        return MEDIUM_NEUTRAL_OVER_DAMPENER_REASON, MEDIUM_NEUTRAL_OVER_DAMPENER_FACTOR
+    return "", 1.0
+
+
+def _refresh_expected_value(stake: StakeRow) -> None:
+    if stake.eligible and stake.edge_pct is not None:
+        stake.expected_value = round(stake.stake_amount * float(stake.edge_pct), 2)
+    else:
+        stake.expected_value = 0.0
+
+
+def _apply_stake_dampeners(stakes: list[StakeRow]) -> None:
+    for s in stakes:
+        if not s.eligible or s.stake_dampener_factor == 1.0:
+            continue
+        s.stake_amount = round(s.stake_amount * s.stake_dampener_factor, 2)
+        s.stake_fraction = round(s.stake_fraction * s.stake_dampener_factor, 6)
+        _refresh_expected_value(s)
+
+
 def _build_stake_row(row: dict[str, str], edge_col: str, bankroll: float) -> StakeRow:
     raw_american = _to_float(row.get("odds"))
     decimal_odds = _american_to_decimal(raw_american) if raw_american is not None else None
@@ -163,6 +194,7 @@ def _build_stake_row(row: dict[str, str], edge_col: str, bankroll: float) -> Sta
     selection = str(row.get("selection", "") or "").strip().lower()
     market_type = str(row.get("market_type", "") or "").strip().lower()
     context_caution_level = str(row.get("context_caution_level", "") or "").strip().lower()
+    context_pick_alignment = str(row.get("context_pick_alignment", "") or "").strip().lower()
     if market_type and market_type != "player_points":
         skip_reason = "kelly_points_only_market_lock"
         eligible = False
@@ -203,6 +235,13 @@ def _build_stake_row(row: dict[str, str], edge_col: str, bankroll: float) -> Sta
     else:
         stake_fraction = 0.0
 
+    stake_dampener_reason, stake_dampener_factor = _medium_neutral_over_dampener(
+        selection=selection,
+        context_caution_level=context_caution_level,
+        context_pick_alignment=context_pick_alignment,
+        eligible=eligible,
+    )
+
     stake_amount = round(bankroll * stake_fraction, 2)
     # Expected value of one unit stake: edge * stake_amount (treating edge_pct as ROI signal)
     if eligible and edge_pct_raw is not None:
@@ -227,6 +266,8 @@ def _build_stake_row(row: dict[str, str], edge_col: str, bankroll: float) -> Sta
         skip_reason=skip_reason,
         context_caution_level=str(row.get("context_caution_level", "") or ""),
         context_pick_alignment=str(row.get("context_pick_alignment", "") or ""),
+        stake_dampener_reason=stake_dampener_reason,
+        stake_dampener_factor=stake_dampener_factor,
     )
 
 
@@ -252,6 +293,8 @@ def _write_stakes(output_path: Path, stakes: list[StakeRow], bankroll: float, pr
         "skip_reason",
         "context_caution_level",
         "context_pick_alignment",
+        "stake_dampener_reason",
+        "stake_dampener_factor",
     ]
     with output_path.open("w", encoding="utf-8", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=fieldnames)
@@ -277,6 +320,8 @@ def _write_stakes(output_path: Path, stakes: list[StakeRow], bankroll: float, pr
                 "skip_reason": s.skip_reason,
                 "context_caution_level": s.context_caution_level,
                 "context_pick_alignment": s.context_pick_alignment,
+                "stake_dampener_reason": s.stake_dampener_reason,
+                "stake_dampener_factor": s.stake_dampener_factor,
             })
 
 
@@ -373,10 +418,11 @@ def main(argv: list[str] | None = None) -> int:
         for s in eligible:
             s.stake_amount = round(s.stake_amount * exposure_scale_factor, 2)
             s.stake_fraction = round(s.stake_fraction * exposure_scale_factor, 6)
-            if s.edge_pct is not None:
-                s.expected_value = round(s.stake_amount * float(s.edge_pct), 2)
+            _refresh_expected_value(s)
     else:
         exposure_scale_factor = 1.0
+
+    _apply_stake_dampeners(eligible)
 
     _log(f"raw_total_exposure=${raw_total_exposure:.2f}")
     _log(
@@ -391,7 +437,8 @@ def main(argv: list[str] | None = None) -> int:
             f"stake player={s.player_name!r} market={s.market_type} sel={s.selection} "
             f"line={s.line} odds={s.american_odds} dec={s.decimal_odds} "
             f"edge_pct={s.edge_pct} conf={s.confidence} "
-            f"frac={s.stake_fraction:.4f} amount=${s.stake_amount:.2f} ev=${s.expected_value:.2f}"
+            f"frac={s.stake_fraction:.4f} amount=${s.stake_amount:.2f} ev=${s.expected_value:.2f} "
+            f"dampener={s.stake_dampener_factor:g} reason={s.stake_dampener_reason or 'none'}"
         )
 
     total_exposure = round(sum(s.stake_amount for s in eligible), 2)

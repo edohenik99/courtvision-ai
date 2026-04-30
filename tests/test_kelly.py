@@ -8,7 +8,7 @@ import csv
 
 import pytest
 from courtvision.betting.kelly import compute_kelly_fraction, compute_recommended_bet, MAX_STAKE_FRACTION, MIN_CONFIDENCE_THRESHOLD
-from scripts.run_kelly_stakes import _build_stake_row, _validate_columns, main
+from scripts.run_kelly_stakes import _apply_stake_dampeners, _build_stake_row, _validate_columns, main
 
 
 def _kelly_row(
@@ -202,6 +202,65 @@ class TestConservativeKellyLogic:
         assert stake.skip_reason == "context_high_caution_over"
         assert stake.stake_amount == 0
         assert stake.stake_fraction == 0
+        assert stake.stake_dampener_reason == ""
+        assert stake.stake_dampener_factor == 1.0
+
+    def test_medium_neutral_over_is_eligible_and_dampened(self):
+        fieldnames = ["player_name", "market_type", "selection", "odds", "confidence", "edge_pct", "side_edge_pct", "context_caution_level", "context_pick_alignment"]
+        edge_col = _validate_columns(fieldnames)
+
+        stake = _build_stake_row(
+            _kelly_row(selection="over", context_caution_level="medium", context_pick_alignment="neutral", edge="0.50", confidence="1.0"),
+            edge_col,
+            bankroll=1000.0,
+        )
+        normal_stake_amount = stake.stake_amount
+        normal_stake_fraction = stake.stake_fraction
+
+        _apply_stake_dampeners([stake])
+
+        assert stake.eligible is True
+        assert stake.skip_reason == ""
+        assert stake.stake_dampener_reason == "medium_neutral_over_dampener"
+        assert stake.stake_dampener_factor == 0.5
+        assert stake.stake_amount == round(normal_stake_amount * 0.5, 2)
+        assert stake.stake_fraction == round(normal_stake_fraction * 0.5, 6)
+
+    def test_medium_aligned_over_is_not_dampened(self):
+        fieldnames = ["player_name", "market_type", "selection", "odds", "confidence", "edge_pct", "side_edge_pct", "context_caution_level", "context_pick_alignment"]
+        edge_col = _validate_columns(fieldnames)
+
+        stake = _build_stake_row(
+            _kelly_row(selection="over", context_caution_level="medium", context_pick_alignment="aligned", edge="0.50", confidence="1.0"),
+            edge_col,
+            bankroll=1000.0,
+        )
+        normal_stake_amount = stake.stake_amount
+
+        _apply_stake_dampeners([stake])
+
+        assert stake.eligible is True
+        assert stake.stake_dampener_reason == ""
+        assert stake.stake_dampener_factor == 1.0
+        assert stake.stake_amount == normal_stake_amount
+
+    def test_under_pick_is_not_dampened_by_medium_neutral_rule(self):
+        fieldnames = ["player_name", "market_type", "selection", "odds", "confidence", "edge_pct", "side_edge_pct", "context_caution_level", "context_pick_alignment"]
+        edge_col = _validate_columns(fieldnames)
+
+        stake = _build_stake_row(
+            _kelly_row(selection="under", context_caution_level="medium", context_pick_alignment="neutral", edge="0.50", confidence="1.0"),
+            edge_col,
+            bankroll=1000.0,
+        )
+        normal_stake_amount = stake.stake_amount
+
+        _apply_stake_dampeners([stake])
+
+        assert stake.eligible is True
+        assert stake.stake_dampener_reason == ""
+        assert stake.stake_dampener_factor == 1.0
+        assert stake.stake_amount == normal_stake_amount
 
     def test_high_caution_under_is_not_skipped_by_context_over_rule(self):
         fieldnames = ["player_name", "market_type", "selection", "odds", "confidence", "edge_pct", "side_edge_pct", "context_caution_level"]
@@ -260,8 +319,55 @@ class TestConservativeKellyLogic:
         skipped = {row["player_name"]: row for row in out_rows if row["eligible"] == "False"}
         assert all(row["kelly_eligible"] == row["eligible"] for row in out_rows)
         assert all(row["context_pick_alignment"] == "aligned" for row in out_rows)
+        assert all("stake_dampener_reason" in row for row in out_rows)
+        assert all("stake_dampener_factor" in row for row in out_rows)
+        assert all(row["stake_dampener_factor"] == "1.0" for row in out_rows)
         assert skipped["C"]["skip_reason"] == "context_high_caution_over"
         assert float(skipped["C"]["stake_amount"]) == 0.0
+
+    def test_output_includes_medium_neutral_over_dampener_metadata(self, tmp_path):
+        input_path = tmp_path / "elite_board.csv"
+        output_path = tmp_path / "kelly_stakes.csv"
+        row = _kelly_row(
+            player_name="Dampened Over",
+            selection="over",
+            context_caution_level="medium",
+            context_pick_alignment="neutral",
+            edge="0.50",
+            confidence="1.0",
+            odds="-110",
+        )
+        with input_path.open("w", encoding="utf-8", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=list(row.keys()))
+            writer.writeheader()
+            writer.writerow(row)
+
+        rc = main(
+            [
+                "--prediction-date",
+                "2026-04-29",
+                "--bankroll",
+                "1000",
+                "--input-csv",
+                str(input_path),
+                "--output-csv",
+                str(output_path),
+                "--max-daily-exposure",
+                "1.0",
+            ]
+        )
+
+        assert rc == 0
+        out_rows = list(csv.DictReader(output_path.open("r", encoding="utf-8", newline="")))
+        assert len(out_rows) == 1
+        out = out_rows[0]
+        assert out["eligible"] == "True"
+        assert out["kelly_eligible"] == "True"
+        assert out["skip_reason"] == ""
+        assert out["stake_dampener_reason"] == "medium_neutral_over_dampener"
+        assert out["stake_dampener_factor"] == "0.5"
+        assert float(out["stake_amount"]) == 10.0
+        assert float(out["stake_fraction"]) == 0.01
 
 
 class TestConfigConstants:
