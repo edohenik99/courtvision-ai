@@ -70,7 +70,7 @@ DEFAULT_BANKROLL = 1000
 
 @dataclass(slots=True)
 class Settings:
-    api_key: str
+    api_key: str = ""
     base_url: str = "https://api.balldontlie.io/v1"
     per_page: int = 100
     request_timeout_seconds: int = 30

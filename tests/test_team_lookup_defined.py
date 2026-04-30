@@ -97,7 +97,7 @@ class TestTeamLookupDefined:
         import ast
 
         source_path = Path(__file__).parent.parent / "courtvision_ai.py"
-        source = source_path.read_text()
+        source = source_path.read_text(encoding="utf-8")
 
         # Parse the source to find the predict method
         tree = ast.parse(source)
@@ -130,8 +130,9 @@ class TestTeamLookupDefined:
         use_lines = []
 
         for i, line in enumerate(lines):
-            if "team_lookup:" in line or ("team_lookup" in line and "=" in line and "team_lookup.get" not in line):
-                if "for" not in line:  # Exclude the comprehension
+            stripped = line.strip()
+            if stripped.startswith("team_lookup:") or stripped.startswith("team_lookup ="):
+                if def_line is None:
                     def_line = i
             if "team_lookup=team_lookup" in line or "team_lookup.get" in line:
                 use_lines.append(i)

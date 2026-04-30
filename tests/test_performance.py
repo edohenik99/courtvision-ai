@@ -4,6 +4,8 @@ Tests the betting performance analysis functions to ensure
 accurate ROI calculations and segment analysis.
 """
 
+import json
+
 import pytest
 import pandas as pd
 import numpy as np

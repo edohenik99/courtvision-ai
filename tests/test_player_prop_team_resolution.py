@@ -48,7 +48,7 @@ class TestPlayerPropTeamResolution:
         from courtvision_ai import CourtVisionAI
 
         ai = CourtVisionAI(api_key="test_key")
-        result = ai._normalize_player_prop_row(market, player_lookup=player_lookup)
+        result = ai._get_client()._normalize_player_prop_row(market, player_lookup=player_lookup)
 
         assert result is not None, "Should return a valid row"
         assert result["team"] == "CLE", f"Expected CLE from resolved identity, got {result['team']}"
@@ -70,7 +70,7 @@ class TestPlayerPropTeamResolution:
         from courtvision_ai import CourtVisionAI
 
         ai = CourtVisionAI(api_key="test_key")
-        result = ai._normalize_player_prop_row(market, player_lookup=player_lookup)
+        result = ai._get_client()._normalize_player_prop_row(market, player_lookup=player_lookup)
 
         assert result is not None
         assert result["team"] == "LAL", f"Expected LAL from API, got {result['team']}"
@@ -91,7 +91,7 @@ class TestPlayerPropTeamResolution:
         from courtvision_ai import CourtVisionAI
 
         ai = CourtVisionAI(api_key="test_key")
-        result = ai._normalize_player_prop_row(market, player_lookup=player_lookup)
+        result = ai._get_client()._normalize_player_prop_row(market, player_lookup=player_lookup)
 
         assert result is not None
         assert result["team"] is None or result["team"] == ""

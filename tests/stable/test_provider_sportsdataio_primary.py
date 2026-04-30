@@ -38,7 +38,7 @@ class TestSportsDataIOPrimary:
     def test_provider_priority_default(self):
         """Test default provider priority is sportsdataio, then balldontlie."""
         # Create manager with default priority
-        manager = ProviderManager(Settings())
+        manager = ProviderManager(Settings(api_key="test_key"))
         
         assert manager.provider_priority[0] == "sportsdataio"
         assert manager.provider_priority[1] == "balldontlie"
@@ -48,7 +48,7 @@ class TestSportsDataIOPrimary:
         """Test provider priority can be overridden via env var."""
         monkeypatch.setenv("NBA_PROVIDER_PRIORITY", "balldontlie,sportsdataio")
         
-        manager = ProviderManager(Settings())
+        manager = ProviderManager(Settings(api_key="test_key"))
         
         assert manager.provider_priority[0] == "balldontlie"
         assert manager.provider_priority[1] == "sportsdataio"
@@ -58,13 +58,13 @@ class TestSportsDataIOPrimary:
 class TestProviderFallback:
     """Test fallback behavior when SportsDataIO fails or is unconfigured."""
 
-    def test_missing_sportsdataio_key_falls_back(self, caplog):
+    def test_missing_sportsdataio_key_falls_back(self, caplog, monkeypatch):
         """Test that missing SportsDataIO key falls back to BallDontLie without crash."""
         caplog.set_level(logging.INFO)
+        monkeypatch.setenv("SPORTSDATAIO_API_KEY", "")
         
         # Create settings without SportsDataIO key
-        settings = Settings()
-        settings.sportsdataio_api_key = ""
+        settings = Settings(api_key="test_key")
         
         # Create manager - should not crash even without key
         manager = ProviderManager(settings)
@@ -96,7 +96,7 @@ class TestProviderFallback:
             )
         ]
 
-        settings = Settings()
+        settings = Settings(api_key="test_key")
         manager = ProviderManager(settings)
         
         # Replace clients with mocks
@@ -124,7 +124,7 @@ class TestProviderLogging:
         """Test that successful provider calls don't dump raw payloads."""
         caplog.set_level(logging.INFO)
         
-        settings = Settings()
+        settings = Settings(api_key="test_key")
         manager = ProviderManager(settings)
         
         # Check that logs don't contain raw payload dumps
@@ -140,7 +140,7 @@ class TestProviderLogging:
         """Test that provider logs contain attempt/success/fallback status."""
         caplog.set_level(logging.INFO)
         
-        settings = Settings()
+        settings = Settings(api_key="test_key")
         manager = ProviderManager(settings)
         
         # Log summary should be called

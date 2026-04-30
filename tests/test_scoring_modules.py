@@ -354,9 +354,12 @@ class TestCandidateScoringPolicy:
 
     def test_policy_default_config(self):
         """Test policy with default config."""
+        from courtvision.config import EliteThresholds
+
         policy = CandidateScoringPolicy()
-        assert policy.config.elite_min_confidence == 0.65
-        assert policy.config.elite_min_quality_score == 82.0
+        elite = EliteThresholds.default()
+        assert policy.config.elite_min_confidence == elite.confidence
+        assert policy.config.elite_min_quality_score == elite.quality_score
 
     def test_policy_custom_config(self):
         """Test policy with custom config."""

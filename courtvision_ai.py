@@ -1721,7 +1721,7 @@ class CourtVisionAI:
         "player_blocks": "opp_blk_allowed_avg",
     }
 
-    def __init__(self, out_dir: str = "outputs") -> None:
+    def __init__(self, out_dir: str = "outputs", api_key: str | None = None) -> None:
         _load_env_file()
         self.request_timeout = self._env_int("BALLDONTLIE_REQUEST_TIMEOUT", 30)
         self.client: Optional[BallDontLieClient] = None
@@ -1744,6 +1744,7 @@ class CourtVisionAI:
         self.api_key, self.api_key_details = resolve_api_key(
             entrypoint="courtvision_ai.py",
             env_var_name=BALLDONTLIE_API_KEY_ENV_VAR,
+            current_value=api_key,
             logger=self.logger,
         )
         self._log_api_key_fingerprint()

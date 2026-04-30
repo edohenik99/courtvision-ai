@@ -230,7 +230,7 @@ def test_board_analytics_with_game_id():
     game_keys = [_normalize_game_key(row) for _, row in df.iterrows()]
     
     # With game_id normalization, each game_id is its own key
-    assert game_keys == [101, 101, 101, 102, 102, 102, 103, 103]
+    assert game_keys == ["101", "101", "101", "102", "102", "102", "103", "103"]
     
     game_counts = pd.Series(game_keys).value_counts()
     max_game_exposure = int(game_counts.max()) if not game_counts.empty else 0

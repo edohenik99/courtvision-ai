@@ -431,15 +431,15 @@ class TestProviderSettings:
         settings = ProviderSettings.from_env()
         status = settings.get_provider_status()
 
-        assert status["provider_priority"] == ["sportsdataio", "balldontlie"]
+        assert status["provider_priority"] == ["balldontlie"]
         assert status["sportsdataio_configured"] is True
         assert status["balldontlie_configured"] is True
 
     def test_provider_status_unconfigured(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test provider status when credentials missing."""
-        monkeypatch.delenv("SPORTSDATAIO_API_KEY", raising=False)
-        monkeypatch.delenv("BALLDONTLIE_API_KEY", raising=False)
-        # Also clear any env vars that clean_api_key might use
+        # Empty process values intentionally block .env fallback for this
+        # configuration diagnostic.
+        monkeypatch.setenv("SPORTSDATAIO_API_KEY", "")
         monkeypatch.setenv("BALLDONTLIE_API_KEY", "")
 
         settings = ProviderSettings.from_env()

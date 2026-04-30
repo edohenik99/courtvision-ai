@@ -107,7 +107,7 @@ def test_report_builder_edge_buckets():
 
 def test_report_builder_calibration():
     """Test calibration score calculation."""
-    builder = ReportBuilder()
+    builder = ReportBuilder(RollingWindow(window_size=100, min_samples=10))
 
     # Add perfectly calibrated picks
     # 60% confidence picks should hit 60% of the time

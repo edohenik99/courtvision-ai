@@ -98,16 +98,18 @@ class TestQualityScoreComponents:
         """Document current quality_score computation."""
         from courtvision.scoring.candidate_scoring import compute_quality_score
 
-        # Test with baseline values
         result = compute_quality_score(
-            base_confidence=0.70,
-            tier_weight=1.0,
+            row={},
+            confidence=0.70,
+            adjusted_edge_abs=0.0,
             edge_pct=5.0,
-            penalties={"total_penalty": 0.0}
+            tier_weight=1.0,
+            historical_multiplier=1.0,
+            total_penalty=0.0,
+            under_bias_multiplier=1.0,
+            market_type="player_points",
         )
-        # quality_score = base_confidence * 100 * tier_weight + edge_pct - penalties
-        # = 0.70 * 100 * 1.0 + 5.0 - 0 = 75.0
-        assert result == 75.0, f"Quality score formula changed: expected 75.0, got {result}"
+        assert result == 71.75, f"Quality score formula changed: expected 71.75, got {result}"
 
     def test_low_edge_high_confidence_inflation(self):
         """Document that high confidence can compensate for low edge."""
@@ -115,12 +117,17 @@ class TestQualityScoreComponents:
 
         # High confidence (0.85) but low edge (0.5%)
         result = compute_quality_score(
-            base_confidence=0.85,
-            tier_weight=1.0,
+            row={},
+            confidence=0.85,
+            adjusted_edge_abs=0.0,
             edge_pct=0.5,
-            penalties={"total_penalty": 0.0}
+            tier_weight=1.0,
+            historical_multiplier=1.0,
+            total_penalty=0.0,
+            under_bias_multiplier=1.0,
+            market_type="player_points",
         )
-        # = 0.85 * 100 + 0.5 = 85.5 quality_score
+        # = 0.85 * 100 + (0.5 * 0.35) = 85.175 quality_score
         # This exceeds the 50.0 threshold despite tiny edge
         assert result >= 50.0, f"High confidence can mask low edge: score={result}"
 

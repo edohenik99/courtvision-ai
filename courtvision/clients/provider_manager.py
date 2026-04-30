@@ -112,9 +112,16 @@ class ProviderManager:
         self.settings = settings or Settings.from_env()
         self.provider_priority = self._resolve_priority(provider_priority)
 
-        # Initialize clients
+        # Initialize clients. BallDontLie may be absent in SportsDataIO-only
+        # environments, so keep the manager constructible and skip the fallback
+        # provider at fetch time if credentials are not available.
         self.sportsdataio = SportsDataIOClient()
-        self.balldontlie = BalldontlieClient(self.settings)
+        self.balldontlie: BalldontlieClient | None
+        try:
+            self.balldontlie = BalldontlieClient(self.settings)
+        except RuntimeError as exc:
+            logger.warning("Provider balldontlie not configured: %s", exc)
+            self.balldontlie = None
 
         # Run status tracking
         self._run_status = ProviderRunStatus()
@@ -254,14 +261,18 @@ class ProviderManager:
         """
         last_error: str | None = None
 
+        primary_provider = self.provider_priority[0] if self.provider_priority else ""
+
         for provider_name in self.provider_priority:
             result = self._try_provider(domain, provider_name, operation, *args, **kwargs)
 
             if result is not None:
+                fallback_used = provider_name != primary_provider
+                result.fallback_used = fallback_used
                 # Track domain status
                 self._run_status.domain_status[domain.value] = {
                     "provider_used": provider_name,
-                    "fallback_used": False,
+                    "fallback_used": fallback_used,
                     "success": True,
                 }
                 self._domain_results[domain.value] = result

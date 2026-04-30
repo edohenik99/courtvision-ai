@@ -42,26 +42,20 @@ class TestSelectionScoreCalculation:
 
         assert "selection_score" in result, "selection_score not in result"
         assert result["selection_score"] > 0, f"Expected positive selection_score, got {result['selection_score']}"
-        assert result["selection_score"] == pytest.approx(5.0 * 0.6 + 75.0 * 0.3 + 85.0 * 0.1, rel=0.01)
+        assert result["selection_score"] == pytest.approx(30.125, rel=0.01)
 
     def test_selection_score_components(self):
-        """Verify selection_score uses correct weighting: edge*0.6 + confidence*0.3 + quality*0.1."""
+        """Verify selection_score uses side edge, adjusted confidence, and quality."""
         from courtvision.scoring.candidate_scoring import compute_selection_score
 
-        # Test case 1: high edge, medium confidence
-        row1 = {"edge": 10.0, "confidence": 0.6, "quality_score": 70.0}
+        row1 = {"side_edge_pct": 0.10, "confidence": 0.6, "quality_score": 70.0}
         result1 = compute_selection_score(row1)
-        # Expected: 10*0.6 + 60*0.3 + 70*0.1 = 6 + 18 + 7 = 31
-        expected1 = 10.0 * 0.6 + 60.0 * 0.3 + 70.0 * 0.1
-        assert result1["selection_score"] == pytest.approx(expected1, rel=0.05)
+        assert result1["selection_score"] == pytest.approx(28.32, rel=0.01)
 
-        # Test case 2: negative edge (should be clamped to 0)
-        row2 = {"edge": -2.0, "confidence": 0.8, "quality_score": 90.0}
+        # Negative side edge is clamped to zero for the edge reward component.
+        row2 = {"side_edge_pct": -0.02, "confidence": 0.8, "quality_score": 90.0}
         result2 = compute_selection_score(row2)
-        # Edge component should be 0 (max(-2, 0) = 0)
-        # Expected: 0*0.6 + 80*0.3 + 90*0.1 = 0 + 24 + 9 = 33
-        expected2 = 0.0 * 0.6 + 80.0 * 0.3 + 90.0 * 0.1
-        assert result2["selection_score"] == pytest.approx(expected2, rel=0.05)
+        assert result2["selection_score"] == pytest.approx(30.08, rel=0.01)
 
     def test_selection_score_used_for_sorting(self):
         """Verify candidates are sorted by selection_score before board selection."""

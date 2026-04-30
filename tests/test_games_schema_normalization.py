@@ -244,8 +244,8 @@ class TestGamesSchemaNormalization:
         """Test that 'id' column is mapped to 'game_id'."""
         games_raw = pd.DataFrame({
             "id": [123, 456],
-            "home_team": [{"id": 1, "abbreviation": "LAL"}],
-            "visitor_team": [{"id": 3, "abbreviation": "GSW"}],
+            "home_team": [{"id": 1, "abbreviation": "LAL"}, {"id": 2, "abbreviation": "BOS"}],
+            "visitor_team": [{"id": 3, "abbreviation": "GSW"}, {"id": 4, "abbreviation": "MIA"}],
         })
 
         result = normalize_games_schema(games_raw)
