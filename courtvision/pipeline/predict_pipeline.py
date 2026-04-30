@@ -17,6 +17,7 @@ from typing import Any, Callable
 import pandas as pd
 
 from courtvision.calibration.buckets import to_float
+from courtvision.artifact_guard import log_prediction_artifact_write
 from courtvision.data.candidates import score_player_markets
 from courtvision.data.normalization import normalize_games_schema
 from courtvision.injuries import InjuryEngine
@@ -1423,7 +1424,20 @@ class PredictionPipeline:
         audit_df = pd.DataFrame(rows)
         csv_path = diagnostics_dir / f"market_availability_audit_{prediction_date}.csv"
         json_path = diagnostics_dir / f"market_availability_audit_{prediction_date}.json"
+        caller = "courtvision.pipeline.predict_pipeline:PredictionPipeline._write_market_availability_audit"
+        log_prediction_artifact_write(
+            requested_prediction_date=prediction_date,
+            output_path=csv_path,
+            caller=caller,
+            artifact_label="market_availability_audit_csv",
+        )
         audit_df.to_csv(csv_path, index=False)
+        log_prediction_artifact_write(
+            requested_prediction_date=prediction_date,
+            output_path=json_path,
+            caller=caller,
+            artifact_label="market_availability_audit_json",
+        )
         json_path.write_text(
             json.dumps(
                 {
@@ -1518,6 +1532,12 @@ class PredictionPipeline:
             "markets": market_rows,
         }
         json_path = diagnostics_dir / f"market_performance_readiness_{prediction_date}.json"
+        log_prediction_artifact_write(
+            requested_prediction_date=prediction_date,
+            output_path=json_path,
+            caller="courtvision.pipeline.predict_pipeline:PredictionPipeline._write_market_performance_readiness",
+            artifact_label="market_performance_readiness",
+        )
         json_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
         print(f"[COUNT] market_performance_readiness_path={json_path}", flush=True)
 

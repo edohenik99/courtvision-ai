@@ -7,6 +7,8 @@ from typing import Any
 
 import pandas as pd
 
+from courtvision.artifact_guard import log_prediction_artifact_write
+
 MANUAL_CONTEXT_COLUMNS: tuple[str, ...] = (
     "prediction_date",
     "player_name",
@@ -252,5 +254,11 @@ def write_manual_context_diagnostics(
     diagnostics_dir = Path(runtime_root) / "diagnostics"
     diagnostics_dir.mkdir(parents=True, exist_ok=True)
     path = diagnostics_dir / f"manual_context_{prediction_date}.json"
+    log_prediction_artifact_write(
+        requested_prediction_date=prediction_date,
+        output_path=path,
+        caller="courtvision.context.manual_player_context:write_manual_context_diagnostics",
+        artifact_label="manual_context_json",
+    )
     path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
     return path, payload

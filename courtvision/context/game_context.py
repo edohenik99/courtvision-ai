@@ -6,6 +6,8 @@ from typing import Any
 
 import pandas as pd
 
+from courtvision.artifact_guard import log_prediction_artifact_write
+
 GAME_CONTEXT_COLUMNS: tuple[str, ...] = (
     "game_id",
     "opponent",
@@ -600,6 +602,13 @@ def write_game_context_outputs(
     operator_dir.mkdir(parents=True, exist_ok=True)
     json_path = diagnostics_dir / f"game_context_{prediction_date}.json"
     txt_path = operator_dir / f"game_context_report_{prediction_date}.txt"
+    caller = "courtvision.context.game_context:write_game_context_outputs"
+    log_prediction_artifact_write(
+        requested_prediction_date=prediction_date,
+        output_path=json_path,
+        caller=caller,
+        artifact_label="game_context_json",
+    )
     json_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
     sample_lines = []
     for sample in payload["sample_rows"][:8]:
@@ -643,5 +652,11 @@ def write_game_context_outputs(
         "",
         "Mode: passive diagnostics only. No projections, confidence, selection, elite, or Kelly logic changed.",
     ]
+    log_prediction_artifact_write(
+        requested_prediction_date=prediction_date,
+        output_path=txt_path,
+        caller=caller,
+        artifact_label="game_context_report",
+    )
     txt_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return json_path, txt_path, payload

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 import pandas as pd
+from courtvision.artifact_guard import log_prediction_artifact_write
 from courtvision.calibration.buckets import (
     confidence_band as bucket_confidence_band,
     injury_confidence_delta_value,
@@ -1271,6 +1272,12 @@ class EliteTelemetry:
         """Write telemetry to CSV file. Returns the path written."""
         out_path = Path(out_dir) / f"elite_pipeline_audit_{self.slate_date}.csv"
         out_path.parent.mkdir(parents=True, exist_ok=True)
+        log_prediction_artifact_write(
+            requested_prediction_date=self.slate_date,
+            output_path=out_path,
+            caller="courtvision.runtime_audit:EliteTelemetry.write_csv",
+            artifact_label="elite_pipeline_audit_csv",
+        )
 
         rows = self.to_rows()
         with out_path.open("w", newline="", encoding="utf-8") as f:
@@ -1294,6 +1301,12 @@ class EliteTelemetry:
         """Write telemetry summary to JSON file. Returns the path written."""
         out_path = Path(out_dir) / f"elite_pipeline_audit_summary_{self.slate_date}.json"
         out_path.parent.mkdir(parents=True, exist_ok=True)
+        log_prediction_artifact_write(
+            requested_prediction_date=self.slate_date,
+            output_path=out_path,
+            caller="courtvision.runtime_audit:EliteTelemetry.write_summary_json",
+            artifact_label="elite_pipeline_audit_summary",
+        )
         payload = {
             "slate_date": self.slate_date,
             "totals": dict(sorted(self.totals.items())),

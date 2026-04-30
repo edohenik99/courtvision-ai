@@ -25,6 +25,10 @@ from typing import Any, Mapping, Optional, Sequence
 
 import pandas as pd
 import requests
+from courtvision.artifact_guard import (
+    guard_prediction_artifact_date as _guard_prediction_artifact_date,
+    log_prediction_artifact_write as _log_prediction_artifact_write,
+)
 from courtvision.balldontlie_auth import (
     BALLDONTLIE_401_HINT,
     BALLDONTLIE_API_KEY_ENV_VAR,
@@ -5642,6 +5646,13 @@ class CourtVisionAI:
 
         json_path = diagnostics_dir / f"injury_context_diagnostics_{prediction_date}.json"
         txt_path = operator_dir / f"injury_context_report_{prediction_date}.txt"
+        caller = "courtvision_ai.py:CourtVisionAI._write_injury_context_diagnostics"
+        _log_prediction_artifact_write(
+            requested_prediction_date=prediction_date,
+            output_path=json_path,
+            caller=caller,
+            artifact_label="injury_context_diagnostics",
+        )
         json_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
 
         lines = [
@@ -5689,6 +5700,12 @@ class CourtVisionAI:
                 "",
                 f"JSON: {json_path}",
             ]
+        )
+        _log_prediction_artifact_write(
+            requested_prediction_date=prediction_date,
+            output_path=txt_path,
+            caller=caller,
+            artifact_label="injury_context_report",
         )
         txt_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return json_path, txt_path
@@ -7445,6 +7462,57 @@ def _write_dataframe(path: Path, df: pd.DataFrame) -> None:
     safe_df.to_csv(path, index=False)
 
 
+def _write_prediction_dataframe(
+    path: Path,
+    df: pd.DataFrame,
+    *,
+    requested_prediction_date: str,
+    caller: str,
+    artifact_label: str,
+) -> None:
+    _log_prediction_artifact_write(
+        requested_prediction_date=requested_prediction_date,
+        output_path=path,
+        caller=caller,
+        artifact_label=artifact_label,
+    )
+    _write_dataframe(path, df)
+
+
+def _write_prediction_json(
+    path: Path,
+    payload: Any,
+    *,
+    requested_prediction_date: str,
+    caller: str,
+    artifact_label: str,
+) -> None:
+    _log_prediction_artifact_write(
+        requested_prediction_date=requested_prediction_date,
+        output_path=path,
+        caller=caller,
+        artifact_label=artifact_label,
+    )
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _write_prediction_text(
+    path: Path,
+    text: str,
+    *,
+    requested_prediction_date: str,
+    caller: str,
+    artifact_label: str,
+) -> None:
+    _log_prediction_artifact_write(
+        requested_prediction_date=requested_prediction_date,
+        output_path=path,
+        caller=caller,
+        artifact_label=artifact_label,
+    )
+    path.write_text(text, encoding="utf-8")
+
+
 FINAL_GRADING_RESULTS = {"win", "loss", "push"}
 
 
@@ -8018,11 +8086,12 @@ def _write_cli_outputs(
         OutputLayoutConfig(verbose_outputs=verbose_outputs),
     )
     paths = output_layout.prediction_paths(prediction_date)
+    prediction_artifact_caller = "courtvision_ai.py:_write_cli_outputs"
 
-    _write_dataframe(paths["player_predictions"], player_df)
-    _write_dataframe(paths["game_predictions"], game_df)
-    _write_dataframe(paths["player_edges"], player_edges_df)
-    _write_dataframe(paths["game_edges"], game_edges_df)
+    _write_prediction_dataframe(paths["player_predictions"], player_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="player_predictions")
+    _write_prediction_dataframe(paths["game_predictions"], game_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="game_predictions")
+    _write_prediction_dataframe(paths["player_edges"], player_edges_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="player_edges")
+    _write_prediction_dataframe(paths["game_edges"], game_edges_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="game_edges")
     
     # [FINAL_ELITE_WRITER] runtime marker - actual final writer path
     elite_count = len(elite_df)
@@ -8060,40 +8129,45 @@ def _write_cli_outputs(
         "market_distribution": market_counts,
         "game_distribution": game_counts
     }
-    with open(coverage_path, "w", encoding="utf-8") as f:
-        json.dump(coverage_data, f, indent=2)
+    _write_prediction_json(
+        coverage_path,
+        coverage_data,
+        requested_prediction_date=prediction_date,
+        caller=prediction_artifact_caller,
+        artifact_label="market_coverage",
+    )
     print(f"[MARKET_COVERAGE] persisted to {coverage_path}")
     
-    _write_dataframe(paths["elite_board"], elite_df)
-    _write_dataframe(paths["full_market_board"], full_market_df)
-    _write_dataframe(paths["sgp_board"], sgp_df)
-    _write_dataframe(paths["player_points_elite_admission_csv"], player_points_elite_admission_df)
-    paths["player_points_elite_admission_json"].write_text(
-        json.dumps(
-            {
-                "prediction_date": prediction_date,
-                "rows": player_points_elite_admission_df.to_dict(orient="records"),
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
+    _write_prediction_dataframe(paths["elite_board"], elite_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="elite_board")
+    _write_prediction_dataframe(paths["full_market_board"], full_market_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="full_market_board")
+    _write_prediction_dataframe(paths["sgp_board"], sgp_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="sgp_board")
+    _write_prediction_dataframe(paths["player_points_elite_admission_csv"], player_points_elite_admission_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="player_points_elite_admission_csv")
+    _write_prediction_json(
+        paths["player_points_elite_admission_json"],
+        {
+            "prediction_date": prediction_date,
+            "rows": player_points_elite_admission_df.to_dict(orient="records"),
+        },
+        requested_prediction_date=prediction_date,
+        caller=prediction_artifact_caller,
+        artifact_label="player_points_elite_admission_json",
     )
     if "top_player_edges" in paths:
-        _write_dataframe(paths["top_player_edges"], _top_rows(player_edges_df))
+        _write_prediction_dataframe(paths["top_player_edges"], _top_rows(player_edges_df), requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="top_player_edges")
     if "top_game_edges" in paths:
-        _write_dataframe(paths["top_game_edges"], _top_rows(game_edges_df))
+        _write_prediction_dataframe(paths["top_game_edges"], _top_rows(game_edges_df), requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="top_game_edges")
     if "stat_only_board" in paths:
-        _write_dataframe(paths["stat_only_board"], all_stats_df)
+        _write_prediction_dataframe(paths["stat_only_board"], all_stats_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="stat_only_board")
     if "strike_board" in paths:
-        _write_dataframe(paths["strike_board"], strike_df)
+        _write_prediction_dataframe(paths["strike_board"], strike_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="strike_board")
     if "predictive_lines_board" in paths:
-        _write_dataframe(paths["predictive_lines_board"], predictive_lines_df)
+        _write_prediction_dataframe(paths["predictive_lines_board"], predictive_lines_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="predictive_lines_board")
     if "team_board" in paths:
-        _write_dataframe(paths["team_board"], team_board_df)
+        _write_prediction_dataframe(paths["team_board"], team_board_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="team_board")
     if "near_miss_board" in paths:
-        _write_dataframe(paths["near_miss_board"], near_miss_df)
+        _write_prediction_dataframe(paths["near_miss_board"], near_miss_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="near_miss_board")
     if "board_diagnostics_csv" in paths:
-        _write_dataframe(paths["board_diagnostics_csv"], diagnostics_df)
+        _write_prediction_dataframe(paths["board_diagnostics_csv"], diagnostics_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="board_diagnostics_csv")
     paths.update(
         _write_grading_outputs(
             out_dir=out_dir,
@@ -8109,16 +8183,32 @@ def _write_cli_outputs(
         "fit_metrics": fit_metrics or {},
         "prediction_summary": summary,
     }
-    paths["model_metrics"].write_text(json.dumps(metrics_payload, indent=2), encoding="utf-8")
-    paths["board_diagnostics_json"].write_text(json.dumps(board_diagnostics, indent=2), encoding="utf-8")
-    paths["elite_decision_report"].write_text(
+    _write_prediction_json(
+        paths["model_metrics"],
+        metrics_payload,
+        requested_prediction_date=prediction_date,
+        caller=prediction_artifact_caller,
+        artifact_label="model_metrics",
+    )
+    _write_prediction_json(
+        paths["board_diagnostics_json"],
+        board_diagnostics,
+        requested_prediction_date=prediction_date,
+        caller=prediction_artifact_caller,
+        artifact_label="board_diagnostics_json",
+    )
+    _write_prediction_text(
+        paths["elite_decision_report"],
         _build_elite_decision_report_text(
             prediction_date=prediction_date,
             elite_df=elite_df,
         ),
-        encoding="utf-8",
+        requested_prediction_date=prediction_date,
+        caller=prediction_artifact_caller,
+        artifact_label="elite_decision_report",
     )
-    paths["top_plays_report"].write_text(
+    _write_prediction_text(
+        paths["top_plays_report"],
         _build_report_text(
             prediction_date=prediction_date,
             fit_metrics=fit_metrics,
@@ -8135,7 +8225,9 @@ def _write_cli_outputs(
             board_diagnostics=board_diagnostics,
             verbose_sections=verbose_outputs,
         ),
-        encoding="utf-8",
+        requested_prediction_date=prediction_date,
+        caller=prediction_artifact_caller,
+        artifact_label="top_plays_report",
     )
 
     return paths

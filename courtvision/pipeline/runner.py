@@ -6,6 +6,7 @@ from typing import Any
 
 import pandas as pd
 
+from courtvision.artifact_guard import log_prediction_artifact_write
 from .contracts import PipelineManifest
 from .stages import stage
 
@@ -18,6 +19,15 @@ def _safe_len(value: Any) -> int | None:
     if isinstance(value, (list, tuple, set, dict)):
         return int(len(value))
     return None
+
+
+def _log_and_guard_board_write(prediction_date: str, output_path: Path, caller: str, board_name: str) -> None:
+    log_prediction_artifact_write(
+        requested_prediction_date=prediction_date,
+        output_path=output_path,
+        caller=caller,
+        artifact_label=board_name,
+    )
 
 
 def build_prediction_manifest(prediction_date: str, prediction_outputs: dict[str, Any]) -> PipelineManifest:
@@ -97,6 +107,7 @@ def save_prediction_boards(prediction_date: str, prediction_outputs: dict[str, A
             if key in prediction_outputs:
                 board_data = prediction_outputs[key]
                 break
+
         if board_data is None or (hasattr(board_data, 'empty') and board_data.empty) or (isinstance(board_data, (list, tuple)) and not board_data):
             continue
 
@@ -104,9 +115,21 @@ def save_prediction_boards(prediction_date: str, prediction_outputs: dict[str, A
             if board_data.empty:
                 continue
             csv_path = boards_dir / f"{board_name}.csv"
+            _log_and_guard_board_write(
+                prediction_date,
+                csv_path,
+                "courtvision.pipeline.runner:save_prediction_boards",
+                board_name,
+            )
             board_data.to_csv(csv_path, index=False)
 
             raw_txt_path = boards_dir / f"{board_name}.txt"
+            _log_and_guard_board_write(
+                prediction_date,
+                raw_txt_path,
+                "courtvision.pipeline.runner:save_prediction_boards",
+                f"{board_name}_raw_preview",
+            )
             with open(raw_txt_path, 'w', encoding='utf-8') as f:
                 f.write(f"{board_name.upper()} BOARD ({len(board_data)} rows)\n")
                 f.write("=" * 50 + "\n")
@@ -120,6 +143,12 @@ def save_prediction_boards(prediction_date: str, prediction_outputs: dict[str, A
             available_columns = [col for col in desired_columns if col in board_data.columns]
 
             clean_txt_path = boards_dir / f"{board_name}_clean.txt"
+            _log_and_guard_board_write(
+                prediction_date,
+                clean_txt_path,
+                "courtvision.pipeline.runner:save_prediction_boards",
+                f"{board_name}_clean_preview",
+            )
             with open(clean_txt_path, 'w', encoding='utf-8') as f:
                 f.write(f"{board_name.upper()} CLEAN BOARD ({len(board_data)} rows)\n")
                 f.write("=" * 80 + "\n")
@@ -137,6 +166,12 @@ def save_prediction_boards(prediction_date: str, prediction_outputs: dict[str, A
             if not board_data:
                 continue
             json_path = boards_dir / f"{board_name}.json"
+            _log_and_guard_board_write(
+                prediction_date,
+                json_path,
+                "courtvision.pipeline.runner:save_prediction_boards",
+                board_name,
+            )
             with open(json_path, 'w', encoding='utf-8') as f:
                 json.dump(board_data, f, indent=2, default=str)
             saved_boards.append((board_name, len(board_data), str(json_path), None))

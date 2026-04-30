@@ -6,6 +6,7 @@ import logging
 from collections import Counter
 from pathlib import Path
 
+from courtvision.artifact_guard import log_prediction_artifact_write
 from courtvision.models import GradedPick, PlayerProjection, RankedPlay
 
 # ELITE_GAME_CAP must match the value in selection/operator_boards.py
@@ -42,6 +43,7 @@ class TextReportWriter:
     def write_elite_board(self, prediction_date: str, plays: list[RankedPlay]) -> tuple[Path, Path]:
         txt_path = self.output_dir / f"elite_board_{prediction_date}.txt"
         csv_path = self.output_dir / f"elite_board_{prediction_date}.csv"
+        caller = "courtvision.reporting.text_report:write_elite_board"
 
         # Calculate game exposure for validation
         game_counts = Counter()
@@ -82,10 +84,22 @@ class TextReportWriter:
             "market_distribution": market_dist,
             "game_distribution": dict(game_counts)
         }
+        log_prediction_artifact_write(
+            requested_prediction_date=prediction_date,
+            output_path=diagnostics_path,
+            caller=caller,
+            artifact_label="market_coverage",
+        )
         with diagnostics_path.open("w", encoding="utf-8") as f:
             json.dump(coverage_data, f, indent=2)
         logger.info(f"[MARKET_COVERAGE] persisted to {diagnostics_path}")
 
+        log_prediction_artifact_write(
+            requested_prediction_date=prediction_date,
+            output_path=txt_path,
+            caller=caller,
+            artifact_label="elite_board_txt",
+        )
         with txt_path.open("w", encoding="utf-8") as handle:
             handle.write(f"CourtVision Elite Board - {prediction_date}\n")
             handle.write("=" * 36 + "\n\n")
@@ -99,6 +113,12 @@ class TextReportWriter:
                 if play.notes:
                     handle.write(f"   Notes: {'; '.join(play.notes)}\n")
 
+        log_prediction_artifact_write(
+            requested_prediction_date=prediction_date,
+            output_path=csv_path,
+            caller=caller,
+            artifact_label="elite_board_csv",
+        )
         with csv_path.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.DictWriter(
                 handle,
