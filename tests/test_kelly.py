@@ -16,6 +16,7 @@ def _kelly_row(
     player_name: str = "Kelly Player",
     selection: str = "over",
     context_caution_level: str = "low",
+    context_pick_alignment: str = "aligned",
     edge: str = "0.10",
     confidence: str = "0.75",
     odds: str = "-110",
@@ -30,6 +31,7 @@ def _kelly_row(
         "edge_pct": edge,
         "side_edge_pct": edge,
         "context_caution_level": context_caution_level,
+        "context_pick_alignment": context_pick_alignment,
     }
 
 
@@ -177,6 +179,7 @@ class TestConservativeKellyLogic:
             "edge_pct": "-0.10",
             "side_edge_pct": "0.10",
             "context_caution_level": "high",
+            "context_pick_alignment": "aligned",
         }
 
         stake = _build_stake_row(row, edge_col, bankroll=1000.0)
@@ -186,6 +189,7 @@ class TestConservativeKellyLogic:
         assert stake.edge_pct == 0.10
         assert stake.side_edge_pct == 0.10
         assert stake.context_caution_level == "high"
+        assert stake.context_pick_alignment == "aligned"
         assert stake.stake_amount > 0
 
     def test_high_caution_over_is_skipped_by_kelly(self):
@@ -254,6 +258,8 @@ class TestConservativeKellyLogic:
         eligible_stakes = [float(row["stake_amount"]) for row in out_rows if row["eligible"] == "True"]
         assert round(sum(eligible_stakes), 2) <= 10.0
         skipped = {row["player_name"]: row for row in out_rows if row["eligible"] == "False"}
+        assert all(row["kelly_eligible"] == row["eligible"] for row in out_rows)
+        assert all(row["context_pick_alignment"] == "aligned" for row in out_rows)
         assert skipped["C"]["skip_reason"] == "context_high_caution_over"
         assert float(skipped["C"]["stake_amount"]) == 0.0
 

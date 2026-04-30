@@ -22,6 +22,7 @@ from courtvision.runtime_selection import elite_points_risk_guard_reason
 
 
 CONTEXT_ALIGNMENT_VALUES = {"aligned", "conflicted", "neutral", "insufficient_data"}
+CONTEXT_CAUTION_VALUES = {"high", "medium", "low", "insufficient_data"}
 
 
 def _edge_bucket(edge_abs: float) -> str:
@@ -67,6 +68,9 @@ def summarize_graded_props(graded_rows: Sequence[Any]) -> dict[str, Any]:
         "by_edge_bucket": {},  # NEW: Hit rate by edge magnitude
         "by_qualification_reason": {},  # NEW: Hit rate by qualification reason
         "by_context_pick_alignment": {},
+        "by_context_caution_level": {},
+        "by_kelly_eligible": {},
+        "by_skip_reason": {},
         "joint_quality_confidence": {},
         "joint_prop_minutes": {},
         "joint_prop_side": {},
@@ -149,6 +153,10 @@ def summarize_graded_props(graded_rows: Sequence[Any]) -> dict[str, Any]:
             row,
         )
         _append_bucket(buckets["by_context_pick_alignment"], row["context_pick_alignment"], row)
+        _append_bucket(buckets["by_context_caution_level"], row["context_caution_level"], row)
+        _append_bucket(buckets["by_kelly_eligible"], row["kelly_eligible"], row)
+        if row["skip_reason"]:
+            _append_bucket(buckets["by_skip_reason"], row["skip_reason"], row)
         _append_bucket(
             buckets["joint_context_alignment_side"],
             _joint_key(row["context_pick_alignment"], row["selection_side"]),
@@ -328,6 +336,9 @@ def _normalize_graded_row(item: Any) -> dict[str, Any]:
     odds_value = row.get("odds", row.get("offered_odds"))
     market_trust_value = row.get("market_trust_weight")
     points_guard_reason = _clean_text(row.get("elite_points_risk_guard_reason")) or _clean_text(elite_points_risk_guard_reason(row))
+    kelly_eligible_value = row.get("kelly_eligible")
+    if not _clean_text(kelly_eligible_value):
+        kelly_eligible_value = row.get("eligible")
     normalized = {
         "prop_type": prop_type or "unknown",
         "selection_side": _clean_text(row.get("selection_side") or row.get("side") or row.get("selection") or "unknown").lower(),
@@ -357,6 +368,9 @@ def _normalize_graded_row(item: Any) -> dict[str, Any]:
             row.get("market_trust_weight_band") or market_trust_weight_band(market_trust_value)
         ),
         "context_pick_alignment": _context_alignment_value(row.get("context_pick_alignment")),
+        "context_caution_level": _context_caution_value(row.get("context_caution_level")),
+        "kelly_eligible": _kelly_eligible_value(kelly_eligible_value),
+        "skip_reason": _clean_text(row.get("skip_reason")).lower(),
         "odds": odds_value,
         "result": _result_value(row),
     }
@@ -504,7 +518,14 @@ def _normalize_market_type(value: Any) -> str:
 
 
 def _clean_text(value: Any) -> str:
-    text = str(value or "").strip()
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()
     if text.lower() in {"nan", "none", "<na>"}:
         return ""
     return text
@@ -513,6 +534,20 @@ def _clean_text(value: Any) -> str:
 def _context_alignment_value(value: Any) -> str:
     text = _clean_text(value).lower()
     return text if text in CONTEXT_ALIGNMENT_VALUES else "insufficient_data"
+
+
+def _context_caution_value(value: Any) -> str:
+    text = _clean_text(value).lower()
+    return text if text in CONTEXT_CAUTION_VALUES else "insufficient_data"
+
+
+def _kelly_eligible_value(value: Any) -> str:
+    text = _clean_text(value).lower()
+    if text in {"true", "1", "yes", "y"}:
+        return "true"
+    if text in {"false", "0", "no", "n"}:
+        return "false"
+    return "unknown"
 
 
 def _replay_identity_key(row: Mapping[str, Any]) -> str:

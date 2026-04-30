@@ -78,6 +78,35 @@ def _feedback_row(
     return row
 
 
+def _kelly_row(
+    *,
+    prediction_date: str = "2026-04-28",
+    player: str = "Alpha Player",
+    selection: str = "under",
+    line: float = 25.5,
+    eligible: bool = True,
+    skip_reason: str = "",
+    context_caution_level: str = "high",
+    context_pick_alignment: str = "aligned",
+) -> dict[str, object]:
+    return {
+        "prediction_date": prediction_date,
+        "player_name": player,
+        "market_type": "player_points",
+        "selection": selection,
+        "line": line,
+        "american_odds": -110,
+        "edge_pct": 0.10,
+        "side_edge_pct": 0.10,
+        "confidence": 0.75,
+        "kelly_eligible": eligible,
+        "eligible": eligible,
+        "skip_reason": skip_reason,
+        "context_caution_level": context_caution_level,
+        "context_pick_alignment": context_pick_alignment,
+    }
+
+
 def _make_ai(tmp_path: Path, history_rows: list[dict[str, object]], feedback_rows: list[dict[str, object]] | None = None) -> tuple[CourtVisionAI, FakeGradingClient]:
     ai = CourtVisionAI.__new__(CourtVisionAI)
     ai.prediction_history_path = tmp_path / "prediction_history.csv"
@@ -365,3 +394,86 @@ def test_feedback_append_unresolved_duplicate_grade_key_is_not_appended(tmp_path
     written = pd.read_csv(ai.feedback_path)
     assert len(written) == 1
     assert written.iloc[0]["grade_key"] == existing["grade_key"]
+
+
+def test_kelly_metadata_persists_after_grading(tmp_path: Path) -> None:
+    pick_date = "2026-04-28"
+    grade_date = "2026-04-29"
+    eligible = _history_row(selection="under", line=25.5, prediction_date=pick_date)
+    eligible["side_edge_pct"] = 0.10
+    skipped = _history_row(selection="over", line=20.5, prediction_date=pick_date)
+    skipped["side_edge_pct"] = 0.20
+
+    runtime = tmp_path / "runtime"
+    (runtime / "operator").mkdir(parents=True)
+    (runtime / "history").mkdir(parents=True)
+    pd.DataFrame(
+        [
+            _kelly_row(prediction_date=pick_date, selection="under", line=25.5, eligible=True, context_pick_alignment="aligned"),
+            _kelly_row(
+                prediction_date=pick_date,
+                selection="over",
+                line=20.5,
+                eligible=False,
+                skip_reason="context_high_caution_over",
+                context_pick_alignment="conflicted",
+            ),
+        ]
+    ).to_csv(runtime / "operator" / f"kelly_stakes_{pick_date}.csv", index=False)
+
+    ai, _ = _make_ai(tmp_path, [eligible, skipped])
+    ai.runtime_dir = runtime
+    ai.runtime_history_dir = runtime / "history"
+    ai.feedback_path = runtime / "history" / "result_feedback.csv"
+
+    graded, _ = ai._grade_history(grade_date, lookback_days=14)
+
+    assert len(graded) == 2
+    by_selection = {row["selection"]: row for row in graded.to_dict("records")}
+    assert str(by_selection["under"]["kelly_eligible"]).lower() == "true"
+    assert by_selection["under"]["context_caution_level"] == "high"
+    assert by_selection["under"]["context_pick_alignment"] == "aligned"
+    assert str(by_selection["over"]["kelly_eligible"]).lower() == "false"
+    assert by_selection["over"]["skip_reason"] == "context_high_caution_over"
+    assert by_selection["over"]["context_caution_level"] == "high"
+    assert by_selection["over"]["context_pick_alignment"] == "conflicted"
+    for field in ["selection", "market_type", "odds", "edge", "side_edge_pct", "confidence", "quality_score"]:
+        assert field in graded.columns
+
+    feedback = pd.read_csv(ai.feedback_path)
+    assert "kelly_eligible" in feedback.columns
+    assert "skip_reason" in feedback.columns
+    assert "context_caution_level" in feedback.columns
+    assert "context_pick_alignment" in feedback.columns
+    skipped_feedback = feedback[feedback["selection"].astype(str).str.lower().eq("over")].iloc[0]
+    assert skipped_feedback["skip_reason"] == "context_high_caution_over"
+
+    paths = _write_grading_outputs(tmp_path, pick_date, pd.DataFrame())
+    exported = pd.read_csv(paths["grading_results"])
+    assert "kelly_eligible" in exported.columns
+    assert "skip_reason" in exported.columns
+    assert exported.loc[exported["selection"].astype(str).str.lower().eq("over"), "skip_reason"].iloc[0] == "context_high_caution_over"
+
+    payload = json.loads(paths["grading_summary_json"].read_text(encoding="utf-8"))
+    assert payload["by_kelly_eligible"]["true"]["wins"] == 1
+    assert payload["by_kelly_eligible"]["false"]["wins"] == 1
+    assert payload["by_skip_reason"]["context_high_caution_over"]["wins"] == 1
+    assert payload["by_context_caution_level"]["high"]["n"] == 2
+
+
+def test_missing_kelly_metadata_does_not_crash_older_history_rows(tmp_path: Path) -> None:
+    pick_date = "2026-04-28"
+    grade_date = "2026-04-29"
+    row = _history_row(selection="over", line=20.5, prediction_date=pick_date)
+    ai, _ = _make_ai(tmp_path, [row])
+    ai.runtime_dir = tmp_path / "runtime"
+    ai.runtime_history_dir = ai.runtime_dir / "history"
+    ai.runtime_history_dir.mkdir(parents=True)
+    ai.feedback_path = ai.runtime_history_dir / "result_feedback.csv"
+
+    graded, summary = ai._grade_history(grade_date, lookback_days=14)
+
+    assert len(graded) == 1
+    assert summary["diagnostics"]["graded_rows_written"] == 1
+    assert "kelly_eligible" in graded.columns
+    assert "skip_reason" in graded.columns

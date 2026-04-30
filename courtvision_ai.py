@@ -220,6 +220,75 @@ def _safe_json_dumps(payload: Any) -> str:
         return str(payload)
 
 
+KELLY_GRADING_METADATA_COLUMNS: tuple[str, ...] = (
+    "kelly_eligible",
+    "skip_reason",
+    "context_caution_level",
+    "context_pick_alignment",
+)
+
+_MISSING_METADATA_TEXT = {"", "nan", "none", "null", "<na>"}
+
+
+def _safe_metadata_text(value: Any) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()
+    return "" if text.lower() in _MISSING_METADATA_TEXT else text
+
+
+def _metadata_has_value(value: Any) -> bool:
+    return bool(_safe_metadata_text(value))
+
+
+def _metadata_date_text(value: Any) -> str:
+    text = _safe_metadata_text(value)
+    if not text:
+        return ""
+    parsed = pd.to_datetime(text, errors="coerce")
+    if pd.notna(parsed):
+        return parsed.strftime("%Y-%m-%d")
+    return text
+
+
+def _metadata_line_key(value: Any) -> str:
+    parsed = shared_safe_float(value)
+    if parsed is None:
+        return _safe_metadata_text(value)
+    return f"{float(parsed):.4f}"
+
+
+def _first_metadata_value(row: Mapping[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = row.get(key)
+        if _metadata_has_value(value):
+            return value
+    return None
+
+
+def _kelly_metadata_identity_key(row: Mapping[str, Any], prediction_date: Any = None) -> str:
+    date_text = _metadata_date_text(prediction_date if prediction_date is not None else row.get("prediction_date"))
+    market_type = _safe_metadata_text(_first_metadata_value(row, "market_type", "market")).lower()
+    player_name = _safe_metadata_text(_first_metadata_value(row, "entity_name", "player_name")).lower()
+    selection = _safe_metadata_text(_first_metadata_value(row, "selection", "side")).lower()
+    line = _first_metadata_value(row, "sportsbook_line", "line", "line_value")
+    line_key = _metadata_line_key(line)
+    if not all([date_text, market_type, player_name, selection, line_key]):
+        return ""
+    return "|".join([date_text, market_type, player_name, selection, line_key])
+
+
+def _metadata_present_count(df: pd.DataFrame, column: str) -> int:
+    if not isinstance(df, pd.DataFrame) or df.empty or column not in df.columns:
+        return 0
+    return int(df[column].map(_metadata_has_value).sum())
+
+
 @dataclass
 class CalibrationRule:
     market_type: str
@@ -4301,6 +4370,8 @@ class CourtVisionAI:
             self.logger.info("auto_grade_no_candidate_rows grade_date=%s", grade_date)
             return pd.DataFrame()
 
+        candidate_rows = self._attach_kelly_metadata_to_predictions(candidate_rows)
+
         client = self._get_client()
         raw_stats = client.get_stats(grade_date, grade_date)
         stats = self._normalize_stats(raw_stats)
@@ -6855,6 +6926,87 @@ class CourtVisionAI:
             return int(round((decimal_odds - 1.0) * 100.0))
         return int(round(-100.0 / max(decimal_odds - 1.0, 0.01)))
 
+    def _kelly_metadata_runtime_root(self) -> Path:
+        runtime_dir = getattr(self, "runtime_dir", None)
+        if runtime_dir is not None:
+            return Path(runtime_dir)
+        feedback_path = getattr(self, "feedback_path", None)
+        if feedback_path is not None:
+            feedback_parent = Path(feedback_path).parent
+            if feedback_parent.name == "history":
+                return feedback_parent.parent
+            return feedback_parent
+        return Path("outputs") / "runtime"
+
+    def _kelly_metadata_lookup_for_dates(self, dates: Sequence[Any]) -> dict[str, dict[str, Any]]:
+        runtime_root = self._kelly_metadata_runtime_root()
+        lookup: dict[str, dict[str, Any]] = {}
+        normalized_dates = sorted(
+            {
+                normalized
+                for value in dates
+                for normalized in [_metadata_date_text(value)]
+                if normalized
+            }
+        )
+        for date_text in normalized_dates:
+            kelly_path = runtime_root / "operator" / f"kelly_stakes_{date_text}.csv"
+            kelly_df = self._safe_read_csv(kelly_path)
+            if kelly_df.empty:
+                continue
+            if "prediction_date" not in kelly_df.columns:
+                kelly_df = kelly_df.copy()
+                kelly_df["prediction_date"] = date_text
+            for _, kelly_row in kelly_df.iterrows():
+                source = _to_str_dict(kelly_row)
+                key = _kelly_metadata_identity_key(source, date_text)
+                if not key:
+                    continue
+                kelly_eligible = source.get("kelly_eligible")
+                if not _metadata_has_value(kelly_eligible):
+                    kelly_eligible = source.get("eligible")
+                lookup[key] = {
+                    "kelly_eligible": kelly_eligible,
+                    "skip_reason": source.get("skip_reason"),
+                    "context_caution_level": source.get("context_caution_level"),
+                    "context_pick_alignment": source.get("context_pick_alignment"),
+                }
+        return lookup
+
+    def _attach_kelly_metadata_to_predictions(self, predictions: pd.DataFrame) -> pd.DataFrame:
+        if not isinstance(predictions, pd.DataFrame) or predictions.empty:
+            return predictions
+
+        out = predictions.copy()
+        if "prediction_date_str" in out.columns:
+            date_values = out["prediction_date_str"].tolist()
+        elif "prediction_date" in out.columns:
+            date_values = out["prediction_date"].tolist()
+        else:
+            date_values = []
+
+        lookup = self._kelly_metadata_lookup_for_dates(date_values)
+        if not lookup:
+            return out
+
+        for column in KELLY_GRADING_METADATA_COLUMNS:
+            if column not in out.columns:
+                out[column] = pd.NA
+
+        for idx, source_row in out.iterrows():
+            row = _to_str_dict(source_row)
+            date_value = _first_metadata_value(row, "prediction_date_str", "prediction_date")
+            key = _kelly_metadata_identity_key(row, date_value)
+            if not key:
+                continue
+            metadata = lookup.get(key)
+            if not metadata:
+                continue
+            for column, value in metadata.items():
+                if _metadata_has_value(value) and not _metadata_has_value(out.at[idx, column]):
+                    out.at[idx, column] = value
+        return out
+
     def _grade_history(self, prediction_date: str, lookback_days: Optional[int] = None) -> tuple[pd.DataFrame, dict[str, Any]]:
         lookback_days = self.GRADE_LOOKBACK_DAYS if lookback_days is None else int(lookback_days)
         diagnostics: dict[str, Any] = {
@@ -6900,6 +7052,7 @@ class CourtVisionAI:
         if hist.empty:
             ungraded_reasons["no_eligible_predictions"] += 1
             return finish(pd.DataFrame(), {"graded_rows": 0, "window_days": lookback_days, "status": "no_eligible_predictions"})
+        hist = self._attach_kelly_metadata_to_predictions(hist)
 
         existing_feedback = self._safe_read_csv(self.feedback_path)
         eligible_before_feedback = int(len(hist))
@@ -7111,7 +7264,10 @@ class CourtVisionAI:
             "is_win": 1 if result == "win" else 0,
             "is_push": 1 if result == "push" else 0,
             "is_loss": 1 if result == "loss" else 0,
+            "kelly_eligible": row.get("kelly_eligible", row.get("eligible")),
+            "skip_reason": row.get("skip_reason"),
             "context_pick_alignment": row.get("context_pick_alignment"),
+            "context_caution_level": row.get("context_caution_level"),
             "odds": row.get("odds") or row.get("offered_odds") or row.get("american_odds"),
             "confidence": row.get("confidence"),
             "quality_score": row.get("quality_score"),
@@ -7340,6 +7496,48 @@ def _read_cumulative_grading_feedback(out_dir: Path, prediction_date: str) -> tu
     return date_rows.reset_index(drop=True), final_rows
 
 
+def _grading_kelly_metadata_dates(prediction_date: str, graded_df: pd.DataFrame) -> list[str]:
+    dates = {_metadata_date_text(prediction_date)}
+    if isinstance(graded_df, pd.DataFrame) and not graded_df.empty and "prediction_date" in graded_df.columns:
+        for value in graded_df["prediction_date"].tolist():
+            date_text = _metadata_date_text(value)
+            if date_text:
+                dates.add(date_text)
+    return sorted(date for date in dates if date)
+
+
+def _safe_csv_row_count(path: Path) -> int:
+    if not path.exists():
+        return 0
+    try:
+        return int(len(pd.read_csv(path, low_memory=False)))
+    except Exception:
+        return 0
+
+
+def _kelly_rows_for_dates(runtime_root: Path, dates: Sequence[str]) -> int:
+    seen: set[str] = set()
+    total = 0
+    for date_text in dates:
+        normalized = _metadata_date_text(date_text)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        total += _safe_csv_row_count(runtime_root / "operator" / f"kelly_stakes_{normalized}.csv")
+    return int(total)
+
+
+def _log_kelly_metadata_diagnostics(out_dir: Path, prediction_date: str, graded_df: pd.DataFrame) -> None:
+    safe_graded = _cli_dataframe(graded_df)
+    runtime_root = Path(out_dir) / "runtime"
+    dates = _grading_kelly_metadata_dates(prediction_date, safe_graded)
+    print(f"[KELLY_META] kelly_rows={_kelly_rows_for_dates(runtime_root, dates)}", flush=True)
+    print(f"[KELLY_META] graded_rows_with_kelly_eligible={_metadata_present_count(safe_graded, 'kelly_eligible')}", flush=True)
+    print(f"[KELLY_META] graded_rows_with_skip_reason={_metadata_present_count(safe_graded, 'skip_reason')}", flush=True)
+    print(f"[KELLY_META] graded_rows_with_context_caution={_metadata_present_count(safe_graded, 'context_caution_level')}", flush=True)
+    print(f"[KELLY_META] graded_rows_with_context_alignment={_metadata_present_count(safe_graded, 'context_pick_alignment')}", flush=True)
+
+
 def _existing_grading_results_rows(path: Path) -> int:
     if not path.exists():
         return 0
@@ -7445,6 +7643,13 @@ def _write_grading_outputs(
     print(f"[GRADING] grading_results_rows_written={grading_results_rows_written}", flush=True)
     print(f"[GRADING] grading_summary_rows_written={grading_summary_rows_written}", flush=True)
     print(f"[GRADING] graded_rows_written={grading_results_rows_written}", flush=True)
+    diagnostics_graded = graded
+    if preserved_existing and paths["grading_results"].exists():
+        try:
+            diagnostics_graded = pd.read_csv(paths["grading_results"], low_memory=False)
+        except Exception:
+            diagnostics_graded = graded
+    _log_kelly_metadata_diagnostics(out_dir, prediction_date, diagnostics_graded)
     for line in kelly_perf_log_lines(summary_payload.get("kelly_decision_performance", {})):
         print(line, flush=True)
     paths["player_points_calibration_json"].write_text(
