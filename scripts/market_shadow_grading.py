@@ -13,6 +13,8 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from courtvision.reporting.kelly_performance import build_kelly_decision_performance, kelly_perf_log_lines
+
 
 RESULT_HIT = "hit"
 RESULT_MISS = "miss"
@@ -345,6 +347,11 @@ def build_market_shadow_grading(
         for key in CONTEXT_ALIGNMENT_VALUES
     }
     context_alignment_performance = _context_alignment_performance(working)
+    kelly_decision_performance = build_kelly_decision_performance(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        out_dir=runtime_root.parent if runtime_root.name == "runtime" else runtime_root,
+    )
 
     return {
         "prediction_date": prediction_date,
@@ -355,6 +362,7 @@ def build_market_shadow_grading(
         "totals": totals,
         "markets": rows,
         "context_alignment_performance": context_alignment_performance,
+        "kelly_decision_performance": kelly_decision_performance,
     }
 
 
@@ -390,6 +398,21 @@ def render_market_shadow_report(payload: dict[str, Any]) -> str:
         lines.append("No resolved graded hit/miss sample yet; context alignment performance is pending.")
     for alignment_key in TRACKED_ALIGNMENT_VALUES:
         lines.append(_performance_line(alignment_key, by_alignment.get(alignment_key, {})))
+    lines.append("")
+
+    kelly_perf = payload.get("kelly_decision_performance", {})
+    lines.append("Kelly Decision Performance")
+    if isinstance(kelly_perf, dict):
+        by_eligible = kelly_perf.get("by_kelly_eligible", {})
+        if isinstance(by_eligible, dict):
+            lines.append(_performance_line("kelly_eligible=true", by_eligible.get("true", {})))
+            lines.append(_performance_line("kelly_eligible=false", by_eligible.get("false", {})))
+        by_skip = kelly_perf.get("by_skip_reason", {})
+        if isinstance(by_skip, dict):
+            for reason, item in sorted(by_skip.items()):
+                lines.append(_performance_line(f"skip_reason={reason}", item))
+    else:
+        lines.append("- insufficient_sample")
     lines.append("")
 
     by_side = (
@@ -449,11 +472,14 @@ def render_market_shadow_report(payload: dict[str, Any]) -> str:
 
 def _performance_line(label: str, item: Any) -> str:
     payload = item if isinstance(item, dict) else {}
+    total = payload.get("total_picks", payload.get("count", 0))
+    graded = payload.get("graded_picks", payload.get("graded_count", 0))
+    pending = payload.get("pending_picks", payload.get("pending_count", 0))
     return (
         f"- {label}: "
-        f"total={int(payload.get('total_picks', 0) or 0)} "
-        f"graded={int(payload.get('graded_picks', 0) or 0)} "
-        f"pending={int(payload.get('pending_picks', 0) or 0)} "
+        f"total={int(total or 0)} "
+        f"graded={int(graded or 0)} "
+        f"pending={int(pending or 0)} "
         f"hit_rate={_format_pct(payload.get('hit_rate'))} "
         f"roi={_format_pct(payload.get('roi'))} "
         f"status={_safe_text(payload.get('status')) or 'insufficient_sample'}"
@@ -488,6 +514,15 @@ def write_market_shadow_outputs(
     report_path.parent.mkdir(parents=True, exist_ok=True)
     diagnostics_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
     report_path.write_text(render_market_shadow_report(payload), encoding="utf-8")
+    grading_summary_path = runtime_root / "diagnostics" / f"grading_summary_{prediction_date}.json"
+    if grading_summary_path.exists():
+        try:
+            grading_summary = json.loads(grading_summary_path.read_text(encoding="utf-8"))
+        except Exception:
+            grading_summary = {}
+        if isinstance(grading_summary, dict):
+            grading_summary["kelly_decision_performance"] = payload.get("kelly_decision_performance", {})
+            grading_summary_path.write_text(json.dumps(grading_summary, indent=2, default=str), encoding="utf-8")
     return diagnostics_path, report_path, payload
 
 
@@ -521,6 +556,8 @@ def main(argv: list[str] | None = None) -> int:
             f"hit_rate={_format_pct(item.get('hit_rate'))} "
             f"roi={_format_pct(item.get('roi'))}"
         )
+    for line in kelly_perf_log_lines(payload.get("kelly_decision_performance", {})):
+        print(line)
     return 0
 
 

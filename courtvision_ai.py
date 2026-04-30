@@ -47,6 +47,7 @@ from courtvision.calibration.grading_summary import (
     summarize_player_points_calibration,
     summarize_player_points_uplift_audit,
 )
+from courtvision.reporting.kelly_performance import build_kelly_decision_performance, kelly_perf_log_lines
 from courtvision.data.bdl_odds_adapter import (
     REQUIRED_COLUMNS as BDL_REQUIRED_COLUMNS,
     filter_valid_odds,
@@ -7405,6 +7406,12 @@ def _write_grading_outputs(
     preserved_existing = bool(graded.empty and (existing_results_rows > 0 or existing_summary_rows > 0))
 
     summary_payload = summarize_graded_props(graded.to_dict("records") if not graded.empty else [])
+    summary_payload["kelly_decision_performance"] = build_kelly_decision_performance(
+        prediction_date=prediction_date,
+        out_dir=out_dir,
+        runtime_root=out_dir / "runtime",
+        graded_df=graded,
+    )
     summary_rows = int(summary_payload.get("overall", {}).get("n", 0) or 0)
     summary_df = flatten_grading_summary(summary_payload)
     elite_rows = _cli_dataframe(elite_df) if isinstance(elite_df, pd.DataFrame) else pd.DataFrame()
@@ -7438,6 +7445,8 @@ def _write_grading_outputs(
     print(f"[GRADING] grading_results_rows_written={grading_results_rows_written}", flush=True)
     print(f"[GRADING] grading_summary_rows_written={grading_summary_rows_written}", flush=True)
     print(f"[GRADING] graded_rows_written={grading_results_rows_written}", flush=True)
+    for line in kelly_perf_log_lines(summary_payload.get("kelly_decision_performance", {})):
+        print(line, flush=True)
     paths["player_points_calibration_json"].write_text(
         json.dumps(
             {

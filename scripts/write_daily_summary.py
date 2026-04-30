@@ -14,6 +14,8 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from courtvision.reporting.kelly_performance import build_kelly_decision_performance
+
 
 def _safe_float(value: Any) -> float | None:
     if value is None:
@@ -190,10 +192,12 @@ def _caution_counts(df: pd.DataFrame) -> dict[str, int]:
 
 def _alignment_performance_line(label: str, item: Any) -> str:
     payload = item if isinstance(item, dict) else {}
+    graded = payload.get("graded_picks", payload.get("graded_count", 0))
+    pending = payload.get("pending_picks", payload.get("pending_count", 0))
     return (
         f"- {label}: "
-        f"graded={int(payload.get('graded_picks', 0) or 0)}, "
-        f"pending={int(payload.get('pending_picks', 0) or 0)}, "
+        f"graded={int(graded or 0)}, "
+        f"pending={int(pending or 0)}, "
         f"hit_rate={_format_pct(payload.get('hit_rate'))}, "
         f"roi={_format_pct(payload.get('roi'))}, "
         f"status={_safe_text(payload.get('status')) or 'insufficient_sample'}"
@@ -254,6 +258,17 @@ def build_daily_summary(
         if isinstance(shadow, dict)
         else {}
     )
+    kelly_decision_performance = (
+        shadow.get("kelly_decision_performance", {})
+        if isinstance(shadow, dict)
+        else {}
+    )
+    if not kelly_decision_performance:
+        kelly_decision_performance = build_kelly_decision_performance(
+            prediction_date=prediction_date,
+            runtime_root=runtime_root,
+            out_dir=runtime_root.parent if runtime_root.name == "runtime" else runtime_root,
+        )
     pending_grading = int(shadow_totals.get("pending_picks") or 0)
 
     readiness_markets = readiness.get("markets", []) if isinstance(readiness, dict) else []
@@ -308,6 +323,18 @@ def build_daily_summary(
             lines.append(_kelly_line(row))
     lines.append(f"Total exposure: {_format_money(total_exposure)}")
     lines.append(f"Expected EV: {_format_money(expected_ev)}")
+
+    lines.extend(["", "Kelly Decision Performance", "-" * 72])
+    by_eligible = kelly_decision_performance.get("by_kelly_eligible", {}) if isinstance(kelly_decision_performance, dict) else {}
+    lines.append(_alignment_performance_line("kelly_eligible=true", by_eligible.get("true", {}) if isinstance(by_eligible, dict) else {}))
+    lines.append(_alignment_performance_line("kelly_eligible=false", by_eligible.get("false", {}) if isinstance(by_eligible, dict) else {}))
+    by_skip = kelly_decision_performance.get("by_skip_reason", {}) if isinstance(kelly_decision_performance, dict) else {}
+    if isinstance(by_skip, dict) and by_skip:
+        lines.append("By skip reason:")
+        for reason, item in sorted(by_skip.items()):
+            lines.append(_alignment_performance_line(reason, item))
+    else:
+        lines.append("- insufficient_sample")
 
     lines.extend(["", "Full-Market Market Counts", "-" * 72])
     if counts:
@@ -422,6 +449,7 @@ def build_daily_summary(
         "full_market_context_alignment": full_market_alignment,
         "shadow_totals": shadow_totals,
         "context_alignment_performance": context_alignment_performance,
+        "kelly_decision_performance": kelly_decision_performance,
         "pending_grading_count": pending_grading,
         "manual_context": manual_context,
         "warnings": warnings,
