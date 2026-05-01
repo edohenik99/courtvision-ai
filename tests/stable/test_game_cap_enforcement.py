@@ -138,9 +138,12 @@ def test_game_cap_enforcement():
     # Expected: 4 rows max from game, with no more than 3 from any team
     assert len(capped_df) <= elite_game_cap, \
         f"Should have at most {elite_game_cap} rows when all from same game, got {len(capped_df)}"
+    assert len(capped_df) == elite_game_cap, \
+        f"Expected game cap to select exactly {elite_game_cap} rows, got {len(capped_df)}"
+    assert skipped_by_game_cap == len(candidates_df) - elite_game_cap, \
+        f"Expected remaining candidates to be skipped by game cap, got {skipped_by_game_cap}"
     
     print(f"\n✓ Test PASSED: Game cap and team cap correctly enforced")
-    return capped_df
 
 
 def test_game_cap_with_int_conversion():

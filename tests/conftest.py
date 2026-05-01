@@ -6,7 +6,7 @@ import pytest
 P3_LEGACY_EXPERIMENTAL_XFAILS = {
     "tests/experimental/test_calibration_audit.py::TestEVOutperformance::test_positive_ev_outperforms_negative": "experimental calibration audit uses random synthetic outcomes and is not part of the operator runtime gate",
     "tests/experimental/test_calibration_audit.py::TestIntegration::test_shadow_run_records_all_required_fields": "experimental shadow-run calibration schema predates current context payload names",
-    "tests/experimental/test_calibration_audit.py::TestIntegration::test_end_to_end_calibration_workflow": "experimental calibration workflow has nondeterministic synthetic hit-rate assumptions",
+    "tests/experimental/test_calibration_audit.py::TestIntegration::test_end_to_end_calibration_workflow": "experimental calibration workflow uses unseeded random synthetic picks and alternates between xpass and xfail across repeated runs",
     "tests/experimental/test_calibration_audit.py::TestStatisticalUtilities::test_calibration_score_calculation": "experimental calibration score expectation predates rolling-window semantics",
     "tests/experimental/test_calibration_audit.py::TestStatisticalUtilities::test_volatility_calculation": "experimental volatility check expects exact floating-point zero",
     "tests/experimental/test_calibration_audit.py::TestConfigurationCalibration::test_conservative_mode_higher_thresholds": "experimental config helper names are obsolete",
@@ -42,4 +42,7 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     for item in items:
         reason = P3_LEGACY_EXPERIMENTAL_XFAILS.get(item.nodeid)
         if reason:
-            item.add_marker(pytest.mark.xfail(reason=reason, strict=False))
+            if item.nodeid == "tests/experimental/test_calibration_audit.py::TestIntegration::test_end_to_end_calibration_workflow":
+                item.add_marker(pytest.mark.xfail(reason=reason, run=False))
+            else:
+                item.add_marker(pytest.mark.xfail(reason=reason, strict=False))
