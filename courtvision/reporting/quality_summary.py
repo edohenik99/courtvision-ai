@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import math
 import subprocess
@@ -40,6 +41,38 @@ PREDICTION_ARTIFACT_NAMES: tuple[str, ...] = (
     "predictive_lines_board",
     "team_board",
     "near_miss_board",
+)
+
+QUALITY_HISTORY_CSV_NAME = "quality_history.csv"
+QUALITY_HISTORY_JSONL_NAME = "quality_history.jsonl"
+QUALITY_HISTORY_COLUMNS: tuple[str, ...] = (
+    "prediction_date",
+    "generated_at",
+    "commit_hash",
+    "data_mode",
+    "games_count",
+    "players_count",
+    "raw_odds_rows",
+    "normalized_odds_rows",
+    "live_odds_count",
+    "synthetic_fallback_odds_count",
+    "raw_candidates_count",
+    "rejected_candidates_count",
+    "full_market_board_count",
+    "elite_board_count",
+    "sgp_board_count",
+    "kelly_rows_count",
+    "kelly_eligible_count",
+    "kelly_skipped_count",
+    "high_caution_over_skip_count",
+    "medium_neutral_over_dampened_count",
+    "total_stake",
+    "total_expected_value",
+    "max_player_exposure",
+    "max_team_exposure",
+    "max_game_exposure",
+    "date_isolation_status",
+    "warnings_count",
 )
 
 
@@ -443,6 +476,136 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
+def _history_int(value: Any) -> int:
+    number = _safe_int(value)
+    return 0 if number is None else int(number)
+
+
+def _history_float(value: Any) -> float:
+    number = _safe_float(value)
+    return 0.0 if number is None else round(float(number), 2)
+
+
+def _history_warning_count(value: Any) -> int:
+    if isinstance(value, list):
+        return len(value)
+    if isinstance(value, tuple):
+        return len(value)
+    if isinstance(value, dict):
+        return len(value)
+    return 1 if _safe_text(value) else 0
+
+
+def _quality_history_row(payload: dict[str, Any], *, fallback_prediction_date: str) -> dict[str, Any]:
+    run = payload.get("run_identity", {}) if isinstance(payload.get("run_identity"), dict) else {}
+    slate = payload.get("slate_provider_counts", {}) if isinstance(payload.get("slate_provider_counts"), dict) else {}
+    funnel = payload.get("candidate_funnel", {}) if isinstance(payload.get("candidate_funnel"), dict) else {}
+    kelly = payload.get("kelly_safety_summary", {}) if isinstance(payload.get("kelly_safety_summary"), dict) else {}
+    exposure = payload.get("risk_exposure_summary", {}) if isinstance(payload.get("risk_exposure_summary"), dict) else {}
+    isolation = payload.get("date_isolation_check", {}) if isinstance(payload.get("date_isolation_check"), dict) else {}
+
+    prediction_date = _safe_text(run.get("prediction_date")) or fallback_prediction_date
+    row = {
+        "prediction_date": prediction_date,
+        "generated_at": _safe_text(run.get("generated_at")),
+        "commit_hash": _safe_text(run.get("commit_hash")),
+        "data_mode": _safe_text(_first_present(run, ("run_data_mode", "data_mode"))),
+        "games_count": _history_int(slate.get("games_count")),
+        "players_count": _history_int(_first_present(slate, ("players_or_baselines_count", "players_count"))),
+        "raw_odds_rows": _history_int(_first_present(slate, ("raw_odds_rows_count", "raw_odds_rows"))),
+        "normalized_odds_rows": _history_int(
+            _first_present(slate, ("normalized_odds_rows_count", "normalized_odds_rows"))
+        ),
+        "live_odds_count": _history_int(slate.get("live_odds_count")),
+        "synthetic_fallback_odds_count": _history_int(
+            _first_present(slate, ("synthetic_or_fallback_odds_count", "synthetic_fallback_odds_count"))
+        ),
+        "raw_candidates_count": _history_int(funnel.get("raw_candidates_count")),
+        "rejected_candidates_count": _history_int(funnel.get("rejected_candidates_count")),
+        "full_market_board_count": _history_int(funnel.get("full_market_board_count")),
+        "elite_board_count": _history_int(funnel.get("elite_board_count")),
+        "sgp_board_count": _history_int(funnel.get("sgp_board_count")),
+        "kelly_rows_count": _history_int(_first_present(funnel, ("kelly_rows_count", "total_rows"))),
+        "kelly_eligible_count": _history_int(kelly.get("kelly_eligible_count")),
+        "kelly_skipped_count": _history_int(_first_present(kelly, ("skipped_count", "kelly_skipped_count"))),
+        "high_caution_over_skip_count": _history_int(
+            _first_present(kelly, ("context_high_caution_over_skip_count", "high_caution_over_skip_count"))
+        ),
+        "medium_neutral_over_dampened_count": _history_int(kelly.get("medium_neutral_over_dampened_count")),
+        "total_stake": _history_float(kelly.get("total_stake")),
+        "total_expected_value": _history_float(kelly.get("total_expected_value")),
+        "max_player_exposure": _history_float(exposure.get("max_player_exposure")),
+        "max_team_exposure": _history_float(exposure.get("max_team_exposure")),
+        "max_game_exposure": _history_float(exposure.get("max_game_exposure")),
+        "date_isolation_status": _safe_text(isolation.get("status")),
+        "warnings_count": _history_warning_count(payload.get("warnings")),
+    }
+    return {column: row.get(column, "") for column in QUALITY_HISTORY_COLUMNS}
+
+
+def _read_quality_history_rows(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    try:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            return [
+                {column: row.get(column, "") for column in QUALITY_HISTORY_COLUMNS}
+                for row in reader
+                if _safe_text(row.get("prediction_date"))
+            ]
+    except Exception:
+        return []
+
+
+def _write_quality_history_csv(path: Path, rows: Sequence[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=QUALITY_HISTORY_COLUMNS, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({column: row.get(column, "") for column in QUALITY_HISTORY_COLUMNS})
+
+
+def _write_quality_history_jsonl(path: Path, rows: Sequence[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = "\n".join(json.dumps(_json_safe(row), sort_keys=True) for row in rows)
+    path.write_text((text + "\n") if text else "", encoding="utf-8")
+
+
+def update_quality_history_from_summary(
+    *,
+    prediction_date: str,
+    runtime_root: str | Path = "outputs/runtime",
+    write_jsonl: bool = True,
+) -> tuple[Path, Path | None, dict[str, Any]]:
+    runtime_root = Path(runtime_root)
+    operator_dir = runtime_root / "operator"
+    summary_path = operator_dir / f"quality_summary_{prediction_date}.json"
+    payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"Quality summary JSON must contain an object: {summary_path}")
+
+    row = _quality_history_row(payload, fallback_prediction_date=prediction_date)
+    history_csv_path = operator_dir / QUALITY_HISTORY_CSV_NAME
+    history_jsonl_path = operator_dir / QUALITY_HISTORY_JSONL_NAME if write_jsonl else None
+
+    existing_rows = _read_quality_history_rows(history_csv_path)
+    row_date = _safe_text(row.get("prediction_date")) or prediction_date
+    updated_rows = [
+        existing_row
+        for existing_row in existing_rows
+        if _safe_text(existing_row.get("prediction_date")) != row_date
+    ]
+    updated_rows.append(row)
+    updated_rows.sort(key=lambda item: _safe_text(item.get("prediction_date")))
+
+    _write_quality_history_csv(history_csv_path, updated_rows)
+    if history_jsonl_path is not None:
+        _write_quality_history_jsonl(history_jsonl_path, updated_rows)
+    return history_csv_path, history_jsonl_path, row
+
+
 def build_quality_summary(
     *,
     prediction_date: str,
@@ -739,10 +902,18 @@ def write_quality_summary_outputs(
     json_path = operator_dir / f"quality_summary_{prediction_date}.json"
     text_path.write_text(text, encoding="utf-8")
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    update_quality_history_from_summary(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+    )
     return text_path, json_path, payload
 
 
 __all__ = [
+    "QUALITY_HISTORY_COLUMNS",
+    "QUALITY_HISTORY_CSV_NAME",
+    "QUALITY_HISTORY_JSONL_NAME",
     "build_quality_summary",
+    "update_quality_history_from_summary",
     "write_quality_summary_outputs",
 ]

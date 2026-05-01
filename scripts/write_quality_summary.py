@@ -8,7 +8,11 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from courtvision.reporting.quality_summary import write_quality_summary_outputs
+from courtvision.reporting.quality_summary import (
+    QUALITY_HISTORY_CSV_NAME,
+    QUALITY_HISTORY_JSONL_NAME,
+    write_quality_summary_outputs,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -27,6 +31,12 @@ def main(argv: list[str] | None = None) -> int:
     funnel = payload["candidate_funnel"]
     print(f"quality_summary_txt={text_path}")
     print(f"quality_summary_json={json_path}")
+    history_csv = Path(args.runtime_root) / "operator" / QUALITY_HISTORY_CSV_NAME
+    history_jsonl = Path(args.runtime_root) / "operator" / QUALITY_HISTORY_JSONL_NAME
+    if history_csv.exists():
+        print(f"quality_history_csv={history_csv}")
+    if history_jsonl.exists():
+        print(f"quality_history_jsonl={history_jsonl}")
     print(
         "quality_summary_totals "
         f"elite={funnel['elite_board_count']} "
