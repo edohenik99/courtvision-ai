@@ -7,6 +7,7 @@ from pathlib import Path
 import pandas as pd
 
 import courtvision_ai
+from courtvision.reporting.quality_summary import write_quality_summary_outputs
 from scripts.run_kelly_stakes import main as run_kelly_stakes
 
 
@@ -197,3 +198,18 @@ def test_operator_fixture_smoke_writes_isolated_boards_and_kelly_metadata(tmp_pa
     assert dampened["stake_dampener_reason"] == "medium_neutral_over_dampener"
     assert dampened["stake_dampener_factor"] == 0.5
     assert dampened["stake_amount"] == 10.0
+
+    quality_txt, quality_json, quality_payload = write_quality_summary_outputs(
+        prediction_date=prediction_date,
+        runtime_root=tmp_path / "runtime",
+        out_dir=tmp_path,
+        generated_at="2026-05-01T00:00:00+00:00",
+    )
+
+    assert quality_txt.exists()
+    assert quality_json.exists()
+    assert quality_payload["candidate_funnel"]["elite_board_count"] == 3
+    assert quality_payload["candidate_funnel"]["kelly_rows_count"] == 3
+    assert quality_payload["kelly_safety_summary"]["context_high_caution_over_skip_count"] == 1
+    assert quality_payload["kelly_safety_summary"]["medium_neutral_over_dampened_count"] == 1
+    assert quality_payload["date_isolation_check"]["status"] == "ok"

@@ -39,6 +39,7 @@ $PostRunTrackingScript = Join-Path $ScriptRoot "scripts\post_run_tracking.py"
 $GradeCompletedScript = Join-Path $ScriptRoot "scripts\grade_completed_picks.py"
 $MarketShadowScript = Join-Path $ScriptRoot "scripts\market_shadow_grading.py"
 $DailySummaryScript = Join-Path $ScriptRoot "scripts\write_daily_summary.py"
+$QualitySummaryScript = Join-Path $ScriptRoot "scripts\write_quality_summary.py"
 
 # Bankroll override: read $env:COURTVISION_BANKROLL when set, else default.
 $KellyBankroll = if ($env:COURTVISION_BANKROLL) { $env:COURTVISION_BANKROLL } else { "1000" }
@@ -303,6 +304,18 @@ if ($validationPassed) {
                 "Daily summary exception: " + $_.Exception.Message | Out-File $GradeLog -Append
             }
         }
+    }
+}
+
+if ($validationPassed -and (Test-Path $QualitySummaryScript)) {
+    "`n--- Quality summary ---" | Out-File $GradeLog -Append
+    try {
+        & $PyExe @PyArgsPrefix $QualitySummaryScript --prediction-date $Date 2>&1 | Tee-Object -FilePath $GradeLog -Append
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  [WARNING] Quality summary failed (exit code: $LASTEXITCODE)" -ForegroundColor Yellow
+        }
+    } catch {
+        "Quality summary exception: " + $_.Exception.Message | Out-File $GradeLog -Append
     }
 }
 

@@ -1,0 +1,748 @@
+from __future__ import annotations
+
+import json
+import math
+import subprocess
+from collections import Counter
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Iterable, Sequence
+
+import pandas as pd
+
+
+PREDICTION_ARTIFACT_NAMES: tuple[str, ...] = (
+    "elite_board",
+    "full_market_board",
+    "sgp_board",
+    "elite_pipeline_audit",
+    "elite_pipeline_audit_summary",
+    "player_predictions",
+    "game_predictions",
+    "player_edges",
+    "game_edges",
+    "model_metrics",
+    "market_coverage",
+    "board_diagnostics",
+    "player_points_elite_admission",
+    "market_availability_audit",
+    "market_performance_readiness",
+    "manual_context",
+    "game_context",
+    "injury_context_diagnostics",
+    "injury_context_report",
+    "top_plays_report",
+    "elite_decision_report",
+    "top_player_edges",
+    "top_game_edges",
+    "stat_only_board",
+    "strike_board",
+    "predictive_lines_board",
+    "team_board",
+    "near_miss_board",
+)
+
+
+def _safe_text(value: Any) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()
+    return "" if text.lower() in {"nan", "none", "null"} else text
+
+
+def _safe_float(value: Any) -> float | None:
+    text = _safe_text(value)
+    if not text:
+        return None
+    try:
+        number = float(text)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(number) or math.isinf(number):
+        return None
+    return number
+
+
+def _safe_int(value: Any) -> int | None:
+    number = _safe_float(value)
+    return None if number is None else int(number)
+
+
+def _is_truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return _safe_text(value).lower() in {"true", "1", "yes", "y"}
+
+
+def _read_csv(path: Path, warnings: list[str], *, optional: bool = True) -> pd.DataFrame:
+    if not path.exists():
+        if optional:
+            warnings.append(f"Missing optional artifact: {path}")
+        else:
+            warnings.append(f"Missing artifact: {path}")
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path, low_memory=False)
+    except Exception as exc:
+        warnings.append(f"Could not read CSV {path}: {exc}")
+        return pd.DataFrame()
+
+
+def _read_json(path: Path, warnings: list[str], *, optional: bool = True) -> dict[str, Any]:
+    if not path.exists():
+        if optional:
+            warnings.append(f"Missing optional artifact: {path}")
+        else:
+            warnings.append(f"Missing artifact: {path}")
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        warnings.append(f"Could not read JSON {path}: {exc}")
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _git_commit_hash() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).resolve().parents[2],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return "unknown"
+    commit = result.stdout.strip()
+    return commit if result.returncode == 0 and commit else "unknown"
+
+
+def _count_rows(df: pd.DataFrame) -> int:
+    return 0 if not isinstance(df, pd.DataFrame) or df.empty else int(len(df))
+
+
+def _numeric_sum(df: pd.DataFrame, column: str) -> float:
+    if df.empty or column not in df.columns:
+        return 0.0
+    return float(pd.to_numeric(df[column], errors="coerce").fillna(0.0).sum())
+
+
+def _value_counts(df: pd.DataFrame, column: str) -> dict[str, int]:
+    if df.empty or column not in df.columns:
+        return {}
+    series = df[column].fillna("unknown").astype(str).str.strip().replace("", "unknown")
+    return {str(k): int(v) for k, v in series.value_counts().sort_index().items()}
+
+
+def _first_present(mapping: dict[str, Any], keys: Sequence[str]) -> Any:
+    for key in keys:
+        if key in mapping and mapping[key] is not None:
+            return mapping[key]
+    return None
+
+
+def _infer_run_data_mode(summary: dict[str, Any], frames: Sequence[pd.DataFrame]) -> str:
+    pipeline_mode = _safe_text(summary.get("pipeline_mode")).lower()
+    quality_status = _safe_text(summary.get("market_quality_status")).lower()
+    if "fixture" in pipeline_mode:
+        return "fixture"
+    for frame in frames:
+        if frame.empty:
+            continue
+        for column in ("line_source", "source_lane", "bookmaker", "vendor"):
+            if column in frame.columns:
+                values = " ".join(frame[column].fillna("").astype(str).str.lower().tolist())
+                if "fixture" in values:
+                    return "fixture"
+        if "is_live_market" in frame.columns and frame["is_live_market"].map(_is_truthy).any():
+            return "live"
+    if quality_status == "live":
+        return "live"
+    return "unknown"
+
+
+def _normalized_date_tokens(path: Path) -> list[str]:
+    import re
+
+    return re.findall(r"\d{4}-\d{2}-\d{2}", str(path))
+
+
+def _prediction_artifact_paths(runtime_root: Path, prediction_date: str) -> list[Path]:
+    lanes = [
+        runtime_root / "operator",
+        runtime_root / "diagnostics",
+        runtime_root / "research",
+        runtime_root / "optional",
+    ]
+    paths: list[Path] = []
+    for lane in lanes:
+        for name in PREDICTION_ARTIFACT_NAMES:
+            for suffix in ("csv", "json", "txt"):
+                path = lane / f"{name}_{prediction_date}.{suffix}"
+                if path.exists():
+                    paths.append(path)
+    return sorted(set(paths), key=lambda p: str(p))
+
+
+def _date_isolation_summary(
+    *,
+    prediction_date: str,
+    artifact_paths: Iterable[Path],
+) -> dict[str, Any]:
+    artifacts: list[str] = []
+    mismatches: list[dict[str, str]] = []
+    for raw_path in artifact_paths:
+        path = Path(raw_path)
+        artifacts.append(str(path))
+        dates = _normalized_date_tokens(path)
+        mismatched = sorted({date for date in dates if date != prediction_date})
+        for artifact_date in mismatched:
+            mismatches.append(
+                {
+                    "artifact_date": artifact_date,
+                    "path": str(path),
+                }
+            )
+    return {
+        "requested_prediction_date": prediction_date,
+        "prediction_artifacts": sorted(artifacts),
+        "mismatched_artifacts": mismatches,
+        "status": "warning" if mismatches else "ok",
+    }
+
+
+def _rejection_reasons(
+    *,
+    audit_summary: dict[str, Any],
+    market_availability: dict[str, Any],
+    fallback_rejected_count: int,
+) -> tuple[list[dict[str, Any]], int]:
+    counts: Counter[str] = Counter()
+    totals = audit_summary.get("totals", {}) if isinstance(audit_summary, dict) else {}
+    rejected_total = int(totals.get("total_rejections") or 0)
+
+    for row in audit_summary.get("rows", []) if isinstance(audit_summary, dict) else []:
+        if not isinstance(row, dict):
+            continue
+        reason = _safe_text(row.get("rejection_reason"))
+        if not reason or reason in {"total_candidates", "passed_to_elite"}:
+            continue
+        counts[reason] += int(row.get("count") or 0)
+
+    if not counts:
+        rejected_total = 0
+        by_market = market_availability.get("rejection_counts_by_market", {})
+        if isinstance(by_market, dict):
+            for reasons in by_market.values():
+                if not isinstance(reasons, dict):
+                    continue
+                for reason, count in reasons.items():
+                    count_int = int(count or 0)
+                    counts[_safe_text(reason) or "unknown"] += count_int
+                    rejected_total += count_int
+
+    if not rejected_total:
+        rejected_total = fallback_rejected_count or int(sum(counts.values()))
+
+    rows: list[dict[str, Any]] = []
+    for reason, count in counts.most_common(10):
+        pct = round((count / rejected_total) * 100.0, 2) if rejected_total else 0.0
+        rows.append({"reason": reason, "count": int(count), "percentage": pct})
+    return rows, int(rejected_total)
+
+
+def _kelly_safety_summary(kelly_df: pd.DataFrame) -> dict[str, Any]:
+    if kelly_df.empty:
+        return {
+            "total_rows": 0,
+            "kelly_eligible_count": 0,
+            "skipped_count": 0,
+            "total_stake": 0.0,
+            "total_expected_value": 0.0,
+            "context_high_caution_over_skip_count": 0,
+            "medium_neutral_over_dampened_count": 0,
+            "total_stake_reduction_from_dampeners": 0.0,
+        }
+
+    eligible_col = "kelly_eligible" if "kelly_eligible" in kelly_df.columns else "eligible"
+    eligible_mask = (
+        kelly_df[eligible_col].map(_is_truthy)
+        if eligible_col in kelly_df.columns
+        else pd.Series(False, index=kelly_df.index)
+    )
+    stake = pd.to_numeric(kelly_df.get("stake_amount", pd.Series(0, index=kelly_df.index)), errors="coerce").fillna(0.0)
+    expected_value = pd.to_numeric(kelly_df.get("expected_value", pd.Series(0, index=kelly_df.index)), errors="coerce").fillna(0.0)
+    factors = pd.to_numeric(
+        kelly_df.get("stake_dampener_factor", pd.Series(1.0, index=kelly_df.index)),
+        errors="coerce",
+    ).fillna(1.0)
+    dampened_mask = (
+        kelly_df.get("stake_dampener_reason", pd.Series("", index=kelly_df.index))
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .eq("medium_neutral_over_dampener")
+    )
+    stake_reduction = 0.0
+    for amount, factor, dampened in zip(stake, factors, dampened_mask):
+        if dampened and factor > 0:
+            stake_reduction += (float(amount) / float(factor)) - float(amount)
+
+    skip_reason = kelly_df.get("skip_reason", pd.Series("", index=kelly_df.index)).fillna("").astype(str).str.strip()
+    return {
+        "total_rows": int(len(kelly_df)),
+        "kelly_eligible_count": int(eligible_mask.sum()),
+        "skipped_count": int((~eligible_mask).sum()),
+        "total_stake": round(float(stake.sum()), 2),
+        "total_expected_value": round(float(expected_value.sum()), 2),
+        "context_high_caution_over_skip_count": int(skip_reason.eq("context_high_caution_over").sum()),
+        "medium_neutral_over_dampened_count": int(dampened_mask.sum()),
+        "total_stake_reduction_from_dampeners": round(float(stake_reduction), 2),
+    }
+
+
+def _exposure_summary(kelly_df: pd.DataFrame, elite_df: pd.DataFrame) -> dict[str, Any]:
+    if kelly_df.empty:
+        return {
+            "by_player": {},
+            "by_team": {},
+            "by_game": {},
+            "max_player_exposure": 0.0,
+            "max_team_exposure": 0.0,
+            "max_game_exposure": 0.0,
+            "warnings": ["Kelly stakes artifact is missing or empty."],
+        }
+
+    working = kelly_df.copy()
+    if "stake_amount" not in working.columns:
+        working["stake_amount"] = 0.0
+    working["stake_amount"] = pd.to_numeric(working["stake_amount"], errors="coerce").fillna(0.0)
+
+    if not elite_df.empty and "player_name" in elite_df.columns:
+        lookup_columns = ["player_name"]
+        for column in ("team", "team_abbr", "game_id"):
+            if column in elite_df.columns and column not in working.columns:
+                lookup_columns.append(column)
+        if len(lookup_columns) > 1:
+            working = working.merge(
+                elite_df[lookup_columns].drop_duplicates(subset=["player_name"]),
+                on="player_name",
+                how="left",
+            )
+
+    def grouped(column: str) -> dict[str, float]:
+        if column not in working.columns:
+            return {}
+        labels = working[column].fillna("unknown").astype(str).str.strip().replace("", "unknown")
+        values = working.assign(_label=labels).groupby("_label")["stake_amount"].sum()
+        return {str(key): round(float(value), 2) for key, value in values.sort_index().items()}
+
+    by_player = grouped("player_name")
+    team_column = "team" if "team" in working.columns else "team_abbr"
+    by_team = grouped(team_column) if team_column in working.columns else {}
+    game_column = "game_id" if "game_id" in working.columns else "game_key"
+    by_game = grouped(game_column) if game_column in working.columns else {}
+    warnings: list[str] = []
+    if not by_team:
+        warnings.append("Team exposure unavailable because no team column was found.")
+    if not by_game:
+        warnings.append("Game exposure unavailable because no game key column was found.")
+    return {
+        "by_player": by_player,
+        "by_team": by_team,
+        "by_game": by_game,
+        "max_player_exposure": round(max(by_player.values()) if by_player else 0.0, 2),
+        "max_team_exposure": round(max(by_team.values()) if by_team else 0.0, 2),
+        "max_game_exposure": round(max(by_game.values()) if by_game else 0.0, 2),
+        "warnings": warnings,
+    }
+
+
+def _board_movement_summary(
+    *,
+    previous_payload: dict[str, Any],
+    current_elite_count: int,
+    current_kelly_count: int,
+) -> dict[str, Any]:
+    previous_funnel = previous_payload.get("candidate_funnel", {}) if isinstance(previous_payload, dict) else {}
+    previous_elite = previous_funnel.get("elite_board_count")
+    previous_kelly = previous_funnel.get("kelly_rows_count")
+    if previous_elite is None and previous_kelly is None:
+        return {
+            "comparison_available": False,
+            "note": "No previous same-date quality summary was available.",
+        }
+    previous_elite_int = _safe_int(previous_elite)
+    previous_kelly_int = _safe_int(previous_kelly)
+    return {
+        "comparison_available": True,
+        "previous_elite_row_count": previous_elite_int,
+        "current_elite_row_count": current_elite_count,
+        "elite_row_count_diff": None if previous_elite_int is None else current_elite_count - previous_elite_int,
+        "previous_kelly_row_count": previous_kelly_int,
+        "current_kelly_row_count": current_kelly_count,
+        "kelly_row_count_diff": None if previous_kelly_int is None else current_kelly_count - previous_kelly_int,
+    }
+
+
+def _artifact_counts(full_market_df: pd.DataFrame, elite_df: pd.DataFrame) -> dict[str, Any]:
+    frame = full_market_df if not full_market_df.empty else elite_df
+    if frame.empty:
+        return {
+            "live_odds_count": 0,
+            "synthetic_or_fallback_odds_count": 0,
+            "provider_breakdown": {},
+        }
+    live_mask = pd.Series(False, index=frame.index)
+    if "is_live_market" in frame.columns:
+        live_mask = live_mask | frame["is_live_market"].map(_is_truthy)
+    for column in ("line_source", "source_lane"):
+        if column in frame.columns:
+            text = frame[column].fillna("").astype(str).str.lower()
+            live_mask = live_mask | text.str.contains("live", regex=False)
+    fallback_mask = pd.Series(False, index=frame.index)
+    if "synthetic_line" in frame.columns:
+        fallback_mask = fallback_mask | frame["synthetic_line"].map(_is_truthy)
+    for column in ("line_source", "source_lane"):
+        if column in frame.columns:
+            text = frame[column].fillna("").astype(str).str.lower()
+            fallback_mask = fallback_mask | text.str.contains("synthetic|fallback", regex=True)
+    breakdown: dict[str, dict[str, int]] = {}
+    for column in ("bookmaker", "vendor", "line_source", "source_lane"):
+        counts = _value_counts(frame, column)
+        if counts:
+            breakdown[column] = counts
+    return {
+        "live_odds_count": int(live_mask.sum()),
+        "synthetic_or_fallback_odds_count": int(fallback_mask.sum()),
+        "provider_breakdown": breakdown,
+    }
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except Exception:
+            pass
+    return str(value)
+
+
+def build_quality_summary(
+    *,
+    prediction_date: str,
+    runtime_root: str | Path = "outputs/runtime",
+    out_dir: str | Path | None = None,
+    generated_at: str | None = None,
+    extra_prediction_artifact_paths: Sequence[str | Path] | None = None,
+) -> tuple[str, dict[str, Any]]:
+    runtime_root = Path(runtime_root)
+    out_dir_path = Path(out_dir) if out_dir is not None else runtime_root.parent
+    operator_dir = runtime_root / "operator"
+    diagnostics_dir = runtime_root / "diagnostics"
+    research_dir = runtime_root / "research"
+    warnings: list[str] = []
+
+    quality_json_path = operator_dir / f"quality_summary_{prediction_date}.json"
+    previous_payload = _read_json(quality_json_path, [], optional=True) if quality_json_path.exists() else {}
+
+    elite_df = _read_csv(operator_dir / f"elite_board_{prediction_date}.csv", warnings, optional=False)
+    full_market_df = _read_csv(operator_dir / f"full_market_board_{prediction_date}.csv", warnings)
+    sgp_df = _read_csv(operator_dir / f"sgp_board_{prediction_date}.csv", warnings)
+    kelly_df = _read_csv(operator_dir / f"kelly_stakes_{prediction_date}.csv", warnings)
+    player_predictions_df = _read_csv(research_dir / f"player_predictions_{prediction_date}.csv", warnings)
+    model_metrics = _read_json(research_dir / f"model_metrics_{prediction_date}.json", warnings)
+    board_diagnostics = _read_json(diagnostics_dir / f"board_diagnostics_{prediction_date}.json", warnings)
+    audit_summary = _read_json(operator_dir / f"elite_pipeline_audit_summary_{prediction_date}.json", warnings)
+    market_availability = _read_json(diagnostics_dir / f"market_availability_audit_{prediction_date}.json", warnings)
+
+    prediction_summary = model_metrics.get("prediction_summary", {}) if isinstance(model_metrics, dict) else {}
+    counts = _artifact_counts(full_market_df, elite_df)
+    run_data_mode = _infer_run_data_mode(prediction_summary, [elite_df, full_market_df])
+
+    games_count = _safe_int(prediction_summary.get("games_count"))
+    raw_odds_rows = _safe_int(prediction_summary.get("odds_count"))
+    normalized_odds_rows = None
+    market_counts = market_availability.get("counts", []) if isinstance(market_availability, dict) else []
+    if isinstance(market_counts, list) and market_counts:
+        raw_sum = 0
+        normalized_sum = 0
+        for row in market_counts:
+            if not isinstance(row, dict):
+                continue
+            raw_sum += int(row.get("count_before_normalization") or 0)
+            normalized_sum += int(row.get("count_after_normalization") or 0)
+        raw_odds_rows = raw_odds_rows if raw_odds_rows is not None else raw_sum
+        normalized_odds_rows = normalized_sum
+    if normalized_odds_rows is None:
+        normalized_odds_rows = raw_odds_rows
+
+    board_counts = board_diagnostics.get("board_counts", {}) if isinstance(board_diagnostics, dict) else {}
+    raw_candidates = _safe_int(prediction_summary.get("candidate_count")) or _count_rows(full_market_df)
+    full_market_count = _safe_int(prediction_summary.get("full_market_count"))
+    if full_market_count is None:
+        full_market_count = _safe_int(board_counts.get("full_market")) or _count_rows(full_market_df)
+    elite_count = _safe_int(prediction_summary.get("elite_count"))
+    if elite_count is None:
+        elite_count = _safe_int(board_counts.get("elite")) or _count_rows(elite_df)
+    kelly_count = _count_rows(kelly_df)
+    fallback_rejected = max(raw_candidates - elite_count, 0)
+    rejection_reasons, rejected_count = _rejection_reasons(
+        audit_summary=audit_summary,
+        market_availability=market_availability,
+        fallback_rejected_count=fallback_rejected,
+    )
+
+    artifact_paths = _prediction_artifact_paths(runtime_root, prediction_date)
+    if extra_prediction_artifact_paths:
+        artifact_paths.extend(Path(path) for path in extra_prediction_artifact_paths)
+    date_isolation = _date_isolation_summary(
+        prediction_date=prediction_date,
+        artifact_paths=artifact_paths,
+    )
+    for mismatch in date_isolation["mismatched_artifacts"]:
+        warnings.append(
+            "Prediction artifact date mismatch: "
+            f"requested={prediction_date} artifact={mismatch['artifact_date']} path={mismatch['path']}"
+        )
+
+    slate_provider_counts = {
+        "games_count": games_count,
+        "players_or_baselines_count": _count_rows(player_predictions_df) or None,
+        "raw_odds_rows_count": raw_odds_rows,
+        "normalized_odds_rows_count": normalized_odds_rows,
+        "live_odds_count": counts["live_odds_count"],
+        "synthetic_or_fallback_odds_count": counts["synthetic_or_fallback_odds_count"],
+        "provider_breakdown": counts["provider_breakdown"],
+    }
+    candidate_funnel = {
+        "raw_candidates_count": raw_candidates,
+        "rejected_candidates_count": rejected_count,
+        "full_market_board_count": full_market_count,
+        "elite_board_count": elite_count,
+        "sgp_board_count": _count_rows(sgp_df),
+        "kelly_rows_count": kelly_count,
+    }
+    kelly_safety = _kelly_safety_summary(kelly_df)
+    risk_exposure = _exposure_summary(kelly_df, elite_df)
+    board_movement = _board_movement_summary(
+        previous_payload=previous_payload,
+        current_elite_count=elite_count,
+        current_kelly_count=kelly_count,
+    )
+
+    run_identity = {
+        "prediction_date": prediction_date,
+        "generated_at": generated_at or datetime.now(timezone.utc).isoformat(),
+        "output_directory": str(out_dir_path),
+        "commit_hash": _git_commit_hash(),
+        "run_data_mode": run_data_mode,
+    }
+    payload = {
+        "run_identity": run_identity,
+        "slate_provider_counts": slate_provider_counts,
+        "candidate_funnel": candidate_funnel,
+        "top_rejection_reasons": rejection_reasons,
+        "kelly_safety_summary": kelly_safety,
+        "risk_exposure_summary": risk_exposure,
+        "board_movement_summary": board_movement,
+        "date_isolation_check": date_isolation,
+        "warnings": warnings + risk_exposure.get("warnings", []),
+    }
+    payload = _json_safe(payload)
+    return _format_quality_summary_text(payload), payload
+
+
+def _fmt_value(value: Any) -> str:
+    if value is None:
+        return "unavailable"
+    if isinstance(value, float):
+        return f"{value:.2f}"
+    return str(value)
+
+
+def _format_mapping(mapping: dict[str, Any], *, indent: str = "- ") -> list[str]:
+    if not mapping:
+        return [f"{indent}none"]
+    return [f"{indent}{key}: {value}" for key, value in sorted(mapping.items())]
+
+
+def _format_quality_summary_text(payload: dict[str, Any]) -> str:
+    run = payload["run_identity"]
+    slate = payload["slate_provider_counts"]
+    funnel = payload["candidate_funnel"]
+    kelly = payload["kelly_safety_summary"]
+    exposure = payload["risk_exposure_summary"]
+    movement = payload["board_movement_summary"]
+    isolation = payload["date_isolation_check"]
+    warnings = payload.get("warnings", [])
+
+    lines = [
+        f"Quality Summary - {run['prediction_date']}",
+        "=" * 72,
+        "",
+        "Run Identity",
+        "-" * 72,
+        f"- prediction_date: {run['prediction_date']}",
+        f"- generated_at: {run['generated_at']}",
+        f"- output_directory: {run['output_directory']}",
+        f"- commit_hash: {run['commit_hash']}",
+        f"- run_data_mode: {run['run_data_mode']}",
+        "",
+        "Slate / Provider Counts",
+        "-" * 72,
+        f"- games_count: {_fmt_value(slate.get('games_count'))}",
+        f"- players_or_baselines_count: {_fmt_value(slate.get('players_or_baselines_count'))}",
+        f"- raw_odds_rows_count: {_fmt_value(slate.get('raw_odds_rows_count'))}",
+        f"- normalized_odds_rows_count: {_fmt_value(slate.get('normalized_odds_rows_count'))}",
+        f"- live_odds_count: {_fmt_value(slate.get('live_odds_count'))}",
+        f"- synthetic_or_fallback_odds_count: {_fmt_value(slate.get('synthetic_or_fallback_odds_count'))}",
+        "- provider_breakdown:",
+    ]
+    provider_breakdown = slate.get("provider_breakdown", {})
+    if provider_breakdown:
+        for column, counts in provider_breakdown.items():
+            lines.append(f"  - {column}:")
+            for key, count in sorted(counts.items()):
+                lines.append(f"    - {key}: {count}")
+    else:
+        lines.append("  - none")
+
+    lines.extend(
+        [
+            "",
+            "Candidate Funnel",
+            "-" * 72,
+            f"- raw_candidates_count: {funnel['raw_candidates_count']}",
+            f"- rejected_candidates_count: {funnel['rejected_candidates_count']}",
+            f"- full_market_board_count: {funnel['full_market_board_count']}",
+            f"- elite_board_count: {funnel['elite_board_count']}",
+            f"- sgp_board_count: {funnel['sgp_board_count']}",
+            f"- kelly_rows_count: {funnel['kelly_rows_count']}",
+            "",
+            "Top Rejection Reasons",
+            "-" * 72,
+        ]
+    )
+    if payload["top_rejection_reasons"]:
+        for row in payload["top_rejection_reasons"]:
+            lines.append(f"- {row['reason']}: {row['count']} ({row['percentage']:.2f}%)")
+    else:
+        lines.append("- none available")
+
+    lines.extend(
+        [
+            "",
+            "Kelly Safety Summary",
+            "-" * 72,
+            f"- total Kelly rows: {kelly['total_rows']}",
+            f"- kelly_eligible count: {kelly['kelly_eligible_count']}",
+            f"- skipped count: {kelly['skipped_count']}",
+            f"- total stake: ${kelly['total_stake']:.2f}",
+            f"- total expected value: ${kelly['total_expected_value']:.2f}",
+            f"- context_high_caution_over skip count: {kelly['context_high_caution_over_skip_count']}",
+            f"- medium_neutral_over_dampener count: {kelly['medium_neutral_over_dampened_count']}",
+            f"- total stake reduction from dampeners: ${kelly['total_stake_reduction_from_dampeners']:.2f}",
+            "",
+            "Risk / Exposure Summary",
+            "-" * 72,
+            f"- max player exposure: ${exposure['max_player_exposure']:.2f}",
+            f"- max team exposure: ${exposure['max_team_exposure']:.2f}",
+            f"- max game exposure: ${exposure['max_game_exposure']:.2f}",
+            "- exposure by player:",
+        ]
+    )
+    lines.extend(f"  {line}" for line in _format_mapping(exposure.get("by_player", {})))
+    lines.append("- exposure by team:")
+    lines.extend(f"  {line}" for line in _format_mapping(exposure.get("by_team", {})))
+    lines.append("- exposure by game:")
+    lines.extend(f"  {line}" for line in _format_mapping(exposure.get("by_game", {})))
+    if exposure.get("warnings"):
+        lines.append("- exposure warnings:")
+        for warning in exposure["warnings"]:
+            lines.append(f"  - {warning}")
+
+    lines.extend(["", "Board Movement Summary", "-" * 72])
+    if movement.get("comparison_available"):
+        lines.append(f"- previous elite row count: {_fmt_value(movement.get('previous_elite_row_count'))}")
+        lines.append(f"- current elite row count: {movement.get('current_elite_row_count')}")
+        lines.append(f"- elite row count difference: {_fmt_value(movement.get('elite_row_count_diff'))}")
+        lines.append(f"- previous Kelly row count: {_fmt_value(movement.get('previous_kelly_row_count'))}")
+        lines.append(f"- current Kelly row count: {movement.get('current_kelly_row_count')}")
+        lines.append(f"- Kelly row count difference: {_fmt_value(movement.get('kelly_row_count_diff'))}")
+    else:
+        lines.append(f"- {movement.get('note', 'Comparison unavailable.')}")
+
+    lines.extend(
+        [
+            "",
+            "Date Isolation Check",
+            "-" * 72,
+            f"- requested prediction date: {isolation['requested_prediction_date']}",
+            f"- status: {isolation['status']}",
+            "- prediction artifacts written for this date:",
+        ]
+    )
+    for path in isolation.get("prediction_artifacts", []):
+        lines.append(f"  - {path}")
+    if not isolation.get("prediction_artifacts"):
+        lines.append("  - none found")
+    if isolation.get("mismatched_artifacts"):
+        lines.append("- mismatched artifacts:")
+        for row in isolation["mismatched_artifacts"]:
+            lines.append(f"  - artifact_date={row['artifact_date']} path={row['path']}")
+
+    lines.extend(["", "Warnings", "-" * 72])
+    if warnings:
+        for warning in warnings:
+            lines.append(f"- {warning}")
+    else:
+        lines.append("- none")
+
+    return "\n".join(lines) + "\n"
+
+
+def write_quality_summary_outputs(
+    *,
+    prediction_date: str,
+    runtime_root: str | Path = "outputs/runtime",
+    out_dir: str | Path | None = None,
+    generated_at: str | None = None,
+    extra_prediction_artifact_paths: Sequence[str | Path] | None = None,
+) -> tuple[Path, Path, dict[str, Any]]:
+    runtime_root = Path(runtime_root)
+    text, payload = build_quality_summary(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        out_dir=out_dir,
+        generated_at=generated_at,
+        extra_prediction_artifact_paths=extra_prediction_artifact_paths,
+    )
+    operator_dir = runtime_root / "operator"
+    operator_dir.mkdir(parents=True, exist_ok=True)
+    text_path = operator_dir / f"quality_summary_{prediction_date}.txt"
+    json_path = operator_dir / f"quality_summary_{prediction_date}.json"
+    text_path.write_text(text, encoding="utf-8")
+    json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return text_path, json_path, payload
+
+
+__all__ = [
+    "build_quality_summary",
+    "write_quality_summary_outputs",
+]
