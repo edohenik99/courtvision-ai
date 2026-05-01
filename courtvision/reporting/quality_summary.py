@@ -52,6 +52,15 @@ QUALITY_HISTORY_COLUMNS: tuple[str, ...] = (
     "data_mode",
     "games_count",
     "players_count",
+    "player_predictions_rows",
+    "baseline_rows",
+    "unique_baseline_players",
+    "active_team_baseline_players",
+    "odds_unique_players",
+    "odds_baseline_matched_players",
+    "full_market_unique_players",
+    "elite_unique_players",
+    "kelly_unique_players",
     "raw_odds_rows",
     "normalized_odds_rows",
     "live_odds_count",
@@ -86,7 +95,9 @@ MARKET_COLUMN_CANDIDATES: tuple[str, ...] = ("market", "market_type", "prop_type
 POINTS_MARKET_NAMES: set[str] = {"points", "player_points"}
 DEFAULT_MIN_LIVE_CANDIDATES = 10
 DEFAULT_MIN_KELLY_ELIGIBLE = 2
-DEFAULT_MIN_PLAYERS_PER_GAME_BASELINE_RATIO = 5
+DEFAULT_MIN_ODDS_PLAYERS_PER_GAME_RATIO = 3
+DEFAULT_MIN_FULL_MARKET_PLAYERS_PER_GAME_RATIO = 3
+DEFAULT_MIN_ACTIVE_TEAM_BASELINE_PLAYERS_PER_GAME_RATIO = 5
 
 
 def _safe_text(value: Any) -> str:
@@ -130,13 +141,11 @@ def _read_csv(
     warnings: list[str],
     *,
     optional: bool = True,
+    missing_warning: str | None = None,
     empty_warning: str | None = None,
 ) -> pd.DataFrame:
     if not path.exists():
-        if optional:
-            warnings.append(f"Missing optional artifact: {path}")
-        else:
-            warnings.append(f"Missing artifact: {path}")
+        warnings.append(missing_warning or (f"Missing optional artifact: {path}" if optional else f"Missing artifact: {path}"))
         return pd.DataFrame()
     if path.stat().st_size == 0:
         warnings.append(empty_warning or f"Empty CSV artifact: {path}")
@@ -184,6 +193,46 @@ def _git_commit_hash() -> str:
 
 def _count_rows(df: pd.DataFrame) -> int:
     return 0 if not isinstance(df, pd.DataFrame) or df.empty else int(len(df))
+
+
+def _nonempty_text_series(series: pd.Series) -> pd.Series:
+    return series.fillna("").astype(str).str.strip().replace("", pd.NA).dropna()
+
+
+def _unique_player_count(df: pd.DataFrame) -> int:
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return 0
+    for column in ("player_id", "player_name", "entity_name"):
+        if column in df.columns:
+            values = _nonempty_text_series(df[column])
+            if not values.empty:
+                return int(values.nunique())
+    return 0
+
+
+def _player_identity_values(df: pd.DataFrame, baseline_df: pd.DataFrame | None = None) -> tuple[set[str], str]:
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return set(), ""
+    columns = ("player_id", "player_name", "entity_name")
+    if isinstance(baseline_df, pd.DataFrame) and not baseline_df.empty:
+        for column in columns:
+            if column in df.columns and column in baseline_df.columns:
+                return set(_nonempty_text_series(df[column]).astype(str)), column
+    for column in columns:
+        if column in df.columns:
+            return set(_nonempty_text_series(df[column]).astype(str)), column
+    return set(), ""
+
+
+def _active_team_values(*frames: pd.DataFrame) -> set[str]:
+    teams: set[str] = set()
+    for frame in frames:
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            continue
+        for column in ("team_abbr", "team"):
+            if column in frame.columns:
+                teams.update(_nonempty_text_series(frame[column]).astype(str).str.upper().tolist())
+    return teams
 
 
 def _numeric_sum(df: pd.DataFrame, column: str) -> float:
@@ -622,14 +671,67 @@ def _market_coverage_summary(
     return rows
 
 
+def _player_baseline_coverage_summary(
+    *,
+    player_predictions_df: pd.DataFrame,
+    player_baselines_df: pd.DataFrame,
+    full_market_df: pd.DataFrame,
+    elite_df: pd.DataFrame,
+    kelly_df: pd.DataFrame,
+) -> dict[str, Any]:
+    player_predictions_rows = _count_rows(player_predictions_df)
+    baseline_rows = _count_rows(player_baselines_df)
+    unique_baseline_players = _unique_player_count(player_baselines_df)
+    full_market_unique_players = _unique_player_count(full_market_df)
+    elite_unique_players = _unique_player_count(elite_df)
+    kelly_unique_players = _unique_player_count(kelly_df)
+
+    active_teams = _active_team_values(full_market_df, elite_df)
+    active_team_baseline_players = None
+    if active_teams and not player_baselines_df.empty:
+        team_column = "team_abbr" if "team_abbr" in player_baselines_df.columns else "team"
+        if team_column in player_baselines_df.columns:
+            team_series = player_baselines_df[team_column].fillna("").astype(str).str.strip().str.upper()
+            active_team_baseline_players = _unique_player_count(player_baselines_df[team_series.isin(active_teams)])
+
+    odds_values, identity_column = _player_identity_values(full_market_df, player_baselines_df)
+    baseline_values: set[str] = set()
+    if identity_column and identity_column in player_baselines_df.columns:
+        baseline_values = set(_nonempty_text_series(player_baselines_df[identity_column]).astype(str))
+    odds_baseline_matched_players = len(odds_values & baseline_values) if baseline_values else 0
+
+    return {
+        "player_predictions_rows": player_predictions_rows,
+        "baseline_rows": baseline_rows,
+        "unique_baseline_players": unique_baseline_players,
+        "active_team_baseline_players": active_team_baseline_players,
+        "active_team_source": "full_market_board" if active_teams else "unavailable",
+        "active_teams": sorted(active_teams),
+        "odds_unique_players": len(odds_values),
+        "odds_unique_players_source": "full_market_board",
+        "odds_baseline_matched_players": int(odds_baseline_matched_players),
+        "odds_baseline_match_key": identity_column or "unavailable",
+        "full_market_unique_players": full_market_unique_players,
+        "elite_unique_players": elite_unique_players,
+        "kelly_unique_players": kelly_unique_players,
+        "players_or_baselines_count": player_predictions_rows,
+        "players_or_baselines_count_legacy_definition": (
+            "Legacy alias for player_predictions_rows; not the model baseline universe."
+        ),
+    }
+
+
 def _coverage_warnings(
     *,
     slate_provider_counts: dict[str, Any],
+    player_baseline_coverage: dict[str, Any],
     kelly_safety: dict[str, Any],
     market_rows: Sequence[dict[str, Any]],
     min_live_candidates: int = DEFAULT_MIN_LIVE_CANDIDATES,
     min_kelly_eligible: int = DEFAULT_MIN_KELLY_ELIGIBLE,
-    min_players_per_game_baseline_ratio: int = DEFAULT_MIN_PLAYERS_PER_GAME_BASELINE_RATIO,
+    min_odds_players_per_game_ratio: int = DEFAULT_MIN_ODDS_PLAYERS_PER_GAME_RATIO,
+    min_full_market_players_per_game_ratio: int = DEFAULT_MIN_FULL_MARKET_PLAYERS_PER_GAME_RATIO,
+    min_active_team_baseline_players_per_game_ratio: int = DEFAULT_MIN_ACTIVE_TEAM_BASELINE_PLAYERS_PER_GAME_RATIO,
 ) -> list[str]:
     warnings: list[str] = []
     live_candidates = _history_int(slate_provider_counts.get("live_odds_count"))
@@ -645,13 +747,33 @@ def _coverage_warnings(
         )
 
     games_count = _history_int(slate_provider_counts.get("games_count"))
-    players_count = _history_int(slate_provider_counts.get("players_or_baselines_count"))
-    if games_count > 0 and players_count / games_count < min_players_per_game_baseline_ratio:
-        ratio = round(players_count / games_count, 2)
+    active_team_baseline_players = _safe_int(player_baseline_coverage.get("active_team_baseline_players"))
+    if active_team_baseline_players is not None and games_count > 0:
+        ratio = round(active_team_baseline_players / games_count, 2)
+        if ratio < min_active_team_baseline_players_per_game_ratio:
+            warnings.append(
+                "Low active-team baseline coverage: "
+                f"active_team_baseline_players={active_team_baseline_players}, "
+                f"games_count={games_count}, ratio={ratio}, "
+                f"floor={min_active_team_baseline_players_per_game_ratio}."
+            )
+
+    odds_unique_players = _history_int(player_baseline_coverage.get("odds_unique_players"))
+    if games_count > 0 and odds_unique_players / games_count < min_odds_players_per_game_ratio:
+        ratio = round(odds_unique_players / games_count, 2)
         warnings.append(
-            "Low player/baseline coverage: "
-            f"players_or_baselines_count={players_count}, games_count={games_count}, "
-            f"ratio={ratio}, floor={min_players_per_game_baseline_ratio}."
+            "Low provider player coverage: "
+            f"odds_unique_players={odds_unique_players}, games_count={games_count}, "
+            f"ratio={ratio}, floor={min_odds_players_per_game_ratio}."
+        )
+
+    full_market_unique_players = _history_int(player_baseline_coverage.get("full_market_unique_players"))
+    if games_count > 0 and full_market_unique_players / games_count < min_full_market_players_per_game_ratio:
+        ratio = round(full_market_unique_players / games_count, 2)
+        warnings.append(
+            "Low full-market player coverage: "
+            f"full_market_unique_players={full_market_unique_players}, games_count={games_count}, "
+            f"ratio={ratio}, floor={min_full_market_players_per_game_ratio}."
         )
 
     for row in market_rows:
@@ -751,6 +873,11 @@ def _quality_history_row(payload: dict[str, Any], *, fallback_prediction_date: s
     kelly = payload.get("kelly_safety_summary", {}) if isinstance(payload.get("kelly_safety_summary"), dict) else {}
     exposure = payload.get("risk_exposure_summary", {}) if isinstance(payload.get("risk_exposure_summary"), dict) else {}
     isolation = payload.get("date_isolation_check", {}) if isinstance(payload.get("date_isolation_check"), dict) else {}
+    player_coverage = (
+        payload.get("player_baseline_coverage", {})
+        if isinstance(payload.get("player_baseline_coverage"), dict)
+        else {}
+    )
     market_coverage = payload.get("market_coverage", {}) if isinstance(payload.get("market_coverage"), dict) else {}
     market_rows = market_coverage.get("rows", []) if isinstance(market_coverage.get("rows"), list) else []
     points_rows = [
@@ -776,7 +903,19 @@ def _quality_history_row(payload: dict[str, Any], *, fallback_prediction_date: s
         "commit_hash": _safe_text(run.get("commit_hash")),
         "data_mode": _safe_text(_first_present(run, ("run_data_mode", "data_mode"))),
         "games_count": _history_int(slate.get("games_count")),
-        "players_count": _history_int(_first_present(slate, ("players_or_baselines_count", "players_count"))),
+        "players_count": _history_int(
+            _first_present(player_coverage, ("player_predictions_rows", "players_or_baselines_count"))
+            or _first_present(slate, ("players_or_baselines_count", "players_count"))
+        ),
+        "player_predictions_rows": _history_int(player_coverage.get("player_predictions_rows")),
+        "baseline_rows": _history_int(player_coverage.get("baseline_rows")),
+        "unique_baseline_players": _history_int(player_coverage.get("unique_baseline_players")),
+        "active_team_baseline_players": _history_int(player_coverage.get("active_team_baseline_players")),
+        "odds_unique_players": _history_int(player_coverage.get("odds_unique_players")),
+        "odds_baseline_matched_players": _history_int(player_coverage.get("odds_baseline_matched_players")),
+        "full_market_unique_players": _history_int(player_coverage.get("full_market_unique_players")),
+        "elite_unique_players": _history_int(player_coverage.get("elite_unique_players")),
+        "kelly_unique_players": _history_int(player_coverage.get("kelly_unique_players")),
         "raw_odds_rows": _history_int(_first_present(slate, ("raw_odds_rows_count", "raw_odds_rows"))),
         "normalized_odds_rows": _history_int(
             _first_present(slate, ("normalized_odds_rows_count", "normalized_odds_rows"))
@@ -891,6 +1030,7 @@ def build_quality_summary(
     operator_dir = runtime_root / "operator"
     diagnostics_dir = runtime_root / "diagnostics"
     research_dir = runtime_root / "research"
+    model_dir = runtime_root.parent / "model"
     warnings: list[str] = []
 
     quality_json_path = operator_dir / f"quality_summary_{prediction_date}.json"
@@ -906,6 +1046,12 @@ def build_quality_summary(
     )
     kelly_df = _read_csv(operator_dir / f"kelly_stakes_{prediction_date}.csv", warnings)
     player_predictions_df = _read_csv(research_dir / f"player_predictions_{prediction_date}.csv", warnings)
+    player_baselines_df = _read_csv(
+        model_dir / "player_baselines.csv",
+        warnings,
+        missing_warning=f"Missing optional baseline artifact: {model_dir / 'player_baselines.csv'}",
+        empty_warning=f"Model player baselines artifact is empty: {model_dir / 'player_baselines.csv'}",
+    )
     model_metrics = _read_json(research_dir / f"model_metrics_{prediction_date}.json", warnings)
     board_diagnostics = _read_json(diagnostics_dir / f"board_diagnostics_{prediction_date}.json", warnings)
     audit_summary = _read_json(operator_dir / f"elite_pipeline_audit_summary_{prediction_date}.json", warnings)
@@ -963,13 +1109,23 @@ def build_quality_summary(
 
     slate_provider_counts = {
         "games_count": games_count,
-        "players_or_baselines_count": _count_rows(player_predictions_df) or None,
         "raw_odds_rows_count": raw_odds_rows,
         "normalized_odds_rows_count": normalized_odds_rows,
         "live_odds_count": counts["live_odds_count"],
         "synthetic_or_fallback_odds_count": counts["synthetic_or_fallback_odds_count"],
         "provider_breakdown": counts["provider_breakdown"],
     }
+    player_baseline_coverage = _player_baseline_coverage_summary(
+        player_predictions_df=player_predictions_df,
+        player_baselines_df=player_baselines_df,
+        full_market_df=full_market_df,
+        elite_df=elite_df,
+        kelly_df=kelly_df,
+    )
+    slate_provider_counts["players_or_baselines_count"] = player_baseline_coverage["players_or_baselines_count"]
+    slate_provider_counts["players_or_baselines_count_legacy_definition"] = player_baseline_coverage[
+        "players_or_baselines_count_legacy_definition"
+    ]
     candidate_funnel = {
         "raw_candidates_count": raw_candidates,
         "rejected_candidates_count": rejected_count,
@@ -993,6 +1149,7 @@ def build_quality_summary(
     )
     coverage_warnings = _coverage_warnings(
         slate_provider_counts=slate_provider_counts,
+        player_baseline_coverage=player_baseline_coverage,
         kelly_safety=kelly_safety,
         market_rows=market_rows,
     )
@@ -1012,13 +1169,16 @@ def build_quality_summary(
     payload = {
         "run_identity": run_identity,
         "slate_provider_counts": slate_provider_counts,
+        "player_baseline_coverage": player_baseline_coverage,
         "candidate_funnel": candidate_funnel,
         "top_rejection_reasons": rejection_reasons,
         "market_coverage": {
             "config": {
                 "min_live_candidates": DEFAULT_MIN_LIVE_CANDIDATES,
                 "min_kelly_eligible": DEFAULT_MIN_KELLY_ELIGIBLE,
-                "min_players_per_game_baseline_ratio": DEFAULT_MIN_PLAYERS_PER_GAME_BASELINE_RATIO,
+                "min_odds_players_per_game_ratio": DEFAULT_MIN_ODDS_PLAYERS_PER_GAME_RATIO,
+                "min_full_market_players_per_game_ratio": DEFAULT_MIN_FULL_MARKET_PLAYERS_PER_GAME_RATIO,
+                "min_active_team_baseline_players_per_game_ratio": DEFAULT_MIN_ACTIVE_TEAM_BASELINE_PLAYERS_PER_GAME_RATIO,
             },
             "rows": market_rows,
             "rejection_reasons_by_market": rejection_reasons_market_rows,
@@ -1051,6 +1211,7 @@ def _format_mapping(mapping: dict[str, Any], *, indent: str = "- ") -> list[str]
 def _format_quality_summary_text(payload: dict[str, Any]) -> str:
     run = payload["run_identity"]
     slate = payload["slate_provider_counts"]
+    player_coverage = payload.get("player_baseline_coverage", {})
     funnel = payload["candidate_funnel"]
     market_coverage = payload.get("market_coverage", {})
     kelly = payload["kelly_safety_summary"]
@@ -1074,7 +1235,6 @@ def _format_quality_summary_text(payload: dict[str, Any]) -> str:
         "Slate / Provider Counts",
         "-" * 72,
         f"- games_count: {_fmt_value(slate.get('games_count'))}",
-        f"- players_or_baselines_count: {_fmt_value(slate.get('players_or_baselines_count'))}",
         f"- raw_odds_rows_count: {_fmt_value(slate.get('raw_odds_rows_count'))}",
         f"- normalized_odds_rows_count: {_fmt_value(slate.get('normalized_odds_rows_count'))}",
         f"- live_odds_count: {_fmt_value(slate.get('live_odds_count'))}",
@@ -1089,6 +1249,25 @@ def _format_quality_summary_text(payload: dict[str, Any]) -> str:
                 lines.append(f"    - {key}: {count}")
     else:
         lines.append("  - none")
+
+    lines.extend(
+        [
+            "",
+            "Player / Baseline Coverage",
+            "-" * 72,
+            f"- player_predictions_rows: {_fmt_value(player_coverage.get('player_predictions_rows'))}",
+            f"- baseline_rows: {_fmt_value(player_coverage.get('baseline_rows'))}",
+            f"- unique_baseline_players: {_fmt_value(player_coverage.get('unique_baseline_players'))}",
+            f"- active_team_baseline_players: {_fmt_value(player_coverage.get('active_team_baseline_players'))}",
+            f"- odds_unique_players: {_fmt_value(player_coverage.get('odds_unique_players'))}",
+            f"- odds_baseline_matched_players: {_fmt_value(player_coverage.get('odds_baseline_matched_players'))}",
+            f"- full_market_unique_players: {_fmt_value(player_coverage.get('full_market_unique_players'))}",
+            f"- elite_unique_players: {_fmt_value(player_coverage.get('elite_unique_players'))}",
+            f"- kelly_unique_players: {_fmt_value(player_coverage.get('kelly_unique_players'))}",
+            f"- players_or_baselines_count_legacy_alias: {_fmt_value(player_coverage.get('players_or_baselines_count'))}",
+            f"- legacy_alias_definition: {_fmt_value(player_coverage.get('players_or_baselines_count_legacy_definition'))}",
+        ]
+    )
 
     lines.extend(
         [

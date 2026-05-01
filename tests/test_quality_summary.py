@@ -52,10 +52,26 @@ def _history_summary_payload(
         "slate_provider_counts": {
             "games_count": 2,
             "players_or_baselines_count": 8,
+            "players_or_baselines_count_legacy_definition": "Legacy alias for player_predictions_rows.",
             "raw_odds_rows_count": 12,
             "normalized_odds_rows_count": 10,
             "live_odds_count": 9,
             "synthetic_or_fallback_odds_count": 1,
+        },
+        "player_baseline_coverage": {
+            "player_predictions_rows": 8,
+            "baseline_rows": 64,
+            "unique_baseline_players": 64,
+            "active_team_baseline_players": 32,
+            "odds_unique_players": 5,
+            "odds_baseline_matched_players": 5,
+            "full_market_unique_players": 5,
+            "elite_unique_players": elite_count,
+            "kelly_unique_players": kelly_rows,
+            "players_or_baselines_count": 8,
+            "players_or_baselines_count_legacy_definition": (
+                "Legacy alias for player_predictions_rows; not the model baseline universe."
+            ),
         },
         "candidate_funnel": {
             "raw_candidates_count": 7,
@@ -119,7 +135,56 @@ def _write_quality_summary_json(runtime_root: Path, prediction_date: str, payloa
     _write_json(runtime_root / "operator" / f"quality_summary_{prediction_date}.json", payload)
 
 
+def _seed_player_baselines(
+    runtime_root: Path,
+    *,
+    teams: tuple[str, ...] = ("BOS", "LAL", "DEN", "MIN"),
+    players_per_team: int = 16,
+) -> None:
+    rows = []
+    player_id = 10_000
+    known_players = [
+        ("Normal Eligible Under", "BOS"),
+        ("High Caution Over", "LAL"),
+        ("Medium Neutral Over", "DEN"),
+        ("Rebounds Over", "DEN"),
+        ("Rebounds Under", "MIN"),
+        ("Assists Under", "DEN"),
+    ]
+    for name, team in known_players:
+        rows.append(
+            {
+                "player_id": player_id,
+                "player_name": name,
+                "team_abbr": team,
+                "games": 20,
+                "min_avg": 28.0,
+                "pts_avg": 12.0,
+                "reb_avg": 4.0,
+                "ast_avg": 3.0,
+            }
+        )
+        player_id += 1
+    for team in teams:
+        for index in range(players_per_team):
+            rows.append(
+                {
+                    "player_id": player_id,
+                    "player_name": f"{team} Baseline {index}",
+                    "team_abbr": team,
+                    "games": 20,
+                    "min_avg": 28.0,
+                    "pts_avg": 12.0,
+                    "reb_avg": 4.0,
+                    "ast_avg": 3.0,
+                }
+            )
+            player_id += 1
+    _write_csv(runtime_root.parent / "model" / "player_baselines.csv", rows)
+
+
 def _seed_quality_artifacts(runtime_root: Path, prediction_date: str) -> None:
+    _seed_player_baselines(runtime_root)
     operator = runtime_root / "operator"
     diagnostics = runtime_root / "diagnostics"
     research = runtime_root / "research"
@@ -288,6 +353,7 @@ def _seed_quality_artifacts(runtime_root: Path, prediction_date: str) -> None:
 
 
 def _seed_market_coverage_artifacts(runtime_root: Path, prediction_date: str) -> None:
+    _seed_player_baselines(runtime_root)
     operator = runtime_root / "operator"
     diagnostics = runtime_root / "diagnostics"
     research = runtime_root / "research"
@@ -530,6 +596,16 @@ def test_quality_summary_generation_from_fixture_artifacts(tmp_path: Path) -> No
     assert "Quality Summary - 2026-04-30" in text_path.read_text(encoding="utf-8")
     assert payload["run_identity"]["run_data_mode"] == "fixture"
     assert payload["slate_provider_counts"]["games_count"] == 2
+    assert payload["slate_provider_counts"]["players_or_baselines_count"] == 3
+    assert payload["player_baseline_coverage"]["player_predictions_rows"] == 3
+    assert payload["player_baseline_coverage"]["baseline_rows"] == 70
+    assert payload["player_baseline_coverage"]["unique_baseline_players"] == 70
+    assert payload["player_baseline_coverage"]["active_team_baseline_players"] == 53
+    assert payload["player_baseline_coverage"]["odds_unique_players"] == 3
+    assert payload["player_baseline_coverage"]["odds_baseline_matched_players"] == 3
+    assert payload["player_baseline_coverage"]["full_market_unique_players"] == 3
+    assert payload["player_baseline_coverage"]["elite_unique_players"] == 3
+    assert payload["player_baseline_coverage"]["kelly_unique_players"] == 3
     assert payload["slate_provider_counts"]["raw_odds_rows_count"] == 6
     assert payload["slate_provider_counts"]["normalized_odds_rows_count"] == 6
     assert payload["candidate_funnel"]["raw_candidates_count"] == 5
@@ -549,6 +625,15 @@ def test_quality_summary_generation_from_fixture_artifacts(tmp_path: Path) -> No
     assert len(history) == 1
     history_row = history.iloc[0]
     assert history_row["prediction_date"] == prediction_date
+    assert int(history_row["player_predictions_rows"]) == 3
+    assert int(history_row["baseline_rows"]) == 70
+    assert int(history_row["unique_baseline_players"]) == 70
+    assert int(history_row["active_team_baseline_players"]) == 53
+    assert int(history_row["odds_unique_players"]) == 3
+    assert int(history_row["odds_baseline_matched_players"]) == 3
+    assert int(history_row["full_market_unique_players"]) == 3
+    assert int(history_row["elite_unique_players"]) == 3
+    assert int(history_row["kelly_unique_players"]) == 3
     assert int(history_row["elite_board_count"]) == 3
     assert int(history_row["medium_neutral_over_dampened_count"]) == 1
     assert (runtime_root / "operator" / QUALITY_HISTORY_JSONL_NAME).exists()
@@ -661,6 +746,8 @@ def test_quality_summary_low_live_candidate_warning(tmp_path: Path) -> None:
 
     warnings = payload["market_coverage"]["coverage_warnings"]
     assert any("Low live candidate coverage" in warning for warning in warnings)
+    assert any("Low provider player coverage" in warning for warning in warnings)
+    assert any("Low full-market player coverage" in warning for warning in warnings)
 
 
 def test_quality_summary_low_kelly_eligible_warning(tmp_path: Path) -> None:
@@ -693,7 +780,7 @@ def test_quality_summary_low_kelly_eligible_warning(tmp_path: Path) -> None:
     assert any("Low Kelly eligible coverage" in warning for warning in warnings)
 
 
-def test_quality_summary_low_baseline_per_game_warning(tmp_path: Path) -> None:
+def test_quality_summary_separates_player_prediction_rows_from_healthy_baselines(tmp_path: Path) -> None:
     prediction_date = "2026-04-30"
     runtime_root = tmp_path / "runtime"
     _seed_market_coverage_artifacts(runtime_root, prediction_date)
@@ -709,8 +796,14 @@ def test_quality_summary_low_baseline_per_game_warning(tmp_path: Path) -> None:
         generated_at="2026-05-01T00:00:00+00:00",
     )
 
+    coverage = payload["player_baseline_coverage"]
+    assert coverage["player_predictions_rows"] == 1
+    assert coverage["baseline_rows"] == 70
+    assert coverage["unique_baseline_players"] == 70
+    assert coverage["active_team_baseline_players"] == 70
     warnings = payload["market_coverage"]["coverage_warnings"]
-    assert any("Low player/baseline coverage" in warning for warning in warnings)
+    assert not any("Low active-team baseline coverage" in warning for warning in warnings)
+    assert not any("Low player/baseline coverage" in warning for warning in warnings)
 
 
 def test_quality_summary_empty_sgp_warning_is_clean(tmp_path: Path) -> None:
@@ -730,6 +823,29 @@ def test_quality_summary_empty_sgp_warning_is_clean(tmp_path: Path) -> None:
     assert all("No columns to parse from file" not in warning for warning in payload["warnings"])
 
 
+def test_quality_summary_missing_baseline_file_warns_without_crashing(tmp_path: Path) -> None:
+    prediction_date = "2026-04-30"
+    runtime_root = tmp_path / "runtime"
+    _seed_market_coverage_artifacts(runtime_root, prediction_date)
+    baseline_path = runtime_root.parent / "model" / "player_baselines.csv"
+    baseline_path.unlink()
+
+    text, payload = build_quality_summary(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        out_dir=tmp_path,
+        generated_at="2026-05-01T00:00:00+00:00",
+    )
+
+    coverage = payload["player_baseline_coverage"]
+    assert coverage["baseline_rows"] == 0
+    assert coverage["unique_baseline_players"] == 0
+    assert coverage["active_team_baseline_players"] is None
+    assert coverage["odds_baseline_matched_players"] == 0
+    assert "Missing optional baseline artifact" in text
+    assert any("Missing optional baseline artifact" in warning for warning in payload["warnings"])
+
+
 def test_quality_history_includes_compact_market_coverage_fields(tmp_path: Path) -> None:
     prediction_date = "2026-04-30"
     runtime_root = tmp_path / "runtime"
@@ -744,6 +860,15 @@ def test_quality_history_includes_compact_market_coverage_fields(tmp_path: Path)
 
     history = _read_history_csv(runtime_root)
     row = history.iloc[0]
+    assert int(row["player_predictions_rows"]) == 18
+    assert int(row["baseline_rows"]) == 70
+    assert int(row["unique_baseline_players"]) == 70
+    assert int(row["active_team_baseline_players"]) == 70
+    assert int(row["odds_unique_players"]) == 6
+    assert int(row["odds_baseline_matched_players"]) == 6
+    assert int(row["full_market_unique_players"]) == 6
+    assert int(row["elite_unique_players"]) == 3
+    assert int(row["kelly_unique_players"]) == 3
     assert int(row["markets_seen"]) == 4
     assert int(row["points_normalized_odds_rows"]) == 4
     assert int(row["points_full_market_board_count"]) == 3
@@ -775,6 +900,15 @@ def test_quality_history_creates_csv_from_one_summary_json(tmp_path: Path) -> No
     assert list(history.columns) == list(QUALITY_HISTORY_COLUMNS)
     assert len(history) == 1
     assert int(history.iloc[0]["kelly_eligible_count"]) == 2
+    assert int(history.iloc[0]["player_predictions_rows"]) == 8
+    assert int(history.iloc[0]["baseline_rows"]) == 64
+    assert int(history.iloc[0]["unique_baseline_players"]) == 64
+    assert int(history.iloc[0]["active_team_baseline_players"]) == 32
+    assert int(history.iloc[0]["odds_unique_players"]) == 5
+    assert int(history.iloc[0]["odds_baseline_matched_players"]) == 5
+    assert int(history.iloc[0]["full_market_unique_players"]) == 5
+    assert int(history.iloc[0]["elite_unique_players"]) == 3
+    assert int(history.iloc[0]["kelly_unique_players"]) == 3
     assert int(history.iloc[0]["markets_seen"]) == 2
     assert int(history.iloc[0]["points_normalized_odds_rows"]) == 4
     assert int(history.iloc[0]["points_elite_board_count"]) == 3
@@ -855,6 +989,15 @@ def test_quality_history_missing_optional_fields_default_to_blanks_and_zeroes(tm
     assert row["date_isolation_status"] == ""
     assert int(row["games_count"]) == 0
     assert int(row["players_count"]) == 0
+    assert int(row["player_predictions_rows"]) == 0
+    assert int(row["baseline_rows"]) == 0
+    assert int(row["unique_baseline_players"]) == 0
+    assert int(row["active_team_baseline_players"]) == 0
+    assert int(row["odds_unique_players"]) == 0
+    assert int(row["odds_baseline_matched_players"]) == 0
+    assert int(row["full_market_unique_players"]) == 0
+    assert int(row["elite_unique_players"]) == 0
+    assert int(row["kelly_unique_players"]) == 0
     assert int(row["kelly_rows_count"]) == 0
     assert int(row["markets_seen"]) == 0
     assert int(row["points_normalized_odds_rows"]) == 0

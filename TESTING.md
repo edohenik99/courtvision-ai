@@ -18,7 +18,7 @@ py -3.13 -m pytest tests --basetemp=.pytest_tmp_full -q
 Current known baseline:
 
 ```text
-658 passed, 31 xfailed
+659 passed, 31 xfailed
 ```
 
 The full suite should pass with xfails only. Do not accept failures, errors, warnings, or XPASS results.
