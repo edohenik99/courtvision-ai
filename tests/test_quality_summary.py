@@ -79,6 +79,37 @@ def _history_summary_payload(
             "max_team_exposure": 12.0,
             "max_game_exposure": 10.0,
         },
+        "market_coverage": {
+            "rows": [
+                {
+                    "market": "player_points",
+                    "normalized_odds_rows": 4,
+                    "raw_candidates_count": 3,
+                    "full_market_board_count": 3,
+                    "elite_board_count": elite_count,
+                    "rejected_count": 0,
+                    "kelly_rows_count": kelly_rows,
+                    "kelly_eligible_count": 2,
+                    "skipped_count": 1,
+                    "high_caution_over_skip_count": 1,
+                    "medium_neutral_over_dampened_count": 1,
+                },
+                {
+                    "market": "player_rebounds",
+                    "normalized_odds_rows": 3,
+                    "raw_candidates_count": 1,
+                    "full_market_board_count": 1,
+                    "elite_board_count": 0,
+                    "rejected_count": 1,
+                    "kelly_rows_count": 0,
+                    "kelly_eligible_count": 0,
+                    "skipped_count": 0,
+                    "high_caution_over_skip_count": 0,
+                    "medium_neutral_over_dampened_count": 0,
+                },
+            ],
+            "coverage_warnings": ["Low live candidate coverage: fixture."],
+        },
         "date_isolation_check": {"status": "ok"},
         "warnings": warnings or [],
     }
@@ -256,6 +287,228 @@ def _seed_quality_artifacts(runtime_root: Path, prediction_date: str) -> None:
     )
 
 
+def _seed_market_coverage_artifacts(runtime_root: Path, prediction_date: str) -> None:
+    operator = runtime_root / "operator"
+    diagnostics = runtime_root / "diagnostics"
+    research = runtime_root / "research"
+
+    full_rows = [
+        {
+            "prediction_date": prediction_date,
+            "player_name": "Normal Eligible Under",
+            "team": "BOS",
+            "game_id": "game-1",
+            "market_type": "player_points",
+            "selection": "under",
+            "line": 21.5,
+            "odds": -110,
+            "confidence": 0.80,
+            "side_edge_pct": 0.12,
+            "context_caution_level": "low",
+            "context_pick_alignment": "aligned",
+            "is_live_market": True,
+            "line_source": "fixture_live_market",
+        },
+        {
+            "prediction_date": prediction_date,
+            "player_name": "High Caution Over",
+            "team": "LAL",
+            "game_id": "game-2",
+            "market_type": "player_points",
+            "selection": "over",
+            "line": 17.5,
+            "odds": -110,
+            "confidence": 0.85,
+            "side_edge_pct": 0.20,
+            "context_caution_level": "high",
+            "context_pick_alignment": "conflicted",
+            "is_live_market": True,
+            "line_source": "fixture_live_market",
+        },
+        {
+            "prediction_date": prediction_date,
+            "player_name": "Medium Neutral Over",
+            "team": "DEN",
+            "game_id": "game-3",
+            "market_type": "player_points",
+            "selection": "over",
+            "line": 8.5,
+            "odds": -110,
+            "confidence": 1.00,
+            "side_edge_pct": 0.50,
+            "context_caution_level": "medium",
+            "context_pick_alignment": "neutral",
+            "is_live_market": True,
+            "line_source": "fixture_live_market",
+        },
+        {
+            "prediction_date": prediction_date,
+            "player_name": "Rebounds Over",
+            "team": "DEN",
+            "game_id": "game-3",
+            "market_type": "player_rebounds",
+            "selection": "over",
+            "line": 10.5,
+            "odds": 120,
+            "confidence": 0.75,
+            "side_edge_pct": 0.20,
+            "is_live_market": True,
+            "line_source": "fixture_live_market",
+        },
+        {
+            "prediction_date": prediction_date,
+            "player_name": "Rebounds Under",
+            "team": "MIN",
+            "game_id": "game-3",
+            "market_type": "player_rebounds",
+            "selection": "under",
+            "line": 12.5,
+            "odds": -120,
+            "confidence": 0.75,
+            "side_edge_pct": 0.10,
+            "is_live_market": True,
+            "line_source": "fixture_live_market",
+        },
+        {
+            "prediction_date": prediction_date,
+            "player_name": "Assists Under",
+            "team": "DEN",
+            "game_id": "game-3",
+            "market_type": "player_assists",
+            "selection": "under",
+            "line": 10.5,
+            "odds": -150,
+            "confidence": 0.75,
+            "side_edge_pct": 0.10,
+            "is_live_market": True,
+            "line_source": "fixture_live_market",
+        },
+    ]
+    elite_rows = full_rows[:3]
+    _write_csv(operator / f"elite_board_{prediction_date}.csv", elite_rows)
+    _write_csv(operator / f"full_market_board_{prediction_date}.csv", full_rows)
+    _write_csv(operator / f"sgp_board_{prediction_date}.csv", [])
+    _write_csv(
+        operator / f"kelly_stakes_{prediction_date}.csv",
+        [
+            {
+                "prediction_date": prediction_date,
+                "player_name": "Normal Eligible Under",
+                "market_type": "player_points",
+                "selection": "under",
+                "stake_amount": 12.0,
+                "expected_value": 1.44,
+                "kelly_eligible": True,
+                "skip_reason": "",
+                "stake_dampener_reason": "",
+                "stake_dampener_factor": 1.0,
+            },
+            {
+                "prediction_date": prediction_date,
+                "player_name": "High Caution Over",
+                "market_type": "player_points",
+                "selection": "over",
+                "stake_amount": 0.0,
+                "expected_value": 0.0,
+                "kelly_eligible": False,
+                "skip_reason": "context_high_caution_over",
+                "stake_dampener_reason": "",
+                "stake_dampener_factor": 1.0,
+            },
+            {
+                "prediction_date": prediction_date,
+                "player_name": "Medium Neutral Over",
+                "market_type": "player_points",
+                "selection": "over",
+                "stake_amount": 10.0,
+                "expected_value": 5.0,
+                "kelly_eligible": True,
+                "skip_reason": "",
+                "stake_dampener_reason": "medium_neutral_over_dampener",
+                "stake_dampener_factor": 0.5,
+            },
+        ],
+    )
+    player_prediction_rows = [
+        {**full_rows[index % len(full_rows)], "player_prediction_row": index}
+        for index in range(18)
+    ]
+    _write_csv(research / f"player_predictions_{prediction_date}.csv", player_prediction_rows)
+    _write_json(
+        research / f"model_metrics_{prediction_date}.json",
+        {
+            "prediction_summary": {
+                "prediction_date": prediction_date,
+                "games_count": 3,
+                "odds_count": 8,
+                "candidate_count": 6,
+                "full_market_count": 6,
+                "elite_count": 3,
+                "pipeline_mode": "fixture_operator_smoke",
+                "market_quality_status": "live",
+            }
+        },
+    )
+    _write_json(
+        diagnostics / f"board_diagnostics_{prediction_date}.json",
+        {"board_counts": {"elite": 3, "full_market": 6, "qualified_pool": 6}},
+    )
+    _write_json(
+        operator / f"elite_pipeline_audit_summary_{prediction_date}.json",
+        {
+            "totals": {"total_candidates": 6, "passed_to_elite": 3, "total_rejections": 3},
+            "rows": [
+                {
+                    "market": "player_assists",
+                    "selection_side": "under",
+                    "rejection_reason": "market_filtered_by_elite_policy",
+                    "count": 1,
+                },
+                {
+                    "market": "player_rebounds",
+                    "selection_side": "over",
+                    "rejection_reason": "market_filtered_by_elite_policy",
+                    "count": 1,
+                },
+                {
+                    "market": "player_rebounds",
+                    "selection_side": "under",
+                    "rejection_reason": "market_filtered_by_elite_policy",
+                    "count": 1,
+                },
+                {"market": "player_points", "rejection_reason": "passed_to_elite", "count": 3},
+            ],
+        },
+    )
+    _write_json(
+        diagnostics / f"market_availability_audit_{prediction_date}.json",
+        {
+            "counts": [
+                {
+                    "market": "player_points",
+                    "count_after_normalization": 4,
+                    "count_after_candidate_generation": 3,
+                },
+                {
+                    "market": "player_rebounds",
+                    "count_after_normalization": 3,
+                    "count_after_candidate_generation": 2,
+                },
+                {
+                    "market": "player_assists",
+                    "count_after_normalization": 1,
+                    "count_after_candidate_generation": 1,
+                },
+                {
+                    "market": "player_3pt_made",
+                    "count_after_normalization": 2,
+                    "count_after_candidate_generation": 0,
+                },
+            ]
+        },
+    )
+
+
 def test_quality_summary_generation_from_fixture_artifacts(tmp_path: Path) -> None:
     prediction_date = "2026-04-30"
     runtime_root = tmp_path / "runtime"
@@ -344,6 +597,162 @@ def test_quality_summary_flags_mismatched_artifact_dates(tmp_path: Path) -> None
     assert any("Prediction artifact date mismatch" in warning for warning in payload["warnings"])
 
 
+def test_quality_summary_includes_market_coverage_for_points_rebounds_assists(tmp_path: Path) -> None:
+    prediction_date = "2026-04-30"
+    runtime_root = tmp_path / "runtime"
+    _seed_market_coverage_artifacts(runtime_root, prediction_date)
+
+    text, payload = build_quality_summary(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        out_dir=tmp_path,
+        generated_at="2026-05-01T00:00:00+00:00",
+    )
+
+    rows = {row["market"]: row for row in payload["market_coverage"]["rows"]}
+    assert set(rows) == {"player_3pt_made", "player_assists", "player_points", "player_rebounds"}
+    assert rows["player_points"]["normalized_odds_rows"] == 4
+    assert rows["player_points"]["raw_candidates_count"] == 3
+    assert rows["player_points"]["full_market_board_count"] == 3
+    assert rows["player_points"]["elite_board_count"] == 3
+    assert rows["player_points"]["kelly_rows_count"] == 3
+    assert rows["player_points"]["kelly_eligible_count"] == 2
+    assert rows["player_points"]["high_caution_over_skip_count"] == 1
+    assert rows["player_points"]["medium_neutral_over_dampened_count"] == 1
+    assert rows["player_rebounds"]["rejected_count"] == 2
+    assert rows["player_assists"]["rejected_count"] == 1
+    assert "Market Coverage" in text
+    assert "player_rebounds" in text
+
+
+def test_quality_summary_rejection_reasons_by_market(tmp_path: Path) -> None:
+    prediction_date = "2026-04-30"
+    runtime_root = tmp_path / "runtime"
+    _seed_market_coverage_artifacts(runtime_root, prediction_date)
+
+    _, payload = build_quality_summary(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        out_dir=tmp_path,
+        generated_at="2026-05-01T00:00:00+00:00",
+    )
+
+    rows = {
+        (row["market"], row["rejection_reason"]): row
+        for row in payload["market_coverage"]["rejection_reasons_by_market"]
+    }
+    assert rows[("player_rebounds", "market_filtered_by_elite_policy")]["count"] == 2
+    assert rows[("player_rebounds", "market_filtered_by_elite_policy")]["percentage"] == 100.0
+    assert rows[("player_assists", "market_filtered_by_elite_policy")]["count"] == 1
+    assert rows[("player_assists", "market_filtered_by_elite_policy")]["percentage"] == 100.0
+
+
+def test_quality_summary_low_live_candidate_warning(tmp_path: Path) -> None:
+    prediction_date = "2026-04-30"
+    runtime_root = tmp_path / "runtime"
+    _seed_market_coverage_artifacts(runtime_root, prediction_date)
+
+    _, payload = build_quality_summary(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        out_dir=tmp_path,
+        generated_at="2026-05-01T00:00:00+00:00",
+    )
+
+    warnings = payload["market_coverage"]["coverage_warnings"]
+    assert any("Low live candidate coverage" in warning for warning in warnings)
+
+
+def test_quality_summary_low_kelly_eligible_warning(tmp_path: Path) -> None:
+    prediction_date = "2026-04-30"
+    runtime_root = tmp_path / "runtime"
+    _seed_market_coverage_artifacts(runtime_root, prediction_date)
+    _write_csv(
+        runtime_root / "operator" / f"kelly_stakes_{prediction_date}.csv",
+        [
+            {
+                "prediction_date": prediction_date,
+                "player_name": "Only Eligible",
+                "market_type": "player_points",
+                "kelly_eligible": True,
+                "skip_reason": "",
+                "stake_amount": 10.0,
+                "expected_value": 1.0,
+            }
+        ],
+    )
+
+    _, payload = build_quality_summary(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        out_dir=tmp_path,
+        generated_at="2026-05-01T00:00:00+00:00",
+    )
+
+    warnings = payload["market_coverage"]["coverage_warnings"]
+    assert any("Low Kelly eligible coverage" in warning for warning in warnings)
+
+
+def test_quality_summary_low_baseline_per_game_warning(tmp_path: Path) -> None:
+    prediction_date = "2026-04-30"
+    runtime_root = tmp_path / "runtime"
+    _seed_market_coverage_artifacts(runtime_root, prediction_date)
+    _write_csv(
+        runtime_root / "research" / f"player_predictions_{prediction_date}.csv",
+        [{"prediction_date": prediction_date, "player_name": "Only Player", "market_type": "player_points"}],
+    )
+
+    _, payload = build_quality_summary(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        out_dir=tmp_path,
+        generated_at="2026-05-01T00:00:00+00:00",
+    )
+
+    warnings = payload["market_coverage"]["coverage_warnings"]
+    assert any("Low player/baseline coverage" in warning for warning in warnings)
+
+
+def test_quality_summary_empty_sgp_warning_is_clean(tmp_path: Path) -> None:
+    prediction_date = "2026-04-30"
+    runtime_root = tmp_path / "runtime"
+    _seed_market_coverage_artifacts(runtime_root, prediction_date)
+
+    text, payload = build_quality_summary(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        out_dir=tmp_path,
+        generated_at="2026-05-01T00:00:00+00:00",
+    )
+
+    assert any("SGP board artifact is empty" in warning for warning in payload["warnings"])
+    assert "No columns to parse from file" not in text
+    assert all("No columns to parse from file" not in warning for warning in payload["warnings"])
+
+
+def test_quality_history_includes_compact_market_coverage_fields(tmp_path: Path) -> None:
+    prediction_date = "2026-04-30"
+    runtime_root = tmp_path / "runtime"
+    _seed_market_coverage_artifacts(runtime_root, prediction_date)
+
+    write_quality_summary_outputs(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        out_dir=tmp_path,
+        generated_at="2026-05-01T00:00:00+00:00",
+    )
+
+    history = _read_history_csv(runtime_root)
+    row = history.iloc[0]
+    assert int(row["markets_seen"]) == 4
+    assert int(row["points_normalized_odds_rows"]) == 4
+    assert int(row["points_full_market_board_count"]) == 3
+    assert int(row["points_elite_board_count"]) == 3
+    assert int(row["points_kelly_eligible_count"]) == 2
+    assert int(row["non_points_rejected_count"]) == 3
+    assert int(row["low_coverage_warning_count"]) >= 1
+
+
 def test_quality_history_creates_csv_from_one_summary_json(tmp_path: Path) -> None:
     prediction_date = "2026-04-30"
     runtime_root = tmp_path / "runtime"
@@ -366,6 +775,12 @@ def test_quality_history_creates_csv_from_one_summary_json(tmp_path: Path) -> No
     assert list(history.columns) == list(QUALITY_HISTORY_COLUMNS)
     assert len(history) == 1
     assert int(history.iloc[0]["kelly_eligible_count"]) == 2
+    assert int(history.iloc[0]["markets_seen"]) == 2
+    assert int(history.iloc[0]["points_normalized_odds_rows"]) == 4
+    assert int(history.iloc[0]["points_elite_board_count"]) == 3
+    assert int(history.iloc[0]["points_kelly_eligible_count"]) == 2
+    assert int(history.iloc[0]["non_points_rejected_count"]) == 1
+    assert int(history.iloc[0]["low_coverage_warning_count"]) == 1
 
 
 def test_quality_history_updates_same_date_instead_of_duplicating(tmp_path: Path) -> None:
@@ -441,6 +856,10 @@ def test_quality_history_missing_optional_fields_default_to_blanks_and_zeroes(tm
     assert int(row["games_count"]) == 0
     assert int(row["players_count"]) == 0
     assert int(row["kelly_rows_count"]) == 0
+    assert int(row["markets_seen"]) == 0
+    assert int(row["points_normalized_odds_rows"]) == 0
+    assert int(row["non_points_rejected_count"]) == 0
+    assert int(row["low_coverage_warning_count"]) == 0
     assert int(row["warnings_count"]) == 0
 
 

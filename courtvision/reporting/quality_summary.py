@@ -71,9 +71,22 @@ QUALITY_HISTORY_COLUMNS: tuple[str, ...] = (
     "max_player_exposure",
     "max_team_exposure",
     "max_game_exposure",
+    "markets_seen",
+    "points_normalized_odds_rows",
+    "points_full_market_board_count",
+    "points_elite_board_count",
+    "points_kelly_eligible_count",
+    "non_points_rejected_count",
+    "low_coverage_warning_count",
     "date_isolation_status",
     "warnings_count",
 )
+
+MARKET_COLUMN_CANDIDATES: tuple[str, ...] = ("market", "market_type", "prop_type")
+POINTS_MARKET_NAMES: set[str] = {"points", "player_points"}
+DEFAULT_MIN_LIVE_CANDIDATES = 10
+DEFAULT_MIN_KELLY_ELIGIBLE = 2
+DEFAULT_MIN_PLAYERS_PER_GAME_BASELINE_RATIO = 5
 
 
 def _safe_text(value: Any) -> str:
@@ -112,15 +125,27 @@ def _is_truthy(value: Any) -> bool:
     return _safe_text(value).lower() in {"true", "1", "yes", "y"}
 
 
-def _read_csv(path: Path, warnings: list[str], *, optional: bool = True) -> pd.DataFrame:
+def _read_csv(
+    path: Path,
+    warnings: list[str],
+    *,
+    optional: bool = True,
+    empty_warning: str | None = None,
+) -> pd.DataFrame:
     if not path.exists():
         if optional:
             warnings.append(f"Missing optional artifact: {path}")
         else:
             warnings.append(f"Missing artifact: {path}")
         return pd.DataFrame()
+    if path.stat().st_size == 0:
+        warnings.append(empty_warning or f"Empty CSV artifact: {path}")
+        return pd.DataFrame()
     try:
         return pd.read_csv(path, low_memory=False)
+    except pd.errors.EmptyDataError:
+        warnings.append(empty_warning or f"Empty CSV artifact: {path}")
+        return pd.DataFrame()
     except Exception as exc:
         warnings.append(f"Could not read CSV {path}: {exc}")
         return pd.DataFrame()
@@ -425,6 +450,229 @@ def _board_movement_summary(
     }
 
 
+def _market_column(df: pd.DataFrame) -> str | None:
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return None
+    for column in MARKET_COLUMN_CANDIDATES:
+        if column in df.columns:
+            return column
+    return None
+
+
+def _market_series(df: pd.DataFrame) -> pd.Series:
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.Series(dtype=str)
+    column = _market_column(df)
+    if column is None:
+        return pd.Series("unknown", index=df.index, dtype=str)
+    return df[column].fillna("unknown").astype(str).str.strip().replace("", "unknown")
+
+
+def _count_by_market(df: pd.DataFrame) -> dict[str, int]:
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return {}
+    markets = _market_series(df)
+    return {str(market): int(count) for market, count in markets.value_counts().sort_index().items()}
+
+
+def _market_availability_counts(market_availability: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    rows = market_availability.get("counts", []) if isinstance(market_availability, dict) else []
+    counts: dict[str, dict[str, Any]] = {}
+    if not isinstance(rows, list):
+        return counts
+    for raw_row in rows:
+        if not isinstance(raw_row, dict):
+            continue
+        market = _safe_text(_first_present(raw_row, MARKET_COLUMN_CANDIDATES)) or "unknown"
+        row = counts.setdefault(
+            market,
+            {
+                "normalized_odds_rows": 0,
+                "raw_candidates_count": None,
+            },
+        )
+        row["normalized_odds_rows"] += int(raw_row.get("count_after_normalization") or 0)
+        if "count_after_candidate_generation" in raw_row:
+            current = row.get("raw_candidates_count")
+            row["raw_candidates_count"] = int(current or 0) + int(raw_row.get("count_after_candidate_generation") or 0)
+    return counts
+
+
+def _rejection_reasons_by_market(
+    *,
+    audit_summary: dict[str, Any],
+    market_availability: dict[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    counts: dict[str, Counter[str]] = {}
+
+    for raw_row in audit_summary.get("rows", []) if isinstance(audit_summary, dict) else []:
+        if not isinstance(raw_row, dict):
+            continue
+        reason = _safe_text(raw_row.get("rejection_reason"))
+        if not reason or reason in {"total_candidates", "passed_to_elite"}:
+            continue
+        market = _safe_text(_first_present(raw_row, MARKET_COLUMN_CANDIDATES)) or "unknown"
+        counts.setdefault(market, Counter())[reason] += int(raw_row.get("count") or 0)
+
+    if not counts:
+        by_market = market_availability.get("rejection_counts_by_market", {}) if isinstance(market_availability, dict) else {}
+        if isinstance(by_market, dict):
+            for market, reasons in by_market.items():
+                market_name = _safe_text(market) or "unknown"
+                if not isinstance(reasons, dict):
+                    continue
+                for reason, count in reasons.items():
+                    reason_name = _safe_text(reason) or "unknown"
+                    counts.setdefault(market_name, Counter())[reason_name] += int(count or 0)
+
+    rows: list[dict[str, Any]] = []
+    totals: dict[str, int] = {}
+    for market in sorted(counts):
+        total = int(sum(counts[market].values()))
+        totals[market] = total
+        for reason, count in sorted(counts[market].items(), key=lambda item: (-item[1], item[0])):
+            pct = round((count / total) * 100.0, 2) if total else 0.0
+            rows.append(
+                {
+                    "market": market,
+                    "rejection_reason": reason,
+                    "count": int(count),
+                    "percentage": pct,
+                }
+            )
+    return rows, totals
+
+
+def _kelly_counts_by_market(kelly_df: pd.DataFrame) -> dict[str, dict[str, int]]:
+    if not isinstance(kelly_df, pd.DataFrame) or kelly_df.empty:
+        return {}
+    markets = _market_series(kelly_df)
+    eligible_col = "kelly_eligible" if "kelly_eligible" in kelly_df.columns else "eligible"
+    eligible_mask = (
+        kelly_df[eligible_col].map(_is_truthy)
+        if eligible_col in kelly_df.columns
+        else pd.Series(False, index=kelly_df.index)
+    )
+    skip_reason = kelly_df.get("skip_reason", pd.Series("", index=kelly_df.index)).fillna("").astype(str).str.strip()
+    dampened_mask = (
+        kelly_df.get("stake_dampener_reason", pd.Series("", index=kelly_df.index))
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .eq("medium_neutral_over_dampener")
+    )
+    counts: dict[str, dict[str, int]] = {}
+    for market in sorted(markets.unique()):
+        mask = markets.eq(market)
+        total = int(mask.sum())
+        eligible = int(eligible_mask[mask].sum())
+        counts[str(market)] = {
+            "kelly_rows_count": total,
+            "kelly_eligible_count": eligible,
+            "skipped_count": int(total - eligible),
+            "high_caution_over_skip_count": int((skip_reason.eq("context_high_caution_over") & mask).sum()),
+            "medium_neutral_over_dampened_count": int((dampened_mask & mask).sum()),
+        }
+    return counts
+
+
+def _market_coverage_summary(
+    *,
+    market_availability: dict[str, Any],
+    full_market_df: pd.DataFrame,
+    elite_df: pd.DataFrame,
+    kelly_df: pd.DataFrame,
+    rejection_counts_by_market: dict[str, int],
+) -> list[dict[str, Any]]:
+    availability = _market_availability_counts(market_availability)
+    full_counts = _count_by_market(full_market_df)
+    elite_counts = _count_by_market(elite_df)
+    kelly_counts = _kelly_counts_by_market(kelly_df)
+    markets = set(availability) | set(full_counts) | set(elite_counts) | set(kelly_counts) | set(rejection_counts_by_market)
+    rows: list[dict[str, Any]] = []
+    for market in sorted(markets):
+        availability_row = availability.get(market, {})
+        normalized = int(availability_row.get("normalized_odds_rows") or 0)
+        raw_candidates = availability_row.get("raw_candidates_count")
+        if normalized == 0 and not any(
+            (
+                full_counts.get(market, 0),
+                elite_counts.get(market, 0),
+                kelly_counts.get(market, {}).get("kelly_rows_count", 0),
+                rejection_counts_by_market.get(market, 0),
+            )
+        ):
+            continue
+        kelly_row = kelly_counts.get(market, {})
+        rows.append(
+            {
+                "market": market,
+                "normalized_odds_rows": normalized,
+                "raw_candidates_count": raw_candidates,
+                "full_market_board_count": int(full_counts.get(market, 0)),
+                "elite_board_count": int(elite_counts.get(market, 0)),
+                "rejected_count": int(rejection_counts_by_market.get(market, 0)),
+                "kelly_rows_count": int(kelly_row.get("kelly_rows_count", 0)),
+                "kelly_eligible_count": int(kelly_row.get("kelly_eligible_count", 0)),
+                "skipped_count": int(kelly_row.get("skipped_count", 0)),
+                "high_caution_over_skip_count": int(kelly_row.get("high_caution_over_skip_count", 0)),
+                "medium_neutral_over_dampened_count": int(kelly_row.get("medium_neutral_over_dampened_count", 0)),
+            }
+        )
+    return rows
+
+
+def _coverage_warnings(
+    *,
+    slate_provider_counts: dict[str, Any],
+    kelly_safety: dict[str, Any],
+    market_rows: Sequence[dict[str, Any]],
+    min_live_candidates: int = DEFAULT_MIN_LIVE_CANDIDATES,
+    min_kelly_eligible: int = DEFAULT_MIN_KELLY_ELIGIBLE,
+    min_players_per_game_baseline_ratio: int = DEFAULT_MIN_PLAYERS_PER_GAME_BASELINE_RATIO,
+) -> list[str]:
+    warnings: list[str] = []
+    live_candidates = _history_int(slate_provider_counts.get("live_odds_count"))
+    if live_candidates < min_live_candidates:
+        warnings.append(
+            f"Low live candidate coverage: live_candidates={live_candidates} below floor={min_live_candidates}."
+        )
+
+    kelly_eligible = _history_int(kelly_safety.get("kelly_eligible_count"))
+    if kelly_eligible < min_kelly_eligible:
+        warnings.append(
+            f"Low Kelly eligible coverage: kelly_eligible={kelly_eligible} below floor={min_kelly_eligible}."
+        )
+
+    games_count = _history_int(slate_provider_counts.get("games_count"))
+    players_count = _history_int(slate_provider_counts.get("players_or_baselines_count"))
+    if games_count > 0 and players_count / games_count < min_players_per_game_baseline_ratio:
+        ratio = round(players_count / games_count, 2)
+        warnings.append(
+            "Low player/baseline coverage: "
+            f"players_or_baselines_count={players_count}, games_count={games_count}, "
+            f"ratio={ratio}, floor={min_players_per_game_baseline_ratio}."
+        )
+
+    for row in market_rows:
+        normalized = _history_int(row.get("normalized_odds_rows"))
+        raw_candidates = row.get("raw_candidates_count")
+        raw_candidates_known = raw_candidates is not None
+        no_raw_candidates = raw_candidates_known and _history_int(raw_candidates) == 0
+        no_board_rows = (
+            _history_int(row.get("full_market_board_count")) == 0
+            and _history_int(row.get("elite_board_count")) == 0
+            and _history_int(row.get("kelly_rows_count")) == 0
+        )
+        if normalized > 0 and no_board_rows and (no_raw_candidates or not raw_candidates_known):
+            warnings.append(
+                "Market coverage loss: "
+                f"market={row.get('market')} normalized_odds_rows={normalized} "
+                "but zero candidates/board rows survived."
+            )
+    return warnings
+
+
 def _artifact_counts(full_market_df: pd.DataFrame, elite_df: pd.DataFrame) -> dict[str, Any]:
     frame = full_market_df if not full_market_df.empty else elite_df
     if frame.empty:
@@ -503,6 +751,23 @@ def _quality_history_row(payload: dict[str, Any], *, fallback_prediction_date: s
     kelly = payload.get("kelly_safety_summary", {}) if isinstance(payload.get("kelly_safety_summary"), dict) else {}
     exposure = payload.get("risk_exposure_summary", {}) if isinstance(payload.get("risk_exposure_summary"), dict) else {}
     isolation = payload.get("date_isolation_check", {}) if isinstance(payload.get("date_isolation_check"), dict) else {}
+    market_coverage = payload.get("market_coverage", {}) if isinstance(payload.get("market_coverage"), dict) else {}
+    market_rows = market_coverage.get("rows", []) if isinstance(market_coverage.get("rows"), list) else []
+    points_rows = [
+        row
+        for row in market_rows
+        if isinstance(row, dict) and _safe_text(row.get("market")).lower() in POINTS_MARKET_NAMES
+    ]
+    non_points_rejected = sum(
+        _history_int(row.get("rejected_count"))
+        for row in market_rows
+        if isinstance(row, dict) and _safe_text(row.get("market")).lower() not in POINTS_MARKET_NAMES
+    )
+    coverage_warnings = (
+        market_coverage.get("coverage_warnings", [])
+        if isinstance(market_coverage.get("coverage_warnings"), list)
+        else []
+    )
 
     prediction_date = _safe_text(run.get("prediction_date")) or fallback_prediction_date
     row = {
@@ -537,6 +802,13 @@ def _quality_history_row(payload: dict[str, Any], *, fallback_prediction_date: s
         "max_player_exposure": _history_float(exposure.get("max_player_exposure")),
         "max_team_exposure": _history_float(exposure.get("max_team_exposure")),
         "max_game_exposure": _history_float(exposure.get("max_game_exposure")),
+        "markets_seen": len([row for row in market_rows if isinstance(row, dict)]),
+        "points_normalized_odds_rows": sum(_history_int(row.get("normalized_odds_rows")) for row in points_rows),
+        "points_full_market_board_count": sum(_history_int(row.get("full_market_board_count")) for row in points_rows),
+        "points_elite_board_count": sum(_history_int(row.get("elite_board_count")) for row in points_rows),
+        "points_kelly_eligible_count": sum(_history_int(row.get("kelly_eligible_count")) for row in points_rows),
+        "non_points_rejected_count": int(non_points_rejected),
+        "low_coverage_warning_count": len(coverage_warnings),
         "date_isolation_status": _safe_text(isolation.get("status")),
         "warnings_count": _history_warning_count(payload.get("warnings")),
     }
@@ -626,7 +898,12 @@ def build_quality_summary(
 
     elite_df = _read_csv(operator_dir / f"elite_board_{prediction_date}.csv", warnings, optional=False)
     full_market_df = _read_csv(operator_dir / f"full_market_board_{prediction_date}.csv", warnings)
-    sgp_df = _read_csv(operator_dir / f"sgp_board_{prediction_date}.csv", warnings)
+    sgp_path = operator_dir / f"sgp_board_{prediction_date}.csv"
+    sgp_df = _read_csv(
+        sgp_path,
+        warnings,
+        empty_warning=f"SGP board artifact is empty; expected columns unavailable: {sgp_path}",
+    )
     kelly_df = _read_csv(operator_dir / f"kelly_stakes_{prediction_date}.csv", warnings)
     player_predictions_df = _read_csv(research_dir / f"player_predictions_{prediction_date}.csv", warnings)
     model_metrics = _read_json(research_dir / f"model_metrics_{prediction_date}.json", warnings)
@@ -703,6 +980,22 @@ def build_quality_summary(
     }
     kelly_safety = _kelly_safety_summary(kelly_df)
     risk_exposure = _exposure_summary(kelly_df, elite_df)
+    rejection_reasons_market_rows, rejection_counts_by_market = _rejection_reasons_by_market(
+        audit_summary=audit_summary,
+        market_availability=market_availability,
+    )
+    market_rows = _market_coverage_summary(
+        market_availability=market_availability,
+        full_market_df=full_market_df,
+        elite_df=elite_df,
+        kelly_df=kelly_df,
+        rejection_counts_by_market=rejection_counts_by_market,
+    )
+    coverage_warnings = _coverage_warnings(
+        slate_provider_counts=slate_provider_counts,
+        kelly_safety=kelly_safety,
+        market_rows=market_rows,
+    )
     board_movement = _board_movement_summary(
         previous_payload=previous_payload,
         current_elite_count=elite_count,
@@ -721,11 +1014,21 @@ def build_quality_summary(
         "slate_provider_counts": slate_provider_counts,
         "candidate_funnel": candidate_funnel,
         "top_rejection_reasons": rejection_reasons,
+        "market_coverage": {
+            "config": {
+                "min_live_candidates": DEFAULT_MIN_LIVE_CANDIDATES,
+                "min_kelly_eligible": DEFAULT_MIN_KELLY_ELIGIBLE,
+                "min_players_per_game_baseline_ratio": DEFAULT_MIN_PLAYERS_PER_GAME_BASELINE_RATIO,
+            },
+            "rows": market_rows,
+            "rejection_reasons_by_market": rejection_reasons_market_rows,
+            "coverage_warnings": coverage_warnings,
+        },
         "kelly_safety_summary": kelly_safety,
         "risk_exposure_summary": risk_exposure,
         "board_movement_summary": board_movement,
         "date_isolation_check": date_isolation,
-        "warnings": warnings + risk_exposure.get("warnings", []),
+        "warnings": warnings + coverage_warnings + risk_exposure.get("warnings", []),
     }
     payload = _json_safe(payload)
     return _format_quality_summary_text(payload), payload
@@ -749,6 +1052,7 @@ def _format_quality_summary_text(payload: dict[str, Any]) -> str:
     run = payload["run_identity"]
     slate = payload["slate_provider_counts"]
     funnel = payload["candidate_funnel"]
+    market_coverage = payload.get("market_coverage", {})
     kelly = payload["kelly_safety_summary"]
     exposure = payload["risk_exposure_summary"]
     movement = payload["board_movement_summary"]
@@ -807,6 +1111,58 @@ def _format_quality_summary_text(payload: dict[str, Any]) -> str:
             lines.append(f"- {row['reason']}: {row['count']} ({row['percentage']:.2f}%)")
     else:
         lines.append("- none available")
+
+    lines.extend(
+        [
+            "",
+            "Market Coverage",
+            "-" * 72,
+            "- market | normalized | raw_candidates | full_market | elite | rejected | kelly | eligible | skipped | high_over_skip | dampened",
+        ]
+    )
+    market_rows = market_coverage.get("rows", []) if isinstance(market_coverage, dict) else []
+    if market_rows:
+        for row in market_rows:
+            raw_candidates = row.get("raw_candidates_count")
+            lines.append(
+                "- "
+                f"{row['market']} | "
+                f"{row['normalized_odds_rows']} | "
+                f"{_fmt_value(raw_candidates)} | "
+                f"{row['full_market_board_count']} | "
+                f"{row['elite_board_count']} | "
+                f"{row['rejected_count']} | "
+                f"{row['kelly_rows_count']} | "
+                f"{row['kelly_eligible_count']} | "
+                f"{row['skipped_count']} | "
+                f"{row['high_caution_over_skip_count']} | "
+                f"{row['medium_neutral_over_dampened_count']}"
+            )
+    else:
+        lines.append("- none available")
+
+    lines.extend(["", "Rejection Reasons By Market", "-" * 72])
+    rejection_rows = (
+        market_coverage.get("rejection_reasons_by_market", [])
+        if isinstance(market_coverage, dict)
+        else []
+    )
+    if rejection_rows:
+        for row in rejection_rows:
+            lines.append(
+                f"- {row['market']} / {row['rejection_reason']}: "
+                f"{row['count']} ({row['percentage']:.2f}%)"
+            )
+    else:
+        lines.append("- none available")
+
+    lines.extend(["", "Coverage Warnings", "-" * 72])
+    coverage_warnings = market_coverage.get("coverage_warnings", []) if isinstance(market_coverage, dict) else []
+    if coverage_warnings:
+        for warning in coverage_warnings:
+            lines.append(f"- {warning}")
+    else:
+        lines.append("- none")
 
     lines.extend(
         [
