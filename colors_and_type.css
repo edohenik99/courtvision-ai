@@ -1,0 +1,203 @@
+/* CourtVision Design System — Tokens + Semantic styles */
+
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+:root {
+  /* ---------- Brand ---------- */
+  --court-orange: #E26B2C;
+  --court-orange-600: #C95A1F;
+  --court-orange-300: #F09567;
+  --hardwood-tan: #C8A678;
+  --hardwood-tan-300: #E2CCA7;
+
+  /* ---------- Ink scale (dark-first) ---------- */
+  --ink-1: #0B0F14;  /* page bg */
+  --ink-2: #11161D;  /* panel */
+  --ink-3: #1A2230;  /* raised */
+  --ink-4: #2A3445;  /* hairline / hover bg */
+  --ink-5: #4A5668;  /* muted text */
+  --ink-6: #8A95A6;  /* secondary text */
+  --ink-7: #E6EAF0;  /* primary text on dark */
+
+  /* ---------- Paper scale (light) ---------- */
+  --paper-1: #FFFFFF;
+  --paper-2: #FAFAF7;  /* warm paper */
+  --paper-3: #F1EFE9;
+  --paper-4: #E2DFD7;
+  --paper-5: #B6B2A8;
+  --paper-6: #5A5851;
+  --paper-7: #1B1B18;
+
+  /* ---------- Semantic numeric ---------- */
+  --edge-green: #2DBE7C;
+  --edge-green-700: #1F9D63;
+  --edge-red: #E5484D;
+  --edge-red-700: #C5363B;
+  --confidence-blue: #3B82F6;
+  --tier-gold: #E6B850;
+
+  /* ---------- Default surface = dark ---------- */
+  --bg-1: var(--ink-1);
+  --bg-2: var(--ink-2);
+  --bg-3: var(--ink-3);
+  --hairline: var(--ink-4);
+  --fg-1: var(--ink-7);
+  --fg-2: var(--ink-6);
+  --fg-3: var(--ink-5);
+  --accent: var(--court-orange);
+  --accent-hover: var(--court-orange-600);
+
+  /* ---------- Type ---------- */
+  --font-display: 'Space Grotesk', system-ui, sans-serif;
+  --font-body: 'Inter', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+  --fs-12: 12px;
+  --fs-13: 13px;
+  --fs-14: 14px;
+  --fs-15: 15px;
+  --fs-16: 16px;
+  --fs-18: 18px;
+  --fs-20: 20px;
+  --fs-24: 24px;
+  --fs-32: 32px;
+  --fs-40: 40px;
+  --fs-56: 56px;
+  --fs-72: 72px;
+
+  --lh-tight: 1.15;
+  --lh-snug: 1.3;
+  --lh-normal: 1.5;
+
+  /* ---------- Spacing (4px base) ---------- */
+  --sp-1: 2px;
+  --sp-2: 4px;
+  --sp-3: 8px;
+  --sp-4: 12px;
+  --sp-5: 16px;
+  --sp-6: 20px;
+  --sp-7: 24px;
+  --sp-8: 32px;
+  --sp-9: 40px;
+  --sp-10: 56px;
+  --sp-11: 72px;
+
+  /* ---------- Radii ---------- */
+  --r-badge: 2px;
+  --r-input: 6px;
+  --r-button: 6px;
+  --r-card: 10px;
+  --r-pill: 999px;
+
+  /* ---------- Shadows ---------- */
+  --shadow-1: 0 1px 2px rgba(11,15,20,.06), 0 1px 1px rgba(11,15,20,.04);
+  --shadow-2: 0 8px 24px rgba(11,15,20,.18);
+  --shadow-inset: inset 0 1px 0 rgba(0,0,0,.20);
+
+  /* ---------- Motion ---------- */
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --dur-fast: 120ms;
+  --dur-base: 180ms;
+  --dur-slow: 240ms;
+}
+
+/* Light surface override */
+.surface-paper {
+  --bg-1: var(--paper-2);
+  --bg-2: var(--paper-1);
+  --bg-3: var(--paper-3);
+  --hairline: var(--paper-4);
+  --fg-1: var(--paper-7);
+  --fg-2: var(--paper-6);
+  --fg-3: var(--paper-5);
+}
+
+/* ---------- Semantic type styles ---------- */
+.cv-display {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: var(--fs-56);
+  line-height: var(--lh-tight);
+  letter-spacing: -0.02em;
+  color: var(--fg-1);
+}
+.cv-h1 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: var(--fs-40);
+  line-height: var(--lh-tight);
+  letter-spacing: -0.015em;
+  color: var(--fg-1);
+}
+.cv-h2 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: var(--fs-24);
+  line-height: var(--lh-snug);
+  letter-spacing: -0.01em;
+  color: var(--fg-1);
+}
+.cv-h3 {
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: var(--fs-18);
+  line-height: var(--lh-snug);
+  color: var(--fg-1);
+}
+.cv-eyebrow {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: var(--fs-12);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--fg-2);
+}
+.cv-p {
+  font-family: var(--font-body);
+  font-size: var(--fs-15);
+  line-height: var(--lh-normal);
+  color: var(--fg-1);
+}
+.cv-caption {
+  font-family: var(--font-body);
+  font-size: var(--fs-13);
+  line-height: var(--lh-snug);
+  color: var(--fg-2);
+}
+.cv-num {
+  font-family: var(--font-mono);
+  font-feature-settings: "tnum" 1, "zero" 1;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-1);
+}
+.cv-num-lg {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: var(--fs-32);
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-1);
+  letter-spacing: -0.01em;
+}
+.cv-bet-label {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: var(--fs-13);
+  letter-spacing: 0.02em;
+  color: var(--fg-1);
+}
+.cv-edge-pos { color: var(--edge-green); }
+.cv-edge-neg { color: var(--edge-red); }
+
+/* ---------- Base reset ---------- */
+* { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg-1);
+  color: var(--fg-1);
+  font-family: var(--font-body);
+  font-size: var(--fs-15);
+  line-height: var(--lh-normal);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
