@@ -85,7 +85,10 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from courtvision.runtime_audit import (
     BoardAuditPolicy,
+    ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER,
     get_elite_rejection_reason as _runtime_get_elite_rejection_reason,
+    elite_context_rejection_reason,
+    projected_kelly_skip_reason,
 )
 from courtvision.runtime_scoring import BoardScoringConfig, BoardScoringPolicy
 
@@ -161,6 +164,15 @@ PLAYER_POINTS_ELITE_ADMISSION_COLUMNS: tuple[str, ...] = (
     "player_points_line_band",
     "injury_influence_bucket",
     "elite_ranked_top_n",
+    "market_type",
+    "selection",
+    "quality_score",
+    "context_pick_alignment",
+    "context_caution_level",
+    "overall_context_signal",
+    "elite_admitted",
+    "elite_rejection_reason",
+    "kelly_projected_skip_reason",
 )
 
 
@@ -2497,6 +2509,157 @@ class CourtVisionAI:
         ]
         return out
 
+    def _annotate_elite_context_safety(self, df: pd.DataFrame) -> pd.DataFrame:
+        if not isinstance(df, pd.DataFrame):
+            return pd.DataFrame()
+        out = df.copy()
+        if out.empty:
+            for column in ("kelly_projected_skip_reason", "final_elite_rejection_reason"):
+                if column not in out.columns:
+                    out[column] = pd.Series(dtype="object")
+            return out
+
+        projected_reasons: list[str] = []
+        elite_reasons: list[str] = []
+        for _, row in out.iterrows():
+            row_dict = _to_str_dict(row)
+            projected_reasons.append(projected_kelly_skip_reason(row_dict))
+            elite_reasons.append(elite_context_rejection_reason(row_dict) or "")
+
+        existing_projected = (
+            out["kelly_projected_skip_reason"].fillna("").astype(str)
+            if "kelly_projected_skip_reason" in out.columns
+            else pd.Series("", index=out.index, dtype="object")
+        )
+        out["kelly_projected_skip_reason"] = [
+            existing if str(existing).strip() else reason
+            for existing, reason in zip(existing_projected.tolist(), projected_reasons)
+        ]
+
+        existing_final = (
+            out["final_elite_rejection_reason"].fillna("").astype(str)
+            if "final_elite_rejection_reason" in out.columns
+            else pd.Series("", index=out.index, dtype="object")
+        )
+        out["final_elite_rejection_reason"] = [
+            existing if str(existing).strip() else reason
+            for existing, reason in zip(existing_final.tolist(), elite_reasons)
+        ]
+        return out
+
+    def _elite_context_safety_reject_mask(self, df: pd.DataFrame) -> pd.Series:
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            return pd.Series(False, index=getattr(df, "index", None), dtype=bool)
+        return pd.Series(
+            [
+                elite_context_rejection_reason(_to_str_dict(row)) == ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER
+                for _, row in df.iterrows()
+            ],
+            index=df.index,
+            dtype=bool,
+        )
+
+    def _apply_elite_context_safety_gate(
+        self,
+        elite_df: pd.DataFrame,
+        candidate_df: pd.DataFrame,
+        *,
+        target_size: Optional[int] = None,
+    ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
+        """Remove high-caution conflicted OVERs from final elite and backfill safely."""
+        elite_source = elite_df.copy() if isinstance(elite_df, pd.DataFrame) else pd.DataFrame()
+        candidate_source = candidate_df.copy() if isinstance(candidate_df, pd.DataFrame) else pd.DataFrame()
+        annotated_elite = self._annotate_elite_context_safety(elite_source)
+        annotated_candidates = self._annotate_elite_context_safety(candidate_source)
+
+        elite_reject_mask = self._elite_context_safety_reject_mask(annotated_elite)
+        candidate_reject_mask = self._elite_context_safety_reject_mask(annotated_candidates)
+        rejected_count = int(elite_reject_mask.sum()) if not annotated_elite.empty else 0
+
+        if rejected_count == 0:
+            summary = {
+                "enabled": True,
+                "rejection_reason": ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER,
+                "input_elite_count": int(len(annotated_elite)),
+                "rejected_from_elite_count": 0,
+                "replacement_candidate_count": 0,
+                "replacement_added_count": 0,
+                "final_elite_count": int(len(annotated_elite)),
+            }
+            return annotated_elite, annotated_candidates, summary
+
+        desired_size = int(target_size if target_size is not None else len(annotated_elite))
+        desired_size = max(0, min(desired_size, int(self.ELITE_BOARD_LIMIT)))
+        survivors = annotated_elite.loc[~elite_reject_mask].copy()
+        for column in ("final_elite_rejection_reason", "elite_rejection_reason"):
+            if column in survivors.columns:
+                survivors[column] = ""
+        if "selection_rejection_reason" in survivors.columns:
+            survivors["selection_rejection_reason"] = ""
+
+        replacement_pool = annotated_candidates.loc[~candidate_reject_mask].copy()
+        if not replacement_pool.empty and "market_type" in replacement_pool.columns:
+            replacement_pool = replacement_pool[
+                replacement_pool["market_type"].fillna("").astype(str).str.strip().str.lower().eq("player_points")
+            ].copy()
+
+        selected_keys = {
+            self._row_identity_key(_to_str_dict(row))
+            for _, row in survivors.iterrows()
+        } if not survivors.empty else set()
+        if selected_keys and not replacement_pool.empty:
+            replacement_pool = replacement_pool[
+                [
+                    self._row_identity_key(_to_str_dict(row)) not in selected_keys
+                    for _, row in replacement_pool.iterrows()
+                ]
+            ].copy()
+
+        sort_cols = self._sort_priority_columns(replacement_pool, elite_priority=True)
+        if sort_cols and not replacement_pool.empty:
+            replacement_pool = replacement_pool.sort_values(
+                by=sort_cols,
+                ascending=[False] * len(sort_cols),
+            ).reset_index(drop=True)
+
+        slots_open = max(0, desired_size - len(survivors))
+        replacements = replacement_pool.head(slots_open).copy() if slots_open and not replacement_pool.empty else pd.DataFrame()
+        for column in ("final_elite_rejection_reason", "elite_rejection_reason"):
+            if column in replacements.columns:
+                replacements[column] = ""
+        if "selection_rejection_reason" in replacements.columns:
+            replacements["selection_rejection_reason"] = ""
+
+        combined = pd.concat([survivors, replacements], ignore_index=True, sort=False) if not survivors.empty or not replacements.empty else annotated_elite.iloc[0:0].copy()
+        if not combined.empty:
+            combined = self._apply_player_exposure_caps(
+                combined,
+                per_player_cap=self.ELITE_MAX_PROPS_PER_PLAYER,
+                sort_columns=self._sort_priority_columns(combined, elite_priority=True),
+            )
+            combined = self._apply_team_exposure_caps(
+                combined,
+                per_team_cap=self.ELITE_TEAM_CAP,
+                per_game_cap=self.ELITE_GAME_CAP,
+                sort_columns=self._sort_priority_columns(combined, elite_priority=True),
+            )
+            sort_cols = self._sort_priority_columns(combined, elite_priority=True)
+            if sort_cols:
+                combined = combined.sort_values(by=sort_cols, ascending=[False] * len(sort_cols))
+            combined = self._tag_final_selection_source_lane(combined.head(desired_size).reset_index(drop=True))
+
+        summary = {
+            "enabled": True,
+            "rejection_reason": ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER,
+            "input_elite_count": int(len(annotated_elite)),
+            "rejected_from_elite_count": rejected_count,
+            "replacement_candidate_count": int(len(replacement_pool)),
+            "replacement_added_count": int(len(replacements)),
+            "final_elite_count": int(len(combined)),
+            "empty_no_bet": bool(len(combined) == 0 and rejected_count > 0),
+        }
+        return combined, annotated_candidates, summary
+
     def _board_stage_snapshot(self, df: pd.DataFrame) -> dict[str, Any]:
         return {
             "count": int(len(df)),
@@ -2665,8 +2828,13 @@ class CourtVisionAI:
 
             if in_final:
                 final_exclusion_stage = "selected"
+                elite_rejection_reason = ""
+            elif elite_context_rejection_reason(row_dict) is not None:
+                final_exclusion_stage = ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER
+                elite_rejection_reason = ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER
             elif not elite_guard_pass:
                 final_exclusion_stage = "failed_hard_guard"
+                elite_rejection_reason = elite_guard_fail_reason or "failed_hard_guard"
             elif not in_primary:
                 if realism_flag:
                     final_exclusion_stage = "lost_on_realism"
@@ -2674,20 +2842,29 @@ class CourtVisionAI:
                     final_exclusion_stage = "lost_on_confidence"
                 else:
                     final_exclusion_stage = "lost_on_score"
+                elite_rejection_reason = final_exclusion_stage
             elif not in_post_exposure:
                 final_exclusion_stage = "lost_on_exposure"
+                elite_rejection_reason = final_exclusion_stage
             elif selected_non_points_above:
                 final_exclusion_stage = "lost_on_cross-market_rank_pressure"
+                elite_rejection_reason = final_exclusion_stage
             elif lost_to_board_cap:
                 final_exclusion_stage = "lost_on_board_capacity"
+                elite_rejection_reason = final_exclusion_stage
             else:
                 final_exclusion_stage = "not_selected"
+                elite_rejection_reason = final_exclusion_stage
+
+            player_name = str(row_dict.get("entity_name") or row_dict.get("player_name") or "").strip()
+            selection_side = str(row_dict.get("selection", "")).strip().lower()
+            projected_skip = projected_kelly_skip_reason(row_dict)
 
             rows.append(
                 {
-                    "player_name": str(row_dict.get("entity_name", "")).strip(),
+                    "player_name": player_name,
                     "market": "player_points",
-                    "side": str(row_dict.get("selection", "")).strip().lower(),
+                    "side": selection_side,
                     "line": self._to_float(row_dict.get("sportsbook_line")),
                     "projection": self._to_float(row_dict.get("model_projection")),
                     "edge": self._to_float(row_dict.get("edge")),
@@ -2709,6 +2886,15 @@ class CourtVisionAI:
                     "player_points_line_band": str(row_dict.get("player_points_line_band", "")).strip(),
                     "injury_influence_bucket": str(row_dict.get("injury_influence_bucket", "")).strip(),
                     "elite_ranked_top_n": bool(elite_ranked_top_n),
+                    "market_type": "player_points",
+                    "selection": selection_side,
+                    "quality_score": round(float(quality_score), 4),
+                    "context_pick_alignment": str(row_dict.get("context_pick_alignment", "") or "").strip(),
+                    "context_caution_level": str(row_dict.get("context_caution_level", "") or "").strip(),
+                    "overall_context_signal": str(row_dict.get("overall_context_signal", "") or "").strip(),
+                    "elite_admitted": bool(in_final),
+                    "elite_rejection_reason": elite_rejection_reason,
+                    "kelly_projected_skip_reason": projected_skip,
                 }
             )
 
@@ -2927,6 +3113,11 @@ class CourtVisionAI:
         final_df = self._tag_final_selection_source_lane(
             final_df.head(self.ELITE_BOARD_LIMIT).reset_index(drop=True)
         )
+        final_df, input_candidates_df, context_safety_summary = self._apply_elite_context_safety_gate(
+            final_df,
+            input_candidates_df,
+            target_size=target_size,
+        )
         player_points_elite_admission_df = self._build_player_points_elite_admission(
             input_candidates_df=input_candidates_df,
             primary_df=primary_df,
@@ -2945,6 +3136,7 @@ class CourtVisionAI:
                     player_points_elite_admission=player_points_elite_admission_df,
                 )
             )
+            trace["elite_context_safety_gate"] = context_safety_summary
         return final_df
 
     def _select_top_per_market(
@@ -3057,6 +3249,7 @@ class CourtVisionAI:
             input_df=live_candidates_df,
             trace=final_board_construction["full_market"],
         )
+        full_market_df = self._annotate_elite_context_safety(full_market_df)
         return elite_df, full_market_df, final_board_construction
 
     def _build_near_miss_board(self, rejected_df: pd.DataFrame, limit: int = 60) -> pd.DataFrame:
@@ -3878,19 +4071,58 @@ class CourtVisionAI:
                 team_baselines=self._merge_passive_team_context(team_baselines, passive_team_context),
                 odds=odds,
             )
+            original_elite_count = int(len(elite_df))
+            elite_df, full_market_df, elite_context_safety_summary = self._apply_elite_context_safety_gate(
+                elite_df,
+                full_market_df,
+                target_size=original_elite_count,
+            )
+            points_input_df = qualified_pool_df if not qualified_pool_df.empty else full_market_df
+            points_primary_df = points_input_df[
+                [
+                    self._is_elite_candidate(_to_str_dict(row))
+                    and elite_context_rejection_reason(_to_str_dict(row)) is None
+                    for _, row in points_input_df.iterrows()
+                ]
+            ].copy() if not points_input_df.empty else pd.DataFrame()
+            player_points_elite_admission_df = self._build_player_points_elite_admission(
+                input_candidates_df=points_input_df,
+                primary_df=points_primary_df,
+                post_exposure_df=points_primary_df,
+                final_df=elite_df,
+                sort_columns=self._sort_priority_columns(points_input_df, elite_priority=True),
+            )
+            final_board_construction = {
+                "elite": self._build_board_construction_trace(
+                    input_live_candidates=points_input_df,
+                    post_primary_selection=points_primary_df,
+                    post_exposure_caps=points_primary_df,
+                    post_backfill=elite_df,
+                    player_points_elite_admission=player_points_elite_admission_df,
+                ),
+                "full_market": self._build_board_construction_trace(
+                    input_live_candidates=points_input_df,
+                    post_primary_selection=full_market_df,
+                    post_exposure_caps=full_market_df,
+                    post_backfill=full_market_df,
+                ),
+            }
+            final_board_construction["elite"]["elite_context_safety_gate"] = elite_context_safety_summary
             rejected_df = pd.DataFrame()
             grading_df, grading_summary = self._grade_history(prediction_date=prediction_date)
             grading_bucket_summary = summarize_graded_props(grading_df.to_dict("records")) if not grading_df.empty else summarize_graded_props([])
             self._append_history(self.prediction_history_path, elite_df if not elite_df.empty else qualified_pool_df)
-            board_diagnostics = {
-                "board_counts": {
-                    "elite": int(len(elite_df)),
-                    "full_market": int(len(full_market_df)),
-                    "qualified_pool": int(len(qualified_pool_df)),
-                },
-                "pipeline_mode": "authoritative_package_pipeline",
-                "legacy_pipeline_enabled": False,
-            }
+            board_diagnostics = self._build_board_diagnostics(
+                prediction_date=prediction_date,
+                qualified_pool_df=qualified_pool_df,
+                elite_df=elite_df,
+                full_market_df=full_market_df,
+                rejected_df=rejected_df,
+                final_board_construction=final_board_construction,
+            )
+            board_diagnostics["pipeline_mode"] = "authoritative_package_pipeline"
+            board_diagnostics["legacy_pipeline_enabled"] = False
+            board_diagnostics["elite_context_safety_gate"] = elite_context_safety_summary
             summary = dict(result.summary or {})
             summary.setdefault("prediction_date", prediction_date)
             summary["pipeline_mode"] = "authoritative_package_pipeline"
@@ -3900,9 +4132,55 @@ class CourtVisionAI:
             summary["full_market_count"] = int(len(full_market_df))
             summary["markets_evaluated"] = int(len(qualified_pool_df))
             elite_caution_counts = self._context_caution_counts(elite_df)
+            elite_selection = (
+                elite_df.get("selection", pd.Series("", index=elite_df.index))
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .str.lower()
+                if not elite_df.empty
+                else pd.Series(dtype=str)
+            )
+            elite_edge = (
+                pd.to_numeric(elite_df.get("edge", pd.Series(dtype=float)), errors="coerce").fillna(0.0)
+                if not elite_df.empty
+                else pd.Series(dtype=float)
+            )
+            team_column = "team" if "team" in elite_df.columns else ("team_abbr" if "team_abbr" in elite_df.columns else "")
+            team_counts = (
+                elite_df[team_column].fillna("").astype(str).str.strip().str.upper().replace("", pd.NA).dropna().value_counts()
+                if team_column and not elite_df.empty
+                else pd.Series(dtype=int)
+            )
+            game_counts = (
+                elite_df["game_id"].fillna("").astype(str).str.strip().replace("", pd.NA).dropna().value_counts()
+                if "game_id" in elite_df.columns and not elite_df.empty
+                else pd.Series(dtype=int)
+            )
+            summary["board_analytics"] = {
+                **(summary.get("board_analytics", {}) if isinstance(summary.get("board_analytics"), dict) else {}),
+                "elite_count": int(len(elite_df)),
+                "overs_count": int(elite_selection.eq("over").sum()),
+                "unders_count": int(elite_selection.eq("under").sum()),
+                "avg_edge": round(float(elite_edge.mean()), 4) if not elite_edge.empty else 0.0,
+                "avg_abs_edge": round(float(elite_edge.abs().mean()), 4) if not elite_edge.empty else 0.0,
+                "max_team_exposure": int(team_counts.max()) if not team_counts.empty else 0,
+                "max_game_exposure": int(game_counts.max()) if not game_counts.empty else 0,
+                "unique_teams": int(len(team_counts)),
+                "unique_games": int(len(game_counts)),
+            }
+            summary["elite_overs_count"] = int(elite_selection.eq("over").sum())
+            summary["elite_unders_count"] = int(elite_selection.eq("under").sum())
+            summary["elite_avg_edge"] = summary["board_analytics"]["avg_edge"]
+            summary["elite_avg_abs_edge"] = summary["board_analytics"]["avg_abs_edge"]
+            summary["elite_max_team_exposure"] = summary["board_analytics"]["max_team_exposure"]
+            summary["elite_max_game_exposure"] = summary["board_analytics"]["max_game_exposure"]
+            summary["elite_unique_teams"] = summary["board_analytics"]["unique_teams"]
+            summary["elite_unique_games"] = summary["board_analytics"]["unique_games"]
             summary["elite_high_caution_count"] = int(elite_caution_counts.get("high", 0))
             summary["elite_medium_caution_count"] = int(elite_caution_counts.get("medium", 0))
             summary["elite_low_caution_count"] = int(elite_caution_counts.get("low", 0))
+            summary["elite_context_safety_gate"] = elite_context_safety_summary
             summary["manual_context_diagnostics_path"] = str(manual_context_path)
             summary["manual_context"] = {
                 "file_found": bool(manual_context_diagnostics.get("file_found", False)),
@@ -3985,7 +4263,8 @@ class CourtVisionAI:
                 "near_miss_props": pd.DataFrame(),
                 "rejected_props": rejected_df,
                 "board_diagnostics": board_diagnostics,
-                "final_board_construction": summary.get("final_board_construction", {}),
+                "final_board_construction": final_board_construction,
+                "player_points_elite_admission": player_points_elite_admission_df,
                 "summary": summary,
                 "games": games,
                 "odds": odds,
@@ -4144,6 +4423,43 @@ class CourtVisionAI:
             team_baselines=self._merge_passive_team_context(team_baselines, passive_team_context),
             odds=odds,
         )
+        original_elite_count = int(len(elite_df))
+        elite_df, full_market_df, elite_context_safety_summary = self._apply_elite_context_safety_gate(
+            elite_df,
+            full_market_df,
+            target_size=original_elite_count,
+        )
+        contextual_points_input_df = prepared_selected_df if not prepared_selected_df.empty else full_market_df
+        contextual_primary_df = contextual_points_input_df[
+            [
+                self._is_elite_candidate(_to_str_dict(row))
+                and elite_context_rejection_reason(_to_str_dict(row)) is None
+                for _, row in contextual_points_input_df.iterrows()
+            ]
+        ].copy() if not contextual_points_input_df.empty else pd.DataFrame()
+        contextual_player_points_elite_admission_df = self._build_player_points_elite_admission(
+            input_candidates_df=contextual_points_input_df,
+            primary_df=contextual_primary_df,
+            post_exposure_df=contextual_primary_df,
+            final_df=elite_df,
+            sort_columns=self._sort_priority_columns(contextual_points_input_df, elite_priority=True),
+        )
+        final_board_construction = {
+            "elite": self._build_board_construction_trace(
+                input_live_candidates=contextual_points_input_df,
+                post_primary_selection=contextual_primary_df,
+                post_exposure_caps=contextual_primary_df,
+                post_backfill=elite_df,
+                player_points_elite_admission=contextual_player_points_elite_admission_df,
+            ),
+            "full_market": self._build_board_construction_trace(
+                input_live_candidates=contextual_points_input_df,
+                post_primary_selection=full_market_df,
+                post_exposure_caps=full_market_df,
+                post_backfill=full_market_df,
+            ),
+        }
+        final_board_construction["elite"]["elite_context_safety_gate"] = elite_context_safety_summary
         graded_df, grading_summary = self._grade_history(prediction_date=prediction_date)
         grading_bucket_summary = summarize_graded_props(graded_df.to_dict("records")) if not graded_df.empty else summarize_graded_props([])
 
@@ -4220,6 +4536,7 @@ class CourtVisionAI:
             "top_qualification_reasons": board_diagnostics.get("qualified_by_reason", [])[:8],
             "top_rejection_reasons": reason_counts.head(8).to_dict(orient="records"),
             "final_board_construction": board_diagnostics.get("final_board_construction", {}),
+            "elite_context_safety_gate": elite_context_safety_summary,
             "data_status": self._build_data_status_message(
                 games=games,
                 odds=odds,
@@ -4350,6 +4667,7 @@ class CourtVisionAI:
             "rejected_props": rejected_df,
             "board_diagnostics": board_diagnostics,
             "final_board_construction": final_board_construction,
+            "player_points_elite_admission": contextual_player_points_elite_admission_df,
             "summary": summary,
             "games": games,
             "odds": odds,
@@ -7514,6 +7832,36 @@ def _write_prediction_text(
     path.write_text(text, encoding="utf-8")
 
 
+def _refresh_elite_audit_summary(
+    *,
+    out_dir: Path,
+    prediction_date: str,
+    summary: Mapping[str, Any],
+    caller: str,
+) -> None:
+    path = out_dir / "runtime" / "operator" / f"elite_pipeline_audit_summary_{prediction_date}.json"
+    payload: dict[str, Any] = {
+        "slate_date": prediction_date,
+        "totals": {},
+        "rows": [],
+    }
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(existing, dict):
+                payload.update(existing)
+        except Exception:
+            pass
+    payload["summary"] = dict(summary)
+    _write_prediction_json(
+        path,
+        payload,
+        requested_prediction_date=prediction_date,
+        caller=caller,
+        artifact_label="elite_pipeline_audit_summary",
+    )
+
+
 FINAL_GRADING_RESULTS = {"win", "loss", "push"}
 
 
@@ -8197,6 +8545,12 @@ def _write_cli_outputs(
         requested_prediction_date=prediction_date,
         caller=prediction_artifact_caller,
         artifact_label="board_diagnostics_json",
+    )
+    _refresh_elite_audit_summary(
+        out_dir=out_dir,
+        prediction_date=prediction_date,
+        summary=summary,
+        caller=prediction_artifact_caller,
     )
     _write_prediction_text(
         paths["elite_decision_report"],

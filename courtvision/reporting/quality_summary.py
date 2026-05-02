@@ -11,6 +11,7 @@ from typing import Any, Iterable, Sequence
 
 import pandas as pd
 
+ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER = "elite_reject_context_high_caution_over"
 
 PREDICTION_ARTIFACT_NAMES: tuple[str, ...] = (
     "elite_board",
@@ -795,6 +796,42 @@ def _coverage_warnings(
     return warnings
 
 
+def _elite_context_safety_summary(full_market_df: pd.DataFrame, elite_df: pd.DataFrame) -> dict[str, Any]:
+    def _reason_count(df: pd.DataFrame) -> int:
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            return 0
+        count = 0
+        for column in ("final_elite_rejection_reason", "elite_rejection_reason"):
+            if column in df.columns:
+                count += int(
+                    df[column]
+                    .fillna("")
+                    .astype(str)
+                    .str.strip()
+                    .eq(ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER)
+                    .sum()
+                )
+        return count
+
+    def _context_mask_count(df: pd.DataFrame) -> int:
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            return 0
+        selection = df.get("selection", pd.Series("", index=df.index)).fillna("").astype(str).str.strip().str.lower()
+        caution = df.get("context_caution_level", pd.Series("", index=df.index)).fillna("").astype(str).str.strip().str.lower()
+        alignment = df.get("context_pick_alignment", pd.Series("", index=df.index)).fillna("").astype(str).str.strip().str.lower()
+        return int((selection.eq("over") & caution.eq("high") & alignment.eq("conflicted")).sum())
+
+    rejected = _reason_count(full_market_df)
+    elite_remaining = _context_mask_count(elite_df)
+    return {
+        "rejection_reason": ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER,
+        "full_market_high_caution_conflicted_over_count": _context_mask_count(full_market_df),
+        "rejected_from_final_elite_count": rejected,
+        "elite_high_caution_conflicted_over_count": elite_remaining,
+        "status": "warning" if elite_remaining else "ok",
+    }
+
+
 def _artifact_counts(full_market_df: pd.DataFrame, elite_df: pd.DataFrame) -> dict[str, Any]:
     frame = full_market_df if not full_market_df.empty else elite_df
     if frame.empty:
@@ -1136,6 +1173,7 @@ def build_quality_summary(
     }
     kelly_safety = _kelly_safety_summary(kelly_df)
     risk_exposure = _exposure_summary(kelly_df, elite_df)
+    elite_context_safety = _elite_context_safety_summary(full_market_df, elite_df)
     rejection_reasons_market_rows, rejection_counts_by_market = _rejection_reasons_by_market(
         audit_summary=audit_summary,
         market_availability=market_availability,
@@ -1153,6 +1191,17 @@ def build_quality_summary(
         kelly_safety=kelly_safety,
         market_rows=market_rows,
     )
+    if elite_context_safety["rejected_from_final_elite_count"]:
+        coverage_warnings.append(
+            "Elite context safety gate excluded "
+            f"{elite_context_safety['rejected_from_final_elite_count']} "
+            "high-caution conflicted OVER candidate(s) from final elite."
+        )
+    if elite_count == 0 and elite_context_safety["rejected_from_final_elite_count"]:
+        coverage_warnings.append(
+            "Elite board is empty after the context safety gate; no-bet is preferred "
+            "over filling elite with Kelly-blocked high-caution OVERs."
+        )
     board_movement = _board_movement_summary(
         previous_payload=previous_payload,
         current_elite_count=elite_count,
@@ -1185,6 +1234,7 @@ def build_quality_summary(
             "coverage_warnings": coverage_warnings,
         },
         "kelly_safety_summary": kelly_safety,
+        "elite_context_safety_gate": elite_context_safety,
         "risk_exposure_summary": risk_exposure,
         "board_movement_summary": board_movement,
         "date_isolation_check": date_isolation,
@@ -1215,6 +1265,7 @@ def _format_quality_summary_text(payload: dict[str, Any]) -> str:
     funnel = payload["candidate_funnel"]
     market_coverage = payload.get("market_coverage", {})
     kelly = payload["kelly_safety_summary"]
+    elite_context_safety = payload.get("elite_context_safety_gate", {})
     exposure = payload["risk_exposure_summary"]
     movement = payload["board_movement_summary"]
     isolation = payload["date_isolation_check"]
@@ -1290,6 +1341,22 @@ def _format_quality_summary_text(payload: dict[str, Any]) -> str:
             lines.append(f"- {row['reason']}: {row['count']} ({row['percentage']:.2f}%)")
     else:
         lines.append("- none available")
+
+    lines.extend(
+        [
+            "",
+            "Elite Context Safety Gate",
+            "-" * 72,
+            f"- rejection reason: {elite_context_safety.get('rejection_reason', ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER)}",
+            "- full-market high-caution conflicted OVER count: "
+            f"{elite_context_safety.get('full_market_high_caution_conflicted_over_count', 0)}",
+            "- rejected from final elite count: "
+            f"{elite_context_safety.get('rejected_from_final_elite_count', 0)}",
+            "- elite high-caution conflicted OVER count: "
+            f"{elite_context_safety.get('elite_high_caution_conflicted_over_count', 0)}",
+            f"- status: {elite_context_safety.get('status', 'unknown')}",
+        ]
+    )
 
     lines.extend(
         [

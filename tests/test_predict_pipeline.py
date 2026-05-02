@@ -959,7 +959,8 @@ class TestPredictionPipeline:
         assert "- neutral/under: graded=0, pending=1, hit_rate=n/a, roi=n/a, status=insufficient_sample" in text
         assert "- aligned/player_points: graded=1, pending=0, hit_rate=100.0%, roi=90.9%, status=ok" in text
         assert "Elite board locked to player_points only." in text
-        assert "Context preview signals are passive labels only" in text
+        assert "Context preview signals do not alter projections." in text
+        assert "High-caution conflicted OVER context gates final elite admission and Kelly staking." in text
         assert "Manual player context is diagnostic only; matched candidates: 1." in text
         assert metadata["full_market_counts"] == {"player_points": 1, "player_rebounds": 1}
         assert metadata["elite_context_alignment"]["conflicted"] == 1

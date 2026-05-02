@@ -1027,3 +1027,77 @@ def test_quality_history_update_does_not_modify_prediction_artifacts(tmp_path: P
     assert elite_path.read_bytes() == original_bytes
     assert elite_path.stat().st_mtime_ns == original_mtime_ns
     assert (runtime_root / "operator" / QUALITY_HISTORY_CSV_NAME).exists()
+
+
+def test_quality_summary_reports_elite_context_safety_gate(tmp_path: Path) -> None:
+    prediction_date = "2026-05-02"
+    runtime_root = tmp_path / "runtime"
+    operator = runtime_root / "operator"
+
+    _write_csv(
+        operator / f"elite_board_{prediction_date}.csv",
+        [
+            {
+                "prediction_date": prediction_date,
+                "player_name": "Safer Under",
+                "market_type": "player_points",
+                "selection": "under",
+                "context_caution_level": "low",
+                "context_pick_alignment": "aligned",
+                "final_elite_rejection_reason": "",
+            }
+        ],
+    )
+    _write_csv(
+        operator / f"full_market_board_{prediction_date}.csv",
+        [
+            {
+                "prediction_date": prediction_date,
+                "player_name": "Blocked Over",
+                "market_type": "player_points",
+                "selection": "over",
+                "context_caution_level": "high",
+                "context_pick_alignment": "conflicted",
+                "final_elite_rejection_reason": "elite_reject_context_high_caution_over",
+            },
+            {
+                "prediction_date": prediction_date,
+                "player_name": "Safer Under",
+                "market_type": "player_points",
+                "selection": "under",
+                "context_caution_level": "low",
+                "context_pick_alignment": "aligned",
+                "final_elite_rejection_reason": "",
+            },
+        ],
+    )
+    _write_csv(
+        operator / f"kelly_stakes_{prediction_date}.csv",
+        [
+            {
+                "prediction_date": prediction_date,
+                "player_name": "Safer Under",
+                "market_type": "player_points",
+                "selection": "under",
+                "stake_amount": 8.0,
+                "expected_value": 1.2,
+                "kelly_eligible": True,
+                "skip_reason": "",
+            }
+        ],
+    )
+
+    text, payload = build_quality_summary(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        out_dir=tmp_path,
+        generated_at="2026-05-03T00:00:00+00:00",
+    )
+
+    gate = payload["elite_context_safety_gate"]
+    assert gate["rejected_from_final_elite_count"] == 1
+    assert gate["elite_high_caution_conflicted_over_count"] == 0
+    assert gate["status"] == "ok"
+    assert any("Elite context safety gate excluded 1" in warning for warning in payload["warnings"])
+    assert "Elite Context Safety Gate" in text
+    assert "elite_reject_context_high_caution_over" in text

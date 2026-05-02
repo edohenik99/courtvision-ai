@@ -190,6 +190,22 @@ def _caution_counts(df: pd.DataFrame) -> dict[str, int]:
     return counts
 
 
+def _elite_context_gate_count(df: pd.DataFrame) -> int:
+    if df.empty:
+        return 0
+    for column in ("final_elite_rejection_reason", "elite_rejection_reason"):
+        if column in df.columns:
+            return int(
+                df[column]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .eq("elite_reject_context_high_caution_over")
+                .sum()
+            )
+    return 0
+
+
 def _alignment_performance_line(label: str, item: Any) -> str:
     payload = item if isinstance(item, dict) else {}
     graded = payload.get("graded_picks", payload.get("graded_count", 0))
@@ -252,6 +268,7 @@ def build_daily_summary(
     elite_alignment = _alignment_counts(elite_df)
     elite_caution = _caution_counts(elite_df)
     full_market_alignment = _alignment_counts(full_market_df)
+    elite_context_gate_count = _elite_context_gate_count(full_market_df)
     shadow_totals = shadow.get("totals", {}) if isinstance(shadow, dict) else {}
     context_alignment_performance = (
         shadow.get("context_alignment_performance", {})
@@ -410,8 +427,15 @@ def build_daily_summary(
     lines.extend(["", "Warnings / Readiness Notes", "-" * 72])
     lines.append("- Elite board locked to player_points only.")
     lines.append("- Kelly stakes locked to player_points only.")
-    lines.append("- Context preview signals are passive labels only and are not applied to projections or staking.")
-    lines.append("- Context caution levels are passive labels only and are not applied to selection or stake sizing.")
+    lines.append("- Context preview signals do not alter projections.")
+    lines.append("- High-caution conflicted OVER context gates final elite admission and Kelly staking.")
+    if elite_context_gate_count:
+        lines.append(
+            f"- Elite context safety gate excluded {elite_context_gate_count} "
+            "high-caution conflicted OVER candidate(s) from final elite."
+        )
+    if elite_df.empty and elite_context_gate_count:
+        lines.append("- No-bet condition: elite board is empty after the context safety gate.")
     if manual_context:
         matches = int(manual_context.get("candidate_matches") or 0)
         lines.append(f"- Manual player context is diagnostic only; matched candidates: {matches}.")
@@ -446,6 +470,7 @@ def build_daily_summary(
         "elite_high_caution_count": elite_caution["high"],
         "elite_medium_caution_count": elite_caution["medium"],
         "elite_low_caution_count": elite_caution["low"],
+        "elite_context_safety_gate_rejected_count": elite_context_gate_count,
         "full_market_context_alignment": full_market_alignment,
         "shadow_totals": shadow_totals,
         "context_alignment_performance": context_alignment_performance,

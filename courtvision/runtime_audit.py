@@ -627,6 +627,7 @@ class BoardAuditPolicy:
 
     def _player_points_elite_admission_payload(self, df: pd.DataFrame) -> dict[str, Any]:
         bucket_order = [
+            ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER,
             "failed_hard_guard",
             "lost_on_score",
             "lost_on_confidence",
@@ -1184,6 +1185,8 @@ REJECT_NEGATIVE_EDGE_DIRECTION = "reject_negative_edge_direction"
 REJECT_UNREALISTIC_LINE = "reject_unrealistic_line"
 REJECT_HEAVY_FAVORITE_ODDS = "reject_heavy_favorite_odds"
 REJECT_OTHER = "reject_other"
+ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER = "elite_reject_context_high_caution_over"
+KELLY_PROJECTED_SKIP_CONTEXT_HIGH_CAUTION_OVER = "context_high_caution_over"
 PASSED_TO_ELITE = "passed_to_elite"
 TOTAL_CANDIDATES = "total_candidates"
 
@@ -1350,6 +1353,10 @@ def get_elite_rejection_reason(row: dict[str, Any]) -> str | None:
     if bool(row.get("exposure_limit_fail", False)):
         return REJECT_EXPOSURE_LIMIT
 
+    context_reason = elite_context_rejection_reason(row)
+    if context_reason is not None:
+        return context_reason
+
     # Check directional edge for player_points
     if market == "player_points":
         if selection == "over" and edge <= 0:
@@ -1374,6 +1381,25 @@ def get_elite_rejection_reason(row: dict[str, Any]) -> str | None:
     return None
 
 
+def projected_kelly_skip_reason(row: Mapping[str, Any]) -> str:
+    """Return the Kelly skip reason implied by context-only safety rules."""
+    selection = str(row.get("selection", row.get("side", "")) or "").strip().lower()
+    caution = str(row.get("context_caution_level", "") or "").strip().lower()
+    if selection == "over" and caution == "high":
+        return KELLY_PROJECTED_SKIP_CONTEXT_HIGH_CAUTION_OVER
+    return ""
+
+
+def elite_context_rejection_reason(row: Mapping[str, Any]) -> str | None:
+    """Return the elite safety-gate reason for context-blocked picks."""
+    selection = str(row.get("selection", row.get("side", "")) or "").strip().lower()
+    caution = str(row.get("context_caution_level", "") or "").strip().lower()
+    alignment = str(row.get("context_pick_alignment", "") or "").strip().lower()
+    if selection == "over" and caution == "high" and alignment == "conflicted":
+        return ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER
+    return None
+
+
 def assemble_elite_board(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
     Defensive assembly of elite board with directional edge validation.
@@ -1389,6 +1415,13 @@ def assemble_elite_board(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         player = str(
             row.get("player_name", row.get("player", "unknown"))
         )
+
+        if elite_context_rejection_reason(row) is not None:
+            print(
+                f"[elite_defensive_catch] {player}: "
+                f"{ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER}"
+            )
+            continue
 
         if market == "player_points":
             if selection == "over" and edge <= 0:
@@ -1411,6 +1444,8 @@ __all__ = [
     "BoardAuditPolicy",
     "EliteTelemetry",
     "get_elite_rejection_reason",
+    "elite_context_rejection_reason",
+    "projected_kelly_skip_reason",
     "assemble_elite_board",
     "REJECT_INJURY_FLAG",
     "REJECT_MINUTES_VOLATILITY",
@@ -1421,6 +1456,8 @@ __all__ = [
     "REJECT_UNREALISTIC_LINE",
     "REJECT_HEAVY_FAVORITE_ODDS",
     "REJECT_OTHER",
+    "ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER",
+    "KELLY_PROJECTED_SKIP_CONTEXT_HIGH_CAUTION_OVER",
     "PASSED_TO_ELITE",
     "TOTAL_CANDIDATES",
 ]
