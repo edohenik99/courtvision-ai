@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>CourtVision · Dashboard</title>
+<link rel="stylesheet" href="styles/tokens.css"/>
+<link rel="stylesheet" href="styles/dashboard.css"/>
+</head>
+<body>
+  <header class="cv-header">
+    <div class="cv-brand">
+      <img src="assets/logo-mark.svg" width="32" height="32" alt=""/>
+      <span class="cv-wordmark">CourtVision</span>
+    </div>
+    <div class="cv-header-meta">
+      <label class="cv-label" for="run-date">Run date</label>
+      <input id="run-date" class="cv-input mono" type="date"/>
+      <span id="run-status" class="cv-pill" data-state="idle">
+        <span class="cv-dot"></span>
+        <span class="cv-pill-label">Loading…</span>
+      </span>
+      <button id="refresh-btn" class="cv-btn ghost">Refresh</button>
+    </div>
+  </header>
+
+  <main class="cv-main">
+    <!-- Diagnostics summary -->
+    <section class="cv-section" id="diagnostics-section">
+      <h2 class="cv-h2">Run Summary</h2>
+      <p class="cv-caption">Counts and quality indicators from the latest prediction run.</p>
+      <div id="diagnostics-cards" class="cv-metric-row" aria-live="polite"></div>
+    </section>
+
+    <!-- Data source health -->
+    <section class="cv-section" id="health-section">
+      <h2 class="cv-h2">Data Source Status</h2>
+      <p class="cv-caption">Provider, injuries, markets, baselines.</p>
+      <div id="health-chips" class="cv-health-row" aria-live="polite"></div>
+    </section>
+
+    <!-- Elite board -->
+    <section class="cv-section" id="elite-section">
+      <h2 class="cv-h2">Elite Board</h2>
+      <p class="cv-caption">Hard-filtered board for strongest market-backed plays.</p>
+      <div id="elite-board" class="cv-board"></div>
+    </section>
+
+    <!-- Full market board -->
+    <section class="cv-section" id="full-market-section">
+      <h2 class="cv-h2">Full Market Board</h2>
+      <p class="cv-caption">Top picks per market with real live lines.</p>
+      <div id="full-market-board" class="cv-board"></div>
+    </section>
+
+    <!-- SGP board -->
+    <section class="cv-section" id="sgp-section">
+      <h2 class="cv-h2">SGP Board</h2>
+      <p class="cv-caption">Same-game parlay legs grouped by game.</p>
+      <div id="sgp-board" class="cv-board"></div>
+    </section>
+  </main>
+
+  <!-- Player edge breakdown modal -->
+  <div id="breakdown-modal" class="cv-modal" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="breakdown-title">
+    <div class="cv-modal-scrim" data-close></div>
+    <div class="cv-modal-card">
+      <header class="cv-modal-header">
+        <h3 id="breakdown-title" class="cv-h3">Edge breakdown</h3>
+        <button class="cv-btn ghost cv-modal-close" data-close aria-label="Close">×</button>
+      </header>
+      <div id="breakdown-body" class="cv-modal-body"></div>
+    </div>
+  </div>
+
+  <script src="scripts/data.js"></script>
+  <script src="scripts/boards.js"></script>
+  <script src="scripts/diagnostics.js"></script>
+  <script src="scripts/breakdown.js"></script>
+  <script src="scripts/app.js"></script>
+</body>
+</html>
