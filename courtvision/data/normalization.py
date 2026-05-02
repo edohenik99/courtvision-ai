@@ -202,6 +202,15 @@ def normalize_odds_frame(
     out = df.copy()
     if "player_id" not in out.columns:
         out["player_id"] = None
+    # Handle missing raw_market_name - map from BallDontLie fields
+    if "raw_market_name" not in out.columns:
+        # Try to map from prop_type or market fields
+        if "prop_type" in out.columns:
+            out["raw_market_name"] = out["prop_type"]
+        elif "market" in out.columns:
+            out["raw_market_name"] = out["market"]
+        else:
+            out["raw_market_name"] = None
     out["market_type"] = out["raw_market_name"].apply(map_market_type)
     out["raw_stat_key"] = out["market_type"].apply(market_to_stat_key)
     out["market_alias"] = out["market_type"]
