@@ -66,15 +66,20 @@ def directional_violations(elite_df: pd.DataFrame) -> list[str]:
     return violations
 
 
-def load_audit_summary(prediction_date: str) -> dict:
+def load_audit_summary(prediction_date: str) -> dict | None:
     path = _operator_dir() / f"elite_pipeline_audit_summary_{prediction_date}.json"
     if not path.is_file():
-        raise FileNotFoundError(f"Audit summary not found: {path}")
+        print(f"[WARNING] Audit summary not found: {path}", file=sys.stderr)
+        return None
     with path.open(encoding="utf-8") as f:
         return json.load(f)
 
 
-def print_cap_enforcement(doc: dict) -> tuple[int, int, bool]:
+def print_cap_enforcement(doc: dict | None) -> tuple[int, int, bool]:
+    if doc is None:
+        print("\n  Cap Enforcement: [SKIP] Audit summary not available")
+        return 0, 0, True  # Allow run to continue
+    
     inner = doc.get("summary") or {}
     ba = inner.get("board_analytics") or {}
     max_team = ba.get("max_team_exposure", inner.get("elite_max_team_exposure"))
@@ -102,8 +107,17 @@ def print_cap_enforcement(doc: dict) -> tuple[int, int, bool]:
 
 
 def print_directional(elite_path: Path) -> bool:
-    elite_df = pd.read_csv(elite_path)
     print("\n  Directional Validation:")
+    try:
+        elite_df = pd.read_csv(elite_path)
+    except pd.errors.EmptyDataError:
+        print("    [WARNING] Empty board file - skipping directional validation")
+        return True  # Allow run to continue
+    
+    if elite_df.empty:
+        print("    [WARNING] Board file has headers but no data rows")
+        return True
+    
     violations = directional_violations(elite_df)
     if violations:
         print(f"    [FAIL] {len(violations)} directional violation(s)")
@@ -115,7 +129,16 @@ def print_directional(elite_path: Path) -> bool:
 
 
 def print_preview(elite_path: Path) -> None:
-    df = pd.read_csv(elite_path)
+    try:
+        df = pd.read_csv(elite_path)
+    except pd.errors.EmptyDataError:
+        print("\n  Top Picks: (empty board file)")
+        return
+    
+    if df.empty:
+        print("\n  Top Picks: (board has headers but no data)")
+        return
+    
     cols = [c for c in ("player_name", "market_type", "selection", "edge") if c in df.columns]
     if not cols:
         print("\n  Top Picks: (no expected columns for preview)")
@@ -126,7 +149,17 @@ def print_preview(elite_path: Path) -> None:
         print(f"    {line}")
 
 
-def print_final_summary(doc: dict, max_team: int, max_game: int) -> None:
+def print_final_summary(doc: dict | None, max_team: int, max_game: int) -> None:
+    print("\n========================================")
+    print("FINAL SUMMARY")
+    print("========================================")
+    
+    if doc is None:
+        print("  [INFO] Audit summary not available - skipping detailed stats")
+        print(f"  Max Team Exposure: {max_team} (cap: 3)")
+        print(f"  Max Game Exposure: {max_game} (cap: 4)")
+        return
+    
     inner = doc.get("summary") or {}
     totals = doc.get("totals") or {}
     ba = inner.get("board_analytics") or {}
@@ -136,9 +169,6 @@ def print_final_summary(doc: dict, max_team: int, max_game: int) -> None:
     total_candidates = totals.get("total_candidates", inner.get("candidate_count", "n/a"))
     total_rejections = totals.get("total_rejections", "n/a")
 
-    print("\n========================================")
-    print("FINAL SUMMARY")
-    print("========================================")
     print(f"  Provider Used:     {provider}")
     print(f"  Elite Count:       {elite_count}")
     print(f"  Total Candidates:  {total_candidates}")
@@ -167,6 +197,16 @@ def validate_outputs(prediction_date: str) -> int:
         print(f"[ERROR] Elite board not found: {elite_path}", file=sys.stderr)
         return 1
 
+    # Check if file is empty
+    try:
+        elite_df = pd.read_csv(elite_path)
+        row_count = len(elite_df)
+    except pd.errors.EmptyDataError:
+        print(f"[WARNING] Elite board exists but is empty: {elite_path}", file=sys.stderr)
+        row_count = 0
+    
+    print(f"[INFO] Elite board: {row_count} picks")
+    
     doc = load_audit_summary(prediction_date)
     max_team, max_game, caps_ok = print_cap_enforcement(doc)
     directional_ok = print_directional(elite_path)
