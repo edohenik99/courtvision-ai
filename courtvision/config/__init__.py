@@ -18,7 +18,11 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+
+# Project root directory (2 levels up from this file)
+ROOT_DIR = Path(__file__).resolve().parents[2]
 
 from courtvision.balldontlie_auth import (
     BALLDONTLIE_API_KEY_ENV_VAR,

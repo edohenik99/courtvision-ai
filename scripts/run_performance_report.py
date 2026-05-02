@@ -60,10 +60,20 @@ def main():
     
     if df.empty:
         print("ERROR: No pick history data found.")
-        print("       Run predictions and grading first.")
+        print("       Run predictions first to generate history.")
         sys.exit(1)
     
     print(f"       Loaded {len(df)} picks from history")
+    
+    # Check for graded results
+    has_graded_results = "result" in df.columns and df["result"].notna().any()
+    graded_count = df["result"].notna().sum() if "result" in df.columns else 0
+    
+    if not has_graded_results or graded_count == 0:
+        print("\n[!] Pick history exists, but graded results are missing.")
+        print("    Run grading before ROI analysis.")
+        print(f"    Total picks: {len(df)}, Graded: {graded_count}")
+        sys.exit(1)
     
     # Generate report
     print("\n[2/3] Generating performance analytics...")
