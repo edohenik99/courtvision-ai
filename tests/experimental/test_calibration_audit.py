@@ -98,9 +98,11 @@ class TestConfidenceCalibration:
         bucket_confidences = [0.55, 0.65, 0.75, 0.85]
 
         for conf in bucket_confidences:
-            for _ in range(50):  # 50 picks per bucket
-                # Generate hit based on exact confidence
-                hit = np.random.random() < conf
+            target_hits = round(conf * 50)
+            for bucket_index in range(50):  # 50 picks per bucket
+                # Keep this deterministic; random sampling can make a calibrated
+                # fixture fail its own threshold in unlucky full-suite runs.
+                hit = bucket_index < target_hits
                 picks.append({
                     "pick_id": f"p{len(picks)}",
                     "prediction_date": "2024-01-01",
@@ -115,7 +117,7 @@ class TestConfidenceCalibration:
                     "clv": (conf - 0.5) * 0.1,
                 })
 
-        builder = ReportBuilder()
+        builder = ReportBuilder(RollingWindow(window_size=len(picks), min_samples=30))
         for p in picks:
             builder.add_pick(**p)
 

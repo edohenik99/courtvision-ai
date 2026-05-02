@@ -16,6 +16,19 @@ if str(ROOT_DIR) not in sys.path:
 
 from courtvision.reporting.kelly_performance import build_kelly_decision_performance
 
+RUN_HEALTH_RECOMMENDATIONS: dict[str, str] = {
+    "HEALTHY": "Run is bet-ready within configured staking limits.",
+    "HEALTHY_LOW_VOLUME": "Run is valid but low-volume; avoid forcing extra action.",
+    "DEGRADED_LOW_COVERAGE": "Provider/candidate coverage is thin; treat picks cautiously.",
+    "DEGRADED_CONTEXT_BLOCKED": (
+        "Model found edges but context safety rejected too many; no threshold loosening recommended."
+    ),
+    "NO_BET": "No stakeable picks. Do not force action.",
+    "ERROR_OR_INCOMPLETE": "Run artifacts are missing or incomplete; review validation before using picks.",
+}
+RUN_HEALTH_CONTEXT_BLOCKED_RATIO = 0.5
+RUN_HEALTH_LOW_VOLUME_KELLY_ELIGIBLE = 2
+
 
 def _safe_float(value: Any) -> float | None:
     if value is None:
@@ -206,6 +219,91 @@ def _elite_context_gate_count(df: pd.DataFrame) -> int:
     return 0
 
 
+def _kelly_high_caution_over_skip_count(df: pd.DataFrame) -> int:
+    if df.empty or "skip_reason" not in df.columns:
+        return 0
+    return int(
+        df["skip_reason"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .eq("context_high_caution_over")
+        .sum()
+    )
+
+
+def _missing_or_unreadable_required_artifact(warnings: list[str], *, elite_count: int) -> bool:
+    for warning in warnings:
+        text = warning.lower()
+        if "missing file:" not in text and "could not read csv" not in text:
+            continue
+        if "elite_board" in text or "full_market_board" in text:
+            return True
+        if elite_count > 0 and "kelly_stakes" in text:
+            return True
+    return False
+
+
+def _daily_run_health_summary(
+    *,
+    elite_df: pd.DataFrame,
+    full_market_df: pd.DataFrame,
+    kelly_df: pd.DataFrame,
+    kelly_eligible_count: int,
+    warnings: list[str],
+) -> dict[str, Any]:
+    flags: list[str] = []
+    elite_count = int(len(elite_df))
+    full_market_count = int(len(full_market_df))
+    kelly_rows = int(len(kelly_df))
+    context_gate_rejections = _elite_context_gate_count(full_market_df)
+    high_caution_over_skips = _kelly_high_caution_over_skip_count(kelly_df)
+
+    if _missing_or_unreadable_required_artifact(warnings, elite_count=elite_count):
+        flags.append("required_artifact_missing_or_unreadable")
+    if elite_count == 0:
+        flags.append("elite_board_empty")
+    if kelly_rows > 0 and kelly_eligible_count == 0:
+        flags.append("kelly_rows_exist_no_eligible")
+    if kelly_rows > 0 and (high_caution_over_skips / kelly_rows) >= RUN_HEALTH_CONTEXT_BLOCKED_RATIO:
+        flags.append("kelly_context_high_caution_over_skip_rate_high")
+    if full_market_count > 0 and (context_gate_rejections / full_market_count) >= RUN_HEALTH_CONTEXT_BLOCKED_RATIO:
+        flags.append("elite_context_gate_rejection_rate_high")
+
+    if "required_artifact_missing_or_unreadable" in flags:
+        status = "ERROR_OR_INCOMPLETE"
+        reason = "Required artifact/read validation failed."
+    elif "elite_board_empty" in flags or "kelly_rows_exist_no_eligible" in flags:
+        status = "NO_BET"
+        reason = "No stakeable picks are available."
+    elif any(
+        flag in flags
+        for flag in (
+            "kelly_context_high_caution_over_skip_rate_high",
+            "elite_context_gate_rejection_rate_high",
+        )
+    ):
+        status = "DEGRADED_CONTEXT_BLOCKED"
+        reason = (
+            f"Context safety blocked {context_gate_rejections} candidate(s) and Kelly skipped "
+            f"{high_caution_over_skips}/{kelly_rows} row(s) for high-caution OVER context."
+        )
+    elif 0 < kelly_eligible_count < RUN_HEALTH_LOW_VOLUME_KELLY_ELIGIBLE:
+        status = "HEALTHY_LOW_VOLUME"
+        flags.append("kelly_eligible_low_volume")
+        reason = f"Run is valid with {kelly_eligible_count} Kelly-eligible pick(s)."
+    else:
+        status = "HEALTHY"
+        reason = f"Run passed health checks with {kelly_eligible_count} Kelly-eligible pick(s)."
+
+    return {
+        "status": status,
+        "reason": reason,
+        "flags": sorted(dict.fromkeys(flags)),
+        "recommendation": RUN_HEALTH_RECOMMENDATIONS[status],
+    }
+
+
 def _alignment_performance_line(label: str, item: Any) -> str:
     payload = item if isinstance(item, dict) else {}
     graded = payload.get("graded_picks", payload.get("graded_count", 0))
@@ -269,6 +367,13 @@ def build_daily_summary(
     elite_caution = _caution_counts(elite_df)
     full_market_alignment = _alignment_counts(full_market_df)
     elite_context_gate_count = _elite_context_gate_count(full_market_df)
+    run_health = _daily_run_health_summary(
+        elite_df=elite_df,
+        full_market_df=full_market_df,
+        kelly_df=kelly_df,
+        kelly_eligible_count=int(len(kelly_eligible)),
+        warnings=warnings,
+    )
     shadow_totals = shadow.get("totals", {}) if isinstance(shadow, dict) else {}
     context_alignment_performance = (
         shadow.get("context_alignment_performance", {})
@@ -296,9 +401,25 @@ def build_daily_summary(
         "=" * 72,
         "Scope: elite board and Kelly remain locked to player_points only.",
         "",
-        "Elite Picks",
+        "Run Health",
         "-" * 72,
+        f"- status: {run_health['status']}",
+        f"- reason: {run_health['reason']}",
+        "- flags:",
     ]
+    if run_health["flags"]:
+        for flag in run_health["flags"]:
+            lines.append(f"  - {flag}")
+    else:
+        lines.append("  - none")
+    lines.extend(
+        [
+            f"- recommendation: {run_health['recommendation']}",
+            "",
+            "Elite Picks",
+            "-" * 72,
+        ]
+    )
     if elite_df.empty:
         lines.append("- None")
     else:
@@ -471,6 +592,11 @@ def build_daily_summary(
         "elite_medium_caution_count": elite_caution["medium"],
         "elite_low_caution_count": elite_caution["low"],
         "elite_context_safety_gate_rejected_count": elite_context_gate_count,
+        "run_health": run_health,
+        "run_health_status": run_health["status"],
+        "run_health_reason": run_health["reason"],
+        "run_health_flags": run_health["flags"],
+        "run_health_recommendation": run_health["recommendation"],
         "full_market_context_alignment": full_market_alignment,
         "shadow_totals": shadow_totals,
         "context_alignment_performance": context_alignment_performance,
@@ -509,6 +635,7 @@ def main(argv: list[str] | None = None) -> int:
         "daily_summary_totals "
         f"elite={metadata['elite_count']} "
         f"kelly_eligible={metadata['kelly_eligible_count']} "
+        f"run_health={metadata['run_health_status']} "
         f"exposure={metadata['total_exposure']:.2f} "
         f"expected_ev={metadata['expected_ev']:.2f} "
         f"pending_grading={metadata['pending_grading_count']}"

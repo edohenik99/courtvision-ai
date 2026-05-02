@@ -88,6 +88,10 @@ QUALITY_HISTORY_COLUMNS: tuple[str, ...] = (
     "points_kelly_eligible_count",
     "non_points_rejected_count",
     "low_coverage_warning_count",
+    "run_health_status",
+    "run_health_reason",
+    "run_health_flags",
+    "run_health_recommendation",
     "date_isolation_status",
     "warnings_count",
 )
@@ -99,6 +103,18 @@ DEFAULT_MIN_KELLY_ELIGIBLE = 2
 DEFAULT_MIN_ODDS_PLAYERS_PER_GAME_RATIO = 3
 DEFAULT_MIN_FULL_MARKET_PLAYERS_PER_GAME_RATIO = 3
 DEFAULT_MIN_ACTIVE_TEAM_BASELINE_PLAYERS_PER_GAME_RATIO = 5
+RUN_HEALTH_CONTEXT_BLOCKED_RATIO = 0.5
+RUN_HEALTH_LOW_VOLUME_KELLY_ELIGIBLE = 2
+RUN_HEALTH_RECOMMENDATIONS: dict[str, str] = {
+    "HEALTHY": "Run is bet-ready within configured staking limits.",
+    "HEALTHY_LOW_VOLUME": "Run is valid but low-volume; avoid forcing extra action.",
+    "DEGRADED_LOW_COVERAGE": "Provider/candidate coverage is thin; treat picks cautiously.",
+    "DEGRADED_CONTEXT_BLOCKED": (
+        "Model found edges but context safety rejected too many; no threshold loosening recommended."
+    ),
+    "NO_BET": "No stakeable picks. Do not force action.",
+    "ERROR_OR_INCOMPLETE": "Run artifacts are missing or incomplete; review validation before using picks.",
+}
 
 
 def _safe_text(value: Any) -> str:
@@ -903,6 +919,119 @@ def _history_warning_count(value: Any) -> int:
     return 1 if _safe_text(value) else 0
 
 
+def _warning_contains(warnings: Sequence[Any], *needles: str) -> bool:
+    lowered_needles = tuple(needle.lower() for needle in needles if needle)
+    for warning in warnings:
+        text = _safe_text(warning).lower()
+        if text and any(needle in text for needle in lowered_needles):
+            return True
+    return False
+
+
+def _run_health_summary(
+    *,
+    candidate_funnel: dict[str, Any],
+    kelly_safety: dict[str, Any],
+    market_coverage: dict[str, Any],
+    elite_context_safety: dict[str, Any],
+    date_isolation: dict[str, Any],
+    warnings: Sequence[Any],
+) -> dict[str, Any]:
+    flags: list[str] = []
+    coverage_warnings = (
+        market_coverage.get("coverage_warnings", [])
+        if isinstance(market_coverage.get("coverage_warnings"), list)
+        else []
+    )
+
+    elite_count = _history_int(candidate_funnel.get("elite_board_count"))
+    full_market_count = _history_int(candidate_funnel.get("full_market_board_count"))
+    kelly_rows = _history_int(_first_present(candidate_funnel, ("kelly_rows_count", "total_rows")))
+    kelly_eligible = _history_int(kelly_safety.get("kelly_eligible_count"))
+    high_caution_over_skips = _history_int(
+        _first_present(kelly_safety, ("context_high_caution_over_skip_count", "high_caution_over_skip_count"))
+    )
+    context_gate_rejections = _history_int(elite_context_safety.get("rejected_from_final_elite_count"))
+    elite_context_violations = _history_int(elite_context_safety.get("elite_high_caution_conflicted_over_count"))
+
+    fatal_artifact_issue = _warning_contains(warnings, "missing artifact:", "prediction artifact date mismatch")
+    fatal_artifact_issue = fatal_artifact_issue or (
+        _warning_contains(warnings, "could not read csv")
+        and _warning_contains(warnings, "elite_board", "full_market_board", "kelly_stakes")
+    )
+    fatal_artifact_issue = fatal_artifact_issue or (
+        _warning_contains(warnings, "missing optional artifact")
+        and _warning_contains(warnings, "full_market_board")
+    )
+    fatal_artifact_issue = fatal_artifact_issue or (
+        elite_count > 0
+        and _warning_contains(warnings, "missing optional artifact")
+        and _warning_contains(warnings, "kelly_stakes")
+    )
+    if _safe_text(date_isolation.get("status")).lower() not in {"", "ok"}:
+        flags.append("date_isolation_warning")
+    if fatal_artifact_issue:
+        flags.append("required_artifact_missing_or_unreadable")
+
+    if elite_count == 0:
+        flags.append("elite_board_empty")
+    if kelly_rows > 0 and kelly_eligible == 0:
+        flags.append("kelly_rows_exist_no_eligible")
+
+    if kelly_rows > 0 and (high_caution_over_skips / kelly_rows) >= RUN_HEALTH_CONTEXT_BLOCKED_RATIO:
+        flags.append("kelly_context_high_caution_over_skip_rate_high")
+    if full_market_count > 0 and (context_gate_rejections / full_market_count) >= RUN_HEALTH_CONTEXT_BLOCKED_RATIO:
+        flags.append("elite_context_gate_rejection_rate_high")
+    if elite_context_violations > 0:
+        flags.append("elite_contains_context_blocked_over")
+
+    if _warning_contains(
+        coverage_warnings,
+        "low live candidate coverage",
+        "low provider player coverage",
+        "low full-market player coverage",
+        "market coverage loss",
+    ):
+        flags.append("provider_or_candidate_coverage_low")
+
+    if flags and any(flag in flags for flag in ("required_artifact_missing_or_unreadable", "date_isolation_warning")):
+        status = "ERROR_OR_INCOMPLETE"
+        reason = "Required artifact/read validation failed."
+    elif "elite_board_empty" in flags or "kelly_rows_exist_no_eligible" in flags:
+        status = "NO_BET"
+        reason = "No stakeable picks are available."
+    elif any(
+        flag in flags
+        for flag in (
+            "kelly_context_high_caution_over_skip_rate_high",
+            "elite_context_gate_rejection_rate_high",
+            "elite_contains_context_blocked_over",
+        )
+    ):
+        status = "DEGRADED_CONTEXT_BLOCKED"
+        reason = (
+            f"Context safety blocked {context_gate_rejections} candidate(s) and Kelly skipped "
+            f"{high_caution_over_skips}/{kelly_rows} row(s) for high-caution OVER context."
+        )
+    elif "provider_or_candidate_coverage_low" in flags:
+        status = "DEGRADED_LOW_COVERAGE"
+        reason = "Provider/candidate coverage warnings are present."
+    elif kelly_eligible > 0 and kelly_eligible < RUN_HEALTH_LOW_VOLUME_KELLY_ELIGIBLE:
+        status = "HEALTHY_LOW_VOLUME"
+        flags.append("kelly_eligible_low_volume")
+        reason = f"Run is valid with {kelly_eligible} Kelly-eligible pick(s)."
+    else:
+        status = "HEALTHY"
+        reason = f"Run passed health checks with {kelly_eligible} Kelly-eligible pick(s)."
+
+    return {
+        "status": status,
+        "reason": reason,
+        "flags": sorted(dict.fromkeys(flags)),
+        "recommendation": RUN_HEALTH_RECOMMENDATIONS[status],
+    }
+
+
 def _quality_history_row(payload: dict[str, Any], *, fallback_prediction_date: str) -> dict[str, Any]:
     run = payload.get("run_identity", {}) if isinstance(payload.get("run_identity"), dict) else {}
     slate = payload.get("slate_provider_counts", {}) if isinstance(payload.get("slate_provider_counts"), dict) else {}
@@ -916,6 +1045,7 @@ def _quality_history_row(payload: dict[str, Any], *, fallback_prediction_date: s
         else {}
     )
     market_coverage = payload.get("market_coverage", {}) if isinstance(payload.get("market_coverage"), dict) else {}
+    run_health = payload.get("run_health", {}) if isinstance(payload.get("run_health"), dict) else {}
     market_rows = market_coverage.get("rows", []) if isinstance(market_coverage.get("rows"), list) else []
     points_rows = [
         row
@@ -932,6 +1062,12 @@ def _quality_history_row(payload: dict[str, Any], *, fallback_prediction_date: s
         if isinstance(market_coverage.get("coverage_warnings"), list)
         else []
     )
+    raw_health_flags = (
+        run_health.get("flags")
+        if isinstance(run_health.get("flags"), list)
+        else payload.get("run_health_flags", [])
+    )
+    health_flags = raw_health_flags if isinstance(raw_health_flags, list) else [raw_health_flags]
 
     prediction_date = _safe_text(run.get("prediction_date")) or fallback_prediction_date
     row = {
@@ -985,6 +1121,17 @@ def _quality_history_row(payload: dict[str, Any], *, fallback_prediction_date: s
         "points_kelly_eligible_count": sum(_history_int(row.get("kelly_eligible_count")) for row in points_rows),
         "non_points_rejected_count": int(non_points_rejected),
         "low_coverage_warning_count": len(coverage_warnings),
+        "run_health_status": _safe_text(
+            _first_present(run_health, ("status", "run_health_status")) or payload.get("run_health_status")
+        ),
+        "run_health_reason": _safe_text(
+            _first_present(run_health, ("reason", "run_health_reason")) or payload.get("run_health_reason")
+        ),
+        "run_health_flags": ";".join(_safe_text(flag) for flag in health_flags if _safe_text(flag)),
+        "run_health_recommendation": _safe_text(
+            _first_present(run_health, ("recommendation", "run_health_recommendation"))
+            or payload.get("run_health_recommendation")
+        ),
         "date_isolation_status": _safe_text(isolation.get("status")),
         "warnings_count": _history_warning_count(payload.get("warnings")),
     }
@@ -1207,6 +1354,7 @@ def build_quality_summary(
         current_elite_count=elite_count,
         current_kelly_count=kelly_count,
     )
+    final_warnings = warnings + coverage_warnings + risk_exposure.get("warnings", [])
 
     run_identity = {
         "prediction_date": prediction_date,
@@ -1215,8 +1363,21 @@ def build_quality_summary(
         "commit_hash": _git_commit_hash(),
         "run_data_mode": run_data_mode,
     }
+    run_health = _run_health_summary(
+        candidate_funnel=candidate_funnel,
+        kelly_safety=kelly_safety,
+        market_coverage={"coverage_warnings": coverage_warnings},
+        elite_context_safety=elite_context_safety,
+        date_isolation=date_isolation,
+        warnings=final_warnings,
+    )
     payload = {
         "run_identity": run_identity,
+        "run_health": run_health,
+        "run_health_status": run_health["status"],
+        "run_health_reason": run_health["reason"],
+        "run_health_flags": run_health["flags"],
+        "run_health_recommendation": run_health["recommendation"],
         "slate_provider_counts": slate_provider_counts,
         "player_baseline_coverage": player_baseline_coverage,
         "candidate_funnel": candidate_funnel,
@@ -1238,7 +1399,7 @@ def build_quality_summary(
         "risk_exposure_summary": risk_exposure,
         "board_movement_summary": board_movement,
         "date_isolation_check": date_isolation,
-        "warnings": warnings + coverage_warnings + risk_exposure.get("warnings", []),
+        "warnings": final_warnings,
     }
     payload = _json_safe(payload)
     return _format_quality_summary_text(payload), payload
@@ -1260,6 +1421,7 @@ def _format_mapping(mapping: dict[str, Any], *, indent: str = "- ") -> list[str]
 
 def _format_quality_summary_text(payload: dict[str, Any]) -> str:
     run = payload["run_identity"]
+    run_health = payload.get("run_health", {}) if isinstance(payload.get("run_health"), dict) else {}
     slate = payload["slate_provider_counts"]
     player_coverage = payload.get("player_baseline_coverage", {})
     funnel = payload["candidate_funnel"]
@@ -1283,15 +1445,36 @@ def _format_quality_summary_text(payload: dict[str, Any]) -> str:
         f"- commit_hash: {run['commit_hash']}",
         f"- run_data_mode: {run['run_data_mode']}",
         "",
-        "Slate / Provider Counts",
+        "Run Health",
         "-" * 72,
-        f"- games_count: {_fmt_value(slate.get('games_count'))}",
-        f"- raw_odds_rows_count: {_fmt_value(slate.get('raw_odds_rows_count'))}",
-        f"- normalized_odds_rows_count: {_fmt_value(slate.get('normalized_odds_rows_count'))}",
-        f"- live_odds_count: {_fmt_value(slate.get('live_odds_count'))}",
-        f"- synthetic_or_fallback_odds_count: {_fmt_value(slate.get('synthetic_or_fallback_odds_count'))}",
-        "- provider_breakdown:",
+        f"- status: {run_health.get('status') or payload.get('run_health_status', 'unknown')}",
+        f"- reason: {run_health.get('reason') or payload.get('run_health_reason', 'unknown')}",
+        "- flags:",
     ]
+    health_flags = (
+        run_health.get("flags")
+        if isinstance(run_health.get("flags"), list)
+        else payload.get("run_health_flags", [])
+    )
+    if health_flags:
+        for flag in health_flags:
+            lines.append(f"  - {flag}")
+    else:
+        lines.append("  - none")
+    lines.extend(
+        [
+            f"- recommendation: {run_health.get('recommendation') or payload.get('run_health_recommendation', 'unknown')}",
+            "",
+            "Slate / Provider Counts",
+            "-" * 72,
+            f"- games_count: {_fmt_value(slate.get('games_count'))}",
+            f"- raw_odds_rows_count: {_fmt_value(slate.get('raw_odds_rows_count'))}",
+            f"- normalized_odds_rows_count: {_fmt_value(slate.get('normalized_odds_rows_count'))}",
+            f"- live_odds_count: {_fmt_value(slate.get('live_odds_count'))}",
+            f"- synthetic_or_fallback_odds_count: {_fmt_value(slate.get('synthetic_or_fallback_odds_count'))}",
+            "- provider_breakdown:",
+        ]
+    )
     provider_breakdown = slate.get("provider_breakdown", {})
     if provider_breakdown:
         for column, counts in provider_breakdown.items():

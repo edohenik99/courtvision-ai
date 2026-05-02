@@ -126,6 +126,16 @@ def _history_summary_payload(
             ],
             "coverage_warnings": ["Low live candidate coverage: fixture."],
         },
+        "run_health": {
+            "status": "DEGRADED_LOW_COVERAGE",
+            "reason": "Provider/candidate coverage warnings are present.",
+            "flags": ["provider_or_candidate_coverage_low"],
+            "recommendation": "Provider/candidate coverage is thin; treat picks cautiously.",
+        },
+        "run_health_status": "DEGRADED_LOW_COVERAGE",
+        "run_health_reason": "Provider/candidate coverage warnings are present.",
+        "run_health_flags": ["provider_or_candidate_coverage_low"],
+        "run_health_recommendation": "Provider/candidate coverage is thin; treat picks cautiously.",
         "date_isolation_check": {"status": "ok"},
         "warnings": warnings or [],
     }
@@ -575,6 +585,130 @@ def _seed_market_coverage_artifacts(runtime_root: Path, prediction_date: str) ->
     )
 
 
+def _seed_run_health_artifacts(
+    runtime_root: Path,
+    prediction_date: str,
+    *,
+    games_count: int = 1,
+    full_market_count: int = 10,
+    elite_count: int = 2,
+    kelly_eligible_count: int = 2,
+    kelly_rows_count: int | None = None,
+    context_gate_rejections: int = 0,
+    high_caution_over_skips: int = 0,
+) -> None:
+    _seed_player_baselines(runtime_root, teams=("BOS", "NYK"), players_per_team=20)
+    operator = runtime_root / "operator"
+    diagnostics = runtime_root / "diagnostics"
+    research = runtime_root / "research"
+    kelly_rows_count = kelly_eligible_count if kelly_rows_count is None else kelly_rows_count
+
+    full_rows: list[dict] = []
+    for index in range(full_market_count):
+        gated = index < context_gate_rejections
+        full_rows.append(
+            {
+                "prediction_date": prediction_date,
+                "player_name": f"Health Player {index}",
+                "team": "BOS",
+                "game_id": "game-health",
+                "market_type": "player_points",
+                "selection": "over" if gated else "under",
+                "line": 10.5 + index,
+                "odds": -110,
+                "confidence": 0.75,
+                "quality_score": 80 - index,
+                "edge": 0.12,
+                "context_caution_level": "high" if gated else "low",
+                "context_pick_alignment": "conflicted" if gated else "aligned",
+                "final_elite_rejection_reason": (
+                    "elite_reject_context_high_caution_over" if gated else ""
+                ),
+                "is_live_market": True,
+                "line_source": "fixture_live_market",
+            }
+        )
+    elite_rows = [
+        {**row, "final_elite_rejection_reason": ""}
+        for row in full_rows[context_gate_rejections : context_gate_rejections + elite_count]
+    ]
+
+    kelly_rows: list[dict] = []
+    for index in range(kelly_rows_count):
+        skipped_for_context = index < high_caution_over_skips
+        eligible = index < kelly_eligible_count and not skipped_for_context
+        kelly_rows.append(
+            {
+                "prediction_date": prediction_date,
+                "player_name": f"Health Kelly {index}",
+                "market_type": "player_points",
+                "selection": "over" if skipped_for_context else "under",
+                "stake_amount": 8.0 if eligible else 0.0,
+                "expected_value": 1.25 if eligible else 0.0,
+                "kelly_eligible": eligible,
+                "eligible": eligible,
+                "skip_reason": "context_high_caution_over" if skipped_for_context else ("" if eligible else "no_positive_edge"),
+                "context_caution_level": "high" if skipped_for_context else "low",
+                "context_pick_alignment": "conflicted" if skipped_for_context else "aligned",
+            }
+        )
+
+    _write_csv(operator / f"full_market_board_{prediction_date}.csv", full_rows)
+    _write_csv(operator / f"elite_board_{prediction_date}.csv", elite_rows)
+    _write_csv(operator / f"kelly_stakes_{prediction_date}.csv", kelly_rows)
+    _write_csv(operator / f"sgp_board_{prediction_date}.csv", [{"prediction_date": prediction_date, "leg_count": 2}])
+    _write_csv(research / f"player_predictions_{prediction_date}.csv", full_rows)
+    _write_json(
+        research / f"model_metrics_{prediction_date}.json",
+        {
+            "prediction_summary": {
+                "prediction_date": prediction_date,
+                "games_count": games_count,
+                "odds_count": full_market_count,
+                "candidate_count": full_market_count,
+                "full_market_count": full_market_count,
+                "elite_count": elite_count,
+                "pipeline_mode": "fixture_operator_smoke",
+                "market_quality_status": "live",
+            }
+        },
+    )
+    _write_json(
+        diagnostics / f"board_diagnostics_{prediction_date}.json",
+        {
+            "board_counts": {
+                "elite": elite_count,
+                "full_market": full_market_count,
+                "qualified_pool": full_market_count,
+            }
+        },
+    )
+    _write_json(
+        operator / f"elite_pipeline_audit_summary_{prediction_date}.json",
+        {
+            "totals": {
+                "total_candidates": full_market_count,
+                "passed_to_elite": elite_count,
+                "total_rejections": max(full_market_count - elite_count, 0),
+            },
+            "rows": [],
+        },
+    )
+    _write_json(
+        diagnostics / f"market_availability_audit_{prediction_date}.json",
+        {
+            "counts": [
+                {
+                    "market": "player_points",
+                    "count_before_normalization": full_market_count,
+                    "count_after_normalization": full_market_count,
+                    "count_after_candidate_generation": full_market_count,
+                }
+            ]
+        },
+    )
+
+
 def test_quality_summary_generation_from_fixture_artifacts(tmp_path: Path) -> None:
     prediction_date = "2026-04-30"
     runtime_root = tmp_path / "runtime"
@@ -636,7 +770,136 @@ def test_quality_summary_generation_from_fixture_artifacts(tmp_path: Path) -> No
     assert int(history_row["kelly_unique_players"]) == 3
     assert int(history_row["elite_board_count"]) == 3
     assert int(history_row["medium_neutral_over_dampened_count"]) == 1
+    assert history_row["run_health_status"] == "DEGRADED_CONTEXT_BLOCKED"
     assert (runtime_root / "operator" / QUALITY_HISTORY_JSONL_NAME).exists()
+
+
+def test_quality_summary_run_health_healthy(tmp_path: Path) -> None:
+    prediction_date = "2026-05-02"
+    runtime_root = tmp_path / "runtime"
+    _seed_run_health_artifacts(runtime_root, prediction_date)
+
+    text, payload = build_quality_summary(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        out_dir=tmp_path,
+        generated_at="2026-05-03T00:00:00+00:00",
+    )
+
+    assert payload["run_health_status"] == "HEALTHY"
+    assert payload["run_health"]["recommendation"] == "Run is bet-ready within configured staking limits."
+    assert payload["run_health_flags"] == []
+    assert "Run Health" in text
+    assert "- status: HEALTHY" in text
+
+
+def test_quality_summary_run_health_healthy_low_volume(tmp_path: Path) -> None:
+    prediction_date = "2026-05-02"
+    runtime_root = tmp_path / "runtime"
+    _seed_run_health_artifacts(
+        runtime_root,
+        prediction_date,
+        elite_count=1,
+        kelly_eligible_count=1,
+        kelly_rows_count=1,
+    )
+
+    _, payload = build_quality_summary(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        out_dir=tmp_path,
+        generated_at="2026-05-03T00:00:00+00:00",
+    )
+
+    assert payload["run_health_status"] == "HEALTHY_LOW_VOLUME"
+    assert "kelly_eligible_low_volume" in payload["run_health_flags"]
+
+
+def test_quality_summary_run_health_degraded_low_coverage(tmp_path: Path) -> None:
+    prediction_date = "2026-05-02"
+    runtime_root = tmp_path / "runtime"
+    _seed_run_health_artifacts(
+        runtime_root,
+        prediction_date,
+        full_market_count=2,
+        elite_count=2,
+        kelly_eligible_count=2,
+        kelly_rows_count=2,
+    )
+
+    _, payload = build_quality_summary(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        out_dir=tmp_path,
+        generated_at="2026-05-03T00:00:00+00:00",
+    )
+
+    assert payload["run_health_status"] == "DEGRADED_LOW_COVERAGE"
+    assert "provider_or_candidate_coverage_low" in payload["run_health_flags"]
+
+
+def test_quality_summary_run_health_degraded_context_blocked(tmp_path: Path) -> None:
+    prediction_date = "2026-05-02"
+    runtime_root = tmp_path / "runtime"
+    _seed_run_health_artifacts(
+        runtime_root,
+        prediction_date,
+        full_market_count=10,
+        elite_count=2,
+        kelly_eligible_count=2,
+        kelly_rows_count=2,
+        context_gate_rejections=6,
+    )
+
+    _, payload = build_quality_summary(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        out_dir=tmp_path,
+        generated_at="2026-05-03T00:00:00+00:00",
+    )
+
+    assert payload["run_health_status"] == "DEGRADED_CONTEXT_BLOCKED"
+    assert "elite_context_gate_rejection_rate_high" in payload["run_health_flags"]
+
+
+def test_quality_summary_run_health_no_bet(tmp_path: Path) -> None:
+    prediction_date = "2026-05-02"
+    runtime_root = tmp_path / "runtime"
+    _seed_run_health_artifacts(
+        runtime_root,
+        prediction_date,
+        elite_count=2,
+        kelly_eligible_count=0,
+        kelly_rows_count=2,
+    )
+
+    _, payload = build_quality_summary(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        out_dir=tmp_path,
+        generated_at="2026-05-03T00:00:00+00:00",
+    )
+
+    assert payload["run_health_status"] == "NO_BET"
+    assert "kelly_rows_exist_no_eligible" in payload["run_health_flags"]
+    assert payload["run_health_recommendation"] == "No stakeable picks. Do not force action."
+
+
+def test_quality_summary_run_health_error_or_incomplete_for_missing_required_artifact(tmp_path: Path) -> None:
+    prediction_date = "2026-05-02"
+    runtime_root = tmp_path / "runtime"
+    _write_csv(runtime_root / "operator" / f"full_market_board_{prediction_date}.csv", [])
+    _write_csv(runtime_root / "operator" / f"kelly_stakes_{prediction_date}.csv", [])
+
+    _, payload = build_quality_summary(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        out_dir=tmp_path,
+        generated_at="2026-05-03T00:00:00+00:00",
+    )
+
+    assert payload["run_health_status"] == "ERROR_OR_INCOMPLETE"
+    assert "required_artifact_missing_or_unreadable" in payload["run_health_flags"]
 
 
 def test_quality_summary_missing_optional_artifacts_warns_without_crashing(tmp_path: Path) -> None:
@@ -915,6 +1178,9 @@ def test_quality_history_creates_csv_from_one_summary_json(tmp_path: Path) -> No
     assert int(history.iloc[0]["points_kelly_eligible_count"]) == 2
     assert int(history.iloc[0]["non_points_rejected_count"]) == 1
     assert int(history.iloc[0]["low_coverage_warning_count"]) == 1
+    assert history.iloc[0]["run_health_status"] == "DEGRADED_LOW_COVERAGE"
+    assert history.iloc[0]["run_health_flags"] == "provider_or_candidate_coverage_low"
+    assert "Provider/candidate coverage" in history.iloc[0]["run_health_recommendation"]
 
 
 def test_quality_history_updates_same_date_instead_of_duplicating(tmp_path: Path) -> None:
@@ -943,6 +1209,7 @@ def test_quality_history_updates_same_date_instead_of_duplicating(tmp_path: Path
     assert len(history) == 1
     assert int(history.iloc[0]["elite_board_count"]) == 6
     assert float(history.iloc[0]["total_stake"]) == 44.0
+    assert history.iloc[0]["run_health_status"] == "DEGRADED_LOW_COVERAGE"
     jsonl_rows = [
         json.loads(line)
         for line in (runtime_root / "operator" / QUALITY_HISTORY_JSONL_NAME)
@@ -951,6 +1218,7 @@ def test_quality_history_updates_same_date_instead_of_duplicating(tmp_path: Path
     ]
     assert len(jsonl_rows) == 1
     assert jsonl_rows[0]["elite_board_count"] == 6
+    assert jsonl_rows[0]["run_health_status"] == "DEGRADED_LOW_COVERAGE"
 
 
 def test_quality_history_adds_second_date_in_sorted_order(tmp_path: Path) -> None:
@@ -1003,6 +1271,10 @@ def test_quality_history_missing_optional_fields_default_to_blanks_and_zeroes(tm
     assert int(row["points_normalized_odds_rows"]) == 0
     assert int(row["non_points_rejected_count"]) == 0
     assert int(row["low_coverage_warning_count"]) == 0
+    assert row["run_health_status"] == ""
+    assert row["run_health_reason"] == ""
+    assert row["run_health_flags"] == ""
+    assert row["run_health_recommendation"] == ""
     assert int(row["warnings_count"]) == 0
 
 
