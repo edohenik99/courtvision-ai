@@ -639,6 +639,38 @@ class PredictionPipeline:
             elite_selection_counts = {}
         print(f"[COUNT] elite_over_rows={int(elite_selection_counts.get('over', 0))}", flush=True)
         print(f"[COUNT] elite_under_rows={int(elite_selection_counts.get('under', 0))}", flush=True)
+
+        # ---- player_points strong-OVER calibration guard diagnostics ---------
+        # Count how many player_points OVER picks with edge >= 3.0 exist in the
+        # qualified pool (diagnostic only — these rows remain in Full Market but
+        # are blocked from Elite/Kelly until projection is recalibrated).
+        _pp_over_guard_count = 0
+        _pp_over_guard_by_player: dict[str, int] = {}
+        _pp_over_guard_by_bucket: dict[str, int] = {"edge_3_to_6": 0, "edge_6_plus": 0}
+        if not candidates_df.empty and "market_type" in candidates_df.columns:
+            for _, crow in candidates_df.iterrows():
+                if str(crow.get("market_type", "")).strip().lower() != "player_points":
+                    continue
+                if str(crow.get("selection", "")).strip().lower() != "over":
+                    continue
+                cedge = to_float(crow.get("edge"))
+                if cedge is None:
+                    cedge = to_float(crow.get("edge_pct"))
+                if cedge is None:
+                    continue
+                if cedge < 3.0:
+                    continue
+                _pp_over_guard_count += 1
+                pname = str(crow.get("player_name", "unknown"))
+                _pp_over_guard_by_player[pname] = _pp_over_guard_by_player.get(pname, 0) + 1
+                if cedge >= 6.0:
+                    _pp_over_guard_by_bucket["edge_6_plus"] += 1
+                else:
+                    _pp_over_guard_by_bucket["edge_3_to_6"] += 1
+        print(f"[COUNT] player_points_strong_over_guard_count={_pp_over_guard_count}", flush=True)
+        print(f"[COUNT] player_points_strong_over_guard_by_player={dict(sorted(_pp_over_guard_by_player.items()))}", flush=True)
+        print(f"[COUNT] player_points_strong_over_guard_by_edge_bucket={_pp_over_guard_by_bucket}", flush=True)
+
         selection_trace.setdefault("elite", {}).update(selection_stage_trace["elite"])
         selection_trace.setdefault("full_market", {}).update(selection_stage_trace["full_market"])
         self.logger.info("board_selection_trace %s", selection_trace)

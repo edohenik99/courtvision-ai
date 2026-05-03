@@ -282,7 +282,10 @@ class CandidateScoringPolicy:
         - Elite points risk guard for player_points
         """
         # Lazy import to avoid circular dependency
-        from courtvision.runtime_selection import passes_elite_points_risk_guard
+        from courtvision.runtime_selection import (
+            passes_elite_points_risk_guard,
+            passes_player_points_strong_over_calibration,
+        )
 
         market_type = str(row.get("market_type", ""))
         confidence = to_float(row.get("confidence")) or 0.0
@@ -304,6 +307,11 @@ class CandidateScoringPolicy:
 
         # Elite points risk guard
         if not passes_elite_points_risk_guard(row):
+            return False
+
+        # Player_points strong-OVER calibration guard (historical 41.6% hit rate
+        # at edge>=+3 — block from elite/Kelly until projection recalibrated)
+        if not passes_player_points_strong_over_calibration(row):
             return False
 
         # Player market thresholds

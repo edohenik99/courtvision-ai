@@ -57,9 +57,9 @@ def test_board_generation_golden(ai: courtvision_ai.CourtVisionAI) -> None:
                 "opponent": "NYK",
                 "selection": "OVER",
                 "sportsbook_line": 24.5,
-                "model_projection": 28.2,
-                "edge": 3.7,
-                "edge_abs": 3.7,
+                "model_projection": 27.0,
+                "edge": 2.5,
+                "edge_abs": 2.5,
                 "confidence": 0.78,
                 "odds": -115,
                 "minutes_avg": 35.0,
@@ -305,8 +305,8 @@ def test_elite_gate_golden(ai: courtvision_ai.CourtVisionAI) -> None:
             "opponent": "NYK",
             "selection": "OVER",
             "sportsbook_line": 25.5,
-            "edge": 3.1,
-            "edge_abs": 3.1,
+            "edge": 2.5,
+            "edge_abs": 2.5,
             "confidence": 0.77,
             "odds": -115,
             "minutes_avg": 35.0,
@@ -440,8 +440,8 @@ def test_elite_points_risk_guard_golden(ai: courtvision_ai.CourtVisionAI) -> Non
             "opponent": "CLE",
             "selection": "OVER",
             "sportsbook_line": 16.5,
-            "edge": 8.8,
-            "edge_abs": 8.8,
+            "edge": 2.8,
+            "edge_abs": 2.8,
             "confidence": 0.722,
             "odds": -102,
             "minutes_avg": 34.0,
@@ -608,9 +608,9 @@ def test_elite_backfill_golden(ai: courtvision_ai.CourtVisionAI) -> None:
                     "opponent": "NYK",
                     "selection": "OVER",
                     "sportsbook_line": 24.5,
-                    "model_projection": 28.2,
-                    "edge": 3.7,
-                    "edge_abs": 3.7,
+                    "model_projection": 27.0,
+                    "edge": 2.5,
+                    "edge_abs": 2.5,
                     "confidence": 0.78,
                     "odds": -115,
                     "minutes_avg": 35.0,
@@ -730,7 +730,7 @@ def test_elite_backfill_golden(ai: courtvision_ai.CourtVisionAI) -> None:
 
     elite = ai._select_elite_board(prepared)
 
-    assert len(elite) == 6
+    assert len(elite) == 5
     assert "Epsilon Wing" in elite["entity_name"].tolist()
     assert "Zeta Creator" in elite["entity_name"].tolist()
 

@@ -18,7 +18,6 @@ from .buckets import (
     quality_band,
     to_float,
 )
-from courtvision.runtime_selection import elite_points_risk_guard_reason
 
 
 CONTEXT_ALIGNMENT_VALUES = {"aligned", "conflicted", "neutral", "insufficient_data"}
@@ -335,7 +334,10 @@ def _normalize_graded_row(item: Any) -> dict[str, Any]:
     confidence_value = row.get("confidence")
     odds_value = row.get("odds", row.get("offered_odds"))
     market_trust_value = row.get("market_trust_weight")
-    points_guard_reason = _clean_text(row.get("elite_points_risk_guard_reason")) or _clean_text(elite_points_risk_guard_reason(row))
+    points_guard_reason = _clean_text(row.get("elite_points_risk_guard_reason"))
+    if not points_guard_reason:
+        from courtvision.runtime_selection import elite_points_risk_guard_reason
+        points_guard_reason = _clean_text(elite_points_risk_guard_reason(row))
     kelly_eligible_value = row.get("kelly_eligible")
     if not _clean_text(kelly_eligible_value):
         kelly_eligible_value = row.get("eligible")

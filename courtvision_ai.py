@@ -87,9 +87,11 @@ from courtvision.runtime_audit import (
     BoardAuditPolicy,
     ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER,
     ELITE_REJECT_GAME_CONTEXT_SUPPRESSED,
+    ELITE_REJECT_PLAYER_POINTS_STRONG_OVER_CALIBRATION,
     get_elite_rejection_reason as _runtime_get_elite_rejection_reason,
     elite_context_rejection_reason,
     projected_kelly_skip_reason,
+    player_points_strong_over_calibration_reason,
 )
 from courtvision.runtime_scoring import BoardScoringConfig, BoardScoringPolicy
 
@@ -2604,6 +2606,7 @@ class CourtVisionAI:
                 "rejected_from_elite_count": 0,
                 "replacement_candidate_count": 0,
                 "replacement_added_count": 0,
+                "strong_over_guard_blocked_count": 0,
                 "final_elite_count": int(len(annotated_elite)),
             }
             return annotated_elite, annotated_candidates, summary
@@ -2622,6 +2625,23 @@ class CourtVisionAI:
             replacement_pool = replacement_pool[
                 replacement_pool["market_type"].fillna("").astype(str).str.strip().str.lower().eq("player_points")
             ].copy()
+
+        # Apply strong OVER calibration guard to replacement pool
+        strong_over_guard_blocked_count = 0
+        if not replacement_pool.empty:
+            strong_over_mask = [
+                bool(player_points_strong_over_calibration_reason(_to_str_dict(row)))
+                for _, row in replacement_pool.iterrows()
+            ]
+            strong_over_guard_blocked_count = sum(strong_over_mask)
+            # Set rejection reason for blocked candidates before filtering them out
+            if strong_over_guard_blocked_count > 0:
+                blocked_indices = replacement_pool.index[strong_over_mask]
+                for col in ("final_elite_rejection_reason", "elite_rejection_reason", "selection_rejection_reason"):
+                    if col in replacement_pool.columns:
+                        replacement_pool.loc[blocked_indices, col] = ELITE_REJECT_PLAYER_POINTS_STRONG_OVER_CALIBRATION
+            # Filter out blocked candidates
+            replacement_pool = replacement_pool.loc[~pd.Series(strong_over_mask, index=replacement_pool.index)].copy()
 
         selected_keys = {
             self._row_identity_key(_to_str_dict(row))
@@ -2681,6 +2701,7 @@ class CourtVisionAI:
             "rejected_from_elite_count": rejected_count,
             "replacement_candidate_count": int(len(replacement_pool)),
             "replacement_added_count": int(len(replacements)),
+            "strong_over_guard_blocked_count": strong_over_guard_blocked_count,
             "final_elite_count": int(len(combined)),
             "empty_no_bet": bool(len(combined) == 0 and rejected_count > 0),
         }

@@ -18,7 +18,10 @@ from courtvision.calibration.buckets import (
     quality_band as bucket_quality_band,
     to_float,
 )
-from courtvision.runtime_selection import elite_points_risk_guard_reason
+from courtvision.runtime_selection import (
+    elite_points_risk_guard_reason,
+    player_points_strong_over_calibration_reason,
+)
 
 
 class BoardAuditPolicy:
@@ -68,6 +71,9 @@ class BoardAuditPolicy:
         enriched["injury_confidence_delta"] = round(injury_confidence_delta_value(enriched), 4)
         enriched["blocked_by_elite_points_risk_guard"] = bool(points_guard_reason)
         enriched["elite_points_risk_guard_reason"] = points_guard_reason
+        strong_over_reason = player_points_strong_over_calibration_reason(enriched)
+        enriched["blocked_by_player_points_strong_over_calibration"] = bool(strong_over_reason)
+        enriched["player_points_strong_over_calibration_reason"] = strong_over_reason
         enriched["player_points_realism_dampened"] = self._to_bool(enriched.get("player_points_realism_dampened"))
         enriched["player_points_realism_dampener_reason"] = self._clean_text(
             enriched.get("player_points_realism_dampener_reason", "")
@@ -143,6 +149,9 @@ class BoardAuditPolicy:
                 elite_df=elite_df,
                 full_market_df=full_market_df,
             ),
+            "player_points_strong_over_guard": self._player_points_strong_over_guard_payload(
+                qualified_pool_df=qualified_pool_df,
+            ),
             "player_points_realism": self._player_points_realism_payload(
                 qualified_pool_df=qualified_pool_df,
                 elite_df=elite_df,
@@ -171,6 +180,8 @@ class BoardAuditPolicy:
             "count_by_final_selection_source_lane",
             "count_by_blocked_by_elite_points_risk_guard",
             "count_by_elite_points_risk_guard_reason",
+            "count_by_blocked_by_player_points_strong_over_calibration",
+            "count_by_player_points_strong_over_calibration_reason",
             "count_by_elite_points_ranking_reason",
             "count_by_player_points_elite_outcome",
             "count_by_player_points_realism_dampener_reason",
@@ -535,6 +546,14 @@ class BoardAuditPolicy:
             "count_by_final_selection_source_lane": self._count_records(df, "final_selection_source_lane"),
             "count_by_blocked_by_elite_points_risk_guard": self._count_records(df, "blocked_by_elite_points_risk_guard"),
             "count_by_elite_points_risk_guard_reason": self._count_records(df, "elite_points_risk_guard_reason"),
+            "count_by_blocked_by_player_points_strong_over_calibration": self._count_records(
+                df,
+                "blocked_by_player_points_strong_over_calibration",
+            ),
+            "count_by_player_points_strong_over_calibration_reason": self._count_records(
+                df,
+                "player_points_strong_over_calibration_reason",
+            ),
             "count_by_elite_points_ranking_reason": self._count_records(df, "elite_points_ranking_reason"),
             "count_by_player_points_elite_outcome": self._count_records(df, "player_points_elite_outcome"),
             "count_by_player_points_realism_dampener_reason": self._count_records(
@@ -599,6 +618,63 @@ class BoardAuditPolicy:
             "elite_board": self._distribution_payload(elite_points),
             "full_market_board": self._distribution_payload(full_market_points),
             "blocked_from_elite_candidate_pool": self._distribution_payload(blocked_points),
+        }
+
+    def _player_points_strong_over_guard_payload(
+        self,
+        *,
+        qualified_pool_df: pd.DataFrame,
+    ) -> dict[str, Any]:
+        """Counts of strong-OVER calibration-blocked rows in the qualified pool.
+
+        Returns:
+          - player_points_strong_over_guard_count: total blocked rows
+          - player_points_strong_over_guard_by_player: {player_name: count}
+          - player_points_strong_over_guard_by_edge_bucket: {bucket: count}
+            buckets: "edge_3_to_6", "edge_6_plus"
+        """
+        empty = {
+            "player_points_strong_over_guard_count": 0,
+            "player_points_strong_over_guard_by_player": {},
+            "player_points_strong_over_guard_by_edge_bucket": {},
+        }
+        if (
+            not isinstance(qualified_pool_df, pd.DataFrame)
+            or qualified_pool_df.empty
+            or "blocked_by_player_points_strong_over_calibration" not in qualified_pool_df.columns
+        ):
+            return empty
+
+        blocked_mask = (
+            qualified_pool_df["blocked_by_player_points_strong_over_calibration"]
+            .fillna(False)
+            .astype(bool)
+        )
+        blocked = qualified_pool_df[blocked_mask]
+        if blocked.empty:
+            return empty
+
+        by_player: dict[str, int] = {}
+        for player in blocked.get("entity_name", pd.Series(dtype=str)).fillna("").astype(str):
+            key = player.strip() or "unknown"
+            by_player[key] = by_player.get(key, 0) + 1
+
+        by_bucket: dict[str, int] = {"edge_3_to_6": 0, "edge_6_plus": 0}
+        edge_series = blocked.get("edge", pd.Series(dtype=float))
+        for value in edge_series.tolist():
+            try:
+                edge = float(value)
+            except (TypeError, ValueError):
+                continue
+            if edge >= 6.0:
+                by_bucket["edge_6_plus"] += 1
+            elif edge >= 3.0:
+                by_bucket["edge_3_to_6"] += 1
+
+        return {
+            "player_points_strong_over_guard_count": int(len(blocked)),
+            "player_points_strong_over_guard_by_player": dict(sorted(by_player.items())),
+            "player_points_strong_over_guard_by_edge_bucket": by_bucket,
         }
 
     def _player_points_realism_payload(
@@ -1188,7 +1264,13 @@ REJECT_HEAVY_FAVORITE_ODDS = "reject_heavy_favorite_odds"
 REJECT_OTHER = "reject_other"
 ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER = "elite_reject_context_high_caution_over"
 ELITE_REJECT_GAME_CONTEXT_SUPPRESSED = "elite_reject_game_context_suppressed"
+ELITE_REJECT_PLAYER_POINTS_STRONG_OVER_CALIBRATION = (
+    "elite_reject_player_points_strong_over_calibration"
+)
 KELLY_PROJECTED_SKIP_CONTEXT_HIGH_CAUTION_OVER = "context_high_caution_over"
+KELLY_PROJECTED_SKIP_PLAYER_POINTS_STRONG_OVER_CALIBRATION = (
+    "player_points_strong_over_calibration"
+)
 PASSED_TO_ELITE = "passed_to_elite"
 TOTAL_CANDIDATES = "total_candidates"
 
@@ -1380,15 +1462,26 @@ def get_elite_rejection_reason(row: dict[str, Any]) -> str | None:
     if odds_val < -400:  # Worse than -400 (e.g., -500, -1000, -2800)
         return REJECT_HEAVY_FAVORITE_ODDS
 
+    # Player_points strong-OVER calibration guard (historical 41.6% hit at edge>=+3)
+    if player_points_strong_over_calibration_reason(row):
+        return ELITE_REJECT_PLAYER_POINTS_STRONG_OVER_CALIBRATION
+
     return None
 
 
 def projected_kelly_skip_reason(row: Mapping[str, Any]) -> str:
-    """Return the Kelly skip reason implied by context-only safety rules."""
+    """Return the Kelly skip reason implied by context-only safety rules.
+
+    Precedence preserves existing behavior: if a row is blocked by both the
+    high-caution context gate and the strong-OVER calibration guard, the
+    context reason takes precedence so existing diagnostics stay stable.
+    """
     selection = str(row.get("selection", row.get("side", "")) or "").strip().lower()
     caution = str(row.get("context_caution_level", "") or "").strip().lower()
     if selection == "over" and caution == "high":
         return KELLY_PROJECTED_SKIP_CONTEXT_HIGH_CAUTION_OVER
+    if player_points_strong_over_calibration_reason(row):
+        return KELLY_PROJECTED_SKIP_PLAYER_POINTS_STRONG_OVER_CALIBRATION
     return ""
 
 
@@ -1441,6 +1534,13 @@ def assemble_elite_board(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             )
             continue
 
+        if player_points_strong_over_calibration_reason(row):
+            print(
+                f"[elite_defensive_catch] {player}: "
+                f"{ELITE_REJECT_PLAYER_POINTS_STRONG_OVER_CALIBRATION}"
+            )
+            continue
+
         if market == "player_points":
             if selection == "over" and edge <= 0:
                 print(
@@ -1476,7 +1576,9 @@ __all__ = [
     "REJECT_OTHER",
     "ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER",
     "ELITE_REJECT_GAME_CONTEXT_SUPPRESSED",
+    "ELITE_REJECT_PLAYER_POINTS_STRONG_OVER_CALIBRATION",
     "KELLY_PROJECTED_SKIP_CONTEXT_HIGH_CAUTION_OVER",
+    "KELLY_PROJECTED_SKIP_PLAYER_POINTS_STRONG_OVER_CALIBRATION",
     "PASSED_TO_ELITE",
     "TOTAL_CANDIDATES",
 ]

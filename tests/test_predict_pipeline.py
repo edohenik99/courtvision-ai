@@ -550,7 +550,7 @@ class TestPredictionPipeline:
                 "raw_prop_type": "points",
                 "raw_market_type": "over_under",
                 "market_type": "player_points",
-                "line": 20.5,
+                "line": 21.5,
                 "odds": -110,
                 "selection": "over",
                 "is_live": True,

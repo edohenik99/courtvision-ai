@@ -231,6 +231,8 @@ class BoardVolumePolicy:
             return False
         if not passes_elite_points_risk_guard(row):
             return False
+        if not passes_player_points_strong_over_calibration(row):
+            return False
         qualification_gate_mode = str(row.get("qualification_gate_mode", "")).strip()
         if qualification_gate_mode not in self.config.elite_backfill_allowed_gate_modes:
             return False
@@ -349,6 +351,52 @@ def elite_points_risk_guard_reason(row: Mapping[str, Any]) -> str:
 
 def passes_elite_points_risk_guard(row: Mapping[str, Any]) -> bool:
     return elite_points_risk_guard_reason(row) == ""
+
+
+# Calibration guard: historical player_points OVER picks at edge >= +3 hit only
+# 41.6% (n=127); at edge >= +6, only 35.7% (n=15). Until projection model is
+# recalibrated, block strong OVERs from elite/Kelly. Diagnostic-only otherwise:
+# rows remain in Full Market.
+PLAYER_POINTS_STRONG_OVER_CALIBRATION_EDGE_THRESHOLD: float = 3.0
+PLAYER_POINTS_STRONG_OVER_CALIBRATION_GUARD_REASON: str = (
+    "player_points_strong_over_calibration_guard"
+)
+
+
+def player_points_strong_over_calibration_reason(row: Mapping[str, Any]) -> str:
+    """Return the strong-OVER calibration block reason, or '' if not blocked.
+
+    Triggers only on player_points OVER picks where edge >= +3.0. UNDERs and
+    non-player_points markets always return ''.
+
+    Defers to the high-caution-conflicted context safety gate when that gate
+    would already block this row, so existing telemetry counters stay stable.
+    The row is still blocked from elite/Kelly — just attributed to the
+    context gate's rejection reason instead of this guard's.
+    """
+    market_type = str(row.get("market_type", "")).strip().lower()
+    if market_type != "player_points":
+        return ""
+    selection = str(row.get("selection", "")).strip().lower()
+    if selection != "over":
+        return ""
+    edge = PlayerSelectionPolicy.to_float(row.get("edge"))
+    if edge is None:
+        edge_abs = PlayerSelectionPolicy.to_float(row.get("edge_abs"))
+        if edge_abs is None:
+            return ""
+        edge = float(edge_abs)
+    if edge < PLAYER_POINTS_STRONG_OVER_CALIBRATION_EDGE_THRESHOLD:
+        return ""
+    caution = str(row.get("context_caution_level", "")).strip().lower()
+    alignment = str(row.get("context_pick_alignment", "")).strip().lower()
+    if caution == "high" and alignment == "conflicted":
+        return ""
+    return PLAYER_POINTS_STRONG_OVER_CALIBRATION_GUARD_REASON
+
+
+def passes_player_points_strong_over_calibration(row: Mapping[str, Any]) -> bool:
+    return player_points_strong_over_calibration_reason(row) == ""
 
 
 def elite_points_recent_form_ratio(row: Mapping[str, Any]) -> float:
@@ -514,6 +562,10 @@ __all__ = [
     "elite_points_risk_guard_reason",
     "elite_points_recent_form_ratio",
     "passes_elite_points_risk_guard",
+    "PLAYER_POINTS_STRONG_OVER_CALIBRATION_EDGE_THRESHOLD",
+    "PLAYER_POINTS_STRONG_OVER_CALIBRATION_GUARD_REASON",
+    "player_points_strong_over_calibration_reason",
+    "passes_player_points_strong_over_calibration",
     "get_elite_rejection_reason",
     "filter_elite_candidates",
 ]

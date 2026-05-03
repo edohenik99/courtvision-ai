@@ -199,7 +199,10 @@ class BoardScoringPolicy:
         Maintains exact same logic as original for backward compatibility.
         """
         # Lazy import to avoid circular dependency
-        from courtvision.runtime_selection import passes_elite_points_risk_guard
+        from courtvision.runtime_selection import (
+            passes_elite_points_risk_guard,
+            passes_player_points_strong_over_calibration,
+        )
 
         market_type = str(row.get("market_type", ""))
         confidence = to_float(row.get("confidence")) or 0.0
@@ -218,6 +221,9 @@ class BoardScoringPolicy:
             return False
 
         if not passes_elite_points_risk_guard(row):
+            return False
+
+        if not passes_player_points_strong_over_calibration(row):
             return False
 
         if market_type.startswith("player_"):
