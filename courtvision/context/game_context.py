@@ -41,6 +41,13 @@ GAME_CONTEXT_COLUMNS: tuple[str, ...] = (
     "context_preview_applied",
 )
 
+GAME_CONTEXT_DIAGNOSTIC_COLUMNS: tuple[str, ...] = (
+    "candidate_team_not_in_game",
+    "game_context_suppressed",
+    "game_context_suppression_reason",
+    "playoff_only_high_caution",
+)
+
 PACE_COLUMNS: tuple[str, ...] = ("team_pace", "pace", "possessions_per_game")
 OFF_RATING_COLUMNS: tuple[str, ...] = ("team_off_rating", "off_rating", "offensive_rating")
 DEF_RATING_COLUMNS: tuple[str, ...] = ("team_def_rating", "def_rating", "defensive_rating")
@@ -380,7 +387,38 @@ def _default_context() -> dict[str, Any]:
         "context_pick_alignment": "insufficient_data",
         "context_caution_level": "insufficient_data",
         "context_preview_applied": False,
+        "candidate_team_not_in_game": False,
+        "game_context_suppressed": False,
+        "game_context_suppression_reason": "",
+        "playoff_only_high_caution": False,
     }
+
+
+def _clear_applied_game_context(out: pd.DataFrame, idx: Any) -> None:
+    defaults = _default_context()
+    for column in GAME_CONTEXT_COLUMNS:
+        if column == "game_id":
+            continue
+        out.at[idx, column] = defaults[column]
+
+
+def _playoff_only_high_caution(row: pd.Series) -> bool:
+    if _text(row.get("selection")).lower() != "over":
+        return False
+    if _text(row.get("context_caution_level")).lower() != "high":
+        return False
+    if _text(row.get("context_pick_alignment")).lower() != "conflicted":
+        return False
+    if _text(row.get("overall_context_signal")).lower() != "supports_under":
+        return False
+    if _text(row.get("playoff_context_signal")).lower() != "supports_under":
+        return False
+    other_signals = (
+        _text(row.get("pace_context_signal")).lower(),
+        _text(row.get("defense_context_signal")).lower(),
+        _text(row.get("rest_context_signal")).lower(),
+    )
+    return all(signal != "supports_under" for signal in other_signals)
 
 
 def apply_game_context(
@@ -446,6 +484,13 @@ def apply_game_context(
         if game:
             home = _team_key(game.get("home"))
             away = _team_key(game.get("away"))
+            team_in_game = bool(team and team in {home, away})
+            if team and home and away and not team_in_game:
+                _clear_applied_game_context(out, idx)
+                out.at[idx, "candidate_team_not_in_game"] = True
+                out.at[idx, "game_context_suppressed"] = True
+                out.at[idx, "game_context_suppression_reason"] = "team_not_in_game_context"
+                continue
             opponent = away if team == home else home if team == away else ""
             out.at[idx, "opponent"] = opponent
             out.at[idx, "home_away"] = "home" if team == home else "away" if team == away else ""
@@ -523,6 +568,7 @@ def apply_game_context(
             out.at[idx, "overall_context_signal"],
             out.at[idx, "context_pick_alignment"],
         )
+        out.at[idx, "playoff_only_high_caution"] = _playoff_only_high_caution(out.loc[idx])
         out.at[idx, "context_preview_applied"] = False
 
     diagnostics.update(_coverage(out))
@@ -571,6 +617,24 @@ def _coverage(df: pd.DataFrame) -> dict[str, Any]:
         if column in df.columns and has_value(column) < len(df)
     }
     coverage["missing_fields"] = list(coverage["missing_fields_breakdown"].keys())
+    if "candidate_team_not_in_game" in df.columns:
+        coverage["candidate_team_not_in_game_count"] = int(
+            df["candidate_team_not_in_game"].map(lambda value: _text(value).lower() == "true").sum()
+        )
+    else:
+        coverage["candidate_team_not_in_game_count"] = 0
+    if "game_context_suppressed" in df.columns:
+        coverage["game_context_suppressed_count"] = int(
+            df["game_context_suppressed"].map(lambda value: _text(value).lower() == "true").sum()
+        )
+    else:
+        coverage["game_context_suppressed_count"] = 0
+    if "playoff_only_high_caution" in df.columns:
+        coverage["playoff_only_high_caution_count"] = int(
+            df["playoff_only_high_caution"].map(lambda value: _text(value).lower() == "true").sum()
+        )
+    else:
+        coverage["playoff_only_high_caution_count"] = 0
     return coverage
 
 
@@ -589,7 +653,18 @@ def write_game_context_outputs(
         "confidence_changed": False,
         "selection_logic_changed": False,
         "kelly_logic_changed": False,
-        "sample_rows": candidates[[c for c in ["player_name", "team", *GAME_CONTEXT_COLUMNS] if c in candidates.columns]]
+        "sample_rows": candidates[
+            [
+                c
+                for c in [
+                    "player_name",
+                    "team",
+                    *GAME_CONTEXT_COLUMNS,
+                    *GAME_CONTEXT_DIAGNOSTIC_COLUMNS,
+                ]
+                if c in candidates.columns
+            ]
+        ]
         .head(20)
         .to_dict("records")
         if not candidates.empty
@@ -624,6 +699,8 @@ def write_game_context_outputs(
             f"playoff:{sample.get('playoff_context_signal')} "
             f"overall:{sample.get('overall_context_signal')} "
             f"alignment:{sample.get('context_pick_alignment')} "
+            f"suppressed:{sample.get('game_context_suppressed')} "
+            f"reason:{sample.get('game_context_suppression_reason')} "
             f"applied:{sample.get('context_preview_applied')}"
         )
     lines = [
@@ -641,6 +718,11 @@ def write_game_context_outputs(
         f"candidates_with_pace: {payload['candidates_with_pace']}",
         f"candidates_with_def_rating: {payload['candidates_with_def_rating']}",
         f"candidates_with_off_rating: {payload.get('candidates_with_off_rating', 0)}",
+        "",
+        "Safety Diagnostics",
+        f"candidate_team_not_in_game_count: {payload.get('candidate_team_not_in_game_count', 0)}",
+        f"game_context_suppressed_count: {payload.get('game_context_suppressed_count', 0)}",
+        f"playoff_only_high_caution_count: {payload.get('playoff_only_high_caution_count', 0)}",
         "",
         "Missing Fields",
         json.dumps(payload.get("missing_fields_breakdown", {}), indent=2, default=str),

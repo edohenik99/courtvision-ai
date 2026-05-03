@@ -215,6 +215,99 @@ def test_game_context_parses_nested_bdl_schema_for_home_and_away_candidates() ->
     assert diagnostics["candidates_with_postseason"] == 2
 
 
+def test_game_context_suppresses_context_when_candidate_team_not_in_game(tmp_path) -> None:
+    candidates = pd.DataFrame(
+        [
+            {
+                "player_id": 460,
+                "player_name": "Nikola Vucevic",
+                "team": "CHI",
+                "team_abbr": "CHI",
+                "game_id": 21682743,
+                "market_type": "player_points",
+                "selection": "over",
+            },
+            {
+                "player_id": 460,
+                "player_name": "Nikola Vucevic",
+                "team": "BOS",
+                "team_abbr": "BOS",
+                "game_id": 21682743,
+                "market_type": "player_points",
+                "selection": "over",
+            },
+        ]
+    )
+    games = pd.DataFrame(
+        [
+            {
+                "game_id": 21682743,
+                "home_team_abbr": "BOS",
+                "visitor_team_abbr": "PHI",
+                "postseason": True,
+            }
+        ]
+    )
+    team_baselines = pd.DataFrame(
+        [
+            {"team_abbr": "BOS", "team_pace": 95.58, "team_def_rating": 111.7, "team_off_rating": 120.0},
+            {"team_abbr": "PHI", "team_pace": 100.4, "team_def_rating": 114.4, "team_off_rating": 114.3},
+            {"team_abbr": "CHI", "team_pace": 101.0, "team_def_rating": 115.0, "team_off_rating": 113.0},
+        ]
+    )
+
+    out, diagnostics = apply_game_context(
+        candidates,
+        games=games,
+        team_baselines=team_baselines,
+        odds=pd.DataFrame(),
+    )
+
+    by_team = {row["team"]: row for _, row in out.iterrows()}
+    stale = by_team["CHI"]
+    valid = by_team["BOS"]
+
+    assert stale["opponent"] == ""
+    assert stale["home_away"] == ""
+    assert pd.isna(stale["postseason"])
+    assert pd.isna(stale["team_pace"])
+    assert pd.isna(stale["opponent_pace"])
+    assert stale["pace_context_signal"] == "insufficient_data"
+    assert stale["defense_context_signal"] == "insufficient_data"
+    assert stale["rest_context_signal"] == "insufficient_data"
+    assert stale["playoff_context_signal"] == "insufficient_data"
+    assert stale["overall_context_signal"] == "insufficient_data"
+    assert stale["context_pick_alignment"] == "insufficient_data"
+    assert stale["context_caution_level"] == "insufficient_data"
+    assert bool(stale["candidate_team_not_in_game"]) is True
+    assert bool(stale["game_context_suppressed"]) is True
+    assert stale["game_context_suppression_reason"] == "team_not_in_game_context"
+
+    assert valid["opponent"] == "PHI"
+    assert valid["home_away"] == "home"
+    assert bool(valid["postseason"]) is True
+    assert valid["playoff_context_signal"] == "supports_under"
+    assert bool(valid["game_context_suppressed"]) is False
+
+    assert diagnostics["candidate_team_not_in_game_count"] == 1
+    assert diagnostics["game_context_suppressed_count"] == 1
+    assert diagnostics["playoff_only_high_caution_count"] == 1
+    assert diagnostics["candidates_with_postseason"] == 1
+
+    json_path, report_path, payload = write_game_context_outputs(
+        prediction_date="2026-05-02",
+        runtime_root=tmp_path / "runtime",
+        diagnostics=diagnostics,
+        candidates=out,
+    )
+    written = json.loads(json_path.read_text(encoding="utf-8"))
+    assert written["game_context_suppressed_count"] == 1
+    assert written["sample_rows"][0]["game_context_suppression_reason"] == "team_not_in_game_context"
+    report_text = report_path.read_text(encoding="utf-8")
+    assert "game_context_suppressed_count: 1" in report_text
+    assert payload["candidate_team_not_in_game_count"] == 1
+
+
 def test_game_context_calculates_one_day_rest_from_schedule() -> None:
     candidates = pd.DataFrame([{"player_name": "Player A", "team": "AAA", "team_abbr": "AAA", "game_id": 1}])
     games = pd.DataFrame([{"game_id": 1, "home_team_abbr": "AAA", "visitor_team_abbr": "BBB"}])

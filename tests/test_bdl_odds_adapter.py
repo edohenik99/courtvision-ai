@@ -54,6 +54,7 @@ def test_line_value_is_mapped_to_line():
     assert row["raw_market_type"] == "over_under"
     assert row["raw_market_name"] == "points"
     assert row["player_name"] == "LeBron James"
+    assert row["_team_abbr"] == "LAL"
     assert row["vendor"] == "draftkings"
     assert row["unresolved_reason"] is None
     assert row["selection"] == "over"
@@ -261,6 +262,7 @@ def test_flat_player_id_uses_lookup_without_embedded_player_object():
     out = normalize_bdl_player_props(raw, player_lookup=_basic_lookup())
 
     assert set(out["player_name"]) == {"Jayson Tatum"}
+    assert set(out["_team_abbr"]) == {"BOS"}
     assert out["unresolved_reason"].isna().all()
 
 

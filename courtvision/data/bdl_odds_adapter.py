@@ -135,6 +135,32 @@ def _resolve_player_name(
     return None
 
 
+def _resolve_player_team_abbr(
+    player_id: Any,
+    player_lookup: Optional[dict[Any, dict[str, Any]]],
+) -> Optional[str]:
+    if not player_lookup or player_id is None:
+        return None
+
+    int_pid = _safe_int(player_id)
+    str_pid = str(int_pid) if int_pid is not None else str(player_id)
+
+    for key in (int_pid, str_pid, player_id):
+        if key is None:
+            continue
+        identity = player_lookup.get(key)
+        if not identity:
+            continue
+        team = _clean_text(
+            identity.get("team_abbr")
+            or identity.get("team")
+            or identity.get("team_abbreviation")
+        )
+        if team:
+            return team.upper()
+    return None
+
+
 def _resolve_player_name_from_row(
     row: pd.Series,
     player_id: Any,
@@ -246,6 +272,10 @@ def normalize_bdl_player_props(
         game_id = _safe_int(_lookup_value(row, "game_id", "game.id"))
         player_id = _safe_int(_lookup_value(row, "player_id", "player.id"))
         player_name = _resolve_player_name_from_row(row, player_id, player_lookup)
+        team_abbr = (
+            _clean_text(_lookup_value(row, "team_abbr", "team.abbreviation", "team.abbr"))
+            or _resolve_player_team_abbr(player_id, player_lookup)
+        )
         raw_prop_type = _lookup_value(row, "prop_type", "raw_prop_type")
         raw_market_name = _resolve_market_name(row)
         market_type = _resolve_market_type(raw_prop_type, raw_market_name, market_type_mapper)
@@ -265,6 +295,7 @@ def normalize_bdl_player_props(
             "vendor": vendor,
             "game_id": game_id,
             "line_source": line_source,
+            "team_abbr": team_abbr,
         }
 
         if market_shape == "milestone":

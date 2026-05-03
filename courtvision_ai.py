@@ -86,6 +86,7 @@ from urllib3.util.retry import Retry
 from courtvision.runtime_audit import (
     BoardAuditPolicy,
     ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER,
+    ELITE_REJECT_GAME_CONTEXT_SUPPRESSED,
     get_elite_rejection_reason as _runtime_get_elite_rejection_reason,
     elite_context_rejection_reason,
     projected_kelly_skip_reason,
@@ -2552,12 +2553,23 @@ class CourtVisionAI:
             return pd.Series(False, index=getattr(df, "index", None), dtype=bool)
         return pd.Series(
             [
-                elite_context_rejection_reason(_to_str_dict(row)) == ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER
+                elite_context_rejection_reason(_to_str_dict(row)) is not None
                 for _, row in df.iterrows()
             ],
             index=df.index,
             dtype=bool,
         )
+
+    @staticmethod
+    def _elite_context_safety_reason_counts(df: pd.DataFrame) -> dict[str, int]:
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            return {}
+        counts: dict[str, int] = {}
+        for _, row in df.iterrows():
+            reason = elite_context_rejection_reason(_to_str_dict(row))
+            if reason:
+                counts[reason] = counts.get(reason, 0) + 1
+        return counts
 
     def _apply_elite_context_safety_gate(
         self,
@@ -2574,12 +2586,20 @@ class CourtVisionAI:
 
         elite_reject_mask = self._elite_context_safety_reject_mask(annotated_elite)
         candidate_reject_mask = self._elite_context_safety_reject_mask(annotated_candidates)
+        elite_reason_counts = self._elite_context_safety_reason_counts(annotated_elite)
+        candidate_reason_counts = self._elite_context_safety_reason_counts(annotated_candidates)
         rejected_count = int(elite_reject_mask.sum()) if not annotated_elite.empty else 0
 
         if rejected_count == 0:
             summary = {
                 "enabled": True,
                 "rejection_reason": ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER,
+                "rejection_reasons": [
+                    ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER,
+                    ELITE_REJECT_GAME_CONTEXT_SUPPRESSED,
+                ],
+                "rejection_reason_counts": elite_reason_counts,
+                "candidate_rejection_reason_counts": candidate_reason_counts,
                 "input_elite_count": int(len(annotated_elite)),
                 "rejected_from_elite_count": 0,
                 "replacement_candidate_count": 0,
@@ -2651,6 +2671,12 @@ class CourtVisionAI:
         summary = {
             "enabled": True,
             "rejection_reason": ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER,
+            "rejection_reasons": [
+                ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER,
+                ELITE_REJECT_GAME_CONTEXT_SUPPRESSED,
+            ],
+            "rejection_reason_counts": elite_reason_counts,
+            "candidate_rejection_reason_counts": candidate_reason_counts,
             "input_elite_count": int(len(annotated_elite)),
             "rejected_from_elite_count": rejected_count,
             "replacement_candidate_count": int(len(replacement_pool)),
@@ -2826,12 +2852,13 @@ class CourtVisionAI:
                 and added_rescue_keys
             )
 
+            context_rejection_reason = elite_context_rejection_reason(row_dict)
             if in_final:
                 final_exclusion_stage = "selected"
                 elite_rejection_reason = ""
-            elif elite_context_rejection_reason(row_dict) is not None:
-                final_exclusion_stage = ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER
-                elite_rejection_reason = ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER
+            elif context_rejection_reason is not None:
+                final_exclusion_stage = context_rejection_reason
+                elite_rejection_reason = context_rejection_reason
             elif not elite_guard_pass:
                 final_exclusion_stage = "failed_hard_guard"
                 elite_rejection_reason = elite_guard_fail_reason or "failed_hard_guard"

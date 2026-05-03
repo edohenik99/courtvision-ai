@@ -366,16 +366,25 @@ def score_player_markets(
 
         # Try player_id matching first (more reliable).
         if player_id > 0 and player_id in player_id_lookup:
-            player_market_rows = player_id_lookup[player_id].copy()
-            exact_name_rows = player_market_rows.copy()
-            matched_players += 1
-            matched_by_id = True
+            exact_name_rows = player_id_lookup[player_id].copy()
+            player_market_rows = exact_name_rows.copy()
+            if team and "_team_abbr" in player_market_rows.columns:
+                odds_team = player_market_rows["_team_abbr"].fillna("").astype(str).str.strip().str.upper()
+                if bool((odds_team != "").any()):
+                    player_market_rows = player_market_rows[odds_team == team].copy()
+            if not player_market_rows.empty:
+                matched_players += 1
+                matched_by_id = True
         # Fall back to normalized name matching
         elif not working_odds.empty and "_normalized_name" in working_odds.columns:
             exact_name_rows = working_odds[
                 working_odds["_normalized_name"] == normalized_player_name
             ].copy()
             player_market_rows = exact_name_rows.copy()
+            if team and "_team_abbr" in player_market_rows.columns:
+                odds_team = player_market_rows["_team_abbr"].fillna("").astype(str).str.strip().str.upper()
+                if bool((odds_team != "").any()):
+                    player_market_rows = player_market_rows[odds_team == team].copy()
             if not player_market_rows.empty:
                 matched_players += 1
 

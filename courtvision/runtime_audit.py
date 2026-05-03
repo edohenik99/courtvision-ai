@@ -627,6 +627,7 @@ class BoardAuditPolicy:
 
     def _player_points_elite_admission_payload(self, df: pd.DataFrame) -> dict[str, Any]:
         bucket_order = [
+            ELITE_REJECT_GAME_CONTEXT_SUPPRESSED,
             ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER,
             "failed_hard_guard",
             "lost_on_score",
@@ -1186,6 +1187,7 @@ REJECT_UNREALISTIC_LINE = "reject_unrealistic_line"
 REJECT_HEAVY_FAVORITE_ODDS = "reject_heavy_favorite_odds"
 REJECT_OTHER = "reject_other"
 ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER = "elite_reject_context_high_caution_over"
+ELITE_REJECT_GAME_CONTEXT_SUPPRESSED = "elite_reject_game_context_suppressed"
 KELLY_PROJECTED_SKIP_CONTEXT_HIGH_CAUTION_OVER = "context_high_caution_over"
 PASSED_TO_ELITE = "passed_to_elite"
 TOTAL_CANDIDATES = "total_candidates"
@@ -1390,8 +1392,23 @@ def projected_kelly_skip_reason(row: Mapping[str, Any]) -> str:
     return ""
 
 
+def _is_truthy_context_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    return text in {"1", "true", "yes", "y"}
+
+
 def elite_context_rejection_reason(row: Mapping[str, Any]) -> str | None:
     """Return the elite safety-gate reason for context-blocked picks."""
+    suppression_reason = str(row.get("game_context_suppression_reason", "") or "").strip().lower()
+    if (
+        _is_truthy_context_flag(row.get("game_context_suppressed"))
+        or _is_truthy_context_flag(row.get("candidate_team_not_in_game"))
+        or suppression_reason == "team_not_in_game_context"
+    ):
+        return ELITE_REJECT_GAME_CONTEXT_SUPPRESSED
+
     selection = str(row.get("selection", row.get("side", "")) or "").strip().lower()
     caution = str(row.get("context_caution_level", "") or "").strip().lower()
     alignment = str(row.get("context_pick_alignment", "") or "").strip().lower()
@@ -1417,9 +1434,10 @@ def assemble_elite_board(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         )
 
         if elite_context_rejection_reason(row) is not None:
+            context_reason = elite_context_rejection_reason(row) or ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER
             print(
                 f"[elite_defensive_catch] {player}: "
-                f"{ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER}"
+                f"{context_reason}"
             )
             continue
 
@@ -1457,6 +1475,7 @@ __all__ = [
     "REJECT_HEAVY_FAVORITE_ODDS",
     "REJECT_OTHER",
     "ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER",
+    "ELITE_REJECT_GAME_CONTEXT_SUPPRESSED",
     "KELLY_PROJECTED_SKIP_CONTEXT_HIGH_CAUTION_OVER",
     "PASSED_TO_ELITE",
     "TOTAL_CANDIDATES",

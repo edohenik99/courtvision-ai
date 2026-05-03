@@ -160,6 +160,48 @@ def test_all_high_caution_conflicted_overs_produce_empty_elite_board(
     assert gate["empty_no_bet"] is True
 
 
+def test_suppressed_game_context_candidate_cannot_backfill_elite(
+    ai: courtvision_ai.CourtVisionAI,
+) -> None:
+    suppressed = _candidate(
+        player_name="Stale Team Candidate",
+        selection="over",
+        line=5.5,
+        edge=6.5,
+        score=160.0,
+        caution="insufficient_data",
+        alignment="neutral",
+        signal="insufficient_data",
+        team="CHI",
+        opponent="",
+    )
+    suppressed["candidate_team_not_in_game"] = True
+    suppressed["game_context_suppressed"] = True
+    suppressed["game_context_suppression_reason"] = "team_not_in_game_context"
+
+    valid = _candidate(
+        player_name="Valid Game Candidate",
+        selection="under",
+        line=24.5,
+        edge=-3.0,
+        score=95.0,
+        caution="low",
+        alignment="aligned",
+        signal="supports_under",
+        team="BOS",
+        opponent="PHI",
+    )
+
+    elite_df, full_market_df, trace = ai._build_final_operator_boards(pd.DataFrame([suppressed, valid]))
+
+    assert elite_df["player_name"].tolist() == ["Valid Game Candidate"]
+    stale_full_market = full_market_df.set_index("player_name").loc["Stale Team Candidate"]
+    assert stale_full_market["final_elite_rejection_reason"] == "elite_reject_game_context_suppressed"
+
+    gate = trace["elite"]["elite_context_safety_gate"]
+    assert gate["candidate_rejection_reason_counts"]["elite_reject_game_context_suppressed"] == 1
+
+
 def test_player_points_elite_admission_records_context_gate_reason(
     ai: courtvision_ai.CourtVisionAI,
 ) -> None:
