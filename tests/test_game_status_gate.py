@@ -41,6 +41,10 @@ from courtvision.runtime_audit import (
 # Helpers
 # ---------------------------------------------------------------------------
 
+# Recent timestamp for fresh odds in tests
+_FRESH_ODDS_TIME = (datetime.now() - timedelta(minutes=5)).isoformat()
+
+
 def _candidate(
     *,
     game_status: str = "scheduled",
@@ -53,6 +57,7 @@ def _candidate(
     quality_score: float = 100.0,
     confidence: float = 0.80,
     line: float = 20.5,
+    odds_updated_at: str | None = None,
 ) -> dict[str, object]:
     return {
         "player_name": player_name,
@@ -68,6 +73,8 @@ def _candidate(
         "game_date": game_datetime or "",
         "game_datetime": game_datetime or "",
         "postseason": postseason,
+        # Include fresh odds timestamp so game-status tests don't trigger odds-stale rejection
+        "odds_updated_at": odds_updated_at or _FRESH_ODDS_TIME,
     }
 
 

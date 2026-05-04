@@ -1284,6 +1284,10 @@ KELLY_SKIP_GAME_IN_PROGRESS = "game_in_progress"
 KELLY_SKIP_GAME_LOCKED = "game_locked"
 KELLY_SKIP_GAME_POSTPONED = "game_postponed"
 
+# Odds freshness gate rejection reasons
+ELITE_REJECT_ODDS_STALE = "elite_reject_odds_stale"
+KELLY_SKIP_ODDS_STALE = "odds_stale"
+
 PASSED_TO_ELITE = "passed_to_elite"
 TOTAL_CANDIDATES = "total_candidates"
 
@@ -1426,7 +1430,10 @@ def get_elite_rejection_reason(row: dict[str, Any], now: Any = None) -> str | No
 
     Mirrors the real gate order in the pipeline.
     """
-    from courtvision.runtime_selection import game_status_ineligibility_reason
+    from courtvision.runtime_selection import (
+        game_status_ineligibility_reason,
+        odds_stale_ineligibility_reason,
+    )
 
     market = str(row.get("market_type", row.get("market", ""))).lower()
     selection = str(row.get("selection", "")).lower()
@@ -1443,6 +1450,10 @@ def get_elite_rejection_reason(row: dict[str, Any], now: Any = None) -> str | No
             "game_status_unknown": ELITE_REJECT_GAME_NOT_BETTABLE,
         }
         return reason_map.get(game_status_reason, ELITE_REJECT_GAME_NOT_BETTABLE)
+
+    # ---- Odds freshness gate (no bets on stale odds) ----
+    if odds_stale_ineligibility_reason(row, now=now):
+        return ELITE_REJECT_ODDS_STALE
 
     # Check injury flag
     if bool(row.get("injury_flag", False)):
@@ -1505,9 +1516,12 @@ def projected_kelly_skip_reason(row: Mapping[str, Any], now: Any = None) -> str:
     sizing can be applied to Full-Market rows that are not already filtered
     out by the elite board.
     """
-    from courtvision.runtime_selection import game_status_ineligibility_reason
+    from courtvision.runtime_selection import (
+        game_status_ineligibility_reason,
+        odds_stale_ineligibility_reason,
+    )
 
-    # Game status / slate-lock gate: never stake on completed/locked games
+    # ---- Game status / slate-lock gate (early: no bets on completed games) ----
     game_status_reason = game_status_ineligibility_reason(row, now=now)
     if game_status_reason:
         reason_map = {
@@ -1518,6 +1532,10 @@ def projected_kelly_skip_reason(row: Mapping[str, Any], now: Any = None) -> str:
             "game_status_unknown": KELLY_SKIP_GAME_NOT_BETTABLE,
         }
         return reason_map.get(game_status_reason, KELLY_SKIP_GAME_NOT_BETTABLE)
+
+    # ---- Odds freshness gate (no bets on stale odds) ----
+    if odds_stale_ineligibility_reason(row, now=now):
+        return KELLY_SKIP_ODDS_STALE
 
     # High-caution conflicted over: historically ~49% hit (n=268)
     selection = str(row.get("selection", row.get("side", "")) or "").strip().lower()
@@ -1626,6 +1644,7 @@ __all__ = [
     "ELITE_REJECT_GAME_IN_PROGRESS",
     "ELITE_REJECT_GAME_LOCKED",
     "ELITE_REJECT_GAME_POSTPONED",
+    "ELITE_REJECT_ODDS_STALE",
     "KELLY_PROJECTED_SKIP_CONTEXT_HIGH_CAUTION_OVER",
     "KELLY_PROJECTED_SKIP_PLAYER_POINTS_STRONG_OVER_CALIBRATION",
     "KELLY_SKIP_GAME_NOT_BETTABLE",
@@ -1633,6 +1652,7 @@ __all__ = [
     "KELLY_SKIP_GAME_IN_PROGRESS",
     "KELLY_SKIP_GAME_LOCKED",
     "KELLY_SKIP_GAME_POSTPONED",
+    "KELLY_SKIP_ODDS_STALE",
     "PASSED_TO_ELITE",
     "TOTAL_CANDIDATES",
 ]

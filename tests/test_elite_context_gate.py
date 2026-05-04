@@ -12,6 +12,8 @@ import courtvision_ai
 
 # Future datetime to pass the game-status gate in tests
 _FUTURE_DATE = (datetime.now() + timedelta(hours=2)).isoformat()
+# Recent timestamp for fresh odds in tests
+_FRESH_ODDS_TIME = (datetime.now() - timedelta(minutes=5)).isoformat()
 
 
 def _stub_logger(name: str) -> logging.Logger:
@@ -79,6 +81,8 @@ def _candidate(
         "game_date": _FUTURE_DATE,
         "game_datetime": _FUTURE_DATE,
         "postseason": "false",
+        # Include fresh odds timestamp so odds-stale gate doesn't block
+        "odds_updated_at": _FRESH_ODDS_TIME,
     }
 
 

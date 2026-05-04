@@ -52,6 +52,8 @@ class TestPlayerPointsEdgeGuardrails:
             "game_date": future,
             "game_datetime": future,
             "postseason": "false",
+            # Include fresh odds timestamp so odds-stale gate doesn't block
+            "odds_updated_at": (datetime.now() - timedelta(minutes=5)).isoformat(),
         }
         # Should return None (no rejection)
         reason = get_elite_rejection_reason(row)
@@ -78,6 +80,8 @@ class TestPlayerPointsEdgeGuardrails:
             "game_date": future,
             "game_datetime": future,
             "postseason": "false",
+            # Include fresh odds timestamp so odds-stale gate doesn't block
+            "odds_updated_at": (datetime.now() - timedelta(minutes=5)).isoformat(),
         }
         reason = get_elite_rejection_reason(row)
         assert reason is not None, "Expected rejection for edge < 0.013"
@@ -105,6 +109,8 @@ class TestPlayerPointsEdgeGuardrails:
             "game_date": future,
             "game_datetime": future,
             "postseason": "false",
+            # Include fresh odds timestamp so odds-stale gate doesn't block
+            "odds_updated_at": (datetime.now() - timedelta(minutes=5)).isoformat(),
         }
         # Currently this would pass - this test documents the gap
         reason = get_elite_rejection_reason(row)

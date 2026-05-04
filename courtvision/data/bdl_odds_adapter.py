@@ -35,6 +35,7 @@ REQUIRED_COLUMNS: tuple[str, ...] = (
     "game_id",
     "line_source",
     "unresolved_reason",
+    "updated_at",
     # Legacy columns for backward compatibility with candidates.py
     "_normalized_name",
     "market",
@@ -283,6 +284,7 @@ def normalize_bdl_player_props(
         line, line_source = _resolve_line(row)
         raw_market_type = _clean_text(_lookup_value(row, "market.type")) or "over_under"
         market_shape = raw_market_type.lower()
+        updated_at = str(_lookup_value(row, "updated_at", "last_updated") or "").strip()
 
         base = {
             "player_id": player_id,
@@ -296,6 +298,7 @@ def normalize_bdl_player_props(
             "game_id": game_id,
             "line_source": line_source,
             "team_abbr": team_abbr,
+            "updated_at": updated_at,
         }
 
         if market_shape == "milestone":

@@ -723,6 +723,77 @@ def is_game_bettable(
     return game_status_ineligibility_reason(row, now, lock_buffer_minutes) == ""
 
 
+#: Default max age in minutes for odds to be considered fresh
+DEFAULT_ODDS_STALE_MINUTES: int = 30
+
+
+def odds_stale_ineligibility_reason(
+    row: Mapping[str, Any],
+    now: Any | None = None,
+    stale_threshold_minutes: int = DEFAULT_ODDS_STALE_MINUTES,
+) -> str:
+    """Return the odds stale ineligibility reason, or '' if odds are fresh.
+
+    Rules:
+    - If updated_at is missing or empty, odds are stale (cannot verify freshness)
+    - If updated_at is older than stale_threshold_minutes from now, odds are stale
+    - If updated_at cannot be parsed, odds are stale (conservative)
+
+    In research mode, always returns "" (all passes).
+
+    Args:
+        row: Candidate row with odds_updated_at field
+        now: Current datetime (defaults to datetime.now())
+        stale_threshold_minutes: Max age of odds in minutes before considered stale
+
+    Returns:
+        Empty string if odds are fresh, otherwise "odds_stale".
+    """
+    import os
+    from datetime import datetime, timedelta
+
+    # Research mode bypass
+    mode = os.environ.get("COURTVISION_MODE", "betting").strip().lower()
+    if mode == "research":
+        return ""
+
+    updated_at_raw = row.get("odds_updated_at", "")
+    if not updated_at_raw:
+        return "odds_stale"
+
+    updated_at_str = str(updated_at_raw).strip()
+    if not updated_at_str:
+        return "odds_stale"
+
+    # Try to parse the datetime
+    updated_at = _parse_game_datetime(updated_at_str)
+    if updated_at is None:
+        return "odds_stale"
+
+    if isinstance(now, datetime):
+        now_dt = now
+    else:
+        now_dt = datetime.now(updated_at.tzinfo) if updated_at.tzinfo else datetime.now()
+
+    age = now_dt - updated_at
+    if age > timedelta(minutes=stale_threshold_minutes):
+        return "odds_stale"
+
+    return ""
+
+
+def is_odds_fresh(
+    row: Mapping[str, Any],
+    now: Any | None = None,
+    stale_threshold_minutes: int = DEFAULT_ODDS_STALE_MINUTES,
+) -> bool:
+    """Return True if the odds on this candidate are fresh enough to bet.
+
+    Convenience wrapper around odds_stale_ineligibility_reason.
+    """
+    return odds_stale_ineligibility_reason(row, now, stale_threshold_minutes) == ""
+
+
 __all__ = [
     "BoardVolumeConfig",
     "BoardVolumePolicy",
@@ -748,4 +819,8 @@ __all__ = [
     "GAME_STATUS_CANCELLED",
     "game_status_ineligibility_reason",
     "is_game_bettable",
+    # Odds freshness gate exports
+    "DEFAULT_ODDS_STALE_MINUTES",
+    "odds_stale_ineligibility_reason",
+    "is_odds_fresh",
 ]

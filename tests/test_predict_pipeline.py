@@ -546,6 +546,7 @@ class TestPredictionPipeline:
             "date": (datetime.now() + timedelta(hours=2)).isoformat(),
             "status": "scheduled",
         }])
+        fresh_time = (datetime.now() - timedelta(minutes=5)).isoformat()
         odds = pd.DataFrame([
             {
                 "game_id": 1,
@@ -558,6 +559,7 @@ class TestPredictionPipeline:
                 "odds": -110,
                 "selection": "over",
                 "is_live": True,
+                "updated_at": fresh_time,
             },
             {
                 "game_id": 1,
@@ -570,6 +572,7 @@ class TestPredictionPipeline:
                 "odds": -110,
                 "selection": "over",
                 "is_live": True,
+                "updated_at": fresh_time,
             },
             {
                 "game_id": 1,
@@ -582,6 +585,7 @@ class TestPredictionPipeline:
                 "odds": -110,
                 "selection": "over",
                 "is_live": True,
+                "updated_at": fresh_time,
             },
         ])
         baselines = pd.DataFrame([
@@ -1009,11 +1013,13 @@ class TestPredictionPipeline:
         logger = logging.getLogger("test_predict_pipeline.selection_trace")
         pipeline = PredictionPipeline(config, logger=logger)
 
+        from datetime import datetime, timedelta
         games = pd.DataFrame([{
             "game_id": 1,
             "home_team_abbr": "LAL",
             "visitor_team_abbr": "BOS",
-            "game_date": "2024-01-15",
+            "game_date": (datetime.now() + timedelta(hours=2)).isoformat(),
+            "status": "scheduled",
         }])
 
         odds = pd.DataFrame([{
@@ -1024,6 +1030,7 @@ class TestPredictionPipeline:
             "odds": -110,
             "is_live": True,
             "team": "LAL",
+            "updated_at": (datetime.now() - timedelta(minutes=5)).isoformat(),
         }])
 
         baselines = pd.DataFrame([{

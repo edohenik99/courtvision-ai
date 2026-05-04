@@ -37,6 +37,8 @@ def test_directional_validation_rejects_wrong_side_points_picks():
         # Include valid future game status so game-status gate doesn't block
         "game_status": "scheduled",
         "game_date": (datetime.now() + timedelta(hours=2)).isoformat(),
+        # Include fresh odds timestamp so odds-stale gate doesn't block
+        "odds_updated_at": (datetime.now() - timedelta(minutes=5)).isoformat(),
     }
 
     assert get_elite_rejection_reason({**base, "selection": "over", "edge_pct": 0.10}) is None

@@ -35,6 +35,8 @@ from courtvision.scoring.candidate_scoring import CandidateScoringPolicy
 
 # Future datetime to pass the game-status gate so tests target the guard under test.
 _FUTURE_DATE = (datetime.now() + timedelta(hours=2)).isoformat()
+#: Recent timestamp for fresh odds in tests
+_FRESH_ODDS_TIME = (datetime.now() - timedelta(minutes=5)).isoformat()
 
 
 def _candidate(
@@ -78,6 +80,8 @@ def _candidate(
         "game_date": _FUTURE_DATE,
         "game_datetime": _FUTURE_DATE,
         "postseason": "false",
+        # Include fresh odds timestamp so odds-stale gate doesn't block
+        "odds_updated_at": _FRESH_ODDS_TIME,
     }
 
 

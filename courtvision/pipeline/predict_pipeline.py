@@ -998,6 +998,8 @@ class PredictionPipeline:
                 "game_status": _game_info.get("game_status", ""),
                 "game_date": _game_info.get("game_date", ""),
                 "postseason": _game_info.get("postseason", ""),
+                # Odds freshness field
+                "odds_updated_at": str(market_row.get("updated_at", "")) if not market_row.empty else "",
             }
 
             scoring_result = self.scoring_policy.apply_scoring_metadata(scoring_input)
@@ -1059,6 +1061,8 @@ class PredictionPipeline:
                 "game_status": _game_info.get("game_status", ""),
                 "game_date": _game_info.get("game_date", ""),
                 "postseason": _game_info.get("postseason", ""),
+                # Odds freshness field
+                "odds_updated_at": str(market_row.get("updated_at", "")) if not market_row.empty else "",
                 **injury_metadata,
             }
 
@@ -1232,6 +1236,8 @@ class PredictionPipeline:
                 "game_status": _team_game_info.get("game_status", ""),
                 "game_date": _team_game_info.get("game_date", ""),
                 "postseason": _team_game_info.get("postseason", ""),
+                # Odds freshness field
+                "odds_updated_at": str(row.get("updated_at", "")).strip(),
             }
             scoring_result = self.scoring_policy.apply_scoring_metadata(scoring_input)
             candidate = {
@@ -1264,6 +1270,8 @@ class PredictionPipeline:
                 "game_status": _team_game_info.get("game_status", ""),
                 "game_date": _team_game_info.get("game_date", ""),
                 "postseason": _team_game_info.get("postseason", ""),
+                # Odds freshness field
+                "odds_updated_at": str(row.get("updated_at", "")).strip(),
             }
             if abs(edge) < self.config.min_edge:
                 rejected.append(
@@ -1328,6 +1336,43 @@ class PredictionPipeline:
         if _game_status_excluded_count > 0:
             print(f"[COUNT] candidates_excluded_by_game_status={_game_status_excluded_count}", flush=True)
             print(f"[COUNT] game_status_exclusion_reasons={dict(sorted(_game_status_reason_counts.items()))}", flush=True)
+
+        # ---- Odds freshness gate diagnostics ----
+        # Count how many rows have updated_at, how many are stale, and by vendor.
+        from courtvision.runtime_selection import odds_stale_ineligibility_reason
+        _odds_rows_total = 0
+        _odds_rows_with_updated_at = 0
+        _stale_odds_count = 0
+        _stale_odds_by_vendor: dict[str, int] = {}
+        _stale_odds_max_age_minutes = 0.0
+        for cand in accepted:
+            _odds_rows_total += 1
+            oa = str(cand.get("odds_updated_at", "") or "").strip()
+            if oa:
+                _odds_rows_with_updated_at += 1
+            stale_reason = odds_stale_ineligibility_reason(cand)
+            if stale_reason:
+                _stale_odds_count += 1
+                vendor = str(cand.get("vendor", cand.get("bookmaker", "unknown")) or "unknown").strip()
+                _stale_odds_by_vendor[vendor] = _stale_odds_by_vendor.get(vendor, 0) + 1
+                # Compute rough age for diagnostics
+                try:
+                    from datetime import datetime, timedelta
+                    from courtvision.runtime_selection import _parse_game_datetime
+                    dt = _parse_game_datetime(oa)
+                    if dt:
+                        age = datetime.now() - dt
+                        age_mins = age.total_seconds() / 60.0
+                        if age_mins > _stale_odds_max_age_minutes:
+                            _stale_odds_max_age_minutes = age_mins
+                except Exception:
+                    pass
+        print(f"[COUNT] odds_rows_total={_odds_rows_total}", flush=True)
+        print(f"[COUNT] odds_rows_with_updated_at={_odds_rows_with_updated_at}", flush=True)
+        print(f"[COUNT] stale_odds_count={_stale_odds_count}", flush=True)
+        if _stale_odds_by_vendor:
+            print(f"[COUNT] stale_odds_by_vendor={dict(sorted(_stale_odds_by_vendor.items()))}", flush=True)
+            print(f"[COUNT] stale_odds_max_age_minutes={round(_stale_odds_max_age_minutes, 1)}", flush=True)
 
         self.logger.info("candidate_universe_output accepted=%d rejected=%d", len(accepted), len(rejected))
 
