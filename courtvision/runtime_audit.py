@@ -1271,6 +1271,19 @@ KELLY_PROJECTED_SKIP_CONTEXT_HIGH_CAUTION_OVER = "context_high_caution_over"
 KELLY_PROJECTED_SKIP_PLAYER_POINTS_STRONG_OVER_CALIBRATION = (
     "player_points_strong_over_calibration"
 )
+
+# Game status / slate-lock gate rejection reasons
+ELITE_REJECT_GAME_NOT_BETTABLE = "elite_reject_game_not_bettable"
+ELITE_REJECT_GAME_FINAL = "elite_reject_game_final"
+ELITE_REJECT_GAME_IN_PROGRESS = "elite_reject_game_in_progress"
+ELITE_REJECT_GAME_LOCKED = "elite_reject_game_locked"
+ELITE_REJECT_GAME_POSTPONED = "elite_reject_game_postponed"
+KELLY_SKIP_GAME_NOT_BETTABLE = "game_not_bettable"
+KELLY_SKIP_GAME_FINAL = "game_final"
+KELLY_SKIP_GAME_IN_PROGRESS = "game_in_progress"
+KELLY_SKIP_GAME_LOCKED = "game_locked"
+KELLY_SKIP_GAME_POSTPONED = "game_postponed"
+
 PASSED_TO_ELITE = "passed_to_elite"
 TOTAL_CANDIDATES = "total_candidates"
 
@@ -1404,18 +1417,32 @@ class EliteTelemetry:
         return out_path
 
 
-def get_elite_rejection_reason(row: dict[str, Any]) -> str | None:
+def get_elite_rejection_reason(row: dict[str, Any], now: Any = None) -> str | None:
     """
     Determine rejection reason for elite admission.
-    
+
     Returns None if row passes all gates, otherwise returns normalized
     rejection reason constant.
-    
+
     Mirrors the real gate order in the pipeline.
     """
+    from courtvision.runtime_selection import game_status_ineligibility_reason
+
     market = str(row.get("market_type", row.get("market", ""))).lower()
     selection = str(row.get("selection", "")).lower()
     edge = float(row.get("edge_pct", row.get("edge", 0.0)) or 0.0)
+
+    # ---- Game status / slate-lock gate (early: no bets on completed games) ----
+    game_status_reason = game_status_ineligibility_reason(row, now=now)
+    if game_status_reason:
+        reason_map = {
+            "game_final": ELITE_REJECT_GAME_FINAL,
+            "game_in_progress": ELITE_REJECT_GAME_IN_PROGRESS,
+            "game_postponed": ELITE_REJECT_GAME_POSTPONED,
+            "game_locked": ELITE_REJECT_GAME_LOCKED,
+            "game_status_unknown": ELITE_REJECT_GAME_NOT_BETTABLE,
+        }
+        return reason_map.get(game_status_reason, ELITE_REJECT_GAME_NOT_BETTABLE)
 
     # Check injury flag
     if bool(row.get("injury_flag", False)):
@@ -1469,13 +1496,30 @@ def get_elite_rejection_reason(row: dict[str, Any]) -> str | None:
     return None
 
 
-def projected_kelly_skip_reason(row: Mapping[str, Any]) -> str:
+def projected_kelly_skip_reason(row: Mapping[str, Any], now: Any = None) -> str:
     """Return the Kelly skip reason implied by context-only safety rules.
 
-    Precedence preserves existing behavior: if a row is blocked by both the
-    high-caution context gate and the strong-OVER calibration guard, the
-    context reason takes precedence so existing diagnostics stay stable.
+    This function inspects row-level context flags and returns a skip-reason
+    string if the row should be excluded from Kelly staking.  It is
+    intentionally lighter than the full elite scoring pipeline so that Kelly
+    sizing can be applied to Full-Market rows that are not already filtered
+    out by the elite board.
     """
+    from courtvision.runtime_selection import game_status_ineligibility_reason
+
+    # Game status / slate-lock gate: never stake on completed/locked games
+    game_status_reason = game_status_ineligibility_reason(row, now=now)
+    if game_status_reason:
+        reason_map = {
+            "game_final": KELLY_SKIP_GAME_FINAL,
+            "game_in_progress": KELLY_SKIP_GAME_IN_PROGRESS,
+            "game_postponed": KELLY_SKIP_GAME_POSTPONED,
+            "game_locked": KELLY_SKIP_GAME_LOCKED,
+            "game_status_unknown": KELLY_SKIP_GAME_NOT_BETTABLE,
+        }
+        return reason_map.get(game_status_reason, KELLY_SKIP_GAME_NOT_BETTABLE)
+
+    # High-caution conflicted over: historically ~49% hit (n=268)
     selection = str(row.get("selection", row.get("side", "")) or "").strip().lower()
     caution = str(row.get("context_caution_level", "") or "").strip().lower()
     if selection == "over" and caution == "high":
@@ -1577,8 +1621,18 @@ __all__ = [
     "ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER",
     "ELITE_REJECT_GAME_CONTEXT_SUPPRESSED",
     "ELITE_REJECT_PLAYER_POINTS_STRONG_OVER_CALIBRATION",
+    "ELITE_REJECT_GAME_NOT_BETTABLE",
+    "ELITE_REJECT_GAME_FINAL",
+    "ELITE_REJECT_GAME_IN_PROGRESS",
+    "ELITE_REJECT_GAME_LOCKED",
+    "ELITE_REJECT_GAME_POSTPONED",
     "KELLY_PROJECTED_SKIP_CONTEXT_HIGH_CAUTION_OVER",
     "KELLY_PROJECTED_SKIP_PLAYER_POINTS_STRONG_OVER_CALIBRATION",
+    "KELLY_SKIP_GAME_NOT_BETTABLE",
+    "KELLY_SKIP_GAME_FINAL",
+    "KELLY_SKIP_GAME_IN_PROGRESS",
+    "KELLY_SKIP_GAME_LOCKED",
+    "KELLY_SKIP_GAME_POSTPONED",
     "PASSED_TO_ELITE",
     "TOTAL_CANDIDATES",
 ]

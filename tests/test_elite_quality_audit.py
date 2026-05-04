@@ -33,8 +33,10 @@ class TestPlayerPointsEdgeGuardrails:
 
     def test_minimal_edge_passes(self):
         """Document that edge >= 0.013 currently passes elite admission."""
+        from datetime import datetime, timedelta
         from courtvision_ai import get_elite_rejection_reason
 
+        future = (datetime.now() + timedelta(hours=2)).isoformat()
         # A pick with exactly 0.013 edge should pass
         row = {
             "market_type": "player_points",
@@ -45,6 +47,11 @@ class TestPlayerPointsEdgeGuardrails:
             "quality_score": 60.0,
             "confidence": 0.70,
             "minutes": 30.0,
+            # Include valid future game status so game-status gate doesn't block
+            "game_status": "scheduled",
+            "game_date": future,
+            "game_datetime": future,
+            "postseason": "false",
         }
         # Should return None (no rejection)
         reason = get_elite_rejection_reason(row)
@@ -53,8 +60,10 @@ class TestPlayerPointsEdgeGuardrails:
 
     def test_below_minimal_edge_rejected(self):
         """Verify that edge < 0.013 is rejected."""
+        from datetime import datetime, timedelta
         from courtvision_ai import get_elite_rejection_reason
 
+        future = (datetime.now() + timedelta(hours=2)).isoformat()
         row = {
             "market_type": "player_points",
             "selection": "over",
@@ -64,6 +73,11 @@ class TestPlayerPointsEdgeGuardrails:
             "quality_score": 60.0,
             "confidence": 0.70,
             "minutes": 30.0,
+            # Include valid future game status so game-status gate doesn't block
+            "game_status": "scheduled",
+            "game_date": future,
+            "game_datetime": future,
+            "postseason": "false",
         }
         reason = get_elite_rejection_reason(row)
         assert reason is not None, "Expected rejection for edge < 0.013"
@@ -71,8 +85,10 @@ class TestPlayerPointsEdgeGuardrails:
 
     def test_high_volatility_player_no_guardrail(self):
         """Document that high volatility players can pass with minimal edge."""
+        from datetime import datetime, timedelta
         from courtvision_ai import get_elite_rejection_reason
 
+        future = (datetime.now() + timedelta(hours=2)).isoformat()
         # A high-volatility player (std_dev of 8 points) with minimal edge
         row = {
             "market_type": "player_points",
@@ -84,6 +100,11 @@ class TestPlayerPointsEdgeGuardrails:
             "confidence": 0.68,  # Barely above threshold
             "minutes": 28.0,
             # No std_dev field exists to check volatility
+            # Include valid future game status so game-status gate doesn't block
+            "game_status": "scheduled",
+            "game_date": future,
+            "game_datetime": future,
+            "postseason": "false",
         }
         # Currently this would pass - this test documents the gap
         reason = get_elite_rejection_reason(row)

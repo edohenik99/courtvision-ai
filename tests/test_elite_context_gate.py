@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
 import courtvision_ai
+
+
+# Future datetime to pass the game-status gate in tests
+_FUTURE_DATE = (datetime.now() + timedelta(hours=2)).isoformat()
 
 
 def _stub_logger(name: str) -> logging.Logger:
@@ -69,6 +74,11 @@ def _candidate(
         "context_caution_level": caution,
         "context_pick_alignment": alignment,
         "overall_context_signal": signal,
+        # Include valid future game status so game-status gate doesn't block
+        "game_status": "scheduled",
+        "game_date": _FUTURE_DATE,
+        "game_datetime": _FUTURE_DATE,
+        "postseason": "false",
     }
 
 

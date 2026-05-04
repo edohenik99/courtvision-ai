@@ -532,15 +532,19 @@ class TestPredictionPipeline:
         assert row["raw_market_type"] == "over_under"
 
     def test_non_points_readiness_gates_and_diagnostics_keep_elite_points_only(self):
+        from datetime import datetime, timedelta
         out_dir = Path("test_outputs") / "market_readiness_pipeline"
         shutil.rmtree(out_dir, ignore_errors=True)
         config = PredictionConfig(prediction_date="2024-01-15", out_dir=str(out_dir))
         pipeline = PredictionPipeline(config)
 
+        # Include a future date so game status gate doesn't block all candidates
         games = pd.DataFrame([{
             "game_id": 1,
             "home_team_abbr": "LAL",
             "visitor_team_abbr": "BOS",
+            "date": (datetime.now() + timedelta(hours=2)).isoformat(),
+            "status": "scheduled",
         }])
         odds = pd.DataFrame([
             {

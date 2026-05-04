@@ -29,10 +29,14 @@ def test_classify_candidate_lane_live_market():
 
 
 def test_directional_validation_rejects_wrong_side_points_picks():
+    from datetime import datetime, timedelta
     base = {
         "market_type": "player_points",
         "sportsbook_line": 24.5,
         "odds": -110,
+        # Include valid future game status so game-status gate doesn't block
+        "game_status": "scheduled",
+        "game_date": (datetime.now() + timedelta(hours=2)).isoformat(),
     }
 
     assert get_elite_rejection_reason({**base, "selection": "over", "edge_pct": 0.10}) is None

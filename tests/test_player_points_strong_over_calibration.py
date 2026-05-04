@@ -6,6 +6,8 @@ visible in Full Market for diagnostics.
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 import pandas as pd
 
 # Import courtvision_ai first to prime the module graph (avoids a pre-existing
@@ -29,6 +31,10 @@ from courtvision.runtime_selection import (
 )
 from courtvision.runtime_scoring import BoardScoringConfig, BoardScoringPolicy
 from courtvision.scoring.candidate_scoring import CandidateScoringPolicy
+
+
+# Future datetime to pass the game-status gate so tests target the guard under test.
+_FUTURE_DATE = (datetime.now() + timedelta(hours=2)).isoformat()
 
 
 def _candidate(
@@ -66,6 +72,12 @@ def _candidate(
         "line_source": "live_market",
         "qualification_gate_mode": qualification_gate_mode,
         "odds": -110,
+        # Include valid future game status so the game-status gate does not block
+        # before the strong-over calibration guard can be tested.
+        "game_status": "scheduled",
+        "game_date": _FUTURE_DATE,
+        "game_datetime": _FUTURE_DATE,
+        "postseason": "false",
     }
 
 

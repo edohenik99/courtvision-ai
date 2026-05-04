@@ -817,6 +817,25 @@ class PredictionPipeline:
                 return is_player_inactive_fn(player_name)
             return False
 
+        # ---- Game status / slate-lock gate: build lookup from games data ----
+        # Map team abbreviation -> game status info for quick lookup per candidate
+        _game_info_by_team: dict[str, dict[str, Any]] = {}
+        if not games.empty and {"home_team_abbr", "visitor_team_abbr"}.issubset(games.columns):
+            for _, g in games.iterrows():
+                gstatus = str(g.get("status", "")).strip().lower()
+                gdate = str(g.get("game_date", g.get("date", ""))).strip()
+                postseason = str(g.get("postseason", g.get("is_postseason", ""))).strip().lower()
+                home = str(g.get("home_team_abbr", "")).strip().upper()
+                visitor = str(g.get("visitor_team_abbr", "")).strip().upper()
+                if gstatus:
+                    for team in (home, visitor):
+                        if team:
+                            _game_info_by_team[team] = {
+                                "game_status": gstatus,
+                                "game_date": gdate,
+                                "postseason": postseason,
+                            }
+
         # Fully modeled markets (real projections)
         FULLY_MODELED_MARKETS = {
             "player_points",
@@ -953,6 +972,10 @@ class PredictionPipeline:
             side_edge = -edge if selection_normalized == "under" else edge
             side_edge_pct = (side_edge / line) if line else 0.0
 
+            # ---- Game status / slate-lock gate: attach game status to candidate ----
+            player_team = str(player_row.get("team_abbr", "")).strip().upper()
+            _game_info = _game_info_by_team.get(player_team, {})
+
             # Score the candidate
             scoring_input = {
                 "market_type": normalized_market,
@@ -971,6 +994,10 @@ class PredictionPipeline:
                 "minutes_recent": _nan_safe_to_float(player_row.get("min_recent")),
                 "is_live_market": bool(market_row.get("is_live", True)) if not market_row.empty else not partial_fill,
                 "synthetic_line": bool(market_row.get("synthetic", False)) if not market_row.empty else partial_fill,
+                # Game status fields for slate-lock gate
+                "game_status": _game_info.get("game_status", ""),
+                "game_date": _game_info.get("game_date", ""),
+                "postseason": _game_info.get("postseason", ""),
             }
 
             scoring_result = self.scoring_policy.apply_scoring_metadata(scoring_input)
@@ -1028,6 +1055,10 @@ class PredictionPipeline:
                 "pre_rejection_reason": pre_rejection_reason,
                 "stake_fraction": stake_fraction,
                 "recommended_bet": recommended_bet,
+                # Game status fields for slate-lock gate diagnostics
+                "game_status": _game_info.get("game_status", ""),
+                "game_date": _game_info.get("game_date", ""),
+                "postseason": _game_info.get("postseason", ""),
                 **injury_metadata,
             }
 
@@ -1179,6 +1210,8 @@ class PredictionPipeline:
                 edge = float(projection - sportsbook_line)
                 selection = str(row.get("selection", team)).strip().lower() or team.lower()
                 confidence = 0.58
+            # Attach game status to team-market scoring input
+            _team_game_info = _game_info_by_team.get(team, {})
             scoring_input = {
                 "market_type": market,
                 "projection": projection,
@@ -1195,6 +1228,10 @@ class PredictionPipeline:
                 "synthetic_line": bool(row.get("synthetic", False)),
                 "odds": int(odds_value),
                 "selection": selection,
+                # Game status fields for slate-lock gate diagnostics
+                "game_status": _team_game_info.get("game_status", ""),
+                "game_date": _team_game_info.get("game_date", ""),
+                "postseason": _team_game_info.get("postseason", ""),
             }
             scoring_result = self.scoring_policy.apply_scoring_metadata(scoring_input)
             candidate = {
@@ -1223,6 +1260,10 @@ class PredictionPipeline:
                 "line_source": "live_market",
                 "source_lane": "live_market_candidate",
                 "pre_rejection_reason": "",
+                # Game status fields for slate-lock gate diagnostics
+                "game_status": _team_game_info.get("game_status", ""),
+                "game_date": _team_game_info.get("game_date", ""),
+                "postseason": _team_game_info.get("postseason", ""),
             }
             if abs(edge) < self.config.min_edge:
                 rejected.append(
@@ -1273,6 +1314,20 @@ class PredictionPipeline:
             if rejection_details["low_confidence"]:
                 sample_conf = rejection_details["low_confidence"][:5]
                 self.logger.info("sample_low_confidence_values %s (threshold=%s)", sample_conf, self.config.min_confidence)
+
+        # ---- Game status / slate-lock gate diagnostics ----
+        # Count how many candidates would be blocked by game status alone.
+        from courtvision.runtime_selection import game_status_ineligibility_reason
+        _game_status_excluded_count = 0
+        _game_status_reason_counts: dict[str, int] = {}
+        for cand in accepted:
+            gs_reason = game_status_ineligibility_reason(cand)
+            if gs_reason:
+                _game_status_excluded_count += 1
+                _game_status_reason_counts[gs_reason] = _game_status_reason_counts.get(gs_reason, 0) + 1
+        if _game_status_excluded_count > 0:
+            print(f"[COUNT] candidates_excluded_by_game_status={_game_status_excluded_count}", flush=True)
+            print(f"[COUNT] game_status_exclusion_reasons={dict(sorted(_game_status_reason_counts.items()))}", flush=True)
 
         self.logger.info("candidate_universe_output accepted=%d rejected=%d", len(accepted), len(rejected))
 
