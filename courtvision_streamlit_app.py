@@ -26,7 +26,7 @@ import sys
 import traceback
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pandas as pd
 import streamlit as st
@@ -56,6 +56,25 @@ try:
 except Exception as exc:  # pragma: no cover — pure UI fallback
     _THEME_AVAILABLE = False
     _THEME_IMPORT_ERROR = str(exc)
+
+
+# =====================================================================
+# Typed DataFrame helpers — silence Pylance ambiguous-return warnings
+# =====================================================================
+
+def column_or_default(df: pd.DataFrame, column: str, default: Any = "") -> pd.Series:
+    if column in df.columns:
+        return cast(pd.Series, df[column])
+    return pd.Series([default] * len(df), index=df.index)
+
+
+def numeric_column_or_default(
+    df: pd.DataFrame,
+    column: str,
+    default: float = 0.0,
+) -> pd.Series:
+    series = column_or_default(df, column, default)
+    return cast(pd.Series, pd.to_numeric(series, errors="coerce").fillna(default))
 
 
 APP_TITLE = "CourtVision"
@@ -301,7 +320,7 @@ def _unique_nonblank_count(df: pd.DataFrame, columns: tuple[str, ...]) -> int:
         return 0
     for col in columns:
         if col in df.columns:
-            values = df[col].dropna().astype(str).str.strip()
+            values = cast(pd.Series, df[col]).dropna().astype(str).str.strip()
             values = values[values != ""]
             if not values.empty:
                 return int(values.nunique())
@@ -563,7 +582,7 @@ def pretty_market_name(market_type: str) -> str:
 # DataFrame styling helpers (pure presentation)
 # =====================================================================
 
-def clean_pick_display(df: pd.DataFrame) -> pd.DataFrame:
+def clean_pick_display(df: pd.DataFrame | None) -> pd.DataFrame:
     if df is None or df.empty:
         return df if df is not None else pd.DataFrame()
 
@@ -573,12 +592,8 @@ def clean_pick_display(df: pd.DataFrame) -> pd.DataFrame:
             out[col] = pd.to_numeric(out[col], errors="coerce")
 
     if "quality_score" not in out.columns:
-        confidence_series = pd.to_numeric(
-            out.get("confidence", pd.Series(dtype=float)), errors="coerce"
-        ).fillna(0.0)
-        edge_abs_series = pd.to_numeric(
-            out.get("edge_abs", pd.Series(dtype=float)), errors="coerce"
-        ).fillna(0.0)
+        confidence_series = numeric_column_or_default(out, "confidence")
+        edge_abs_series = numeric_column_or_default(out, "edge_abs")
         out["quality_score"] = confidence_series * 100.0 + edge_abs_series * 8.0
 
     sort_cols = [
@@ -638,7 +653,7 @@ def clean_pick_display(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def style_pick_table(df: pd.DataFrame) -> pd.DataFrame:
+def style_pick_table(df: pd.DataFrame | None) -> pd.DataFrame:
     if df is None or df.empty:
         return df if df is not None else pd.DataFrame()
     view = clean_pick_display(df)
@@ -668,7 +683,7 @@ def style_pick_table(df: pd.DataFrame) -> pd.DataFrame:
     return view
 
 
-def style_rejection_table(df: pd.DataFrame) -> pd.DataFrame:
+def style_rejection_table(df: pd.DataFrame | None) -> pd.DataFrame:
     if df is None or df.empty:
         return df if df is not None else pd.DataFrame()
     cols = [
@@ -690,7 +705,7 @@ def style_rejection_table(df: pd.DataFrame) -> pd.DataFrame:
     return view
 
 
-def build_top_play_view(df: pd.DataFrame, limit: int = 12) -> pd.DataFrame:
+def build_top_play_view(df: pd.DataFrame | None, limit: int = 12) -> pd.DataFrame:
     if df is None or df.empty:
         return df if df is not None else pd.DataFrame()
     working = clean_pick_display(df)
@@ -699,8 +714,8 @@ def build_top_play_view(df: pd.DataFrame, limit: int = 12) -> pd.DataFrame:
             working[col] = pd.to_numeric(working[col], errors="coerce")
     if "quality_score" not in working.columns:
         working["quality_score"] = (
-            working.get("confidence", pd.Series(dtype=float)).fillna(0.0) * 100.0
-            + working.get("edge_abs", pd.Series(dtype=float)).fillna(0.0) * 8.0
+            numeric_column_or_default(working, "confidence") * 100.0
+            + numeric_column_or_default(working, "edge_abs") * 8.0
         )
     working = working.sort_values(
         by=["quality_score", "confidence", "edge_abs"],
@@ -824,9 +839,9 @@ def render_kpi_row(summary: dict[str, Any]) -> None:
 
 
 def render_no_picks_explainer(
-    rejected_df: pd.DataFrame,
-    selected_df: pd.DataFrame,
-    full_market_df: pd.DataFrame,
+    rejected_df: pd.DataFrame | None,
+    selected_df: pd.DataFrame | None,
+    full_market_df: pd.DataFrame | None,
 ) -> None:
     if selected_df is not None and not selected_df.empty:
         return
@@ -857,7 +872,7 @@ def render_no_picks_explainer(
     st.dataframe(style_rejection_table(near.head(20)), width="stretch", hide_index=True)
 
 
-def render_board_section(title: str, df: pd.DataFrame, caption: str | None = None) -> None:
+def render_board_section(title: str, df: pd.DataFrame | None, caption: str | None = None) -> None:
     render_section_head(title, caption)
     if df is None or df.empty:
         render_empty_state("No rows in this board")
@@ -1059,14 +1074,14 @@ def games_from_payload(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
         payload.get("full_market_props"),
         payload.get("all_stats_props"),
     ]
-    rows: list[dict[str, Any]] = []
+    slices: list[pd.DataFrame] = []
     for df in sources:
         if isinstance(df, pd.DataFrame) and {"team", "opponent"}.issubset(df.columns):
-            rows.append(df[["team", "opponent"]])
-    if not rows:
+            slices.append(df[["team", "opponent"]])
+    if not slices:
         return []
 
-    merged = pd.concat(rows, ignore_index=True).dropna()
+    merged = pd.concat(slices, ignore_index=True).dropna()
     merged["matchup_key"] = merged.apply(
         lambda r: "__".join(
             sorted([str(r["team"]).upper().strip(), str(r["opponent"]).upper().strip()])
@@ -1186,10 +1201,10 @@ def render_history_view(out_dir: str) -> None:
                 ).round(2)
                 st.dataframe(hit_rate, width="stretch", hide_index=True)
             if {"hit", "model_projection", "actual_value"}.issubset(feedback_df.columns):
-                overall_hit_rate = pd.to_numeric(feedback_df["hit"], errors="coerce").mean()
+                overall_hit_rate = numeric_column_or_default(feedback_df, "hit").mean()
                 mae = (
-                    pd.to_numeric(feedback_df["model_projection"], errors="coerce")
-                    - pd.to_numeric(feedback_df["actual_value"], errors="coerce")
+                    numeric_column_or_default(feedback_df, "model_projection")
+                    - numeric_column_or_default(feedback_df, "actual_value")
                 ).abs().mean()
                 overall_hit_rate_value = (
                     0.0 if pd.isna(overall_hit_rate) else float(overall_hit_rate)
@@ -1200,7 +1215,7 @@ def render_history_view(out_dir: str) -> None:
                 c2.metric("Overall MAE", f"{mae_value:.2f}")
 
 
-def render_history_summary(history_df: pd.DataFrame) -> None:
+def render_history_summary(history_df: pd.DataFrame | None) -> None:
     if history_df is None or history_df.empty:
         return
     if "market_type" not in history_df.columns:
@@ -1212,8 +1227,8 @@ def render_history_summary(history_df: pd.DataFrame) -> None:
         avg_edge=("edge_abs", "mean"),
     )
     grp["market_type"] = grp["market_type"].map(pretty_market_name)
-    grp["avg_confidence"] = grp["avg_confidence"].round(3)
-    grp["avg_edge"] = grp["avg_edge"].round(3)
+    grp["avg_confidence"] = numeric_column_or_default(grp, "avg_confidence").round(3)
+    grp["avg_edge"] = numeric_column_or_default(grp, "avg_edge").round(3)
     st.dataframe(grp, width="stretch", hide_index=True)
 
 
@@ -1240,9 +1255,7 @@ def render_calibration_view(out_dir: str) -> None:
         if "market_type" in view.columns:
             view["market_type"] = view["market_type"].map(pretty_market_name)
         if "hit_rate" in view.columns:
-            view["hit_rate"] = (
-                pd.to_numeric(view["hit_rate"], errors="coerce") * 100
-            ).round(2)
+            view["hit_rate"] = (numeric_column_or_default(view, "hit_rate") * 100).round(2)
         st.dataframe(view, width="stretch", hide_index=True)
 
 
