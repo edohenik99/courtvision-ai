@@ -148,6 +148,7 @@ def test_normalize_injuries_frame_builds_player_name_when_missing() -> None:
                 "player.first_name": "Tyrese",
                 "player.last_name": "Haliburton",
                 "player.id": 44,
+                "player.team_id": 1,
                 "status": "Out",
                 "description": "Hamstring",
             }

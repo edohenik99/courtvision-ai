@@ -18,6 +18,7 @@ from courtvision.injuries import (
     compute_recent_form_ratio,
     injury_status_weight,
 )
+from courtvision.data.normalization import normalize_injuries_frame
 
 
 class TestInjuryStatusWeight:
@@ -305,6 +306,114 @@ class TestInjuryEngine:
             25.0, 0.70, injury_context,
         )
         assert meta["team_injury_impact"] == 0.20
+
+
+class TestNormalizeInjuriesFrame:
+    """Tests for normalize_injuries_frame covering multiple input shapes."""
+
+    def test_sdk_dotted_fields_normalize(self):
+        raw = pd.DataFrame(
+            [
+                {
+                    "player.id": 3547247,
+                    "player.first_name": "Tyrese",
+                    "player.last_name": "Haliburton",
+                    "player.team_id": 1,
+                    "status": "Out",
+                    "description": "Hamstring",
+                }
+            ]
+        )
+        out = normalize_injuries_frame(raw)
+        assert len(out) == 1
+        assert out.iloc[0]["player_name"] == "Tyrese Haliburton"
+        assert out.iloc[0]["player_id"] == 3547247
+        assert out.iloc[0]["team_id"] == 1
+        assert out.iloc[0]["status"] == "Out"
+        assert out.iloc[0]["injury_normalized"] == True
+        assert out.iloc[0]["injury_rejection_reason"] == ""
+
+    def test_nested_player_dict_normalizes(self):
+        raw = pd.DataFrame(
+            [
+                {
+                    "player": {
+                        "id": 123,
+                        "first_name": "LeBron",
+                        "last_name": "James",
+                        "team": {"id": 14, "abbreviation": "LAL"},
+                    },
+                    "status": "Day-To-Day",
+                    "description": "Ankle",
+                }
+            ]
+        )
+        out = normalize_injuries_frame(raw)
+        assert len(out) == 1
+        assert out.iloc[0]["player_name"] == "LeBron James"
+        assert out.iloc[0]["team_id"] == 14
+        assert out.iloc[0]["team_abbr"] == "LAL"
+
+    def test_flat_fields_build_player_name(self):
+        raw = pd.DataFrame(
+            [
+                {
+                    "player_id": 456,
+                    "first_name": "Giannis",
+                    "last_name": "Antetokounmpo",
+                    "team_abbr": "MIL",
+                    "status": "Out",
+                }
+            ]
+        )
+        out = normalize_injuries_frame(raw)
+        assert len(out) == 1
+        assert out.iloc[0]["player_name"] == "Giannis Antetokounmpo"
+
+    def test_missing_player_identity_rejected(self):
+        raw = pd.DataFrame(
+            [
+                {
+                    "status": "Out",
+                    "team_abbr": "LAL",
+                }
+            ]
+        )
+        out = normalize_injuries_frame(raw)
+        assert len(out) == 0
+
+    def test_missing_team_identity_rejected(self):
+        raw = pd.DataFrame(
+            [
+                {
+                    "player_name": "Test Player",
+                    "status": "Out",
+                }
+            ]
+        )
+        out = normalize_injuries_frame(raw)
+        assert len(out) == 0
+
+    def test_missing_status_rejected(self):
+        raw = pd.DataFrame(
+            [
+                {
+                    "player_name": "Test Player",
+                    "team_abbr": "LAL",
+                }
+            ]
+        )
+        out = normalize_injuries_frame(raw)
+        assert len(out) == 0
+
+    def test_empty_input_returns_empty_frame(self):
+        out = normalize_injuries_frame(pd.DataFrame())
+        assert len(out) == 0
+        assert list(out.columns) == [
+            "player_id", "first_name", "last_name", "player_name",
+            "team_id", "team_abbr", "status", "description", "return_date",
+            "injury_normalized", "injury_rejection_reason",
+        ]
 
 
 if __name__ == "__main__":

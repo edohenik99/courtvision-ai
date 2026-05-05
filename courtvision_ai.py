@@ -3773,28 +3773,56 @@ class CourtVisionAI:
                 if item is None:
                     continue
 
-                player_name = ""
+                # Flatten nested player identity from SDK row
                 if isinstance(item, dict):
                     player_name = str(item.get("player_name") or "").strip()
-                    if not player_name and item.get("player"):
-                        p = item.get("player")
-                        if isinstance(p, dict):
+                    p = item.get("player")
+                    if p is None:
+                        p = {}
+                    if isinstance(p, dict):
+                        if not player_name:
                             first_name = str(p.get("first_name", "")).strip()
                             last_name = str(p.get("last_name", "")).strip()
                             player_name = f"{first_name} {last_name}".strip()
+                        player_id = p.get("id")
+                        first_name = str(p.get("first_name", "")).strip()
+                        last_name = str(p.get("last_name", "")).strip()
+                        team = p.get("team", {})
+                        team_id = team.get("id") if isinstance(team, dict) else None
+                        team_abbr = str(team.get("abbreviation", "")).strip() if isinstance(team, dict) else ""
+                    else:
+                        player_id = getattr(p, "id", None)
+                        first_name = str(getattr(p, "first_name", "") or "").strip()
+                        last_name = str(getattr(p, "last_name", "") or "").strip()
+                        if not player_name and first_name and last_name:
+                            player_name = f"{first_name} {last_name}".strip()
+                        team = getattr(p, "team", None)
+                        team_id = getattr(team, "id", None) if team else None
+                        team_abbr = str(getattr(team, "abbreviation", "") or "").strip() if team else ""
                 else:
                     player_name = str(getattr(item, "player_name", None) or "").strip()
+                    p = getattr(item, "player", None)
+                    if p is None:
+                        p = item
                     if not player_name:
-                        p = getattr(item, "player", None)
-                        if p and hasattr(p, "first_name") and hasattr(p, "last_name"):
-                            player_name = f"{p.first_name} {p.last_name}".strip()
+                        first_name = str(getattr(p, "first_name", "") or "").strip()
+                        last_name = str(getattr(p, "last_name", "") or "").strip()
+                        player_name = f"{first_name} {last_name}".strip()
+                    player_id = getattr(p, "id", None)
+                    first_name = str(getattr(p, "first_name", "") or "").strip()
+                    last_name = str(getattr(p, "last_name", "") or "").strip()
+                    team = getattr(p, "team", None)
+                    team_id = getattr(team, "id", None) if team else None
+                    team_abbr = str(getattr(team, "abbreviation", "") or "").strip() if team else ""
 
                 rows.append(
                     {
-                        "player.id": getattr(item, "id", None),
-                        "player.first_name": getattr(item, "first_name", None),
-                        "player.last_name": getattr(item, "last_name", None),
-                        "player.team_id": getattr(item, "team_id", None),
+                        "player.id": player_id,
+                        "player.first_name": first_name,
+                        "player.last_name": last_name,
+                        "player_name": player_name,
+                        "player.team_id": team_id,
+                        "team_abbr": team_abbr,
                         "status": getattr(item, "status", None),
                         "description": getattr(item, "description", None),
                         "return_date": getattr(item, "return_date", None),

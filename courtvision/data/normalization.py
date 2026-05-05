@@ -256,33 +256,135 @@ def normalize_odds_frame(
 
 
 def normalize_injuries_frame(injuries_raw: pd.DataFrame) -> pd.DataFrame:
-    if not isinstance(injuries_raw, pd.DataFrame) or injuries_raw.empty:
-        return pd.DataFrame()
+    """Normalize injuries to a canonical schema with row-level diagnostics.
+
+    Accepts these shapes:
+      - dotted SDK fields: ``player.id``, ``player.first_name``, ``player.last_name``, ``player.team_id``
+      - nested object/dict: ``player`` column containing a dict/object
+      - flat fields: ``player_id``, ``first_name``, ``last_name``, ``player_name``
+      - team fields: ``team_abbr``, ``team``, ``team_id``, ``player.team_id``
+      - status fields: ``status``, ``injury_status``
+      - description fields: ``description``, ``injury_description``, ``note``, ``notes``
+      - return fields: ``return_date``, ``expected_return``, ``expected_return_date``
+    """
+    expected_cols = [
+        "player_id", "first_name", "last_name", "player_name",
+        "team_id", "team_abbr", "status", "description", "return_date",
+        "injury_normalized", "injury_rejection_reason",
+    ]
+    if injuries_raw.empty:
+        return pd.DataFrame(columns=expected_cols)
 
     injuries = injuries_raw.copy()
-    if "player_name" not in injuries.columns:
-        first_name = injuries.get("player.first_name", pd.Series("", index=injuries.index)).fillna("").astype(str)
-        last_name = injuries.get("player.last_name", pd.Series("", index=injuries.index)).fillna("").astype(str)
-        injuries["player_name"] = (first_name + " " + last_name).str.strip()
 
-    if "player_id" not in injuries.columns and "player.id" in injuries.columns:
-        injuries["player_id"] = injuries["player.id"]
-    if "team_id" not in injuries.columns:
-        if "team.id" in injuries.columns:
-            injuries["team_id"] = injuries["team.id"]
-        elif "player.team_id" in injuries.columns:
-            injuries["team_id"] = injuries["player.team_id"]
+    # --- flatten nested player dict/object if present ---
+    if "player" in injuries.columns and "player_name" not in injuries.columns:
+        def _extract_player_field(row: pd.Series, field: str) -> Any:
+            p = row.get("player")
+            if isinstance(p, dict):
+                return p.get(field)
+            if p is not None and hasattr(p, field):
+                return getattr(p, field, None)
+            return None
+
+        if "player_id" not in injuries.columns:
+            injuries["player_id"] = injuries.apply(lambda r: _extract_player_field(r, "id"), axis=1)
+        if "first_name" not in injuries.columns:
+            injuries["first_name"] = injuries.apply(lambda r: _extract_player_field(r, "first_name"), axis=1).astype(str)
+        if "last_name" not in injuries.columns:
+            injuries["last_name"] = injuries.apply(lambda r: _extract_player_field(r, "last_name"), axis=1).astype(str)
+        if "team_id" not in injuries.columns:
+            injuries["team_id"] = injuries.apply(
+                lambda r: (
+                    (r.get("player") or {}).get("team", {}).get("id")
+                    if isinstance(r.get("player"), dict) else
+                    getattr(getattr(r.get("player"), "team", None), "id", None)
+                ),
+                axis=1,
+            )
+        if "team_abbr" not in injuries.columns:
+            injuries["team_abbr"] = injuries.apply(
+                lambda r: (
+                    str((r.get("player") or {}).get("team", {}).get("abbreviation", "")).strip()
+                    if isinstance(r.get("player"), dict) else
+                    str(getattr(getattr(r.get("player"), "team", None), "abbreviation", "") or "").strip()
+                ),
+                axis=1,
+            )
+
+    # --- rename dotted SDK fields to flat names ---
+    rename_map = {
+        "player.id": "player_id",
+        "player.first_name": "first_name",
+        "player.last_name": "last_name",
+        "player.team_id": "team_id",
+    }
+    injuries = injuries.rename(columns={k: v for k, v in rename_map.items() if k in injuries.columns})
+
+    # --- unify alternative field names ---
+    if "status" not in injuries.columns and "injury_status" in injuries.columns:
+        injuries["status"] = injuries["injury_status"]
+    if "description" not in injuries.columns:
+        for alt in ("injury_description", "note", "notes"):
+            if alt in injuries.columns:
+                injuries["description"] = injuries[alt]
+                break
+    if "return_date" not in injuries.columns:
+        for alt in ("expected_return", "expected_return_date"):
+            if alt in injuries.columns:
+                injuries["return_date"] = injuries[alt]
+                break
     if "team_abbr" not in injuries.columns:
-        if "team.abbreviation" in injuries.columns:
-            injuries["team_abbr"] = injuries["team.abbreviation"]
-        else:
-            injuries["team_abbr"] = ""
+        for alt in ("team", ):
+            if alt in injuries.columns:
+                injuries["team_abbr"] = injuries[alt]
+                break
 
+    # --- build player_name from first/last if missing ---
+    if "player_name" not in injuries.columns:
+        injuries["player_name"] = ""
+    for i, row in injuries.iterrows():
+        if not str(row.get("player_name", "")).strip():
+            fname = str(row.get("first_name", "")).strip()
+            lname = str(row.get("last_name", "")).strip()
+            injuries.at[i, "player_name"] = f"{fname} {lname}".strip()
+
+    # --- ensure expected columns exist with safe defaults ---
+    for col in ["player_id", "team_id", "team_abbr", "status", "description", "return_date"]:
+        if col not in injuries.columns:
+            injuries[col] = pd.NA
+
+    # --- row-level validation / diagnostics ---
+    def _row_diag(row: pd.Series) -> tuple[bool, str]:
+        import pandas as pd
+        _pn = row.get("player_name")
+        player_name = str(_pn).strip() if _pn is not None and not pd.isna(_pn) else ""
+        if not player_name:
+            return False, "missing_player_identity"
+        team_id = row.get("team_id")
+        _ta = row.get("team_abbr")
+        team_abbr = str(_ta).strip() if _ta is not None and not pd.isna(_ta) else ""
+        has_team_id = team_id is not None and not pd.isna(team_id)
+        if not has_team_id and not team_abbr:
+            return False, "missing_team_identity"
+        _st = row.get("status")
+        status = str(_st).strip() if _st is not None and not pd.isna(_st) else ""
+        if not status:
+            return False, "missing_status"
+        return True, ""
+
+    diags = injuries.apply(_row_diag, axis=1, result_type="expand")
+    diags.columns = ["injury_normalized", "injury_rejection_reason"]
+    injuries = pd.concat([injuries.reset_index(drop=True), diags], axis=1)
+
+    # Coerce types for downstream safety
     injuries["status"] = injuries.get("status", pd.Series("", index=injuries.index)).fillna("").astype(str)
     injuries["description"] = injuries.get("description", pd.Series("", index=injuries.index)).fillna("").astype(str)
     injuries["return_date"] = injuries.get("return_date", pd.Series("", index=injuries.index)).fillna("").astype(str)
     injuries["player_name"] = injuries.get("player_name", pd.Series("", index=injuries.index)).fillna("").astype(str).str.strip()
-    injuries = injuries[injuries["player_name"].astype(str).str.len() > 0].copy()
+
+    # Keep only rows that passed validation
+    injuries = injuries[injuries["injury_normalized"]].copy()
     return injuries.reset_index(drop=True)
 
 
