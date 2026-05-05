@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import csv
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 
 from scripts.dashboard import load_dashboard_data
 from scripts.history_tracking import (
     grade_completed_picks,
+    migrate_pick_history_schema,
     persist_daily_picks,
     update_performance_summaries,
+    PICK_HISTORY_COLUMNS,
 )
 
 
@@ -258,4 +262,208 @@ def test_dashboard_loader_handles_empty_files(tmp_path: Path) -> None:
     assert set(data.keys()) == {"pick_history", "performance_summary", "by_side", "by_edge", "by_qualification"}
     for value in data.values():
         assert isinstance(value, pd.DataFrame)
+
+
+# ---------------------------------------------------------------------------
+# Patch 2 tests: schema migration, Kelly context, cross-slate, grading warning
+# ---------------------------------------------------------------------------
+
+
+def test_pick_history_migration_adds_new_columns_preserves_rows(tmp_path: Path) -> None:
+    """migrate_pick_history_schema adds missing columns without destroying rows."""
+    history_root = tmp_path / "data" / "history"
+    history_root.mkdir(parents=True, exist_ok=True)
+
+    # Write a pick_history with only the original (pre-Patch-2) columns
+    old_cols = ["prediction_date", "run_timestamp", "player_name", "team", "opponent",
+                "game_id", "market", "selection", "line", "projection", "edge", "abs_edge",
+                "odds", "confidence", "quality_score", "qualification_reason",
+                "provider_used", "result_status"]
+    pd.DataFrame([{
+        "prediction_date": "2026-04-01",
+        "run_timestamp": "2026-04-01T12:00:00+00:00",
+        "player_name": "Alice",
+        "team": "BOS",
+        "opponent": "NYK",
+        "game_id": "g1",
+        "market": "player_points",
+        "selection": "over",
+        "line": 20.5,
+        "projection": 22.0,
+        "edge": 1.5,
+        "abs_edge": 1.5,
+        "odds": "-110",
+        "confidence": "0.75",
+        "quality_score": 80.0,
+        "qualification_reason": "pass",
+        "provider_used": "test",
+        "result_status": "hit",
+    }]).to_csv(history_root / "pick_history.csv", index=False)
+
+    result = migrate_pick_history_schema(history_root=history_root)
+
+    assert result["status"] == "ok"
+    for col in ("kelly_eligible", "skip_reason", "context_caution_level", "context_pick_alignment", "line_source"):
+        assert col in result["added_columns"], f"{col} should have been added"
+
+    updated = pd.read_csv(history_root / "pick_history.csv")
+    assert len(updated) == 1, "existing row must be preserved"
+    assert updated.iloc[0]["player_name"] == "Alice"
+    assert updated.iloc[0]["result_status"] == "hit"
+    for col in PICK_HISTORY_COLUMNS:
+        assert col in updated.columns, f"column {col} missing after migration"
+
+    # Idempotent: second run reports no changes
+    result2 = migrate_pick_history_schema(history_root=history_root)
+    assert result2["added_columns"] == []
+    assert len(pd.read_csv(history_root / "pick_history.csv")) == 1
+
+
+def test_persist_daily_picks_carries_kelly_context_metadata(tmp_path: Path) -> None:
+    """persist_daily_picks populates kelly/context columns from kelly_stakes CSV."""
+    runtime_root = tmp_path / "outputs" / "runtime"
+    history_root = tmp_path / "data" / "history"
+    date = "2026-05-01"
+
+    _write_elite_board(
+        runtime_root / "operator" / f"elite_board_{date}.csv",
+        [{
+            "prediction_date": date,
+            "player_name": "Context Player",
+            "market_type": "player_points",
+            "selection": "over",
+            "sportsbook_line": 22.5,
+            "model_projection": 24.0,
+            "edge": 1.5,
+            "odds": -110,
+            "confidence": 0.75,
+            "quality_score": 82.0,
+            "qualification_reason": "pass",
+            "context_caution_level": "high",
+            "context_pick_alignment": "conflicted",
+            "line_source": "live_market",
+        }],
+    )
+    _write_audit(runtime_root / "operator" / f"elite_pipeline_audit_summary_{date}.json")
+
+    # Write kelly_stakes with eligibility metadata
+    kelly_path = runtime_root / "operator" / f"kelly_stakes_{date}.csv"
+    kelly_path.parent.mkdir(parents=True, exist_ok=True)
+    with kelly_path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=[
+            "prediction_date", "player_name", "market_type", "selection", "line",
+            "kelly_eligible", "eligible", "skip_reason", "context_caution_level", "context_pick_alignment",
+        ])
+        writer.writeheader()
+        writer.writerow({
+            "prediction_date": date,
+            "player_name": "Context Player",
+            "market_type": "player_points",
+            "selection": "over",
+            "line": "22.5",
+            "kelly_eligible": "True",
+            "eligible": "True",
+            "skip_reason": "",
+            "context_caution_level": "high",
+            "context_pick_alignment": "conflicted",
+        })
+
+    result = persist_daily_picks(prediction_date=date, runtime_root=runtime_root, history_root=history_root)
+    assert result["appended_rows"] == 1
+
+    history = pd.read_csv(history_root / "pick_history.csv")
+    row = history.iloc[0]
+    # pandas reads "True" from CSV as bool True — normalise before comparing
+    assert str(row["kelly_eligible"]).strip() == "True"
+    assert str(row.get("skip_reason", "")).strip() in ("", "nan")
+    assert row["context_caution_level"] == "high"
+    assert row["context_pick_alignment"] == "conflicted"
+    assert row["line_source"] == "live_market"
+
+
+def test_cross_slate_aggregation_output_written(tmp_path: Path) -> None:
+    """update_performance_summaries writes performance_context_cross_slate.csv with expected groups."""
+    history_root = tmp_path / "data" / "history"
+    history_root.mkdir(parents=True, exist_ok=True)
+    runtime_root = tmp_path / "outputs" / "runtime"
+
+    pd.DataFrame([
+        {
+            "prediction_date": "2026-04-01",
+            "run_timestamp": "2026-04-01T12:00:00+00:00",
+            "player_name": "A",
+            "team": "BOS", "opponent": "NYK", "game_id": "",
+            "market": "player_points", "selection": "over",
+            "line": 20.5, "projection": 22.0, "edge": 1.5, "abs_edge": 1.5,
+            "odds": "-110", "confidence": "0.75", "quality_score": 80.0,
+            "qualification_reason": "pass", "provider_used": "test",
+            "result_status": "hit",
+            "kelly_eligible": "True", "skip_reason": "",
+            "context_caution_level": "low", "context_pick_alignment": "aligned",
+            "line_source": "live_market",
+        },
+        {
+            "prediction_date": "2026-04-02",
+            "run_timestamp": "2026-04-02T12:00:00+00:00",
+            "player_name": "B",
+            "team": "MIA", "opponent": "LAL", "game_id": "",
+            "market": "player_rebounds", "selection": "over",
+            "line": 5.5, "projection": 4.0, "edge": -1.5, "abs_edge": 1.5,
+            "odds": "-110", "confidence": "0.65", "quality_score": 75.0,
+            "qualification_reason": "pass", "provider_used": "test",
+            "result_status": "miss",
+            "kelly_eligible": "False", "skip_reason": "context_high_caution_over",
+            "context_caution_level": "high", "context_pick_alignment": "conflicted",
+            "line_source": "live_market",
+        },
+    ]).to_csv(history_root / "pick_history.csv", index=False)
+
+    update_performance_summaries(history_root=history_root, runtime_root=runtime_root)
+
+    cross_path = history_root / "performance_context_cross_slate.csv"
+    assert cross_path.exists(), "performance_context_cross_slate.csv must be written"
+
+    cross = pd.read_csv(cross_path)
+    dims = set(cross["dimension"].unique())
+    for expected_dim in ("kelly_eligible", "skip_reason", "context_caution_level", "context_pick_alignment", "market", "selection"):
+        assert expected_dim in dims, f"dimension '{expected_dim}' missing from cross-slate output"
+
+    high_caution = cross[
+        (cross["dimension"] == "context_caution_level") & (cross["group_value"] == "high")
+    ]
+    assert len(high_caution) == 1
+    assert high_caution.iloc[0]["total"] == 1
+    assert high_caution.iloc[0]["misses"] == 1
+    assert high_caution.iloc[0]["hit_rate"] == 0.0
+
+    eligible_true = cross[
+        (cross["dimension"] == "kelly_eligible") & (cross["group_value"] == "True")
+    ]
+    assert len(eligible_true) == 1
+    assert eligible_true.iloc[0]["hits"] == 1
+
+
+def test_grading_empty_result_warning_is_emitted(tmp_path: Path, capsys) -> None:
+    """_load_actual_results_for_date prints a warning when auto_grade returns empty."""
+    import scripts.history_tracking as ht
+
+    with patch.object(ht, "CourtVisionAI") as mock_ai_cls:
+        mock_ai_cls.return_value.auto_grade.return_value = pd.DataFrame()
+        ht._load_actual_results_for_date("2026-04-01", tmp_path)
+
+    captured = capsys.readouterr()
+    assert "[history_tracking] WARNING" in captured.out
+    assert "auto_grade returned no results" in captured.out
+    assert "2026-04-01" in captured.out
+
+
+def test_candidate_scoring_py_is_untouched() -> None:
+    """Confirm candidate_scoring.py was not modified by this patch."""
+    path = Path(__file__).parent.parent / "courtvision" / "scoring" / "candidate_scoring.py"
+    assert path.exists(), "candidate_scoring.py must exist"
+    content = path.read_text(encoding="utf-8")
+    # None of the symbols introduced by Patch 2 should appear in candidate_scoring
+    assert "migrate_pick_history_schema" not in content
+    assert "performance_context_cross_slate" not in content
+    assert "_build_kelly_lookup" not in content
 

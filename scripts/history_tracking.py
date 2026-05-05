@@ -7,6 +7,7 @@ from typing import Any
 
 import pandas as pd
 from courtvision_ai import CourtVisionAI
+from courtvision.calibration.buckets import abs_edge_bucket as _abs_edge_bucket
 
 
 PICK_HISTORY_COLUMNS = [
@@ -28,6 +29,12 @@ PICK_HISTORY_COLUMNS = [
     "qualification_reason",
     "provider_used",
     "result_status",
+    # Context / Kelly columns — populated from kelly_stakes when available
+    "kelly_eligible",
+    "skip_reason",
+    "context_caution_level",
+    "context_pick_alignment",
+    "line_source",
 ]
 
 
@@ -47,17 +54,32 @@ def _safe_text(value: Any, default: str = "") -> str:
     return text if text else default
 
 
-def _edge_bucket(edge_value: float) -> str:
-    abs_edge = abs(edge_value)
-    if abs_edge < 1.0:
-        return "<1"
-    if abs_edge < 2.0:
-        return "1-2"
-    if abs_edge < 3.0:
-        return "2-3"
-    if abs_edge < 5.0:
-        return "3-5"
-    return "5+"
+def _line_key(value: Any) -> str:
+    """Normalize a sportsbook line value to a consistent 4-decimal string for dict joins."""
+    if value is None:
+        return "__none__"
+    s = str(value).strip()
+    if s in ("", "nan", "None"):
+        return "__none__"
+    try:
+        return f"{float(s):.4f}"
+    except (TypeError, ValueError):
+        return s.lower()
+
+
+def _confidence_bucket(value: float) -> str:
+    """Bucket a 0–1 float confidence; called on pd.to_numeric result (NaN-safe)."""
+    if value != value:  # NaN check
+        return "unknown"
+    if value < 0.55:
+        return "below_0.55"
+    if value < 0.65:
+        return "0.55-0.65"
+    if value < 0.75:
+        return "0.65-0.75"
+    if value < 0.85:
+        return "0.75-0.85"
+    return "0.85+"
 
 
 def _load_csv(path: Path, columns: list[str] | None = None) -> pd.DataFrame:
@@ -82,6 +104,66 @@ def _provider_from_audit_summary(audit_summary_path: Path) -> str:
     return _safe_text(summary.get("provider_used"), default="unknown")
 
 
+def _build_kelly_lookup(kelly_df: pd.DataFrame) -> dict[str, dict[str, Any]]:
+    """Build a lookup dict from a kelly_stakes DataFrame for joining into pick_history.
+
+    Key format: "{player.lower()}|{market.lower()}|{selection.lower()}|{line_key}"
+    Returns context columns: kelly_eligible, skip_reason, context_caution_level, context_pick_alignment.
+    """
+    if kelly_df.empty:
+        return {}
+    name_col = "player_name" if "player_name" in kelly_df.columns else "entity_name"
+    mkt_col = "market_type" if "market_type" in kelly_df.columns else "market"
+    line_col = next((c for c in ("line", "sportsbook_line", "line_value") if c in kelly_df.columns), None)
+    lookup: dict[str, dict[str, Any]] = {}
+    for _, row in kelly_df.iterrows():
+        player = _safe_text(row.get(name_col)).lower()
+        market = _safe_text(row.get(mkt_col)).lower()
+        selection = _safe_text(row.get("selection")).lower()
+        line = _line_key(row.get(line_col) if line_col else None)
+        key = f"{player}|{market}|{selection}|{line}"
+        eligible_raw = row.get("kelly_eligible") if row.get("kelly_eligible") is not None else row.get("eligible")
+        if isinstance(eligible_raw, bool):
+            kelly_eligible = "True" if eligible_raw else "False"
+        elif str(eligible_raw).strip().lower() in ("true", "1", "yes"):
+            kelly_eligible = "True"
+        elif str(eligible_raw).strip().lower() in ("false", "0", "no"):
+            kelly_eligible = "False"
+        else:
+            kelly_eligible = ""
+        lookup[key] = {
+            "kelly_eligible": kelly_eligible,
+            "skip_reason": _safe_text(row.get("skip_reason")),
+            "context_caution_level": _safe_text(row.get("context_caution_level")),
+            "context_pick_alignment": _safe_text(row.get("context_pick_alignment")),
+        }
+    return lookup
+
+
+def migrate_pick_history_schema(
+    history_root: str | Path = "data/history",
+) -> dict[str, Any]:
+    """Idempotent migration: add missing PICK_HISTORY_COLUMNS to an existing pick_history.csv.
+
+    Safe to re-run: only adds absent columns with empty-string defaults.
+    Never removes, renames, or overwrites existing data.
+    Returns a summary dict with keys: status, added_columns, total_rows.
+    """
+    history_root_path = Path(history_root)
+    pick_history_path = history_root_path / "pick_history.csv"
+    if not pick_history_path.exists():
+        return {"status": "no_file", "added_columns": [], "total_rows": 0}
+    df = pd.read_csv(pick_history_path)
+    added: list[str] = []
+    for col in PICK_HISTORY_COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
+            added.append(col)
+    if added:
+        _write_csv(pick_history_path, df[PICK_HISTORY_COLUMNS])
+    return {"status": "ok", "added_columns": added, "total_rows": len(df)}
+
+
 def persist_daily_picks(
     prediction_date: str,
     runtime_root: str | Path = "outputs/runtime",
@@ -102,23 +184,42 @@ def persist_daily_picks(
     picks_output_path.parent.mkdir(parents=True, exist_ok=True)
     elite_df.to_csv(picks_output_path, index=False)
 
+    # Load kelly_stakes for context / eligibility columns — best-effort, no hard failure.
+    kelly_stakes_path = runtime_root_path / "operator" / f"kelly_stakes_{prediction_date}.csv"
+    kelly_lookup: dict[str, dict[str, Any]] = {}
+    if kelly_stakes_path.exists():
+        try:
+            kelly_lookup = _build_kelly_lookup(pd.read_csv(kelly_stakes_path))
+        except Exception:
+            kelly_lookup = {}
+
     provider_used = _provider_from_audit_summary(audit_summary_path)
     timestamp = datetime.now(timezone.utc).isoformat()
 
     normalized_rows: list[dict[str, Any]] = []
     for _, row in elite_df.iterrows():
         edge = _safe_float(row.get("edge"))
+        player = _safe_text(row.get("player_name")) or _safe_text(row.get("entity_name"), default="unknown")
+        market = _safe_text(row.get("market_type")) or _safe_text(row.get("market"))
+        selection = _safe_text(row.get("selection")).lower()
+        line_raw = row.get("sportsbook_line") if row.get("sportsbook_line") is not None else row.get("line_value")
+        lookup_key = f"{player.lower()}|{market.lower()}|{selection}|{_line_key(line_raw)}"
+        kelly_ctx = kelly_lookup.get(lookup_key, {})
+        # context_caution_level / context_pick_alignment: prefer kelly_stakes (has all candidates),
+        # fall back to the columns on the elite_board row itself.
+        context_caution_level = kelly_ctx.get("context_caution_level") or _safe_text(row.get("context_caution_level"))
+        context_pick_alignment = kelly_ctx.get("context_pick_alignment") or _safe_text(row.get("context_pick_alignment"))
         normalized_rows.append(
             {
                 "prediction_date": _safe_text(row.get("prediction_date"), default=prediction_date),
                 "run_timestamp": timestamp,
-                "player_name": _safe_text(row.get("player_name")) or _safe_text(row.get("entity_name"), default="unknown"),
+                "player_name": player,
                 "team": _safe_text(row.get("team")) or _safe_text(row.get("team_abbr")),
                 "opponent": _safe_text(row.get("opponent")),
                 "game_id": _safe_text(row.get("game_id")),
-                "market": _safe_text(row.get("market_type")) or _safe_text(row.get("market")),
-                "selection": _safe_text(row.get("selection")).lower(),
-                "line": _safe_float(row.get("sportsbook_line"), _safe_float(row.get("line_value"))),
+                "market": market,
+                "selection": selection,
+                "line": _safe_float(line_raw),
                 "projection": _safe_float(row.get("model_projection"), _safe_float(row.get("projection"))),
                 "edge": edge,
                 "abs_edge": abs(edge),
@@ -128,6 +229,11 @@ def persist_daily_picks(
                 "qualification_reason": _safe_text(row.get("qualification_reason")),
                 "provider_used": provider_used,
                 "result_status": result_status,
+                "kelly_eligible": kelly_ctx.get("kelly_eligible", ""),
+                "skip_reason": kelly_ctx.get("skip_reason", ""),
+                "context_caution_level": context_caution_level,
+                "context_pick_alignment": context_pick_alignment,
+                "line_source": _safe_text(row.get("line_source")),
             }
         )
 
@@ -158,9 +264,18 @@ def _load_actual_results_for_date(prediction_date: str, runtime_root: Path) -> p
         ai = CourtVisionAI(out_dir=str(outputs_root))
         graded_df = ai.auto_grade(prediction_date)
         if graded_df is None or graded_df.empty:
+            print(
+                f"[history_tracking] WARNING: auto_grade returned no results for {prediction_date}. "
+                "Picks will remain pending. Possible causes: provider API unavailable, "
+                "game not yet final, or date has no matching game data."
+            )
             return pd.DataFrame()
         return graded_df.copy()
-    except Exception:
+    except Exception as exc:
+        print(
+            f"[history_tracking] WARNING: auto_grade raised {type(exc).__name__}: {exc} "
+            f"for {prediction_date}. Picks will remain pending."
+        )
         return pd.DataFrame()
 
 
@@ -204,6 +319,67 @@ def _map_actual_result(row: pd.Series, actual_df: pd.DataFrame) -> str:
     return "pending"
 
 
+def _write_context_cross_slate_summary(history_df: pd.DataFrame, history_root_path: Path) -> None:
+    """Write a cross-slate hit-rate summary grouped by context and eligibility dimensions.
+
+    Aggregates across ALL dates in pick_history. Output:
+      {history_root}/performance_context_cross_slate.csv
+    Columns: dimension, group_value, total, hits, misses, pushes, pending, hit_rate
+    """
+    df = history_df.copy()
+    # Derive bucketed dimensions from numeric columns
+    if "edge" in df.columns:
+        df["edge_bucket"] = pd.to_numeric(df["edge"], errors="coerce").apply(
+            lambda v: _abs_edge_bucket(v) if v == v else "unknown"
+        )
+    else:
+        df["edge_bucket"] = "unknown"
+    if "confidence" in df.columns:
+        df["confidence_bucket"] = pd.to_numeric(df["confidence"], errors="coerce").apply(_confidence_bucket)
+    else:
+        df["confidence_bucket"] = "unknown"
+
+    dim_map = {
+        "kelly_eligible": "kelly_eligible",
+        "skip_reason": "skip_reason",
+        "context_caution_level": "context_caution_level",
+        "context_pick_alignment": "context_pick_alignment",
+        "market": "market",
+        "selection": "selection",
+        "edge_bucket": "edge_bucket",
+        "confidence_bucket": "confidence_bucket",
+    }
+
+    rows: list[dict[str, Any]] = []
+    for col, display_name in dim_map.items():
+        if col not in df.columns:
+            continue
+        group_col = df[col].fillna("").astype(str).str.strip().replace({"nan": "", "none": "", "None": ""})
+        for group_val, seg in df.assign(**{col: group_col}).groupby(col, sort=True):
+            if not str(group_val).strip():
+                continue
+            hits = int((seg["result_status"] == "hit").sum())
+            misses = int((seg["result_status"] == "miss").sum())
+            pushes = int((seg["result_status"] == "push").sum())
+            pending = int((seg["result_status"] == "pending").sum())
+            graded_total = hits + misses
+            rows.append({
+                "dimension": display_name,
+                "group_value": group_val,
+                "total": int(len(seg)),
+                "hits": hits,
+                "misses": misses,
+                "pushes": pushes,
+                "pending": pending,
+                "hit_rate": round(float(hits / graded_total), 4) if graded_total else 0.0,
+            })
+
+    _write_csv(
+        history_root_path / "performance_context_cross_slate.csv",
+        pd.DataFrame(rows, columns=["dimension", "group_value", "total", "hits", "misses", "pushes", "pending", "hit_rate"]),
+    )
+
+
 def update_performance_summaries(
     history_root: str | Path = "data/history",
     runtime_root: str | Path = "outputs/runtime",
@@ -220,8 +396,13 @@ def update_performance_summaries(
             "overs_count", "overs_hit_rate", "unders_count", "unders_hit_rate",
             "avg_edge", "avg_abs_edge", "max_team_exposure", "max_game_exposure",
         ]))
+        per_date_cols = ["date", "group", "total", "hits", "misses", "pushes", "pending", "hit_rate"]
         for name in ("performance_by_market.csv", "performance_by_selection.csv", "performance_by_edge_bucket.csv", "performance_by_qualification_reason.csv"):
-            _write_csv(history_root_path / name, pd.DataFrame(columns=["date", "group", "total", "hits", "misses", "pushes", "pending", "hit_rate"]))
+            _write_csv(history_root_path / name, pd.DataFrame(columns=per_date_cols))
+        _write_csv(
+            history_root_path / "performance_context_cross_slate.csv",
+            pd.DataFrame(columns=["dimension", "group_value", "total", "hits", "misses", "pushes", "pending", "hit_rate"]),
+        )
         return
 
     history_df["prediction_date"] = history_df["prediction_date"].astype(str)
@@ -304,11 +485,13 @@ def update_performance_summaries(
                 )
         _write_csv(history_root_path / filename, pd.DataFrame(rows, columns=["date", "group", "total", "hits", "misses", "pushes", "pending", "hit_rate"]))
 
-    history_df["edge_bucket"] = history_df["edge"].apply(_edge_bucket)
+    history_df["edge_bucket"] = history_df["edge"].apply(_abs_edge_bucket)
     grouped_summary("market", "performance_by_market.csv")
     grouped_summary("selection", "performance_by_selection.csv")
     grouped_summary("edge_bucket", "performance_by_edge_bucket.csv")
     grouped_summary("qualification_reason", "performance_by_qualification_reason.csv")
+
+    _write_context_cross_slate_summary(history_df, history_root_path)
 
 
 def grade_completed_picks(
