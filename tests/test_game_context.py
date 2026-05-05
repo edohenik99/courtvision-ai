@@ -292,6 +292,9 @@ def test_game_context_suppresses_context_when_candidate_team_not_in_game(tmp_pat
     assert diagnostics["candidate_team_not_in_game_count"] == 1
     assert diagnostics["game_context_suppressed_count"] == 1
     assert diagnostics["playoff_only_high_caution_count"] == 1
+    assert diagnostics["stale_team_not_in_game_count"] == 1
+    assert diagnostics["context_conflict_cause_counts"]["stale_team_not_in_game"] == 1
+    assert stale["context_conflict_cause"] == "stale_team_not_in_game"
     assert diagnostics["candidates_with_postseason"] == 1
 
     json_path, report_path, payload = write_game_context_outputs(
@@ -306,6 +309,57 @@ def test_game_context_suppresses_context_when_candidate_team_not_in_game(tmp_pat
     report_text = report_path.read_text(encoding="utf-8")
     assert "game_context_suppressed_count: 1" in report_text
     assert payload["candidate_team_not_in_game_count"] == 1
+
+
+def test_game_context_conflict_cause_buckets_split_playoff_and_defense() -> None:
+    candidates = pd.DataFrame(
+        [
+            {
+                "player_name": "Playoff Only Over",
+                "team": "AAA",
+                "team_abbr": "AAA",
+                "game_id": 1,
+                "market_type": "player_points",
+                "selection": "over",
+            },
+            {
+                "player_name": "Defense Driven Over",
+                "team": "CCC",
+                "team_abbr": "CCC",
+                "game_id": 2,
+                "market_type": "player_points",
+                "selection": "over",
+            },
+        ]
+    )
+    games = pd.DataFrame(
+        [
+            {"game_id": 1, "home_team_abbr": "AAA", "visitor_team_abbr": "BBB", "postseason": True},
+            {"game_id": 2, "home_team_abbr": "CCC", "visitor_team_abbr": "DDD", "postseason": False},
+        ]
+    )
+    team_baselines = pd.DataFrame(
+        [
+            {"team_abbr": "AAA", "team_pace": 98.5, "team_def_rating": 114.0, "team_off_rating": 115.0},
+            {"team_abbr": "BBB", "team_pace": 98.0, "team_def_rating": 114.0, "team_off_rating": 114.0},
+            {"team_abbr": "CCC", "team_pace": 98.5, "team_def_rating": 114.0, "team_off_rating": 115.0},
+            {"team_abbr": "DDD", "team_pace": 98.0, "team_def_rating": 111.0, "team_off_rating": 114.0},
+        ]
+    )
+
+    out, diagnostics = apply_game_context(
+        candidates,
+        games=games,
+        team_baselines=team_baselines,
+        odds=pd.DataFrame(),
+    )
+
+    by_player = {row["player_name"]: row for _, row in out.iterrows()}
+    assert by_player["Playoff Only Over"]["context_conflict_cause"] == "playoff_only"
+    assert by_player["Defense Driven Over"]["context_conflict_cause"] == "defense_driven"
+    assert diagnostics["context_conflict_cause_counts"]["playoff_only"] == 1
+    assert diagnostics["context_conflict_cause_counts"]["defense_driven"] == 1
+    assert diagnostics["context_conflict_cause_counts"]["pace_driven"] == 0
 
 
 def test_game_context_calculates_one_day_rest_from_schedule() -> None:

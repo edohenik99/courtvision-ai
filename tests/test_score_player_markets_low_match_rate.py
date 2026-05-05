@@ -58,6 +58,7 @@ def _reject_candidate(
 
 def test_low_match_rate_does_not_discard_accepted_candidates(
     monkeypatch,
+    capsys,
 ) -> None:
     """If only 1/4 baseline players have odds (25%, well below the old
     50% threshold), the function must still return the matched player's
@@ -105,3 +106,10 @@ def test_low_match_rate_does_not_discard_accepted_candidates(
         "Low baseline-coverage must not discard already-accepted candidates. "
         f"accepted={accepted!r} rejected={rejected!r}"
     )
+    output = capsys.readouterr().out
+    assert "[COUNT] odds_unique_players=1" in output
+    assert "[COUNT] odds_baseline_matched_players=1" in output
+    assert "[COUNT] active_board_match_rate=100.0%" in output
+    assert "[COUNT] baseline_universe_player_count=4" in output
+    assert "[WARNING] Low baseline coverage" not in output
+    assert "[WARNING] Low active-board baseline match" not in output

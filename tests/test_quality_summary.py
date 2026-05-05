@@ -610,6 +610,7 @@ def _seed_run_health_artifacts(
             {
                 "prediction_date": prediction_date,
                 "player_name": f"Health Player {index}",
+                "player_id": 10_000 + index,
                 "team": "BOS",
                 "game_id": "game-health",
                 "market_type": "player_points",
@@ -838,7 +839,37 @@ def test_quality_summary_run_health_degraded_low_coverage(tmp_path: Path) -> Non
     assert "provider_or_candidate_coverage_low" in payload["run_health_flags"]
 
 
-def test_quality_summary_run_health_degraded_context_blocked(tmp_path: Path) -> None:
+def test_quality_summary_active_board_coverage_uses_odds_denominator(tmp_path: Path) -> None:
+    prediction_date = "2026-05-02"
+    runtime_root = tmp_path / "runtime"
+    _seed_run_health_artifacts(
+        runtime_root,
+        prediction_date,
+        games_count=2,
+        full_market_count=28,
+        elite_count=2,
+        kelly_eligible_count=2,
+        kelly_rows_count=2,
+    )
+
+    _, payload = build_quality_summary(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        out_dir=tmp_path,
+        generated_at="2026-05-03T00:00:00+00:00",
+    )
+
+    coverage = payload["player_baseline_coverage"]
+    assert coverage["baseline_universe_player_count"] > coverage["odds_unique_players"]
+    assert coverage["odds_unique_players"] == 28
+    assert coverage["odds_baseline_matched_players"] == 28
+    assert coverage["active_board_match_rate"] == 1.0
+    warnings = payload["market_coverage"]["coverage_warnings"]
+    assert not any("Low active-board baseline match" in warning for warning in warnings)
+    assert "provider_or_candidate_coverage_low" not in payload["run_health_flags"]
+
+
+def test_quality_summary_run_health_context_gated_when_final_elite_is_clean(tmp_path: Path) -> None:
     prediction_date = "2026-05-02"
     runtime_root = tmp_path / "runtime"
     _seed_run_health_artifacts(
@@ -858,8 +889,10 @@ def test_quality_summary_run_health_degraded_context_blocked(tmp_path: Path) -> 
         generated_at="2026-05-03T00:00:00+00:00",
     )
 
-    assert payload["run_health_status"] == "DEGRADED_CONTEXT_BLOCKED"
-    assert "elite_context_gate_rejection_rate_high" in payload["run_health_flags"]
+    assert payload["run_health_status"] == "HEALTHY_CONTEXT_GATED"
+    assert "valid_context_safety_blocking" in payload["run_health_flags"]
+    assert "elite_context_gate_rejection_rate_high" not in payload["run_health_flags"]
+    assert payload["elite_context_safety_gate"]["elite_high_caution_conflicted_over_count"] == 0
 
 
 def test_quality_summary_run_health_no_bet(tmp_path: Path) -> None:
@@ -1330,6 +1363,7 @@ def test_quality_summary_reports_elite_context_safety_gate(tmp_path: Path) -> No
                 "selection": "over",
                 "context_caution_level": "high",
                 "context_pick_alignment": "conflicted",
+                "context_conflict_cause": "defense_driven",
                 "final_elite_rejection_reason": "elite_reject_context_high_caution_over",
             },
             {
@@ -1369,6 +1403,8 @@ def test_quality_summary_reports_elite_context_safety_gate(tmp_path: Path) -> No
     gate = payload["elite_context_safety_gate"]
     assert gate["rejected_from_final_elite_count"] == 1
     assert gate["elite_high_caution_conflicted_over_count"] == 0
+    assert gate["final_elite_context_clean"] is True
+    assert gate["full_market_context_conflict_cause_counts"]["defense_driven"] == 1
     assert gate["status"] == "ok"
     assert any("Elite context safety gate excluded 1" in warning for warning in payload["warnings"])
     assert "Elite Context Safety Gate" in text

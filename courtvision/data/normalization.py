@@ -174,7 +174,17 @@ def normalize_stats_frame(df: pd.DataFrame) -> pd.DataFrame:
 
 def normalize_games_frame(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
-        return pd.DataFrame(columns=["game_id", "home_team_abbr", "visitor_team_abbr", "status", "date", "datetime"])
+        return pd.DataFrame(
+            columns=[
+                "game_id",
+                "home_team_abbr",
+                "visitor_team_abbr",
+                "status",
+                "date",
+                "datetime",
+                "game_status_bucket",
+            ]
+        )
 
     rows: list[dict[str, Any]] = []
     for _, row in df.iterrows():
@@ -183,11 +193,20 @@ def normalize_games_frame(df: pd.DataFrame) -> pd.DataFrame:
         # Guard against upstream APIs that put an ISO datetime in the status field
         status = row.get("status")
         datetime_val = row.get("datetime")
+        raw_status_text = "" if status is None else str(status).strip()
+        status_bucket = ""
         if _is_iso_datetime(status):
             # The status field contains a datetime string; treat as unknown and preserve the datetime
             if datetime_val is None or str(datetime_val).strip() == "":
                 datetime_val = status
             status = "unknown"
+            status_bucket = "scheduled_future_iso_status"
+        elif raw_status_text.lower() in {"", "nan", "none", "null", "<na>"}:
+            status_bucket = "unknown_missing_status"
+        if status_bucket != "scheduled_future_iso_status" and (
+            status is None or str(status).strip().lower() in {"", "unknown", "nan", "none", "null", "<na>"}
+        ) and (datetime_val is None or str(datetime_val).strip() == ""):
+            status_bucket = "unknown_missing_datetime"
         # Preserve date/datetime from upstream so downstream slate-lock can validate
         rows.append(
             {
@@ -197,6 +216,7 @@ def normalize_games_frame(df: pd.DataFrame) -> pd.DataFrame:
                 "status": status,
                 "date": row.get("date"),
                 "datetime": datetime_val,
+                "game_status_bucket": status_bucket,
             }
         )
 

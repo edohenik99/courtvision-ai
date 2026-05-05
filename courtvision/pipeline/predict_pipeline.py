@@ -836,6 +836,7 @@ class PredictionPipeline:
                     gstatus = "unknown"
                 game_datetime_val = g.get("game_datetime") or g.get("datetime") or g.get("game_date") or g.get("date") or ""
                 game_date_val = g.get("game_date") or g.get("date") or game_datetime_val
+                game_status_bucket = str(g.get("game_status_bucket", "") or "").strip().lower()
                 if gstatus and gstatus != "unknown":
                     _games_with_status_count += 1
                 if game_datetime_val:
@@ -844,11 +845,13 @@ class PredictionPipeline:
                     "game_status": gstatus,
                     "game_datetime": game_datetime_val,
                     "game_date": game_date_val,
+                    "game_status_bucket": game_status_bucket,
                 }
                 _game_info_by_team[visitor_team_abbr] = {
                     "game_status": gstatus,
                     "game_datetime": game_datetime_val,
                     "game_date": game_date_val,
+                    "game_status_bucket": game_status_bucket,
                 }
         self.logger.info(
             "games_enrichment games=%s with_status=%s with_datetime=%s mapped_teams=%s",
@@ -1120,6 +1123,7 @@ class PredictionPipeline:
                 "recommended_bet": recommended_bet,
                 # Game status fields for slate-lock gate diagnostics
                 "game_status": _game_info.get("game_status", ""),
+                "game_status_bucket": _game_info.get("game_status_bucket", ""),
                 "game_date": _game_info.get("game_date", ""),
                 "game_datetime": _game_info.get("game_datetime", ""),
                 "postseason": _game_info.get("postseason", ""),
@@ -1306,6 +1310,7 @@ class PredictionPipeline:
                 "selection": selection,
                 # Game status fields for slate-lock gate diagnostics
                 "game_status": _team_game_info.get("game_status", ""),
+                "game_status_bucket": _team_game_info.get("game_status_bucket", ""),
                 "game_date": _team_game_info.get("game_date", ""),
                 "postseason": _team_game_info.get("postseason", ""),
                 # Odds freshness field
@@ -1340,6 +1345,7 @@ class PredictionPipeline:
                 "pre_rejection_reason": "",
                 # Game status fields for slate-lock gate diagnostics
                 "game_status": _team_game_info.get("game_status", ""),
+                "game_status_bucket": _team_game_info.get("game_status_bucket", ""),
                 "game_date": _team_game_info.get("game_date", ""),
                 "postseason": _team_game_info.get("postseason", ""),
                 # Odds freshness field
@@ -1416,23 +1422,35 @@ class PredictionPipeline:
         _unknown_future = 0
         _unknown_missing = 0
         _unknown_past = 0
+        _scheduled_future_iso_status = 0
+        _unknown_missing_status = 0
+        _unknown_missing_datetime = 0
         for cand in accepted:
             gs = str(cand.get("game_status", "") or "").strip().lower()
+            gs_bucket = str(cand.get("game_status_bucket", "") or "").strip().lower()
             gd = cand.get("game_datetime") or cand.get("game_date") or ""
             if gs:
                 _candidates_with_game_status += 1
             if gd:
                 _candidates_with_game_datetime += 1
+            if gs_bucket == "scheduled_future_iso_status":
+                _scheduled_future_iso_status += 1
+            if gs_bucket == "unknown_missing_status":
+                _unknown_missing_status += 1
             if gs in ("unknown", ""):
                 dt = _parse_game_datetime(gd)
                 if dt is None:
                     _unknown_missing += 1
+                    _unknown_missing_datetime += 1
                 elif _is_before_lock_buffer(dt, None, 10):
                     _unknown_future += 1
                 else:
                     _unknown_past += 1
         print(f"[COUNT] candidates_with_game_status_count={_candidates_with_game_status}", flush=True)
         print(f"[COUNT] candidates_with_game_datetime_count={_candidates_with_game_datetime}", flush=True)
+        print(f"[COUNT] scheduled_future_iso_status_count={_scheduled_future_iso_status}", flush=True)
+        print(f"[COUNT] unknown_missing_status_count={_unknown_missing_status}", flush=True)
+        print(f"[COUNT] unknown_missing_datetime_count={_unknown_missing_datetime}", flush=True)
         print(f"[COUNT] game_status_unknown_with_future_datetime_count={_unknown_future}", flush=True)
         print(f"[COUNT] game_status_unknown_missing_datetime_count={_unknown_missing}", flush=True)
         print(f"[COUNT] game_status_unknown_past_datetime_count={_unknown_past}", flush=True)

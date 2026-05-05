@@ -330,12 +330,21 @@ def score_player_markets(
     odds_player_ids = set(player_id_lookup.keys())
     baseline_ids_set = set(baseline_player_ids)
     intersection = odds_player_ids & baseline_ids_set
+    active_board_match_rate = (
+        (len(intersection) / len(odds_player_ids) * 100.0)
+        if odds_player_ids
+        else 0.0
+    )
     print(
         f"[COUNT] odds_baseline_intersection "
         f"odds_ids={len(odds_player_ids)} baseline_ids={len(baseline_ids_set)} "
         f"intersection={len(intersection)} sample_intersection={list(intersection)[:5]}",
         flush=True,
     )
+    print(f"[COUNT] odds_unique_players={len(odds_player_ids)}", flush=True)
+    print(f"[COUNT] odds_baseline_matched_players={len(intersection)}", flush=True)
+    print(f"[COUNT] active_board_match_rate={active_board_match_rate:.1f}%", flush=True)
+    print(f"[COUNT] baseline_universe_player_count={len(baseline_ids_set)}", flush=True)
 
     for _, player_row in players_df.iterrows():
         player_name = str(player_row.get("player_name", "")).strip()
@@ -732,10 +741,10 @@ def score_player_markets(
         print(f"[COUNT] odds_rows_total={len(working_odds)}", flush=True)
         print(f"[COUNT] accepted_candidates_pre_return={len(accepted_candidates)}", flush=True)
         print(f"[COUNT] rejected_candidates_pre_return={len(rejected_candidates)}", flush=True)
-        print(f"[DIAGNOSIS] Low baseline coverage (informational, not fatal)", flush=True)
+        print(f"[DIAGNOSIS] Low baseline-universe coverage (informational, not fatal)", flush=True)
         print(f"  Sample players from baselines: {sample_players}", flush=True)
         print(
-            f"[WARNING] Low baseline coverage: {matched_players}/{total_players} players matched, "
+            f"[DIAGNOSIS] Baseline universe coverage: {matched_players}/{total_players} players matched, "
             f"odds rows={len(working_odds)} — keeping {len(accepted_candidates)} accepted candidates",
             flush=True,
         )

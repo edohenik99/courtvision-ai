@@ -46,6 +46,16 @@ GAME_CONTEXT_DIAGNOSTIC_COLUMNS: tuple[str, ...] = (
     "game_context_suppressed",
     "game_context_suppression_reason",
     "playoff_only_high_caution",
+    "context_conflict_cause",
+)
+
+CONTEXT_CONFLICT_CAUSE_BUCKETS: tuple[str, ...] = (
+    "playoff_only",
+    "defense_driven",
+    "pace_driven",
+    "pace_defense_combined",
+    "playoff_defense_combined",
+    "stale_team_not_in_game",
 )
 
 PACE_COLUMNS: tuple[str, ...] = ("team_pace", "pace", "possessions_per_game")
@@ -391,6 +401,7 @@ def _default_context() -> dict[str, Any]:
         "game_context_suppressed": False,
         "game_context_suppression_reason": "",
         "playoff_only_high_caution": False,
+        "context_conflict_cause": "",
     }
 
 
@@ -421,6 +432,36 @@ def _playoff_only_high_caution(row: pd.Series) -> bool:
     return all(signal != "supports_under" for signal in other_signals)
 
 
+def _context_conflict_cause(row: pd.Series) -> str:
+    if _text(row.get("candidate_team_not_in_game")).lower() == "true":
+        return "stale_team_not_in_game"
+    if _text(row.get("game_context_suppression_reason")).lower() == "team_not_in_game_context":
+        return "stale_team_not_in_game"
+    if _text(row.get("selection")).lower() != "over":
+        return ""
+    if _text(row.get("context_caution_level")).lower() != "high":
+        return ""
+    if _text(row.get("context_pick_alignment")).lower() != "conflicted":
+        return ""
+
+    pace_under = _text(row.get("pace_context_signal")).lower() == "supports_under"
+    defense_under = _text(row.get("defense_context_signal")).lower() == "supports_under"
+    rest_under = _text(row.get("rest_context_signal")).lower() == "supports_under"
+    playoff_under = _text(row.get("playoff_context_signal")).lower() == "supports_under"
+
+    if pace_under and defense_under:
+        return "pace_defense_combined"
+    if playoff_under and defense_under:
+        return "playoff_defense_combined"
+    if playoff_under and not any((pace_under, defense_under, rest_under)):
+        return "playoff_only"
+    if defense_under:
+        return "defense_driven"
+    if pace_under:
+        return "pace_driven"
+    return ""
+
+
 def apply_game_context(
     candidates: pd.DataFrame,
     *,
@@ -435,6 +476,9 @@ def apply_game_context(
     for column, value in defaults.items():
         if column not in out.columns:
             out[column] = value
+    for column in (*GAME_CONTEXT_COLUMNS, *GAME_CONTEXT_DIAGNOSTIC_COLUMNS):
+        if column in out.columns:
+            out[column] = out[column].astype("object")
     diagnostics = {
         "rows": int(len(out)),
         "total_candidates": int(len(out)),
@@ -490,6 +534,7 @@ def apply_game_context(
                 out.at[idx, "candidate_team_not_in_game"] = True
                 out.at[idx, "game_context_suppressed"] = True
                 out.at[idx, "game_context_suppression_reason"] = "team_not_in_game_context"
+                out.at[idx, "context_conflict_cause"] = "stale_team_not_in_game"
                 continue
             opponent = away if team == home else home if team == away else ""
             out.at[idx, "opponent"] = opponent
@@ -569,6 +614,7 @@ def apply_game_context(
             out.at[idx, "context_pick_alignment"],
         )
         out.at[idx, "playoff_only_high_caution"] = _playoff_only_high_caution(out.loc[idx])
+        out.at[idx, "context_conflict_cause"] = _context_conflict_cause(out.loc[idx])
         out.at[idx, "context_preview_applied"] = False
 
     diagnostics.update(_coverage(out))
@@ -635,6 +681,19 @@ def _coverage(df: pd.DataFrame) -> dict[str, Any]:
         )
     else:
         coverage["playoff_only_high_caution_count"] = 0
+    cause_counts = {bucket: 0 for bucket in CONTEXT_CONFLICT_CAUSE_BUCKETS}
+    if "context_conflict_cause" in df.columns:
+        raw_counts = (
+            df["context_conflict_cause"]
+            .map(lambda value: _text(value).lower())
+            .loc[lambda series: series != ""]
+            .value_counts()
+            .to_dict()
+        )
+        for cause, count in raw_counts.items():
+            cause_counts[cause] = int(count)
+    coverage["context_conflict_cause_counts"] = cause_counts
+    coverage["stale_team_not_in_game_count"] = int(cause_counts.get("stale_team_not_in_game", 0))
     return coverage
 
 
@@ -701,6 +760,7 @@ def write_game_context_outputs(
             f"alignment:{sample.get('context_pick_alignment')} "
             f"suppressed:{sample.get('game_context_suppressed')} "
             f"reason:{sample.get('game_context_suppression_reason')} "
+            f"conflict_cause:{sample.get('context_conflict_cause')} "
             f"applied:{sample.get('context_preview_applied')}"
         )
     lines = [
@@ -723,6 +783,8 @@ def write_game_context_outputs(
         f"candidate_team_not_in_game_count: {payload.get('candidate_team_not_in_game_count', 0)}",
         f"game_context_suppressed_count: {payload.get('game_context_suppressed_count', 0)}",
         f"playoff_only_high_caution_count: {payload.get('playoff_only_high_caution_count', 0)}",
+        "context_conflict_cause_counts:",
+        json.dumps(payload.get("context_conflict_cause_counts", {}), indent=2, default=str),
         "",
         "Missing Fields",
         json.dumps(payload.get("missing_fields_breakdown", {}), indent=2, default=str),

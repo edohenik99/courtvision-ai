@@ -19,6 +19,9 @@ from courtvision.reporting.kelly_performance import build_kelly_decision_perform
 RUN_HEALTH_RECOMMENDATIONS: dict[str, str] = {
     "HEALTHY": "Run is bet-ready within configured staking limits.",
     "HEALTHY_LOW_VOLUME": "Run is valid but low-volume; avoid forcing extra action.",
+    "HEALTHY_CONTEXT_GATED": (
+        "Run is bet-ready; context safety blocked risky candidates and final Elite is clean."
+    ),
     "DEGRADED_LOW_COVERAGE": "Provider/candidate coverage is thin; treat picks cautiously.",
     "DEGRADED_CONTEXT_BLOCKED": (
         "Model found edges but context safety rejected too many; no threshold loosening recommended."
@@ -28,6 +31,14 @@ RUN_HEALTH_RECOMMENDATIONS: dict[str, str] = {
 }
 RUN_HEALTH_CONTEXT_BLOCKED_RATIO = 0.5
 RUN_HEALTH_LOW_VOLUME_KELLY_ELIGIBLE = 2
+CONTEXT_CONFLICT_CAUSE_BUCKETS: tuple[str, ...] = (
+    "playoff_only",
+    "defense_driven",
+    "pace_driven",
+    "pace_defense_combined",
+    "playoff_defense_combined",
+    "stale_team_not_in_game",
+)
 
 
 def _safe_float(value: Any) -> float | None:
@@ -219,6 +230,58 @@ def _elite_context_gate_count(df: pd.DataFrame) -> int:
     return 0
 
 
+def _high_caution_conflicted_over_count(df: pd.DataFrame) -> int:
+    if df.empty:
+        return 0
+    selection = df.get("selection", pd.Series("", index=df.index)).fillna("").astype(str).str.strip().str.lower()
+    caution = df.get("context_caution_level", pd.Series("", index=df.index)).fillna("").astype(str).str.strip().str.lower()
+    alignment = df.get("context_pick_alignment", pd.Series("", index=df.index)).fillna("").astype(str).str.strip().str.lower()
+    return int((selection.eq("over") & caution.eq("high") & alignment.eq("conflicted")).sum())
+
+
+def _context_conflict_cause(row: pd.Series) -> str:
+    if _safe_text(row.get("candidate_team_not_in_game")).lower() == "true":
+        return "stale_team_not_in_game"
+    if _safe_text(row.get("game_context_suppression_reason")).lower() == "team_not_in_game_context":
+        return "stale_team_not_in_game"
+    explicit = _safe_text(row.get("context_conflict_cause")).lower()
+    if explicit:
+        return explicit
+    if _safe_text(row.get("selection")).lower() != "over":
+        return ""
+    if _safe_text(row.get("context_caution_level")).lower() != "high":
+        return ""
+    if _safe_text(row.get("context_pick_alignment")).lower() != "conflicted":
+        return ""
+
+    pace_under = _safe_text(row.get("pace_context_signal")).lower() == "supports_under"
+    defense_under = _safe_text(row.get("defense_context_signal")).lower() == "supports_under"
+    rest_under = _safe_text(row.get("rest_context_signal")).lower() == "supports_under"
+    playoff_under = _safe_text(row.get("playoff_context_signal")).lower() == "supports_under"
+    if pace_under and defense_under:
+        return "pace_defense_combined"
+    if playoff_under and defense_under:
+        return "playoff_defense_combined"
+    if playoff_under and not any((pace_under, defense_under, rest_under)):
+        return "playoff_only"
+    if defense_under:
+        return "defense_driven"
+    if pace_under:
+        return "pace_driven"
+    return ""
+
+
+def _context_conflict_cause_counts(df: pd.DataFrame) -> dict[str, int]:
+    counts = {bucket: 0 for bucket in CONTEXT_CONFLICT_CAUSE_BUCKETS}
+    if df.empty:
+        return counts
+    for _, row in df.iterrows():
+        cause = _context_conflict_cause(row)
+        if cause:
+            counts[cause] = int(counts.get(cause, 0) + 1)
+    return counts
+
+
 def _kelly_high_caution_over_skip_count(df: pd.DataFrame) -> int:
     if df.empty or "skip_reason" not in df.columns:
         return 0
@@ -257,7 +320,14 @@ def _daily_run_health_summary(
     full_market_count = int(len(full_market_df))
     kelly_rows = int(len(kelly_df))
     context_gate_rejections = _elite_context_gate_count(full_market_df)
+    elite_context_violations = _high_caution_conflicted_over_count(elite_df)
     high_caution_over_skips = _kelly_high_caution_over_skip_count(kelly_df)
+    final_elite_context_clean = elite_count > 0 and elite_context_violations == 0
+    valid_context_safety_blocking = (
+        context_gate_rejections > 0
+        and final_elite_context_clean
+        and high_caution_over_skips == 0
+    )
 
     if _missing_or_unreadable_required_artifact(warnings, elite_count=elite_count):
         flags.append("required_artifact_missing_or_unreadable")
@@ -267,8 +337,16 @@ def _daily_run_health_summary(
         flags.append("kelly_rows_exist_no_eligible")
     if kelly_rows > 0 and (high_caution_over_skips / kelly_rows) >= RUN_HEALTH_CONTEXT_BLOCKED_RATIO:
         flags.append("kelly_context_high_caution_over_skip_rate_high")
-    if full_market_count > 0 and (context_gate_rejections / full_market_count) >= RUN_HEALTH_CONTEXT_BLOCKED_RATIO:
+    if (
+        full_market_count > 0
+        and (context_gate_rejections / full_market_count) >= RUN_HEALTH_CONTEXT_BLOCKED_RATIO
+        and not valid_context_safety_blocking
+    ):
         flags.append("elite_context_gate_rejection_rate_high")
+    elif valid_context_safety_blocking:
+        flags.append("valid_context_safety_blocking")
+    if elite_context_violations > 0:
+        flags.append("elite_contains_context_blocked_over")
 
     if "required_artifact_missing_or_unreadable" in flags:
         status = "ERROR_OR_INCOMPLETE"
@@ -281,12 +359,19 @@ def _daily_run_health_summary(
         for flag in (
             "kelly_context_high_caution_over_skip_rate_high",
             "elite_context_gate_rejection_rate_high",
+            "elite_contains_context_blocked_over",
         )
     ):
         status = "DEGRADED_CONTEXT_BLOCKED"
         reason = (
             f"Context safety blocked {context_gate_rejections} candidate(s) and Kelly skipped "
             f"{high_caution_over_skips}/{kelly_rows} row(s) for high-caution OVER context."
+        )
+    elif "valid_context_safety_blocking" in flags:
+        status = "HEALTHY_CONTEXT_GATED"
+        reason = (
+            f"Context safety blocked {context_gate_rejections} high-caution OVER candidate(s); "
+            f"final Elite is clean with {kelly_eligible_count} Kelly-eligible pick(s)."
         )
     elif 0 < kelly_eligible_count < RUN_HEALTH_LOW_VOLUME_KELLY_ELIGIBLE:
         status = "HEALTHY_LOW_VOLUME"
@@ -366,6 +451,7 @@ def build_daily_summary(
     elite_alignment = _alignment_counts(elite_df)
     elite_caution = _caution_counts(elite_df)
     full_market_alignment = _alignment_counts(full_market_df)
+    full_market_context_conflict_causes = _context_conflict_cause_counts(full_market_df)
     elite_context_gate_count = _elite_context_gate_count(full_market_df)
     run_health = _daily_run_health_summary(
         elite_df=elite_df,
@@ -452,6 +538,9 @@ def build_daily_summary(
         f"low={elite_caution['low']}, "
         f"insufficient_data={elite_caution['insufficient_data']}"
     )
+    lines.append("- full_market context conflict causes:")
+    for cause, count in sorted(full_market_context_conflict_causes.items()):
+        lines.append(f"  - {cause}: {count}")
 
     lines.extend(["", "Kelly Stakes", "-" * 72])
     if kelly_eligible.empty:
@@ -592,6 +681,8 @@ def build_daily_summary(
         "elite_medium_caution_count": elite_caution["medium"],
         "elite_low_caution_count": elite_caution["low"],
         "elite_context_safety_gate_rejected_count": elite_context_gate_count,
+        "full_market_context_conflict_cause_counts": full_market_context_conflict_causes,
+        "stale_team_not_in_game_count": int(full_market_context_conflict_causes.get("stale_team_not_in_game", 0)),
         "run_health": run_health,
         "run_health_status": run_health["status"],
         "run_health_reason": run_health["reason"],

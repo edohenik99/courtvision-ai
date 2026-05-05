@@ -97,6 +97,7 @@ def test_normalize_games_frame_iso_datetime_in_status_becomes_unknown() -> None:
     out = normalize_games_frame(raw)
     assert out.iloc[0]["status"] == "unknown"
     assert out.iloc[0]["datetime"] == "2026-05-05T01:30:00.000Z"
+    assert out.iloc[0]["game_status_bucket"] == "scheduled_future_iso_status"
     # datetime should be preserved even if it already existed
 
 
@@ -116,6 +117,23 @@ def test_normalize_games_frame_iso_datetime_in_status_preserves_when_datetime_mi
     out = normalize_games_frame(raw)
     assert out.iloc[0]["status"] == "unknown"
     assert out.iloc[0]["datetime"] == "2026-05-05T01:30:00Z"
+    assert out.iloc[0]["game_status_bucket"] == "scheduled_future_iso_status"
+
+
+def test_normalize_games_frame_missing_status_and_datetime_gets_explicit_bucket() -> None:
+    raw = pd.DataFrame(
+        [
+            {
+                "id": 12,
+                "home_team": {"abbreviation": "LAL"},
+                "visitor_team": {"abbreviation": "GSW"},
+                "status": "",
+                "date": "2026-05-05",
+            }
+        ]
+    )
+    out = normalize_games_frame(raw)
+    assert out.iloc[0]["game_status_bucket"] == "unknown_missing_datetime"
 
 
 def test_normalize_odds_frame_maps_market_and_numeric_columns() -> None:

@@ -12,6 +12,14 @@ from typing import Any, Iterable, Sequence
 import pandas as pd
 
 ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER = "elite_reject_context_high_caution_over"
+CONTEXT_CONFLICT_CAUSE_BUCKETS: tuple[str, ...] = (
+    "playoff_only",
+    "defense_driven",
+    "pace_driven",
+    "pace_defense_combined",
+    "playoff_defense_combined",
+    "stale_team_not_in_game",
+)
 
 PREDICTION_ARTIFACT_NAMES: tuple[str, ...] = (
     "elite_board",
@@ -108,6 +116,9 @@ RUN_HEALTH_LOW_VOLUME_KELLY_ELIGIBLE = 2
 RUN_HEALTH_RECOMMENDATIONS: dict[str, str] = {
     "HEALTHY": "Run is bet-ready within configured staking limits.",
     "HEALTHY_LOW_VOLUME": "Run is valid but low-volume; avoid forcing extra action.",
+    "HEALTHY_CONTEXT_GATED": (
+        "Run is bet-ready; context safety blocked risky candidates and final Elite is clean."
+    ),
     "DEGRADED_LOW_COVERAGE": "Provider/candidate coverage is thin; treat picks cautiously.",
     "DEGRADED_CONTEXT_BLOCKED": (
         "Model found edges but context safety rejected too many; no threshold loosening recommended."
@@ -716,11 +727,17 @@ def _player_baseline_coverage_summary(
     if identity_column and identity_column in player_baselines_df.columns:
         baseline_values = set(_nonempty_text_series(player_baselines_df[identity_column]).astype(str))
     odds_baseline_matched_players = len(odds_values & baseline_values) if baseline_values else 0
+    active_board_match_rate = (
+        round(odds_baseline_matched_players / len(odds_values), 4)
+        if odds_values
+        else None
+    )
 
     return {
         "player_predictions_rows": player_predictions_rows,
         "baseline_rows": baseline_rows,
         "unique_baseline_players": unique_baseline_players,
+        "baseline_universe_player_count": unique_baseline_players,
         "active_team_baseline_players": active_team_baseline_players,
         "active_team_source": "full_market_board" if active_teams else "unavailable",
         "active_teams": sorted(active_teams),
@@ -728,6 +745,7 @@ def _player_baseline_coverage_summary(
         "odds_unique_players_source": "full_market_board",
         "odds_baseline_matched_players": int(odds_baseline_matched_players),
         "odds_baseline_match_key": identity_column or "unavailable",
+        "active_board_match_rate": active_board_match_rate,
         "full_market_unique_players": full_market_unique_players,
         "elite_unique_players": elite_unique_players,
         "kelly_unique_players": kelly_unique_players,
@@ -776,6 +794,14 @@ def _coverage_warnings(
             )
 
     odds_unique_players = _history_int(player_baseline_coverage.get("odds_unique_players"))
+    odds_baseline_matched_players = _history_int(player_baseline_coverage.get("odds_baseline_matched_players"))
+    if odds_unique_players > 0 and (odds_baseline_matched_players / odds_unique_players) < 0.5:
+        ratio = round(odds_baseline_matched_players / odds_unique_players, 4)
+        warnings.append(
+            "Low active-board baseline match: "
+            f"odds_baseline_matched_players={odds_baseline_matched_players}, "
+            f"odds_unique_players={odds_unique_players}, active_board_match_rate={ratio}."
+        )
     if games_count > 0 and odds_unique_players / games_count < min_odds_players_per_game_ratio:
         ratio = round(odds_unique_players / games_count, 2)
         warnings.append(
@@ -812,6 +838,49 @@ def _coverage_warnings(
     return warnings
 
 
+def _context_conflict_cause(row: pd.Series) -> str:
+    if _safe_text(row.get("candidate_team_not_in_game")).lower() == "true":
+        return "stale_team_not_in_game"
+    if _safe_text(row.get("game_context_suppression_reason")).lower() == "team_not_in_game_context":
+        return "stale_team_not_in_game"
+    explicit = _safe_text(row.get("context_conflict_cause")).lower()
+    if explicit:
+        return explicit
+    if _safe_text(row.get("selection")).lower() != "over":
+        return ""
+    if _safe_text(row.get("context_caution_level")).lower() != "high":
+        return ""
+    if _safe_text(row.get("context_pick_alignment")).lower() != "conflicted":
+        return ""
+
+    pace_under = _safe_text(row.get("pace_context_signal")).lower() == "supports_under"
+    defense_under = _safe_text(row.get("defense_context_signal")).lower() == "supports_under"
+    rest_under = _safe_text(row.get("rest_context_signal")).lower() == "supports_under"
+    playoff_under = _safe_text(row.get("playoff_context_signal")).lower() == "supports_under"
+    if pace_under and defense_under:
+        return "pace_defense_combined"
+    if playoff_under and defense_under:
+        return "playoff_defense_combined"
+    if playoff_under and not any((pace_under, defense_under, rest_under)):
+        return "playoff_only"
+    if defense_under:
+        return "defense_driven"
+    if pace_under:
+        return "pace_driven"
+    return ""
+
+
+def _context_conflict_cause_counts(df: pd.DataFrame) -> dict[str, int]:
+    counts = {bucket: 0 for bucket in CONTEXT_CONFLICT_CAUSE_BUCKETS}
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return counts
+    for _, row in df.iterrows():
+        cause = _context_conflict_cause(row)
+        if cause:
+            counts[cause] = int(counts.get(cause, 0) + 1)
+    return counts
+
+
 def _elite_context_safety_summary(full_market_df: pd.DataFrame, elite_df: pd.DataFrame) -> dict[str, Any]:
     def _reason_count(df: pd.DataFrame) -> int:
         if not isinstance(df, pd.DataFrame) or df.empty:
@@ -839,11 +908,18 @@ def _elite_context_safety_summary(full_market_df: pd.DataFrame, elite_df: pd.Dat
 
     rejected = _reason_count(full_market_df)
     elite_remaining = _context_mask_count(elite_df)
+    full_market_cause_counts = _context_conflict_cause_counts(full_market_df)
+    elite_cause_counts = _context_conflict_cause_counts(elite_df)
     return {
         "rejection_reason": ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER,
         "full_market_high_caution_conflicted_over_count": _context_mask_count(full_market_df),
         "rejected_from_final_elite_count": rejected,
         "elite_high_caution_conflicted_over_count": elite_remaining,
+        "final_elite_context_clean": elite_remaining == 0,
+        "valid_context_safety_blocking": bool(rejected and elite_remaining == 0),
+        "full_market_context_conflict_cause_counts": full_market_cause_counts,
+        "elite_context_conflict_cause_counts": elite_cause_counts,
+        "stale_team_not_in_game_count": int(full_market_cause_counts.get("stale_team_not_in_game", 0)),
         "status": "warning" if elite_remaining else "ok",
     }
 
@@ -953,6 +1029,12 @@ def _run_health_summary(
     )
     context_gate_rejections = _history_int(elite_context_safety.get("rejected_from_final_elite_count"))
     elite_context_violations = _history_int(elite_context_safety.get("elite_high_caution_conflicted_over_count"))
+    final_elite_context_clean = elite_count > 0 and elite_context_violations == 0
+    valid_context_safety_blocking = (
+        context_gate_rejections > 0
+        and final_elite_context_clean
+        and high_caution_over_skips == 0
+    )
 
     fatal_artifact_issue = _warning_contains(warnings, "missing artifact:", "prediction artifact date mismatch")
     fatal_artifact_issue = fatal_artifact_issue or (
@@ -980,17 +1062,23 @@ def _run_health_summary(
 
     if kelly_rows > 0 and (high_caution_over_skips / kelly_rows) >= RUN_HEALTH_CONTEXT_BLOCKED_RATIO:
         flags.append("kelly_context_high_caution_over_skip_rate_high")
-    if full_market_count > 0 and (context_gate_rejections / full_market_count) >= RUN_HEALTH_CONTEXT_BLOCKED_RATIO:
+    if (
+        full_market_count > 0
+        and (context_gate_rejections / full_market_count) >= RUN_HEALTH_CONTEXT_BLOCKED_RATIO
+        and not valid_context_safety_blocking
+    ):
         flags.append("elite_context_gate_rejection_rate_high")
+    elif valid_context_safety_blocking:
+        flags.append("valid_context_safety_blocking")
     if elite_context_violations > 0:
         flags.append("elite_contains_context_blocked_over")
 
     if _warning_contains(
         coverage_warnings,
         "low live candidate coverage",
+        "low active-board baseline match",
         "low provider player coverage",
         "low full-market player coverage",
-        "market coverage loss",
     ):
         flags.append("provider_or_candidate_coverage_low")
 
@@ -1016,6 +1104,12 @@ def _run_health_summary(
     elif "provider_or_candidate_coverage_low" in flags:
         status = "DEGRADED_LOW_COVERAGE"
         reason = "Provider/candidate coverage warnings are present."
+    elif "valid_context_safety_blocking" in flags:
+        status = "HEALTHY_CONTEXT_GATED"
+        reason = (
+            f"Context safety blocked {context_gate_rejections} high-caution OVER candidate(s); "
+            f"final Elite is clean with {kelly_eligible} Kelly-eligible pick(s)."
+        )
     elif kelly_eligible > 0 and kelly_eligible < RUN_HEALTH_LOW_VOLUME_KELLY_ELIGIBLE:
         status = "HEALTHY_LOW_VOLUME"
         flags.append("kelly_eligible_low_volume")
@@ -1492,9 +1586,11 @@ def _format_quality_summary_text(payload: dict[str, Any]) -> str:
             f"- player_predictions_rows: {_fmt_value(player_coverage.get('player_predictions_rows'))}",
             f"- baseline_rows: {_fmt_value(player_coverage.get('baseline_rows'))}",
             f"- unique_baseline_players: {_fmt_value(player_coverage.get('unique_baseline_players'))}",
+            f"- baseline_universe_player_count: {_fmt_value(player_coverage.get('baseline_universe_player_count'))}",
             f"- active_team_baseline_players: {_fmt_value(player_coverage.get('active_team_baseline_players'))}",
             f"- odds_unique_players: {_fmt_value(player_coverage.get('odds_unique_players'))}",
             f"- odds_baseline_matched_players: {_fmt_value(player_coverage.get('odds_baseline_matched_players'))}",
+            f"- active_board_match_rate: {_fmt_value(player_coverage.get('active_board_match_rate'))}",
             f"- full_market_unique_players: {_fmt_value(player_coverage.get('full_market_unique_players'))}",
             f"- elite_unique_players: {_fmt_value(player_coverage.get('elite_unique_players'))}",
             f"- kelly_unique_players: {_fmt_value(player_coverage.get('kelly_unique_players'))}",
@@ -1537,6 +1633,13 @@ def _format_quality_summary_text(payload: dict[str, Any]) -> str:
             f"{elite_context_safety.get('rejected_from_final_elite_count', 0)}",
             "- elite high-caution conflicted OVER count: "
             f"{elite_context_safety.get('elite_high_caution_conflicted_over_count', 0)}",
+            "- final Elite context clean: "
+            f"{elite_context_safety.get('final_elite_context_clean', False)}",
+            "- full-market context conflict causes:",
+            *_format_mapping(
+                elite_context_safety.get("full_market_context_conflict_cause_counts", {}),
+                indent="  - ",
+            ),
             f"- status: {elite_context_safety.get('status', 'unknown')}",
         ]
     )
