@@ -252,7 +252,40 @@ def injury_confidence_delta_value(row: Mapping[str, Any]) -> float:
     return float(adjusted - baseline)
 
 
+# Edge bucket thresholds operate on raw absolute edge values (stat units, e.g. points).
+# Do NOT pass decimal-fraction (0.07) or percentage-style (7.0) values — they will be
+# misclassified. See courtvision/scoring/edge.py for edge_pct_value() which returns %.
+ABS_EDGE_BUCKETS = ["<1", "1-2", "2-3", "3-5", "5+"]
+
+
+def abs_edge_bucket(value: Any) -> str:
+    """Classify a raw absolute edge value (stat units, e.g. points) into a named bucket.
+
+    Bucket thresholds (stat-unit scale):
+      "<1"      abs_edge < 1.0
+      "1-2"     1.0 <= abs_edge < 2.0
+      "2-3"     2.0 <= abs_edge < 3.0
+      "3-5"     3.0 <= abs_edge < 5.0
+      "5+"      abs_edge >= 5.0
+      "unknown" value is None or non-numeric
+    """
+    v = to_float(value)
+    if v is None:
+        return "unknown"
+    abs_v = abs(v)
+    if abs_v < 1.0:
+        return "<1"
+    if abs_v < 2.0:
+        return "1-2"
+    if abs_v < 3.0:
+        return "2-3"
+    if abs_v < 5.0:
+        return "3-5"
+    return "5+"
+
+
 __all__ = [
+    "ABS_EDGE_BUCKETS",
     "CONFIDENCE_BANDS",
     "INJURY_INFLUENCE_BUCKETS",
     "MARKET_TRUST_WEIGHT_BANDS",
@@ -261,6 +294,7 @@ __all__ = [
     "PLAYER_PROFILE_BUCKETS",
     "PLAYER_POINTS_LINE_BANDS",
     "QUALITY_BANDS",
+    "abs_edge_bucket",
     "confidence_band",
     "injury_confidence_delta_value",
     "injury_influence_bucket",

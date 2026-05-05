@@ -13,13 +13,14 @@ from typing import Any
 import pandas as pd
 import numpy as np
 
+from courtvision.calibration.buckets import abs_edge_bucket as _abs_edge_bucket
 from courtvision.config import ROOT_DIR, DEFAULT_BANKROLL
 
 
 # Minimum sample size for statistical significance
 MIN_SAMPLE_SIZE = 20
 
-# Confidence bucket thresholds
+# Confidence bucket thresholds (confidence stored as 0–1 decimal fraction)
 CONFIDENCE_BUCKETS = [
     (0.55, 0.65, "0.55-0.65"),
     (0.65, 0.75, "0.65-0.75"),
@@ -27,12 +28,9 @@ CONFIDENCE_BUCKETS = [
     (0.85, 1.01, "0.85+"),  # 1.01 to include 0.85-1.0
 ]
 
-# Edge bucket thresholds (as percentages)
-EDGE_BUCKETS = [
-    (0.0, 0.03, "small_0-3pct"),
-    (0.03, 0.06, "medium_3-6pct"),
-    (0.06, 1.0, "large_6pct_plus"),
-]
+# Edge bucket labels — thresholds live in abs_edge_bucket() in courtvision.calibration.buckets.
+# pick_history.csv stores `edge` as raw absolute stat units (e.g. 1.5 = 1.5 points).
+EDGE_BUCKET_LABELS = ["<1", "1-2", "2-3", "3-5", "5+"]
 
 
 def normalize_pick_history_schema(df: pd.DataFrame) -> pd.DataFrame:
@@ -328,12 +326,14 @@ def roi_by_confidence_bucket(df: pd.DataFrame) -> list[dict[str, Any]]:
 
 
 def roi_by_edge_bucket(df: pd.DataFrame) -> list[dict[str, Any]]:
-    """Compute ROI grouped by edge buckets.
+    """Compute ROI grouped by raw-absolute edge buckets.
 
-    Buckets:
-    - small_0-3pct: 0-3% edge
-    - medium_3-6pct: 3-6% edge
-    - large_6pct_plus: 6%+ edge
+    Buckets (stat-unit scale, e.g. points):
+    - edge_<1:   abs_edge < 1.0
+    - edge_1-2:  1.0 <= abs_edge < 2.0
+    - edge_2-3:  2.0 <= abs_edge < 3.0
+    - edge_3-5:  3.0 <= abs_edge < 5.0
+    - edge_5+:   abs_edge >= 5.0
 
     Returns:
         List of edge segments with ROI, win_rate, sample_size
@@ -341,24 +341,17 @@ def roi_by_edge_bucket(df: pd.DataFrame) -> list[dict[str, Any]]:
     if df.empty or "edge" not in df.columns:
         return []
 
-    # Only graded picks
     graded = df[df["result"].isin(["win", "loss", "push"])].copy()
-
     if graded.empty:
         return []
 
+    graded["_edge_bucket"] = graded["edge"].apply(_abs_edge_bucket)
+
     results = []
-    for low, high, label in EDGE_BUCKETS:
-        mask = (graded["edge"] >= low) & (graded["edge"] < high)
-        bucket_df = graded[mask]
-
-        if len(bucket_df) == 0:
-            continue
-
-        segment = _compute_segment_stats(bucket_df, f"edge_{label}")
+    for bucket_label, bucket_df in graded.groupby("_edge_bucket"):
+        segment = _compute_segment_stats(bucket_df, f"edge_{bucket_label}")
         results.append(segment)
 
-    # Sort by ROI descending
     return sorted(results, key=lambda x: x["roi"], reverse=True)
 
 

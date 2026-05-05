@@ -26,6 +26,7 @@ from courtvision.betting.performance import (
     normalize_pick_history_schema,
     MIN_SAMPLE_SIZE,
 )
+from courtvision.calibration.buckets import abs_edge_bucket
 
 
 class TestLoadPickHistory:
@@ -275,32 +276,68 @@ class TestRoiByConfidenceBucket:
         assert "confidence_0.55-0.65" not in bucket_segments
 
 
+class TestAbsEdgeBucket:
+    """Test abs_edge_bucket() for raw-absolute stat-unit edge values."""
+
+    def test_very_small_edge_below_one(self):
+        """0.015 raw abs is < 1 stat unit — falls in '<1' bucket."""
+        assert abs_edge_bucket(0.015) == "<1"
+
+    def test_typical_small_edge(self):
+        """1.5 stat units falls in '1-2' bucket."""
+        assert abs_edge_bucket(1.5) == "1-2"
+
+    def test_medium_edge(self):
+        """3.5 stat units falls in '3-5' bucket."""
+        assert abs_edge_bucket(3.5) == "3-5"
+
+    def test_large_edge(self):
+        """7.0 stat units falls in '5+' bucket."""
+        assert abs_edge_bucket(7.0) == "5+"
+
+    def test_negative_edge_uses_absolute_value(self):
+        """Negative raw edge uses absolute value for bucketing."""
+        assert abs_edge_bucket(-1.5) == "1-2"
+
+    def test_none_returns_unknown(self):
+        """None input returns 'unknown'."""
+        assert abs_edge_bucket(None) == "unknown"
+
+    def test_boundary_exactly_one(self):
+        """1.0 falls in '1-2' (lower-inclusive boundary)."""
+        assert abs_edge_bucket(1.0) == "1-2"
+
+    def test_boundary_exactly_five(self):
+        """5.0 falls in '5+' (lower-inclusive boundary)."""
+        assert abs_edge_bucket(5.0) == "5+"
+
+
 class TestRoiByEdgeBucket:
-    """Test ROI by edge bucket analysis."""
+    """Test ROI by edge bucket analysis (edge column stores raw absolute stat units)."""
 
     def test_edge_bucket_grouping(self):
-        """Test picks are grouped into correct edge buckets."""
+        """Picks with distinct raw-absolute edges land in distinct buckets."""
         df = pd.DataFrame({
             "result": ["win", "loss", "win"],
-            "edge": [0.02, 0.04, 0.08],
+            "edge": [0.8, 2.5, 7.0],  # <1, 2-3, 5+ buckets
             "stake": [20.0, 20.0, 20.0],
             "profit_loss": [18.2, -20.0, 18.2],
         })
         result = roi_by_edge_bucket(df)
-        assert len(result) > 0
+        assert len(result) == 3
 
-    def test_small_edge_bucket(self):
-        """Test small edge (0-3%) bucket."""
+    def test_sub_one_edge_bucket(self):
+        """Picks with edge < 1.0 stat units land in 'edge_<1' segment."""
         df = pd.DataFrame({
             "result": ["win", "loss"],
-            "edge": [0.02, 0.025],
+            "edge": [0.5, 0.8],
             "stake": [20.0, 20.0],
             "profit_loss": [18.2, -20.0],
         })
         result = roi_by_edge_bucket(df)
-        small_bucket = next((r for r in result if "small" in r["segment"]), None)
-        assert small_bucket is not None
-        assert small_bucket["sample_size"] == 2
+        sub_one = next((r for r in result if r["segment"] == "edge_<1"), None)
+        assert sub_one is not None
+        assert sub_one["sample_size"] == 2
 
 
 class TestWorstPerformingSegments:
