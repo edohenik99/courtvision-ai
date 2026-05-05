@@ -80,6 +80,44 @@ def test_normalize_games_frame_returns_expected_columns() -> None:
     assert out.iloc[0]["visitor_team_abbr"] == "PHX"
 
 
+def test_normalize_games_frame_iso_datetime_in_status_becomes_unknown() -> None:
+    """BallDontLie sometimes puts the game datetime in the status field."""
+    raw = pd.DataFrame(
+        [
+            {
+                "id": 12,
+                "home_team": {"abbreviation": "LAL"},
+                "visitor_team": {"abbreviation": "GSW"},
+                "status": "2026-05-05T01:30:00Z",
+                "date": "2026-05-05",
+                "datetime": "2026-05-05T01:30:00.000Z",
+            }
+        ]
+    )
+    out = normalize_games_frame(raw)
+    assert out.iloc[0]["status"] == "unknown"
+    assert out.iloc[0]["datetime"] == "2026-05-05T01:30:00.000Z"
+    # datetime should be preserved even if it already existed
+
+
+def test_normalize_games_frame_iso_datetime_in_status_preserves_when_datetime_missing() -> None:
+    """If status is a datetime and the explicit datetime field is missing, use status value."""
+    raw = pd.DataFrame(
+        [
+            {
+                "id": 12,
+                "home_team": {"abbreviation": "LAL"},
+                "visitor_team": {"abbreviation": "GSW"},
+                "status": "2026-05-05T01:30:00Z",
+                "date": "2026-05-05",
+            }
+        ]
+    )
+    out = normalize_games_frame(raw)
+    assert out.iloc[0]["status"] == "unknown"
+    assert out.iloc[0]["datetime"] == "2026-05-05T01:30:00Z"
+
+
 def test_normalize_odds_frame_maps_market_and_numeric_columns() -> None:
     raw = pd.DataFrame(
         [

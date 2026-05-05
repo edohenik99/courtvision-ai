@@ -538,12 +538,14 @@ class TestPredictionPipeline:
         config = PredictionConfig(prediction_date="2024-01-15", out_dir=str(out_dir))
         pipeline = PredictionPipeline(config)
 
-        # Include a future date so game status gate doesn't block all candidates
+        # Include a future game datetime so game status gate doesn't block candidates.
+        future_game_datetime = (datetime.now() + timedelta(hours=2)).isoformat()
         games = pd.DataFrame([{
             "game_id": 1,
             "home_team_abbr": "LAL",
             "visitor_team_abbr": "BOS",
-            "date": (datetime.now() + timedelta(hours=2)).isoformat(),
+            "date": future_game_datetime,
+            "datetime": future_game_datetime,
             "status": "scheduled",
         }])
         fresh_time = (datetime.now() - timedelta(minutes=5)).isoformat()
@@ -555,9 +557,9 @@ class TestPredictionPipeline:
                 "raw_prop_type": "points",
                 "raw_market_type": "over_under",
                 "market_type": "player_points",
-                "line": 21.5,
+                "line": 31.5,
                 "odds": -110,
-                "selection": "over",
+                "selection": "under",
                 "is_live": True,
                 "updated_at": fresh_time,
             },
@@ -593,10 +595,11 @@ class TestPredictionPipeline:
                 "player_name": "Points Star",
                 "team_abbr": "LAL",
                 "player_id": 123,
-                "pts_avg": 24.0,
+                "pts_avg": 27.0,
+                "pts_recent": 27.0,
                 "reb_avg": 4.0,
                 "ast_avg": 5.0,
-                "min_avg": 34.0,
+                "min_avg": 35.0,
             },
             {
                 "player_name": "Combo Star",
@@ -621,6 +624,12 @@ class TestPredictionPipeline:
         result = pipeline.run(games, odds, baselines)
 
         assert set(result.elite_props["market_type"]) == {"player_points"}
+        elite_row = result.elite_props.iloc[0]
+        assert elite_row["selection"] == "under"
+        assert elite_row["side_edge"] > 0
+        assert elite_row["quality_score"] >= 50.0
+        assert elite_row["game_status"] == "scheduled"
+        assert str(elite_row["game_datetime"]).strip()
         assert "player_points_rebounds" in set(result.full_market_props["market_type"])
         assert "player_rebounds" not in set(result.full_market_props["market_type"])
 
@@ -1014,20 +1023,27 @@ class TestPredictionPipeline:
         pipeline = PredictionPipeline(config, logger=logger)
 
         from datetime import datetime, timedelta
+        future_game_datetime = (datetime.now() + timedelta(hours=2)).isoformat()
         games = pd.DataFrame([{
             "game_id": 1,
             "home_team_abbr": "LAL",
             "visitor_team_abbr": "BOS",
-            "game_date": (datetime.now() + timedelta(hours=2)).isoformat(),
+            "game_date": future_game_datetime,
+            "datetime": future_game_datetime,
             "status": "scheduled",
         }])
 
         odds = pd.DataFrame([{
             "game_id": 1,
+            "player_id": 123,
             "player_name": "LeBron James",
             "raw_market_name": "player_points",
-            "line": 25.5,
+            "raw_prop_type": "points",
+            "raw_market_type": "over_under",
+            "market_type": "player_points",
+            "line": 31.5,
             "odds": -110,
+            "selection": "under",
             "is_live": True,
             "team": "LAL",
             "updated_at": (datetime.now() - timedelta(minutes=5)).isoformat(),
@@ -1038,7 +1054,7 @@ class TestPredictionPipeline:
             "team_abbr": "LAL",
             "player_id": 123,
             "pts_avg": 27.0,
-            "pts_recent": 28.0,
+            "pts_recent": 27.0,
             "reb_avg": 8.0,
             "ast_avg": 8.0,
             "min_avg": 35.0,
@@ -1049,6 +1065,11 @@ class TestPredictionPipeline:
 
         # After live-gate fix, candidates SHOULD flow through
         assert not result.elite_props.empty, "Live candidates should be admitted after fix"
+        elite_row = result.elite_props.iloc[0]
+        assert elite_row["selection"] == "under"
+        assert elite_row["quality_score"] >= 50.0
+        assert elite_row["game_status"] == "scheduled"
+        assert str(elite_row["game_datetime"]).strip()
         assert "selection_rejection_reason" in result.merged_market_props.columns
         # Should NOT be rejected for missing qualification reason
         assert result.merged_market_props.iloc[0].get("selection_rejection_reason") != (

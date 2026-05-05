@@ -191,6 +191,42 @@ def test_numeric_status_treated_as_in_progress() -> None:
     assert is_game_bettable(row) is False
 
 
+def test_empty_status_with_future_datetime_is_allowed() -> None:
+    # Empty game_status should be treated like unknown when datetime is valid and future
+    future = datetime.now() + timedelta(hours=2)
+    row = _candidate(game_status="", game_datetime=future.isoformat())
+    assert game_status_ineligibility_reason(row, now=datetime.now()) == ""
+    assert is_game_bettable(row, now=datetime.now()) is True
+
+
+def test_empty_status_with_missing_datetime_blocks() -> None:
+    # Empty game_status + no datetime should block
+    row = _candidate(game_status="", game_datetime=None)
+    assert game_status_ineligibility_reason(row) == "game_status_unknown"
+    assert is_game_bettable(row) is False
+
+
+def test_empty_status_with_past_datetime_blocks() -> None:
+    # Empty game_status + past datetime should block as locked
+    past = datetime.now() - timedelta(hours=2)
+    row = _candidate(game_status="", game_datetime=past.isoformat())
+    assert game_status_ineligibility_reason(row, now=datetime.now()) == "game_locked"
+    assert is_game_bettable(row, now=datetime.now()) is False
+
+
+def test_unknown_status_with_future_game_datetime_is_bettable() -> None:
+    future = datetime.now() + timedelta(hours=2)
+    row = _candidate(game_status="unknown", game_datetime=future.isoformat())
+    assert game_status_ineligibility_reason(row, now=datetime.now()) == ""
+    assert is_game_bettable(row, now=datetime.now()) is True
+
+
+def test_unknown_status_with_missing_game_datetime_blocks() -> None:
+    row = _candidate(game_status="unknown", game_datetime=None)
+    assert game_status_ineligibility_reason(row) == "game_status_unknown"
+    assert is_game_bettable(row) is False
+
+
 # ---------------------------------------------------------------------------
 # Game datetime / lock buffer tests
 # ---------------------------------------------------------------------------

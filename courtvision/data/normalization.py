@@ -11,6 +11,26 @@ MarketMapper = Callable[[Any], str | None]
 StatKeyMapper = Callable[[Any], str | None]
 
 
+def _is_iso_datetime(value: Any) -> bool:
+    """Heuristic to detect if a value is an ISO-8601 datetime string masquerading as status."""
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if len(text) < 10:
+        return False
+    # Must contain date separator, time separator, and time designator
+    if "T" not in text or ":" not in text:
+        return False
+    # Must look like a date (YYYY-MM-DD) with optional time offset
+    parts = text.split("T")
+    if len(parts) < 2:
+        return False
+    date_part = parts[0]
+    if len(date_part) < 10 or date_part[4] != "-" or date_part[7] != "-":
+        return False
+    return True
+
+
 def parse_minutes(value: Any) -> float:
     if value in (None, ""):
         return 0.0
@@ -154,18 +174,29 @@ def normalize_stats_frame(df: pd.DataFrame) -> pd.DataFrame:
 
 def normalize_games_frame(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
-        return pd.DataFrame(columns=["game_id", "home_team_abbr", "visitor_team_abbr", "status"])
+        return pd.DataFrame(columns=["game_id", "home_team_abbr", "visitor_team_abbr", "status", "date", "datetime"])
 
     rows: list[dict[str, Any]] = []
     for _, row in df.iterrows():
         home = row.get("home_team", {}) if isinstance(row.get("home_team"), dict) else {}
         visitor = row.get("visitor_team", {}) if isinstance(row.get("visitor_team"), dict) else {}
+        # Guard against upstream APIs that put an ISO datetime in the status field
+        status = row.get("status")
+        datetime_val = row.get("datetime")
+        if _is_iso_datetime(status):
+            # The status field contains a datetime string; treat as unknown and preserve the datetime
+            if datetime_val is None or str(datetime_val).strip() == "":
+                datetime_val = status
+            status = "unknown"
+        # Preserve date/datetime from upstream so downstream slate-lock can validate
         rows.append(
             {
                 "game_id": row.get("id"),
                 "home_team_abbr": home.get("abbreviation") or row.get("home_team_abbr"),
                 "visitor_team_abbr": visitor.get("abbreviation") or row.get("visitor_team_abbr"),
-                "status": row.get("status"),
+                "status": status,
+                "date": row.get("date"),
+                "datetime": datetime_val,
             }
         )
 

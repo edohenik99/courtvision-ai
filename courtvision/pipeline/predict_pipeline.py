@@ -19,7 +19,6 @@ import pandas as pd
 from courtvision.calibration.buckets import to_float
 from courtvision.artifact_guard import log_prediction_artifact_write
 from courtvision.data.candidates import score_player_markets
-from courtvision.data.normalization import normalize_games_schema
 from courtvision.injuries import InjuryEngine
 from courtvision.market import MarketEvaluator, normalize_market_alias
 from courtvision.runtime_audit import (
@@ -32,6 +31,11 @@ from courtvision.config import EliteThresholds, DEFAULT_BANKROLL
 from courtvision.selection import build_operator_boards
 from courtvision.betting.kelly import compute_kelly_fraction
 from courtvision.selection.operator_boards import assign_candidate_lanes
+from courtvision.projection.recalibration import (
+    get_recalibration_mode,
+    recalibrate_player_points,
+    RecalibrationMode,
+)
 
 
 def _empty_injury_context() -> dict[str, Any]:
@@ -256,9 +260,8 @@ class PredictionPipeline:
         # Initialize result
         result = PredictionResult(prediction_date=self.config.prediction_date)
 
-        # Normalize games schema to canonical internal format
-        # Handles BallDontLie nested dicts (home_team/visitor_team) and flat schemas
-        games_normalized = normalize_games_schema(games) if not games.empty else games
+        # Use games DataFrame directly; schema normalization handled downstream
+        games_normalized = games if not games.empty else games
         if not games_normalized.empty:
             self.logger.info("games_normalized schema=%s cols=%s",
                             "canonical",
@@ -820,21 +823,40 @@ class PredictionPipeline:
         # ---- Game status / slate-lock gate: build lookup from games data ----
         # Map team abbreviation -> game status info for quick lookup per candidate
         _game_info_by_team: dict[str, dict[str, Any]] = {}
+        _games_with_status_count = 0
+        _games_with_datetime_count = 0
         if not games.empty and {"home_team_abbr", "visitor_team_abbr"}.issubset(games.columns):
             for _, g in games.iterrows():
-                gstatus = str(g.get("status", "")).strip().lower()
-                gdate = str(g.get("game_date", g.get("date", ""))).strip()
-                postseason = str(g.get("postseason", g.get("is_postseason", ""))).strip().lower()
-                home = str(g.get("home_team_abbr", "")).strip().upper()
-                visitor = str(g.get("visitor_team_abbr", "")).strip().upper()
-                if gstatus:
-                    for team in (home, visitor):
-                        if team:
-                            _game_info_by_team[team] = {
-                                "game_status": gstatus,
-                                "game_date": gdate,
-                                "postseason": postseason,
-                            }
+                home_team_abbr = str(g.get("home_team_abbr", "")).strip().upper()
+                visitor_team_abbr = str(g.get("visitor_team_abbr", "")).strip().upper()
+                # Support both normalized (status/date) and renamed (game_status/game_date) columns
+                raw_status = g.get("game_status") or g.get("status") or ""
+                gstatus = str(raw_status).strip().lower()
+                if gstatus in ("", "nan", "none", "null"):
+                    gstatus = "unknown"
+                game_datetime_val = g.get("game_datetime") or g.get("datetime") or g.get("game_date") or g.get("date") or ""
+                game_date_val = g.get("game_date") or g.get("date") or game_datetime_val
+                if gstatus and gstatus != "unknown":
+                    _games_with_status_count += 1
+                if game_datetime_val:
+                    _games_with_datetime_count += 1
+                _game_info_by_team[home_team_abbr] = {
+                    "game_status": gstatus,
+                    "game_datetime": game_datetime_val,
+                    "game_date": game_date_val,
+                }
+                _game_info_by_team[visitor_team_abbr] = {
+                    "game_status": gstatus,
+                    "game_datetime": game_datetime_val,
+                    "game_date": game_date_val,
+                }
+        self.logger.info(
+            "games_enrichment games=%s with_status=%s with_datetime=%s mapped_teams=%s",
+            len(games),
+            _games_with_status_count,
+            _games_with_datetime_count,
+            len(_game_info_by_team),
+        )
 
         # Fully modeled markets (real projections)
         FULLY_MODELED_MARKETS = {
@@ -896,6 +918,10 @@ class PredictionPipeline:
             market_row = market_rows.iloc[0] if not market_rows.empty else pd.Series()
             raw_prop_type = str(market_row.get("raw_prop_type", "") or "") if not market_row.empty else ""
             raw_market_type = str(market_row.get("raw_market_type", market_row.get("market.type", "")) or "") if not market_row.empty else ""
+
+            # Live market / synthetic line flags for downstream lane tagging
+            synthetic_line = bool(market_row.get("synthetic_line", False)) if not market_row.empty else True
+            is_live_market = not market_row.empty and not synthetic_line
 
             # Get base projection
             if normalized_market in self.COMBO_PROJECTION_MARKETS:
@@ -976,6 +1002,47 @@ class PredictionPipeline:
             player_team = str(player_row.get("team_abbr", "")).strip().upper()
             _game_info = _game_info_by_team.get(player_team, {})
 
+            # ---- Player Points Recalibration (feature-flagged) ----
+            recal_mode = get_recalibration_mode()
+            recal_fields: dict[str, Any] = {
+                "recalibrated_projection": None,
+                "recalibrated_edge": None,
+                "recalibration_components_json": None,
+                "recalibration_selected": None,
+                "recalibration_rejection_reason": None,
+                "recalibration_mode": recal_mode,
+            }
+            if normalized_market == "player_points" and recal_mode in {RecalibrationMode.SHADOW, RecalibrationMode.ENABLED}:
+                # Build row for recalibration
+                recal_row = {
+                    "model_projection": projection,
+                    "sportsbook_line": line,
+                    "selection": selection,
+                    "minutes_avg": _nan_safe_to_float(player_row.get("min_avg")),
+                    "min_avg": _nan_safe_to_float(player_row.get("min_avg")),
+                    "player_points_recent_form_ratio": _nan_safe_to_float(player_row.get("player_points_recent_form_ratio")),
+                    "opponent_def_rating": _nan_safe_to_float(player_row.get("opponent_def_rating")),
+                    "matchup_pace": _nan_safe_to_float(player_row.get("matchup_pace")),
+                    "postseason": _game_info.get("postseason", ""),
+                    "player_profile_bucket": str(player_row.get("player_profile_bucket", "")),
+                }
+                recal_result = recalibrate_player_points(recal_row)
+                recal_fields = {
+                    "recalibrated_projection": recal_result["recalibrated_projection"],
+                    "recalibrated_edge": recal_result["recalibrated_edge"],
+                    "recalibration_components_json": recal_result["recalibration_components_json"],
+                    "recalibration_selected": recal_result["recalibration_selected"],
+                    "recalibration_rejection_reason": recal_result["recalibration_rejection_reason"],
+                    "recalibration_mode": recal_mode,
+                }
+                # In enabled mode, override projection/edge if recalibration selects the pick
+                if recal_mode == RecalibrationMode.ENABLED and recal_result["recalibration_selected"]:
+                    projection = recal_result["recalibrated_projection"]
+                    edge = recal_result["recalibrated_edge"]
+                    edge_pct = (edge / line) if line else 0.0
+                    side_edge = -edge if selection_normalized == "under" else edge
+                    side_edge_pct = (side_edge / line) if line else 0.0
+
             # Score the candidate
             scoring_input = {
                 "market_type": normalized_market,
@@ -989,22 +1056,16 @@ class PredictionPipeline:
                 "confidence": confidence,
                 "player_name": str(player_row.get("player_name", "")),
                 "team": str(player_row.get("team_abbr", "")),
-                "selection": selection,
-                "minutes_avg": _nan_safe_to_float(player_row.get("min_avg")),
-                "minutes_recent": _nan_safe_to_float(player_row.get("min_recent")),
-                "is_live_market": bool(market_row.get("is_live", True)) if not market_row.empty else not partial_fill,
-                "synthetic_line": bool(market_row.get("synthetic", False)) if not market_row.empty else partial_fill,
-                # Game status fields for slate-lock gate
-                "game_status": _game_info.get("game_status", ""),
-                "game_date": _game_info.get("game_date", ""),
-                "postseason": _game_info.get("postseason", ""),
-                # Odds freshness field
-                "odds_updated_at": str(market_row.get("updated_at", "")) if not market_row.empty else "",
             }
-
             scoring_result = self.scoring_policy.apply_scoring_metadata(scoring_input)
-            is_live_market = bool(market_row.get("is_live", True)) if not market_row.empty else not partial_fill
-            synthetic_line = bool(market_row.get("synthetic", False)) if not market_row.empty else partial_fill
+
+            # Compute Kelly stake fraction for bet sizing
+            stake_fraction = compute_kelly_fraction(
+                edge=edge_pct,
+                odds=float(odds) if odds else 1.91,
+                confidence=float(confidence) if confidence else 0.0,
+            )
+            recommended_bet = round(DEFAULT_BANKROLL * stake_fraction, 2)
 
             # Determine qualification_reason based on market source
             # For live markets, set qualification_reason to pass the live gate filter
@@ -1060,9 +1121,12 @@ class PredictionPipeline:
                 # Game status fields for slate-lock gate diagnostics
                 "game_status": _game_info.get("game_status", ""),
                 "game_date": _game_info.get("game_date", ""),
+                "game_datetime": _game_info.get("game_datetime", ""),
                 "postseason": _game_info.get("postseason", ""),
                 # Odds freshness field
                 "odds_updated_at": str(market_row.get("updated_at", "")) if not market_row.empty else "",
+                # Recalibration fields (shadow/enabled modes)
+                **recal_fields,
                 **injury_metadata,
             }
 
@@ -1122,6 +1186,14 @@ class PredictionPipeline:
                 return None
             if confidence < self.config.min_confidence:
                 return None
+
+            # ---- Recalibration rejection (enabled mode only) ----
+            # If recalibration rejected this player_points pick, exclude it
+            if normalized_market == "player_points" and get_recalibration_mode() == RecalibrationMode.ENABLED:
+                if not candidate_row.get("recalibration_selected", True):
+                    reason = candidate_row.get("recalibration_rejection_reason", "recalibration_rejected")
+                    candidate_row["pre_rejection_reason"] = reason
+                    return None
 
             return candidate_row
 
@@ -1336,6 +1408,34 @@ class PredictionPipeline:
         if _game_status_excluded_count > 0:
             print(f"[COUNT] candidates_excluded_by_game_status={_game_status_excluded_count}", flush=True)
             print(f"[COUNT] game_status_exclusion_reasons={dict(sorted(_game_status_reason_counts.items()))}", flush=True)
+
+        # ---- Game status enrichment diagnostics ----
+        from courtvision.runtime_selection import _parse_game_datetime, _is_before_lock_buffer
+        _candidates_with_game_status = 0
+        _candidates_with_game_datetime = 0
+        _unknown_future = 0
+        _unknown_missing = 0
+        _unknown_past = 0
+        for cand in accepted:
+            gs = str(cand.get("game_status", "") or "").strip().lower()
+            gd = cand.get("game_datetime") or cand.get("game_date") or ""
+            if gs:
+                _candidates_with_game_status += 1
+            if gd:
+                _candidates_with_game_datetime += 1
+            if gs in ("unknown", ""):
+                dt = _parse_game_datetime(gd)
+                if dt is None:
+                    _unknown_missing += 1
+                elif _is_before_lock_buffer(dt, None, 10):
+                    _unknown_future += 1
+                else:
+                    _unknown_past += 1
+        print(f"[COUNT] candidates_with_game_status_count={_candidates_with_game_status}", flush=True)
+        print(f"[COUNT] candidates_with_game_datetime_count={_candidates_with_game_datetime}", flush=True)
+        print(f"[COUNT] game_status_unknown_with_future_datetime_count={_unknown_future}", flush=True)
+        print(f"[COUNT] game_status_unknown_missing_datetime_count={_unknown_missing}", flush=True)
+        print(f"[COUNT] game_status_unknown_past_datetime_count={_unknown_past}", flush=True)
 
         # ---- Odds freshness gate diagnostics ----
         # Count how many rows have updated_at, how many are stale, and by vendor.
