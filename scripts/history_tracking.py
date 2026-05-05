@@ -37,6 +37,30 @@ PICK_HISTORY_COLUMNS = [
     "line_source",
 ]
 
+CONTEXT_CROSS_SLATE_COLUMNS = [
+    "dimension",
+    "group_value",
+    "total",
+    "hits",
+    "misses",
+    "pushes",
+    "pending",
+    "graded_total",
+    "hit_rate",
+    "sample_status",
+    "calibration_eligible",
+    "calibration_exclusion_reason",
+]
+
+CALIBRATION_SELECTIONS = {"over", "under"}
+LEGACY_METADATA_DIMENSIONS = {
+    "kelly_eligible",
+    "skip_reason",
+    "context_caution_level",
+    "context_pick_alignment",
+}
+BLANK_GROUP_VALUE = "(blank)"
+
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
@@ -80,6 +104,38 @@ def _confidence_bucket(value: float) -> str:
     if value < 0.85:
         return "0.75-0.85"
     return "0.85+"
+
+
+def _sample_status(graded_total: int) -> str:
+    if graded_total <= 0:
+        return "no_graded_results"
+    if graded_total < 20:
+        return "insufficient_sample"
+    return "usable_sample"
+
+
+def _context_group_value(series: pd.Series) -> pd.Series:
+    group_col = series.fillna("").astype(str).str.strip()
+    group_col = group_col.replace({"nan": "", "none": "", "None": ""})
+    return group_col.mask(group_col == "", BLANK_GROUP_VALUE)
+
+
+def _context_calibration_reasons(dimension: str, group_value: str, graded_total: int) -> list[str]:
+    reasons: list[str] = []
+    group_norm = str(group_value or "").strip().lower()
+
+    if dimension == "selection" and group_norm not in CALIBRATION_SELECTIONS:
+        reason_value = group_norm.replace(" ", "_") or "blank"
+        reasons.append(f"unsupported_selection_{reason_value}")
+
+    if dimension in LEGACY_METADATA_DIMENSIONS and group_value == BLANK_GROUP_VALUE:
+        reasons.append("legacy_missing_metadata")
+
+    status = _sample_status(graded_total)
+    if status != "usable_sample":
+        reasons.append(status)
+
+    return reasons
 
 
 def _load_csv(path: Path, columns: list[str] | None = None) -> pd.DataFrame:
@@ -324,7 +380,8 @@ def _write_context_cross_slate_summary(history_df: pd.DataFrame, history_root_pa
 
     Aggregates across ALL dates in pick_history. Output:
       {history_root}/performance_context_cross_slate.csv
-    Columns: dimension, group_value, total, hits, misses, pushes, pending, hit_rate
+    Adds sample/calibration metadata so legacy rows are visible but not
+    mistaken for usable calibration segments.
     """
     df = history_df.copy()
     # Derive bucketed dimensions from numeric columns
@@ -354,15 +411,16 @@ def _write_context_cross_slate_summary(history_df: pd.DataFrame, history_root_pa
     for col, display_name in dim_map.items():
         if col not in df.columns:
             continue
-        group_col = df[col].fillna("").astype(str).str.strip().replace({"nan": "", "none": "", "None": ""})
+        group_col = _context_group_value(df[col])
         for group_val, seg in df.assign(**{col: group_col}).groupby(col, sort=True):
-            if not str(group_val).strip():
-                continue
-            hits = int((seg["result_status"] == "hit").sum())
-            misses = int((seg["result_status"] == "miss").sum())
-            pushes = int((seg["result_status"] == "push").sum())
-            pending = int((seg["result_status"] == "pending").sum())
+            result_status = seg["result_status"].fillna("").astype(str).str.strip().str.lower()
+            hits = int((result_status == "hit").sum())
+            misses = int((result_status == "miss").sum())
+            pushes = int((result_status == "push").sum())
+            pending = int((result_status == "pending").sum())
             graded_total = hits + misses
+            sample_status = _sample_status(graded_total)
+            exclusion_reasons = _context_calibration_reasons(display_name, str(group_val), graded_total)
             rows.append({
                 "dimension": display_name,
                 "group_value": group_val,
@@ -371,12 +429,16 @@ def _write_context_cross_slate_summary(history_df: pd.DataFrame, history_root_pa
                 "misses": misses,
                 "pushes": pushes,
                 "pending": pending,
-                "hit_rate": round(float(hits / graded_total), 4) if graded_total else 0.0,
+                "graded_total": graded_total,
+                "hit_rate": round(float(hits / graded_total), 4) if graded_total else "",
+                "sample_status": sample_status,
+                "calibration_eligible": not exclusion_reasons,
+                "calibration_exclusion_reason": ";".join(exclusion_reasons),
             })
 
     _write_csv(
         history_root_path / "performance_context_cross_slate.csv",
-        pd.DataFrame(rows, columns=["dimension", "group_value", "total", "hits", "misses", "pushes", "pending", "hit_rate"]),
+        pd.DataFrame(rows, columns=CONTEXT_CROSS_SLATE_COLUMNS),
     )
 
 
@@ -401,7 +463,7 @@ def update_performance_summaries(
             _write_csv(history_root_path / name, pd.DataFrame(columns=per_date_cols))
         _write_csv(
             history_root_path / "performance_context_cross_slate.csv",
-            pd.DataFrame(columns=["dimension", "group_value", "total", "hits", "misses", "pushes", "pending", "hit_rate"]),
+            pd.DataFrame(columns=CONTEXT_CROSS_SLATE_COLUMNS),
         )
         return
 

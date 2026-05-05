@@ -41,6 +41,58 @@ def _write_audit(path: Path, max_team: int = 2, max_game: int = 3) -> None:
     )
 
 
+def _history_row(
+    player_name: str,
+    *,
+    prediction_date: str = "2026-04-01",
+    market: str = "player_points",
+    selection: str = "over",
+    result_status: str = "hit",
+    edge: float = 1.5,
+    confidence: str = "0.75",
+    kelly_eligible: str = "",
+    skip_reason: str = "",
+    context_caution_level: str = "",
+    context_pick_alignment: str = "",
+    line_source: str = "",
+) -> dict:
+    return {
+        "prediction_date": prediction_date,
+        "run_timestamp": f"{prediction_date}T12:00:00+00:00",
+        "player_name": player_name,
+        "team": "BOS",
+        "opponent": "NYK",
+        "game_id": "",
+        "market": market,
+        "selection": selection,
+        "line": 20.5,
+        "projection": 22.0,
+        "edge": edge,
+        "abs_edge": abs(edge),
+        "odds": "-110",
+        "confidence": confidence,
+        "quality_score": 80.0,
+        "qualification_reason": "pass",
+        "provider_used": "test",
+        "result_status": result_status,
+        "kelly_eligible": kelly_eligible,
+        "skip_reason": skip_reason,
+        "context_caution_level": context_caution_level,
+        "context_pick_alignment": context_pick_alignment,
+        "line_source": line_source,
+    }
+
+
+def _cross_row(cross: pd.DataFrame, dimension: str, group_value: str) -> pd.Series:
+    match = cross[(cross["dimension"] == dimension) & (cross["group_value"].astype(str) == group_value)]
+    assert len(match) == 1, f"expected one row for {dimension}={group_value}"
+    return match.iloc[0]
+
+
+def _bool_value(value: object) -> bool:
+    return str(value).strip().lower() == "true"
+
+
 def test_pick_history_append_works(tmp_path: Path) -> None:
     runtime_root = tmp_path / "outputs" / "runtime"
     history_root = tmp_path / "data" / "history"
@@ -443,6 +495,101 @@ def test_cross_slate_aggregation_output_written(tmp_path: Path) -> None:
     assert eligible_true.iloc[0]["hits"] == 1
 
 
+def test_cross_slate_pending_only_and_milestone_segments_are_not_calibration(tmp_path: Path) -> None:
+    """Zero-graded and unsupported-selection groups stay visible without fake hit rates."""
+    history_root = tmp_path / "data" / "history"
+    history_root.mkdir(parents=True, exist_ok=True)
+    runtime_root = tmp_path / "outputs" / "runtime"
+
+    rows = [
+        _history_row(
+            "Pending Kelly",
+            result_status="pending",
+            kelly_eligible="True",
+            context_caution_level="low",
+            context_pick_alignment="aligned",
+        ),
+        _history_row("Legacy Hit", result_status="hit"),
+        _history_row("Legacy Miss", result_status="miss"),
+        _history_row("Milestone Pending", selection="milestone", result_status="pending"),
+    ]
+    pd.DataFrame(rows).to_csv(history_root / "pick_history.csv", index=False)
+
+    update_performance_summaries(history_root=history_root, runtime_root=runtime_root)
+    cross = pd.read_csv(history_root / "performance_context_cross_slate.csv")
+
+    expected_columns = {
+        "dimension",
+        "group_value",
+        "total",
+        "hits",
+        "misses",
+        "pushes",
+        "pending",
+        "graded_total",
+        "hit_rate",
+        "sample_status",
+        "calibration_eligible",
+        "calibration_exclusion_reason",
+    }
+    assert expected_columns.issubset(cross.columns)
+
+    pending_kelly = _cross_row(cross, "kelly_eligible", "True")
+    assert pending_kelly["graded_total"] == 0
+    assert pd.isna(pending_kelly["hit_rate"])
+    assert pending_kelly["sample_status"] == "no_graded_results"
+    assert not _bool_value(pending_kelly["calibration_eligible"])
+    assert "no_graded_results" in pending_kelly["calibration_exclusion_reason"]
+
+    milestone = _cross_row(cross, "selection", "milestone")
+    assert milestone["graded_total"] == 0
+    assert pd.isna(milestone["hit_rate"])
+    assert milestone["sample_status"] == "no_graded_results"
+    assert not _bool_value(milestone["calibration_eligible"])
+    assert "unsupported_selection_milestone" in milestone["calibration_exclusion_reason"]
+
+    legacy_blank = _cross_row(cross, "kelly_eligible", "(blank)")
+    assert legacy_blank["graded_total"] == 2
+    assert legacy_blank["sample_status"] == "insufficient_sample"
+    assert not _bool_value(legacy_blank["calibration_eligible"])
+    assert "legacy_missing_metadata" in legacy_blank["calibration_exclusion_reason"]
+
+
+def test_cross_slate_sample_status_and_graded_hit_rate(tmp_path: Path) -> None:
+    """Over/under hit rates use hits/(hits+misses) while sample buckets are explicit."""
+    history_root = tmp_path / "data" / "history"
+    history_root.mkdir(parents=True, exist_ok=True)
+    runtime_root = tmp_path / "outputs" / "runtime"
+
+    rows = []
+    for idx in range(12):
+        rows.append(_history_row(f"Over Hit {idx}", selection="over", result_status="hit"))
+    for idx in range(8):
+        rows.append(_history_row(f"Over Miss {idx}", selection="over", result_status="miss"))
+    for idx in range(3):
+        rows.append(_history_row(f"Under Hit {idx}", selection="under", result_status="hit"))
+    for idx in range(2):
+        rows.append(_history_row(f"Under Miss {idx}", selection="under", result_status="miss"))
+    pd.DataFrame(rows).to_csv(history_root / "pick_history.csv", index=False)
+
+    update_performance_summaries(history_root=history_root, runtime_root=runtime_root)
+    cross = pd.read_csv(history_root / "performance_context_cross_slate.csv")
+
+    over = _cross_row(cross, "selection", "over")
+    assert over["graded_total"] == 20
+    assert over["hit_rate"] == 0.6
+    assert over["sample_status"] == "usable_sample"
+    assert _bool_value(over["calibration_eligible"])
+    assert str(over.get("calibration_exclusion_reason", "")).strip() in ("", "nan")
+
+    under = _cross_row(cross, "selection", "under")
+    assert under["graded_total"] == 5
+    assert under["hit_rate"] == 0.6
+    assert under["sample_status"] == "insufficient_sample"
+    assert not _bool_value(under["calibration_eligible"])
+    assert "insufficient_sample" in under["calibration_exclusion_reason"]
+
+
 def test_grading_empty_result_warning_is_emitted(tmp_path: Path, capsys) -> None:
     """_load_actual_results_for_date prints a warning when auto_grade returns empty."""
     import scripts.history_tracking as ht
@@ -465,5 +612,6 @@ def test_candidate_scoring_py_is_untouched() -> None:
     # None of the symbols introduced by Patch 2 should appear in candidate_scoring
     assert "migrate_pick_history_schema" not in content
     assert "performance_context_cross_slate" not in content
+    assert "calibration_eligible" not in content
     assert "_build_kelly_lookup" not in content
 
