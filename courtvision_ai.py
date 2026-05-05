@@ -3788,7 +3788,7 @@ class CourtVisionAI:
                         first_name = str(p.get("first_name", "")).strip()
                         last_name = str(p.get("last_name", "")).strip()
                         team = p.get("team", {})
-                        team_id = team.get("id") if isinstance(team, dict) else None
+                        team_id = p.get("team_id") or (team.get("id") if isinstance(team, dict) else None)
                         team_abbr = str(team.get("abbreviation", "")).strip() if isinstance(team, dict) else ""
                     else:
                         player_id = getattr(p, "id", None)
@@ -3797,7 +3797,7 @@ class CourtVisionAI:
                         if not player_name and first_name and last_name:
                             player_name = f"{first_name} {last_name}".strip()
                         team = getattr(p, "team", None)
-                        team_id = getattr(team, "id", None) if team else None
+                        team_id = getattr(p, "team_id", None) or (getattr(team, "id", None) if team else None)
                         team_abbr = str(getattr(team, "abbreviation", "") or "").strip() if team else ""
                 else:
                     player_name = str(getattr(item, "player_name", None) or "").strip()
@@ -3812,8 +3812,11 @@ class CourtVisionAI:
                     first_name = str(getattr(p, "first_name", "") or "").strip()
                     last_name = str(getattr(p, "last_name", "") or "").strip()
                     team = getattr(p, "team", None)
-                    team_id = getattr(team, "id", None) if team else None
+                    team_id = getattr(p, "team_id", None) or (getattr(team, "id", None) if team else None)
                     team_abbr = str(getattr(team, "abbreviation", "") or "").strip() if team else ""
+                status = item.get("status") if isinstance(item, dict) else getattr(item, "status", None)
+                description = item.get("description") if isinstance(item, dict) else getattr(item, "description", None)
+                return_date = item.get("return_date") if isinstance(item, dict) else getattr(item, "return_date", None)
 
                 rows.append(
                     {
@@ -3823,9 +3826,9 @@ class CourtVisionAI:
                         "player_name": player_name,
                         "player.team_id": team_id,
                         "team_abbr": team_abbr,
-                        "status": getattr(item, "status", None),
-                        "description": getattr(item, "description", None),
-                        "return_date": getattr(item, "return_date", None),
+                        "status": status,
+                        "description": description,
+                        "return_date": return_date,
                     }
                 )
 
@@ -5926,16 +5929,65 @@ class CourtVisionAI:
 
         raw_date_columns = [c for c in raw_df.columns if "date" in str(c).lower()] if not raw_df.empty else []
         normalized_date_columns = [c for c in norm_df.columns if "date" in str(c).lower()] if not norm_df.empty else []
+        report_date_columns = [
+            c
+            for c in sorted(set(raw_date_columns + normalized_date_columns))
+            if "return" not in str(c).lower() and "expected" not in str(c).lower()
+        ]
         date_values: set[str] = set()
         for frame, cols in ((raw_df, raw_date_columns), (norm_df, normalized_date_columns)):
             for col in cols:
                 date_values.update(str(value)[:10] for value in frame[col].dropna().tolist() if str(value).strip())
         has_date_columns = bool(raw_date_columns or normalized_date_columns)
-        date_matches = not has_date_columns or prediction_date in date_values
+        report_date_values: set[str] = set()
+        for frame in (raw_df, norm_df):
+            for col in report_date_columns:
+                if col in frame.columns:
+                    report_date_values.update(str(value)[:10] for value in frame[col].dropna().tolist() if str(value).strip())
+        date_matches = not report_date_columns or prediction_date in report_date_values
 
         rows_with_player_id = self._series_nonempty_count(norm_df, ["player_id", "player.id"])
         rows_with_team_id = self._series_nonempty_count(norm_df, ["team_id", "team.id", "player.team_id"])
         rows_with_team_abbr = self._series_nonempty_count(norm_df, ["team_abbr", "team.abbreviation"])
+        team_id_present = (
+            pd.to_numeric(norm_df.get("team_id", pd.Series(index=norm_df.index, dtype=float)), errors="coerce").notna()
+            if not norm_df.empty
+            else pd.Series(dtype=bool)
+        )
+        team_abbr_present = (
+            norm_df.get("team_abbr", pd.Series("", index=norm_df.index)).fillna("").astype(str).str.strip().ne("")
+            if not norm_df.empty
+            else pd.Series(dtype=bool)
+        )
+        player_id_values = (
+            pd.to_numeric(norm_df.get("player_id", pd.Series(index=norm_df.index, dtype=float)), errors="coerce")
+            if not norm_df.empty
+            else pd.Series(dtype=float)
+        )
+        status_present = (
+            norm_df.get("status", pd.Series("", index=norm_df.index)).fillna("").astype(str).str.strip().ne("")
+            if not norm_df.empty
+            else pd.Series(dtype=bool)
+        )
+        player_name_present = (
+            norm_df.get("player_name", pd.Series("", index=norm_df.index)).fillna("").astype(str).str.strip().ne("")
+            if not norm_df.empty
+            else pd.Series(dtype=bool)
+        )
+        rows_missing_team_identity = int((~team_id_present & ~team_abbr_present).sum()) if not norm_df.empty else 0
+        rows_player_matched_to_candidates = int(player_id_values.isin(candidate_player_ids).sum()) if not norm_df.empty and candidate_player_ids else 0
+        final_normalized_rows = int((status_present & (player_id_values.notna() | player_name_present)).sum()) if not norm_df.empty else 0
+        rejection_reason_counts = (
+            norm_df.get("injury_rejection_reason", pd.Series("", index=norm_df.index))
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .replace("", "none")
+            .value_counts()
+            .to_dict()
+            if not norm_df.empty
+            else {}
+        )
 
         nonzero_injury_impact = self._nonzero_count(candidates, "injury_impact_score")
         nonzero_team_impact = self._nonzero_count(candidates, "team_injury_impact")
@@ -5959,7 +6011,7 @@ class CourtVisionAI:
             mismatch_reasons.append("team_id mismatch")
         if len(norm_df) > 0 and rows_with_team_abbr == 0:
             mismatch_reasons.append("team_abbr missing")
-        if has_date_columns and not date_matches:
+        if report_date_columns and not date_matches:
             mismatch_reasons.append("date mismatch")
         if len(norm_df) > 0 and not active_team_id_matches and not active_team_abbr_matches:
             if rows_with_team_abbr == 0:
@@ -5976,9 +6028,14 @@ class CourtVisionAI:
 
         context_team_count = 0
         context_player_count = 0
+        rows_team_enriched = 0
+        rows_active_team_matched = 0
         if isinstance(injury_context, Mapping):
             context_team_count = len(injury_context.get("teams", {}) or {})
             context_player_count = len(injury_context.get("players", {}) or {})
+            context_metadata = injury_context.get("metadata", {}) if isinstance(injury_context.get("metadata", {}), Mapping) else {}
+            rows_team_enriched = int(context_metadata.get("rows_team_enriched", 0) or 0)
+            rows_active_team_matched = int(context_metadata.get("rows_active_team_matched", 0) or 0)
 
         payload = {
             "prediction_date": prediction_date,
@@ -5988,9 +6045,16 @@ class CourtVisionAI:
             "raw_columns": [str(c) for c in raw_df.columns.tolist()],
             "normalized_columns": [str(c) for c in norm_df.columns.tolist()],
             "rows_with_player_id": rows_with_player_id,
+            "rows_with_player_id_before_team_filter": rows_with_player_id,
             "rows_with_team_id": rows_with_team_id,
             "rows_with_team_abbr": rows_with_team_abbr,
             "rows_with_team_id_or_abbr": int(max(rows_with_team_id, rows_with_team_abbr)),
+            "rows_missing_team_identity": rows_missing_team_identity,
+            "rows_team_enriched": rows_team_enriched,
+            "rows_player_matched_to_candidates": rows_player_matched_to_candidates,
+            "rows_active_team_matched": rows_active_team_matched,
+            "final_normalized_rows": final_normalized_rows,
+            "rejection_reason_counts": {str(k): int(v) for k, v in rejection_reason_counts.items()},
             "active_slate_team_ids": sorted(active_team_ids),
             "active_slate_team_abbrs": sorted(active_team_abbrs),
             "injury_team_ids": sorted(injury_team_ids),
@@ -6012,6 +6076,7 @@ class CourtVisionAI:
             "nonzero_candidate_impacts": nonzero_candidate_impacts,
             "has_date_columns": bool(has_date_columns),
             "date_columns": sorted(set(raw_date_columns + normalized_date_columns)),
+            "report_date_columns": report_date_columns,
             "date_values_sample": sorted(date_values)[:10],
             "date_matches_prediction_date": bool(date_matches),
             "mismatch_reasons": deduped_reasons,
@@ -6066,8 +6131,14 @@ class CourtVisionAI:
             f"- raw injury rows: {payload.get('raw_rows', 0)}",
             f"- normalized injury rows: {payload.get('normalized_rows', 0)}",
             f"- rows with player_id: {payload.get('rows_with_player_id', 0)}",
+            f"- rows with player_id before team filter: {payload.get('rows_with_player_id_before_team_filter', 0)}",
             f"- rows with team_id: {payload.get('rows_with_team_id', 0)}",
             f"- rows with team_abbr: {payload.get('rows_with_team_abbr', 0)}",
+            f"- rows missing team identity: {payload.get('rows_missing_team_identity', 0)}",
+            f"- rows team enriched: {payload.get('rows_team_enriched', 0)}",
+            f"- rows player matched to candidates: {payload.get('rows_player_matched_to_candidates', 0)}",
+            f"- rows active team matched: {payload.get('rows_active_team_matched', 0)}",
+            f"- final normalized rows: {payload.get('final_normalized_rows', 0)}",
             f"- active slate team matches: {payload.get('active_team_matches', 0)}",
             f"- baseline player ID matches: {payload.get('baseline_player_matches', 0)}",
             f"- candidate player ID matches: {payload.get('candidate_player_matches', 0)}",
@@ -6088,7 +6159,9 @@ class CourtVisionAI:
                 f"Active teams: {payload.get('active_slate_team_abbrs', [])}",
                 f"Injury team abbreviations: {payload.get('injury_team_abbrs', [])}",
                 f"Date columns present: {payload.get('date_columns', [])}",
+                f"Report date columns: {payload.get('report_date_columns', [])}",
                 f"Date values sample: {payload.get('date_values_sample', [])}",
+                f"Rejection reason counts: {payload.get('rejection_reason_counts', {})}",
                 f"SDK raw keys: {(payload.get('fetch_diagnostics') or {}).get('sdk_raw_columns', payload.get('raw_columns', []))}",
                 f"HTTP raw keys: {(payload.get('fetch_diagnostics') or {}).get('http_raw_columns', [])}",
                 f"Recommended provider/config action: {payload.get('recommended_provider_config_action', 'none')}",
@@ -6108,6 +6181,12 @@ class CourtVisionAI:
     def _emit_injury_context_diagnostics(self, payload: Mapping[str, Any]) -> None:
         print(f"[INJURY] raw_rows={int(payload.get('raw_rows', 0) or 0)}", flush=True)
         print(f"[INJURY] normalized_rows={int(payload.get('normalized_rows', 0) or 0)}", flush=True)
+        print(f"[INJURY] rows_with_player_id_before_team_filter={int(payload.get('rows_with_player_id_before_team_filter', 0) or 0)}", flush=True)
+        print(f"[INJURY] rows_missing_team_identity={int(payload.get('rows_missing_team_identity', 0) or 0)}", flush=True)
+        print(f"[INJURY] rows_team_enriched={int(payload.get('rows_team_enriched', 0) or 0)}", flush=True)
+        print(f"[INJURY] rows_player_matched_to_candidates={int(payload.get('rows_player_matched_to_candidates', 0) or 0)}", flush=True)
+        print(f"[INJURY] rows_active_team_matched={int(payload.get('rows_active_team_matched', 0) or 0)}", flush=True)
+        print(f"[INJURY] final_normalized_rows={int(payload.get('final_normalized_rows', 0) or 0)}", flush=True)
         print(f"[INJURY] active_team_matches={int(payload.get('active_team_matches', 0) or 0)}", flush=True)
         print(f"[INJURY] baseline_player_matches={int(payload.get('baseline_player_matches', 0) or 0)}", flush=True)
         print(f"[INJURY] candidate_player_matches={int(payload.get('candidate_player_matches', 0) or 0)}", flush=True)

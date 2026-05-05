@@ -137,6 +137,42 @@ class TestBuildInjuryContext:
         # = min(1.0, 0.857 + 0.317 + 0.667) = 1.0 (capped)
         assert team_ctx["impact_score"] == 1.0
 
+    def test_team_identity_enriched_from_player_id_baseline(self):
+        injuries = normalize_injuries_frame(pd.DataFrame([
+            {
+                "player.id": 77,
+                "player.first_name": "LeBron",
+                "player.last_name": "James",
+                "player.team_id": None,
+                "team_abbr": "",
+                "status": "Out",
+                "description": "Foot",
+                "return_date": "2026-10-01",
+            }
+        ]))
+        baselines = pd.DataFrame([
+            {
+                "player_id": 77,
+                "player_name": "LeBron James",
+                "team_abbr": "LAL",
+                "team_id": 14,
+                "pts_avg": 25.0,
+                "reb_avg": 8.0,
+                "ast_avg": 7.0,
+                "stl_avg": 1.0,
+                "blk_avg": 1.0,
+                "min_avg": 34.0,
+            }
+        ])
+
+        context = build_injury_context(injuries, baselines, {"LAL"})
+
+        assert context["metadata"]["rows_team_enriched"] == 1
+        assert context["metadata"]["rows_active_team_matched"] == 1
+        assert "LAL" in context["teams"]
+        assert "player_id:77" in context["players"]
+        assert context["players"]["player_id:77"]["team_abbr"] == "LAL"
+
 
 class TestApplyPlayerInjuryContext:
     """Test injury context application to projections."""
@@ -173,6 +209,25 @@ class TestApplyPlayerInjuryContext:
         assert conf == 0.25  # floored at min_confidence
         assert meta["injury_status"] == "out"
         assert "player_status:out" in meta["injury_notes"]
+
+    def test_own_injury_reduction_matches_player_id_key(self):
+        injury_context = {
+            "players": {
+                "player_id:77": {
+                    "status": "Out",
+                    "injury_weight": 1.0,
+                    "availability_multiplier": 0.0,
+                },
+            },
+            "teams": {},
+        }
+        proj, conf, meta = apply_player_injury_context(
+            {"player_id": 77, "player_name": "Different Name"}, "LAL", "BOS", "player_points",
+            25.0, 0.70, injury_context,
+        )
+        assert proj == 0.0
+        assert conf == 0.25
+        assert meta["injury_status"] == "Out"
 
     def test_teammate_absence_boost(self):
         injury_context = {
@@ -380,19 +435,26 @@ class TestNormalizeInjuriesFrame:
             ]
         )
         out = normalize_injuries_frame(raw)
-        assert len(out) == 0
+        assert len(out) == 1
+        assert bool(out.iloc[0]["injury_normalized"]) is False
+        assert out.iloc[0]["injury_rejection_reason"] == "missing_player_identity"
 
-    def test_missing_team_identity_rejected(self):
+    def test_missing_team_identity_preserved_for_enrichment(self):
         raw = pd.DataFrame(
             [
                 {
+                    "player_id": 999,
                     "player_name": "Test Player",
                     "status": "Out",
                 }
             ]
         )
         out = normalize_injuries_frame(raw)
-        assert len(out) == 0
+        assert len(out) == 1
+        assert out.iloc[0]["player_id"] == 999
+        assert bool(out.iloc[0]["injury_normalized"]) is False
+        assert out.iloc[0]["injury_rejection_reason"] == "missing_team_identity"
+        assert out.iloc[0]["injury_enrichment_reason"] == "needs_team_enrichment"
 
     def test_missing_status_rejected(self):
         raw = pd.DataFrame(
@@ -404,7 +466,50 @@ class TestNormalizeInjuriesFrame:
             ]
         )
         out = normalize_injuries_frame(raw)
-        assert len(out) == 0
+        assert len(out) == 1
+        assert bool(out.iloc[0]["injury_normalized"]) is False
+        assert out.iloc[0]["injury_rejection_reason"] == "missing_status"
+
+    def test_dotted_player_id_missing_team_identity_is_partially_normalized(self):
+        raw = pd.DataFrame(
+            [
+                {
+                    "player.id": 102,
+                    "player.first_name": "Zach",
+                    "player.last_name": "Collins",
+                    "player.team_id": None,
+                    "team_abbr": "",
+                    "status": "Out",
+                    "description": "Ankle",
+                    "return_date": "2026-10-01",
+                }
+            ]
+        )
+        out = normalize_injuries_frame(raw)
+        assert len(out) == 1
+        assert out.iloc[0]["player_id"] == 102
+        assert out.iloc[0]["player_name"] == "Zach Collins"
+        assert out.iloc[0]["status"] == "Out"
+        assert bool(out.iloc[0]["injury_normalized"]) is False
+        assert out.iloc[0]["injury_rejection_reason"] == "missing_team_identity"
+
+    def test_return_date_does_not_make_injury_row_invalid(self):
+        raw = pd.DataFrame(
+            [
+                {
+                    "player.id": 77,
+                    "player.first_name": "LeBron",
+                    "player.last_name": "James",
+                    "team_abbr": "LAL",
+                    "status": "Out",
+                    "return_date": "2026-10-01",
+                }
+            ]
+        )
+        out = normalize_injuries_frame(raw)
+        assert len(out) == 1
+        assert bool(out.iloc[0]["injury_normalized"]) is True
+        assert out.iloc[0]["injury_rejection_reason"] == ""
 
     def test_empty_input_returns_empty_frame(self):
         out = normalize_injuries_frame(pd.DataFrame())
@@ -412,7 +517,7 @@ class TestNormalizeInjuriesFrame:
         assert list(out.columns) == [
             "player_id", "first_name", "last_name", "player_name",
             "team_id", "team_abbr", "status", "description", "return_date",
-            "injury_normalized", "injury_rejection_reason",
+            "injury_normalized", "injury_rejection_reason", "injury_enrichment_reason",
         ]
 
 

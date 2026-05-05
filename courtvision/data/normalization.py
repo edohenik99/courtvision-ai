@@ -270,9 +270,9 @@ def normalize_injuries_frame(injuries_raw: pd.DataFrame) -> pd.DataFrame:
     expected_cols = [
         "player_id", "first_name", "last_name", "player_name",
         "team_id", "team_abbr", "status", "description", "return_date",
-        "injury_normalized", "injury_rejection_reason",
+        "injury_normalized", "injury_rejection_reason", "injury_enrichment_reason",
     ]
-    if injuries_raw.empty:
+    if not isinstance(injuries_raw, pd.DataFrame) or injuries_raw.empty:
         return pd.DataFrame(columns=expected_cols)
 
     injuries = injuries_raw.copy()
@@ -296,9 +296,17 @@ def normalize_injuries_frame(injuries_raw: pd.DataFrame) -> pd.DataFrame:
         if "team_id" not in injuries.columns:
             injuries["team_id"] = injuries.apply(
                 lambda r: (
-                    (r.get("player") or {}).get("team", {}).get("id")
+                    (r.get("player") or {}).get("team_id")
+                    or (
+                        (r.get("player") or {}).get("team", {}).get("id")
+                        if isinstance((r.get("player") or {}).get("team"), dict)
+                        else None
+                    )
                     if isinstance(r.get("player"), dict) else
-                    getattr(getattr(r.get("player"), "team", None), "id", None)
+                    (
+                        getattr(r.get("player"), "team_id", None)
+                        or getattr(getattr(r.get("player"), "team", None), "id", None)
+                    )
                 ),
                 axis=1,
             )
@@ -354,28 +362,39 @@ def normalize_injuries_frame(injuries_raw: pd.DataFrame) -> pd.DataFrame:
         if col not in injuries.columns:
             injuries[col] = pd.NA
 
+    injuries["player_id"] = pd.to_numeric(injuries["player_id"], errors="coerce")
+    injuries["team_id"] = pd.to_numeric(injuries["team_id"], errors="coerce")
+    injuries["team_abbr"] = injuries["team_abbr"].fillna("").astype(str).str.strip().str.upper()
+
     # --- row-level validation / diagnostics ---
     def _row_diag(row: pd.Series) -> tuple[bool, str]:
         import pandas as pd
         _pn = row.get("player_name")
         player_name = str(_pn).strip() if _pn is not None and not pd.isna(_pn) else ""
-        if not player_name:
+        player_id = row.get("player_id")
+        has_player_id = player_id is not None and not pd.isna(player_id)
+        if not has_player_id and not player_name:
             return False, "missing_player_identity"
+        _st = row.get("status")
+        status = str(_st).strip() if _st is not None and not pd.isna(_st) else ""
+        if not status:
+            return False, "missing_status"
         team_id = row.get("team_id")
         _ta = row.get("team_abbr")
         team_abbr = str(_ta).strip() if _ta is not None and not pd.isna(_ta) else ""
         has_team_id = team_id is not None and not pd.isna(team_id)
         if not has_team_id and not team_abbr:
             return False, "missing_team_identity"
-        _st = row.get("status")
-        status = str(_st).strip() if _st is not None and not pd.isna(_st) else ""
-        if not status:
-            return False, "missing_status"
         return True, ""
 
     diags = injuries.apply(_row_diag, axis=1, result_type="expand")
     diags.columns = ["injury_normalized", "injury_rejection_reason"]
     injuries = pd.concat([injuries.reset_index(drop=True), diags], axis=1)
+    injuries["injury_enrichment_reason"] = ""
+    injuries.loc[
+        injuries["injury_rejection_reason"].eq("missing_team_identity"),
+        "injury_enrichment_reason",
+    ] = "needs_team_enrichment"
 
     # Coerce types for downstream safety
     injuries["status"] = injuries.get("status", pd.Series("", index=injuries.index)).fillna("").astype(str)
@@ -383,8 +402,6 @@ def normalize_injuries_frame(injuries_raw: pd.DataFrame) -> pd.DataFrame:
     injuries["return_date"] = injuries.get("return_date", pd.Series("", index=injuries.index)).fillna("").astype(str)
     injuries["player_name"] = injuries.get("player_name", pd.Series("", index=injuries.index)).fillna("").astype(str).str.strip()
 
-    # Keep only rows that passed validation
-    injuries = injuries[injuries["injury_normalized"]].copy()
     return injuries.reset_index(drop=True)
 
 

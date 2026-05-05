@@ -76,53 +76,122 @@ def build_injury_context(
     - active_injuries: DataFrame of active injury records
     """
     cfg = config or InjuryContextConfig()
-    context: dict[str, Any] = {"players": {}, "teams": {}, "active_injuries": pd.DataFrame()}
+    context: dict[str, Any] = {
+        "players": {},
+        "teams": {},
+        "active_injuries": pd.DataFrame(),
+        "metadata": {
+            "rows_team_enriched": 0,
+            "rows_missing_team_identity": 0,
+            "rows_active_team_matched": 0,
+        },
+    }
 
     if injuries.empty or player_baselines.empty:
         return context
 
-    # Build player lookup with name keys
+    def _clean_text(value: Any) -> str:
+        if value is None or pd.isna(value):
+            return ""
+        return str(value).strip()
+
+    def _coerce_positive_int(value: Any) -> int | None:
+        try:
+            if value is None or pd.isna(value):
+                return None
+            numeric = int(float(value))
+        except (TypeError, ValueError):
+            return None
+        return numeric if numeric > 0 else None
+
+    active_team_set = {str(team).strip().upper() for team in active_teams if str(team).strip()}
+
+    # Build baseline lookups. Prefer player_id for live injury rows; keep name fallback for
+    # older fixtures and providers that only expose names.
     player_cols = [
         c for c in ["player_name", "team_abbr", "player_id", "team_id",
                    "pts_avg", "reb_avg", "ast_avg", "stl_avg", "blk_avg", "min_avg"]
         if c in player_baselines.columns
     ]
     baseline_lookup = player_baselines[player_cols].copy()
+    for col in ["player_name", "team_abbr", "player_id", "team_id"]:
+        if col not in baseline_lookup.columns:
+            baseline_lookup[col] = pd.NA
+    baseline_lookup["_player_id_key"] = baseline_lookup["player_id"].map(_coerce_positive_int)
     baseline_lookup["player_name_key"] = (
         baseline_lookup.get("player_name", pd.Series("", index=baseline_lookup.index))
         .fillna("").astype(str).str.strip().str.lower()
     )
 
-    # Prepare injuries with name keys
-    injuries = injuries.copy()
-    injuries["player_name_key"] = (
-        injuries.get("player_name", pd.Series("", index=injuries.index))
-        .fillna("").astype(str).str.strip().str.lower()
-    )
+    baseline_by_id: dict[int, dict[str, Any]] = {}
+    baseline_by_name: dict[str, dict[str, Any]] = {}
+    for _, baseline_row in baseline_lookup.iterrows():
+        row_dict = dict(baseline_row)
+        baseline_id = _coerce_positive_int(row_dict.get("_player_id_key"))
+        if baseline_id is not None and baseline_id not in baseline_by_id:
+            baseline_by_id[baseline_id] = row_dict
+        name_key = _clean_text(row_dict.get("player_name_key"))
+        if name_key and name_key not in baseline_by_name:
+            baseline_by_name[name_key] = row_dict
 
-    # Merge baselines into injuries
-    enriched = injuries.merge(
-        baseline_lookup,
-        how="left",
-        on="player_name_key",
-        suffixes=("", "_baseline"),
-    )
+    enriched_rows: list[dict[str, Any]] = []
+    for _, injury_row in injuries.iterrows():
+        row_dict = dict(injury_row)
+        status = _clean_text(row_dict.get("status"))
+        player_id = _coerce_positive_int(row_dict.get("player_id") or row_dict.get("player.id"))
+        player_name = _clean_text(row_dict.get("player_name"))
+        if not player_name:
+            player_name = f"{_clean_text(row_dict.get('first_name'))} {_clean_text(row_dict.get('last_name'))}".strip()
+        if not status or (player_id is None and not player_name):
+            continue
 
-    # Fill team_abbr from baseline if missing
-    if "team_abbr" not in enriched.columns:
-        enriched["team_abbr"] = enriched.get("team_abbr_baseline", pd.Series("", index=enriched.index))
-    else:
-        missing_mask = enriched["team_abbr"].fillna("").astype(str).str.len() == 0
-        enriched.loc[missing_mask, "team_abbr"] = enriched.loc[missing_mask, "team_abbr_baseline"]
+        name_key = player_name.lower()
+        baseline = baseline_by_id.get(player_id) if player_id is not None else None
+        if baseline is None and name_key:
+            baseline = baseline_by_name.get(name_key)
+        baseline = baseline or {}
 
-    # Filter to active teams
-    enriched["team_abbr"] = (
-        enriched.get("team_abbr", pd.Series("", index=enriched.index))
-        .fillna("").astype(str).str.upper()
-    )
-    if active_teams:
-        enriched = enriched[enriched["team_abbr"].isin({str(team).upper() for team in active_teams})].copy()
+        team_id = _coerce_positive_int(row_dict.get("team_id") or row_dict.get("team.id") or row_dict.get("player.team_id"))
+        team_abbr = _clean_text(row_dict.get("team_abbr") or row_dict.get("team.abbreviation")).upper()
+        was_missing_team_id = team_id is None
+        was_missing_team_abbr = not team_abbr
+        was_missing_team = was_missing_team_id and was_missing_team_abbr
 
+        if player_id is None:
+            player_id = _coerce_positive_int(baseline.get("player_id"))
+        if not player_name:
+            player_name = _clean_text(baseline.get("player_name"))
+        if team_id is None:
+            team_id = _coerce_positive_int(baseline.get("team_id"))
+        if not team_abbr:
+            team_abbr = _clean_text(baseline.get("team_abbr")).upper()
+
+        team_enriched = bool(
+            (was_missing_team_id and team_id is not None)
+            or (was_missing_team_abbr and bool(team_abbr))
+        )
+        row_dict["player_id"] = player_id
+        row_dict["player_name"] = player_name
+        row_dict["team_id"] = team_id
+        row_dict["team_abbr"] = team_abbr
+        row_dict["status"] = status
+        row_dict["injury_original_missing_team_identity"] = bool(was_missing_team)
+        row_dict["injury_team_enriched"] = bool(team_enriched)
+        if team_enriched:
+            row_dict["injury_normalized"] = True
+            row_dict["injury_rejection_reason"] = ""
+            row_dict["injury_enrichment_reason"] = "team_identity_enriched_from_player_baseline"
+        elif team_id is None and not team_abbr:
+            row_dict["injury_normalized"] = False
+            row_dict["injury_rejection_reason"] = row_dict.get("injury_rejection_reason") or "missing_team_identity"
+            row_dict["injury_enrichment_reason"] = "team_identity_unresolved"
+
+        for stat_col in ["pts_avg", "reb_avg", "ast_avg", "stl_avg", "blk_avg", "min_avg"]:
+            if stat_col not in row_dict or pd.isna(row_dict.get(stat_col)):
+                row_dict[stat_col] = baseline.get(stat_col, 0.0)
+        enriched_rows.append(row_dict)
+
+    enriched = pd.DataFrame(enriched_rows)
     if enriched.empty:
         return context
 
@@ -145,27 +214,52 @@ def build_injury_context(
     enriched["weighted_stocks"] = (enriched["stl_avg"] + enriched["blk_avg"]) * enriched["injury_weight"]
     enriched["weighted_minutes"] = enriched["min_avg"] * enriched["injury_weight"]
 
-    # Build player context
     active_details = []
     for _, row in enriched.iterrows():
         row_dict = dict(row)
-        player_name = str(row_dict.get("player_name") or row_dict.get("player_name_baseline") or "").strip()
+        player_id = _coerce_positive_int(row_dict.get("player_id"))
+        player_name = _clean_text(row_dict.get("player_name"))
         team_abbr = str(row_dict.get("team_abbr") or "").strip().upper()
-        if not player_name or not team_abbr:
+        if player_id is None and not player_name:
             continue
 
-        key = f"{player_name}:{team_abbr}"
         availability_multiplier = max(0.0, 1.0 - float(row_dict.get("injury_weight") or 0.0))
         row_dict["availability_multiplier"] = availability_multiplier
-        context["players"][key] = row_dict
+        if player_id is not None:
+            context["players"][f"player_id:{player_id}"] = row_dict
+        if player_name and team_abbr:
+            context["players"][f"{player_name}:{team_abbr}"] = row_dict
         active_details.append(row_dict)
 
     context["active_injuries"] = pd.DataFrame(active_details)
     if context["active_injuries"].empty:
         return context
 
+    context["metadata"]["rows_team_enriched"] = int(
+        context["active_injuries"].get("injury_team_enriched", pd.Series(False, index=context["active_injuries"].index))
+        .fillna(False)
+        .astype(bool)
+        .sum()
+    )
+    context["metadata"]["rows_missing_team_identity"] = int(
+        (
+            context["active_injuries"].get("team_abbr", pd.Series("", index=context["active_injuries"].index))
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .eq("")
+        ).sum()
+    )
+
+    team_context_rows = context["active_injuries"].copy()
+    team_context_rows["team_abbr"] = team_context_rows.get("team_abbr", pd.Series("", index=team_context_rows.index)).fillna("").astype(str).str.upper()
+    team_context_rows = team_context_rows[team_context_rows["team_abbr"].str.len() > 0].copy()
+    if active_team_set:
+        team_context_rows = team_context_rows[team_context_rows["team_abbr"].isin(active_team_set)].copy()
+    context["metadata"]["rows_active_team_matched"] = int(len(team_context_rows))
+
     # Build team context
-    for team_abbr, grp in context["active_injuries"].groupby("team_abbr"):
+    for team_abbr, grp in team_context_rows.groupby("team_abbr"):
         weighted_pts = float(
             pd.to_numeric(grp.get("weighted_pts", pd.Series(dtype=float)), errors="coerce")
             .fillna(0.0).sum()
@@ -247,7 +341,13 @@ def apply_player_injury_context(
     player_name = str(player_row.get("player_name", "")).strip()
     player_key = f"{player_name}:{str(team_abbr).upper()}"
 
-    own_injury = players_ctx.get(player_key, {}) if isinstance(players_ctx, Mapping) else {}
+    own_injury: Mapping[str, Any] = {}
+    if isinstance(players_ctx, Mapping):
+        player_id = to_float(player_row.get("player_id"))
+        if player_id is not None and player_id > 0:
+            own_injury = players_ctx.get(f"player_id:{int(player_id)}", {}) or {}
+        if not own_injury:
+            own_injury = players_ctx.get(player_key, {}) or {}
     team_ctx = teams_ctx.get(str(team_abbr).upper(), {}) if isinstance(teams_ctx, Mapping) else {}
     opp_ctx = teams_ctx.get(str(opp_abbr).upper(), {}) if isinstance(teams_ctx, Mapping) else {}
 
