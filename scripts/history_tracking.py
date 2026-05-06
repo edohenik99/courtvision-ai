@@ -117,6 +117,11 @@ LEGACY_METADATA_DIMENSIONS = {
 BLANK_GROUP_VALUE = "(blank)"
 PLAYER_POINTS_MARKET = "player_points"
 FULL_MARKET_BOARD_PATTERN = re.compile(r"^full_market_board_(\d{4}-\d{2}-\d{2})\.csv$")
+PENDING_RESULT_STATUS = "pending"
+VOID_RESULT_STATUS = "void"
+UNSUPPORTED_RESULT_STATUS = "unsupported"
+GAME_NOT_FINAL_REASON = "game_not_final"
+UNSUPPORTED_GRADING_REASONS = {"unsupported_market", "unsupported_selection"}
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -133,6 +138,23 @@ def _safe_text(value: Any, default: str = "") -> str:
         return default
     text = str(value).strip()
     return text if text else default
+
+
+def _today_iso() -> str:
+    return datetime.now().date().isoformat()
+
+
+def _split_grading_reasons(value: Any) -> list[str]:
+    return [reason for reason in _safe_text(value).split(";") if reason]
+
+
+def _unresolved_result_status(skip_reason: str, prediction_date: str) -> str:
+    reasons = set(_split_grading_reasons(skip_reason))
+    if reasons == {GAME_NOT_FINAL_REASON} and _safe_text(prediction_date) >= _today_iso():
+        return PENDING_RESULT_STATUS
+    if reasons & UNSUPPORTED_GRADING_REASONS:
+        return UNSUPPORTED_RESULT_STATUS
+    return VOID_RESULT_STATUS
 
 
 def _line_key(value: Any) -> str:
@@ -1228,6 +1250,7 @@ def update_performance_summaries(
 
     history_df["prediction_date"] = history_df["prediction_date"].astype(str)
     history_df["selection"] = history_df["selection"].astype(str).str.lower()
+    history_df["result_status"] = history_df["result_status"].fillna("").astype(str).str.strip().str.lower()
     history_df["edge"] = pd.to_numeric(history_df["edge"], errors="coerce").fillna(0.0)
     history_df["abs_edge"] = pd.to_numeric(history_df["abs_edge"], errors="coerce").fillna(history_df["edge"].abs())
 
@@ -1326,7 +1349,7 @@ def grade_completed_picks(
     pick_history_df = _load_csv(pick_history_path, columns=PICK_HISTORY_COLUMNS)
     if pick_history_df.empty:
         update_performance_summaries(history_root=history_root_path, runtime_root=runtime_root_path)
-        return {"updated_rows": 0, "pending_rows": 0}
+        return {"updated_rows": 0, "pending_rows": 0, "unsupported_rows": 0, "void_rows": 0, "skip_reasons": {}}
 
     pick_history_df = pick_history_df.reindex(columns=PICK_HISTORY_COLUMNS)
     for column in ("actual_value", "grading_skip_reason"):
@@ -1359,16 +1382,18 @@ def grade_completed_picks(
                 stats_df=stats_df,
                 games_df=games_df,
             )
+            if result_status == PENDING_RESULT_STATUS:
+                skip_reason = skip_reason or "actual_stats_not_found"
+                result_status = _unresolved_result_status(skip_reason, prediction_date)
             date_rows.at[idx, "result_status"] = result_status
-            if result_status != "pending":
+            if result_status != PENDING_RESULT_STATUS:
                 updated += 1
                 date_rows.at[idx, "actual_value"] = actual_value if actual_value is not None else ""
-                date_rows.at[idx, "grading_skip_reason"] = ""
+                date_rows.at[idx, "grading_skip_reason"] = "" if result_status in {"hit", "miss", "push"} else skip_reason
             else:
-                date_rows.at[idx, "grading_skip_reason"] = skip_reason or "actual_stats_not_found"
-                for reason in str(date_rows.at[idx, "grading_skip_reason"]).split(";"):
-                    if reason:
-                        skip_reasons[reason] += 1
+                date_rows.at[idx, "grading_skip_reason"] = skip_reason
+            for reason in _split_grading_reasons(date_rows.at[idx, "grading_skip_reason"]):
+                skip_reasons[reason] += 1
         pick_history_df.loc[date_rows.index, "result_status"] = date_rows["result_status"]
         pick_history_df.loc[date_rows.index, "actual_value"] = date_rows["actual_value"]
         pick_history_df.loc[date_rows.index, "grading_skip_reason"] = date_rows["grading_skip_reason"]
@@ -1379,9 +1404,13 @@ def grade_completed_picks(
     _write_csv(pick_history_path, pick_history_df[PICK_HISTORY_COLUMNS])
     update_performance_summaries(history_root=history_root_path, runtime_root=runtime_root_path)
     pending_rows = int((pick_history_df["result_status"].astype(str).str.lower() == "pending").sum())
+    unsupported_rows = int((pick_history_df["result_status"].astype(str).str.lower() == UNSUPPORTED_RESULT_STATUS).sum())
+    void_rows = int((pick_history_df["result_status"].astype(str).str.lower() == VOID_RESULT_STATUS).sum())
     return {
         "updated_rows": updated,
         "pending_rows": pending_rows,
+        "unsupported_rows": unsupported_rows,
+        "void_rows": void_rows,
         "skip_reasons": dict(sorted(skip_reasons.items())),
     }
 

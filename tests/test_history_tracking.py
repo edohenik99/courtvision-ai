@@ -209,9 +209,11 @@ def test_pending_picks_do_not_crash_grading(tmp_path: Path, monkeypatch) -> None
     monkeypatch.setattr(history_tracking, "_load_player_stats_for_date", lambda *_args, **_kwargs: pd.DataFrame())
     monkeypatch.setattr(history_tracking, "_load_games_for_date", lambda *_args, **_kwargs: pd.DataFrame())
     result = grade_completed_picks(history_root=history_root, runtime_root=runtime_root)
-    assert result["updated_rows"] == 0
+    assert result["updated_rows"] == 1
+    assert result["pending_rows"] == 0
+    assert result["void_rows"] == 1
     updated = pd.read_csv(history_root / "pick_history.csv")
-    assert updated.iloc[0]["result_status"] == "pending"
+    assert updated.iloc[0]["result_status"] == "void"
     assert "actual_stats_not_found" in updated.iloc[0]["grading_skip_reason"]
 
 
@@ -363,7 +365,7 @@ def test_over_under_player_points_grades_with_player_name_team_fallback(tmp_path
     assert by_player.loc["Fallback Push", "result_status"] == "push"
 
 
-def test_unmatched_stale_pending_rows_receive_grading_skip_reason(tmp_path: Path, monkeypatch) -> None:
+def test_unmatched_stale_pending_rows_become_void_with_grading_skip_reason(tmp_path: Path, monkeypatch) -> None:
     runtime_root = tmp_path / "outputs" / "runtime"
     history_root = tmp_path / "data" / "history"
     history_root.mkdir(parents=True, exist_ok=True)
@@ -381,8 +383,10 @@ def test_unmatched_stale_pending_rows_receive_grading_skip_reason(tmp_path: Path
     result = grade_completed_picks(history_root=history_root, runtime_root=runtime_root)
 
     updated = pd.read_csv(history_root / "pick_history.csv")
-    assert result["updated_rows"] == 0
-    assert updated.iloc[0]["result_status"] == "pending"
+    assert result["updated_rows"] == 1
+    assert result["pending_rows"] == 0
+    assert result["void_rows"] == 1
+    assert updated.iloc[0]["result_status"] == "void"
     reason = updated.iloc[0]["grading_skip_reason"]
     assert "missing_game_id" in reason
     assert "missing_player_id" in reason
@@ -412,6 +416,7 @@ def test_unfinished_games_remain_pending_with_game_not_final(tmp_path: Path, mon
 
     import scripts.history_tracking as history_tracking
 
+    monkeypatch.setattr(history_tracking, "_today_iso", lambda: date)
     monkeypatch.setattr(history_tracking, "_load_actual_results_for_date", lambda *_args, **_kwargs: pd.DataFrame())
     monkeypatch.setattr(history_tracking, "_load_player_stats_for_date", lambda *_args, **_kwargs: stats.copy())
     monkeypatch.setattr(history_tracking, "_load_games_for_date", lambda *_args, **_kwargs: games.copy())
@@ -423,6 +428,39 @@ def test_unfinished_games_remain_pending_with_game_not_final(tmp_path: Path, mon
     assert updated.iloc[0]["result_status"] == "pending"
     assert updated.iloc[0]["grading_skip_reason"] == "game_not_final"
     assert result["skip_reasons"] == {"game_not_final": 1}
+
+
+def test_historical_game_not_final_rows_become_void(tmp_path: Path, monkeypatch) -> None:
+    runtime_root = tmp_path / "outputs" / "runtime"
+    history_root = tmp_path / "data" / "history"
+    history_root.mkdir(parents=True, exist_ok=True)
+    date = "2026-04-25"
+    row = {
+        **_history_row("Stale Scheduled", prediction_date=date, selection="under", result_status="pending"),
+        "team": "NYK",
+        "opponent": "PHI",
+        "game_id": 21708674,
+        "line": 27.5,
+    }
+    pd.DataFrame([row]).to_csv(history_root / "pick_history.csv", index=False)
+    games = pd.DataFrame(
+        [{"id": 21708674, "home_team_abbr": "NYK", "visitor_team_abbr": "PHI", "status": "Scheduled"}]
+    )
+
+    import scripts.history_tracking as history_tracking
+
+    monkeypatch.setattr(history_tracking, "_today_iso", lambda: "2026-05-06")
+    monkeypatch.setattr(history_tracking, "_load_actual_results_for_date", lambda *_args, **_kwargs: pd.DataFrame())
+    monkeypatch.setattr(history_tracking, "_load_player_stats_for_date", lambda *_args, **_kwargs: pd.DataFrame())
+    monkeypatch.setattr(history_tracking, "_load_games_for_date", lambda *_args, **_kwargs: games.copy())
+
+    result = grade_completed_picks(history_root=history_root, runtime_root=runtime_root)
+
+    updated = pd.read_csv(history_root / "pick_history.csv")
+    assert result["updated_rows"] == 1
+    assert result["pending_rows"] == 0
+    assert updated.iloc[0]["result_status"] == "void"
+    assert updated.iloc[0]["grading_skip_reason"] == "game_not_final"
 
 
 def test_performance_summary_updates_correctly(tmp_path: Path) -> None:
@@ -484,6 +522,40 @@ def test_performance_summary_updates_correctly(tmp_path: Path) -> None:
     assert perf.iloc[0]["hit_rate"] == 0.5
     assert perf.iloc[0]["max_team_exposure"] == 2
     assert perf.iloc[0]["max_game_exposure"] == 4
+
+
+def test_performance_summary_excludes_void_and_unsupported_from_hit_rate(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "outputs" / "runtime"
+    history_root = tmp_path / "data" / "history"
+    history_root.mkdir(parents=True, exist_ok=True)
+    date = "2026-04-26"
+    rows = [
+        _history_row("Hit", prediction_date=date, result_status="hit", selection="over"),
+        _history_row("Miss", prediction_date=date, result_status="miss", selection="under"),
+        _history_row("Push", prediction_date=date, result_status="push", selection="over"),
+        _history_row("Pending", prediction_date=date, result_status="pending", selection="under"),
+        _history_row("Void", prediction_date=date, result_status="void", selection="over"),
+        _history_row("Unsupported", prediction_date=date, result_status="unsupported", selection="under"),
+    ]
+    pd.DataFrame(rows).to_csv(history_root / "pick_history.csv", index=False)
+
+    update_performance_summaries(history_root=history_root, runtime_root=runtime_root)
+
+    perf = pd.read_csv(history_root / "performance_summary.csv")
+    assert len(perf) == 1
+    row = perf.iloc[0]
+    assert row["total_picks"] == 6
+    assert row["hits"] == 1
+    assert row["misses"] == 1
+    assert row["pushes"] == 1
+    assert row["pending"] == 1
+    assert row["hit_rate"] == 0.5
+
+    by_market = pd.read_csv(history_root / "performance_by_market.csv")
+    market_row = by_market.iloc[0]
+    assert market_row["total"] == 6
+    assert market_row["pending"] == 1
+    assert market_row["hit_rate"] == 0.5
 
 
 def test_dashboard_loader_handles_empty_files(tmp_path: Path) -> None:
