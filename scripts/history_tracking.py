@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ PICK_HISTORY_COLUMNS = [
     "prediction_date",
     "run_timestamp",
     "player_name",
+    "player_id",
     "team",
     "opponent",
     "game_id",
@@ -30,6 +32,8 @@ PICK_HISTORY_COLUMNS = [
     "qualification_reason",
     "provider_used",
     "result_status",
+    "actual_value",
+    "grading_skip_reason",
     # Context / Kelly columns — populated from kelly_stakes when available
     "kelly_eligible",
     "skip_reason",
@@ -795,6 +799,7 @@ def persist_daily_picks(
                 "prediction_date": _safe_text(row.get("prediction_date"), default=prediction_date),
                 "run_timestamp": timestamp,
                 "player_name": player,
+                "player_id": _safe_text(row.get("player_id")),
                 "team": _safe_text(row.get("team")) or _safe_text(row.get("team_abbr")),
                 "opponent": _safe_text(row.get("opponent")),
                 "game_id": _safe_text(row.get("game_id")),
@@ -810,6 +815,8 @@ def persist_daily_picks(
                 "qualification_reason": _safe_text(row.get("qualification_reason")),
                 "provider_used": provider_used,
                 "result_status": result_status,
+                "actual_value": "",
+                "grading_skip_reason": "",
                 "kelly_eligible": kelly_ctx.get("kelly_eligible", ""),
                 "skip_reason": kelly_ctx.get("skip_reason", ""),
                 "context_caution_level": context_caution_level,
@@ -860,44 +867,271 @@ def _load_actual_results_for_date(prediction_date: str, runtime_root: Path) -> p
         return pd.DataFrame()
 
 
-def _map_actual_result(row: pd.Series, actual_df: pd.DataFrame) -> str:
+def _runtime_outputs_root(runtime_root: Path) -> Path:
+    return runtime_root.parent if runtime_root.name == "runtime" else runtime_root
+
+
+def _load_player_stats_for_date(prediction_date: str, runtime_root: Path) -> pd.DataFrame:
+    try:
+        ai = CourtVisionAI(out_dir=str(_runtime_outputs_root(runtime_root)))
+        client = ai._get_client()
+        raw_stats = client.get_stats(str(prediction_date), str(prediction_date))
+        stats = ai._normalize_stats(raw_stats)
+        return stats.copy() if isinstance(stats, pd.DataFrame) else pd.DataFrame()
+    except Exception as exc:
+        print(
+            f"[history_tracking] WARNING: player stats load raised {type(exc).__name__}: {exc} "
+            f"for {prediction_date}. Stats fallback unavailable."
+        )
+        return pd.DataFrame()
+
+
+def _load_games_for_date(prediction_date: str, runtime_root: Path) -> pd.DataFrame:
+    try:
+        ai = CourtVisionAI(out_dir=str(_runtime_outputs_root(runtime_root)))
+        client = ai._get_client()
+        raw_games = client.get_games(str(prediction_date))
+        return raw_games.copy() if isinstance(raw_games, pd.DataFrame) else pd.DataFrame()
+    except Exception as exc:
+        print(
+            f"[history_tracking] WARNING: games load raised {type(exc).__name__}: {exc} "
+            f"for {prediction_date}. Game finality diagnostics unavailable."
+        )
+        return pd.DataFrame()
+
+
+def _normalize_pick_market(value: Any) -> str:
+    market = _safe_text(value).lower()
+    aliases = {
+        "points": "player_points",
+        "pts": "player_points",
+        "rebounds": "player_rebounds",
+        "assists": "player_assists",
+        "threes": "player_3pt_made",
+        "player_threes": "player_3pt_made",
+    }
+    return aliases.get(market, market)
+
+
+def _id_key(value: Any) -> str:
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    text = _safe_text(value)
+    if not text:
+        return ""
+    try:
+        return str(int(float(text)))
+    except (TypeError, ValueError):
+        return text
+
+
+def _game_team_abbrs(game_row: pd.Series | dict[str, Any]) -> tuple[str, str]:
+    home = game_row.get("home_team", {}) if isinstance(game_row.get("home_team"), dict) else {}
+    visitor = game_row.get("visitor_team", {}) if isinstance(game_row.get("visitor_team"), dict) else {}
+    home_abbr = (
+        _safe_text(home.get("abbreviation") if isinstance(home, dict) else "")
+        or _safe_text(game_row.get("home_team_abbr"))
+        or _safe_text(game_row.get("home_team"))
+    ).upper()
+    visitor_abbr = (
+        _safe_text(visitor.get("abbreviation") if isinstance(visitor, dict) else "")
+        or _safe_text(game_row.get("visitor_team_abbr"))
+        or _safe_text(game_row.get("away_team_abbr"))
+        or _safe_text(game_row.get("away_team"))
+    ).upper()
+    return home_abbr, visitor_abbr
+
+
+def _game_row_is_final(game_row: pd.Series | dict[str, Any]) -> bool:
+    status = _safe_text(game_row.get("status")).lower()
+    if any(token in status for token in ("final", "complete", "closed")):
+        return True
+    home_score = _safe_float(game_row.get("home_team_score"), default=float("nan"))
+    visitor_score = _safe_float(game_row.get("visitor_team_score"), default=float("nan"))
+    has_scores = home_score == home_score and visitor_score == visitor_score
+    nonzero_scores = has_scores and (float(home_score) != 0.0 or float(visitor_score) != 0.0)
+    return bool(nonzero_scores and status not in {"scheduled", "not started", "pre-game", "pregame"})
+
+
+def _matching_game_rows(row: pd.Series, games_df: pd.DataFrame) -> list[pd.Series]:
+    if games_df.empty:
+        return []
+    game_id = _id_key(row.get("game_id"))
+    team = _safe_text(row.get("team")).upper()
+    opponent = _safe_text(row.get("opponent")).upper()
+    if opponent == "OPP":
+        opponent = ""
+
+    matches: list[pd.Series] = []
+    for _, game in games_df.iterrows():
+        game_ids = {_id_key(game.get("id")), _id_key(game.get("game_id"))}
+        if game_id and game_id in game_ids:
+            matches.append(game)
+            continue
+        home_abbr, visitor_abbr = _game_team_abbrs(game)
+        teams = {home_abbr, visitor_abbr}
+        if team and opponent and {team, opponent} == teams:
+            matches.append(game)
+        elif team and not opponent and team in teams:
+            matches.append(game)
+    return matches
+
+
+def _game_final_status(row: pd.Series, games_df: pd.DataFrame) -> bool | None:
+    matches = _matching_game_rows(row, games_df)
+    if not matches:
+        return None
+    return any(_game_row_is_final(match) for match in matches)
+
+
+def _line_result(selection: str, actual_value: float, line: float) -> str:
+    if selection == "milestone":
+        return "hit" if actual_value >= line else "miss"
+    if abs(actual_value - line) < 1e-9:
+        return "push"
+    if selection == "over":
+        return "hit" if actual_value > line else "miss"
+    if selection == "under":
+        return "hit" if actual_value < line else "miss"
+    return "pending"
+
+
+def _status_from_graded_result(value: Any) -> str:
+    result = _safe_text(value).lower()
+    if result in {"hit", "win", "won"}:
+        return "hit"
+    if result in {"miss", "loss", "lost"}:
+        return "miss"
+    if result == "push":
+        return "push"
+    return "pending"
+
+
+def _pick_direct_actual(row: pd.Series, actual_df: pd.DataFrame) -> tuple[str, float | None]:
     if actual_df.empty:
-        return "pending"
+        return "pending", None
     player = _safe_text(row.get("player_name")).lower()
     selection = _safe_text(row.get("selection")).lower()
-    market = _safe_text(row.get("market")).lower()
+    market = _normalize_pick_market(row.get("market"))
     line = _safe_float(row.get("line"))
 
     candidates = actual_df.copy()
     if "entity_name" in candidates.columns:
-        candidates = candidates[candidates["entity_name"].astype(str).str.lower() == player]
+        candidates = candidates[candidates["entity_name"].astype(str).str.strip().str.lower() == player]
     elif "player_name" in candidates.columns:
-        candidates = candidates[candidates["player_name"].astype(str).str.lower() == player]
+        candidates = candidates[candidates["player_name"].astype(str).str.strip().str.lower() == player]
     if "selection" in candidates.columns:
         candidates = candidates[candidates["selection"].astype(str).str.lower() == selection]
     elif "side" in candidates.columns:
         candidates = candidates[candidates["side"].astype(str).str.lower() == selection]
     if "market_type" in candidates.columns:
-        market_candidates = candidates["market_type"].astype(str).str.lower()
-        normalized_market = market.replace("player_threes", "player_3pt_made")
-        candidates = candidates[market_candidates == normalized_market]
+        market_candidates = candidates["market_type"].map(_normalize_pick_market)
+        candidates = candidates[market_candidates == market]
     elif "prop_type" in candidates.columns:
-        candidates = candidates[candidates["prop_type"].astype(str).str.lower() == market.replace("player_", "").replace("_made", "").replace("3pt", "threes")]
-    if "sportsbook_line" in candidates.columns:
+        candidates = candidates[candidates["prop_type"].map(_normalize_pick_market) == market]
+    if line is not None and "sportsbook_line" in candidates.columns:
         candidates = candidates[(pd.to_numeric(candidates["sportsbook_line"], errors="coerce") - line).abs() < 1e-6]
-    elif "line_value" in candidates.columns:
+    elif line is not None and "line_value" in candidates.columns:
         candidates = candidates[(candidates["line_value"].astype(float) - line).abs() < 1e-6]
     result_col = "result" if "result" in candidates.columns else ("graded_result" if "graded_result" in candidates.columns else "")
     if candidates.empty or not result_col:
-        return "pending"
-    result = _safe_text(candidates.iloc[0].get(result_col)).lower()
-    if result == "win":
-        return "hit"
-    if result == "loss":
-        return "miss"
-    if result == "push":
-        return "push"
-    return "pending"
+        return "pending", None
+    status = _status_from_graded_result(candidates.iloc[0].get(result_col))
+    actual_value = _safe_float(candidates.iloc[0].get("actual_value"), default=float("nan"))
+    actual = float(actual_value) if actual_value == actual_value else None
+    return status, actual
+
+
+def _map_actual_result(row: pd.Series, actual_df: pd.DataFrame) -> str:
+    status, _actual = _pick_direct_actual(row, actual_df)
+    return status
+
+
+def _resolve_player_points_actual(row: pd.Series, stats_df: pd.DataFrame) -> tuple[float | None, str]:
+    missing_game_id = not _id_key(row.get("game_id"))
+    missing_player_id = not _id_key(row.get("player_id"))
+    if stats_df.empty:
+        reasons = []
+        if missing_game_id:
+            reasons.append("missing_game_id")
+        if missing_player_id:
+            reasons.append("missing_player_id")
+        reasons.append("actual_stats_not_found")
+        return None, ";".join(reasons)
+
+    candidates = stats_df.copy()
+    player_id = _id_key(row.get("player_id"))
+    game_id = _id_key(row.get("game_id"))
+    if player_id and "player_id" in candidates.columns:
+        player_mask = candidates["player_id"].map(_id_key) == player_id
+        candidates = candidates[player_mask].copy()
+    if game_id and "game_id" in candidates.columns:
+        game_mask = candidates["game_id"].map(_id_key) == game_id
+        candidates = candidates[game_mask].copy()
+
+    if candidates.empty or missing_game_id or missing_player_id:
+        fallback = stats_df.copy()
+        player = _safe_text(row.get("player_name")).lower()
+        team = _safe_text(row.get("team")).upper()
+        prediction_date = _safe_text(row.get("prediction_date"))
+        if player and "player_name" in fallback.columns:
+            fallback = fallback[fallback["player_name"].astype(str).str.strip().str.lower() == player].copy()
+        if team and "team_abbr" in fallback.columns:
+            fallback = fallback[fallback["team_abbr"].astype(str).str.strip().str.upper() == team].copy()
+        if prediction_date and "game_date" in fallback.columns:
+            game_dates = pd.to_datetime(fallback["game_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+            fallback = fallback[game_dates == prediction_date].copy()
+        candidates = fallback
+
+    if candidates.empty:
+        reasons = []
+        if missing_game_id:
+            reasons.append("missing_game_id")
+        if missing_player_id:
+            reasons.append("missing_player_id")
+        reasons.append("player_stat_match_failed")
+        return None, ";".join(reasons)
+    if "pts" not in candidates.columns:
+        return None, "actual_stats_not_found"
+    actual = _safe_float(candidates.iloc[0].get("pts"), default=float("nan"))
+    if actual != actual:
+        return None, "actual_stats_not_found"
+    return float(actual), ""
+
+
+def _grade_pick_row(
+    row: pd.Series,
+    *,
+    actual_df: pd.DataFrame,
+    stats_df: pd.DataFrame,
+    games_df: pd.DataFrame,
+) -> tuple[str, float | None, str]:
+    market = _normalize_pick_market(row.get("market"))
+    selection = _safe_text(row.get("selection")).lower()
+    line = _safe_float(row.get("line"), default=float("nan"))
+
+    if market != "player_points":
+        return "pending", None, "unsupported_market"
+    if selection not in {"over", "under", "milestone"}:
+        return "pending", None, "unsupported_selection"
+    if line != line:
+        return "pending", None, "actual_stats_not_found"
+
+    final_status = _game_final_status(row, games_df)
+    if final_status is False:
+        return "pending", None, "game_not_final"
+
+    direct_status, direct_actual = _pick_direct_actual(row, actual_df)
+    if direct_status in {"hit", "miss", "push"}:
+        return direct_status, direct_actual, ""
+
+    actual_value, reason = _resolve_player_points_actual(row, stats_df)
+    if actual_value is None:
+        return "pending", None, reason
+    return _line_result(selection, actual_value, float(line)), actual_value, ""
 
 
 def _write_context_cross_slate_summary(history_df: pd.DataFrame, history_root_path: Path) -> None:
@@ -1095,24 +1329,49 @@ def grade_completed_picks(
         return {"updated_rows": 0, "pending_rows": 0}
 
     pick_history_df = pick_history_df.reindex(columns=PICK_HISTORY_COLUMNS)
+    for column in ("actual_value", "grading_skip_reason"):
+        pick_history_df[column] = pick_history_df[column].astype("object").where(
+            pick_history_df[column].notna(),
+            "",
+        )
     pending_mask = pick_history_df["result_status"].astype(str).str.lower() == "pending"
     if prediction_date:
         pending_mask &= pick_history_df["prediction_date"].astype(str) == str(prediction_date)
     updated = 0
+    skip_reasons: Counter[str] = Counter()
     for prediction_date in pick_history_df.loc[pending_mask, "prediction_date"].astype(str).unique():
         actual_df = _load_actual_results_for_date(prediction_date, runtime_root=runtime_root_path)
+        stats_df = _load_player_stats_for_date(prediction_date, runtime_root=runtime_root_path)
+        games_df = _load_games_for_date(prediction_date, runtime_root=runtime_root_path)
         date_mask = (pick_history_df["prediction_date"].astype(str) == prediction_date) & pending_mask
         date_rows = pick_history_df[date_mask].copy()
         if date_rows.empty:
             continue
-        date_rows["result_status"] = date_rows.apply(lambda r: _map_actual_result(r, actual_df), axis=1)
-        unsupported_mask = ~date_rows["market"].astype(str).str.lower().isin(
-            {"player_points", "player_rebounds", "player_assists", "player_3pt_made", "player_steals", "player_blocks", "moneyline", "team_total"}
-        )
-        date_rows["grading_note"] = ""
-        date_rows.loc[unsupported_mask & date_rows["result_status"].eq("pending"), "grading_note"] = "grading_not_supported_for_market"
-        updated += int((date_rows["result_status"] != "pending").sum())
+        if "actual_value" not in date_rows.columns:
+            date_rows["actual_value"] = ""
+        if "grading_skip_reason" not in date_rows.columns:
+            date_rows["grading_skip_reason"] = ""
+
+        for idx, row in date_rows.iterrows():
+            result_status, actual_value, skip_reason = _grade_pick_row(
+                row,
+                actual_df=actual_df,
+                stats_df=stats_df,
+                games_df=games_df,
+            )
+            date_rows.at[idx, "result_status"] = result_status
+            if result_status != "pending":
+                updated += 1
+                date_rows.at[idx, "actual_value"] = actual_value if actual_value is not None else ""
+                date_rows.at[idx, "grading_skip_reason"] = ""
+            else:
+                date_rows.at[idx, "grading_skip_reason"] = skip_reason or "actual_stats_not_found"
+                for reason in str(date_rows.at[idx, "grading_skip_reason"]).split(";"):
+                    if reason:
+                        skip_reasons[reason] += 1
         pick_history_df.loc[date_rows.index, "result_status"] = date_rows["result_status"]
+        pick_history_df.loc[date_rows.index, "actual_value"] = date_rows["actual_value"]
+        pick_history_df.loc[date_rows.index, "grading_skip_reason"] = date_rows["grading_skip_reason"]
 
         runtime_graded_path = runtime_root_path / "history" / f"graded_picks_{prediction_date}.csv"
         _write_csv(runtime_graded_path, date_rows)
@@ -1120,5 +1379,9 @@ def grade_completed_picks(
     _write_csv(pick_history_path, pick_history_df[PICK_HISTORY_COLUMNS])
     update_performance_summaries(history_root=history_root_path, runtime_root=runtime_root_path)
     pending_rows = int((pick_history_df["result_status"].astype(str).str.lower() == "pending").sum())
-    return {"updated_rows": updated, "pending_rows": pending_rows}
+    return {
+        "updated_rows": updated,
+        "pending_rows": pending_rows,
+        "skip_reasons": dict(sorted(skip_reasons.items())),
+    }
 

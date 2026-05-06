@@ -28,9 +28,10 @@ def main() -> int:
     )
     print(f"graded_updates={result['updated_rows']}")
     print(f"pending_remaining={result['pending_rows']}")
+    for reason, count in result.get("skip_reasons", {}).items():
+        print(f"skip_reason={reason},{count}")
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
