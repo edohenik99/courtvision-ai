@@ -60,6 +60,14 @@ from courtvision.reporting.correlation_exposure import (
     report_row_line as correlation_exposure_row_line,
     write_correlation_exposure_report,
 )
+from courtvision.reporting.team_distribution import (
+    OBSERVATION_ONLY_NOTE as TEAM_DISTRIBUTION_OBSERVATION_ONLY_NOTE,
+    REPORT_TITLE as TEAM_DISTRIBUTION_TITLE,
+    build_team_distribution_report,
+    report_paths_for_date as team_distribution_report_paths_for_date,
+    report_row_line as team_distribution_report_row_line,
+    write_team_distribution_report,
+)
 from scripts.history_tracking import PLAYER_POINTS_MARKET, persist_market_shadow_history
 
 RUN_HEALTH_RECOMMENDATIONS: dict[str, str] = {
@@ -630,6 +638,14 @@ def build_daily_summary(
         prediction_date=prediction_date,
         runtime_root=runtime_root,
     )
+    team_distribution_text_path, team_distribution_csv_path = team_distribution_report_paths_for_date(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+    )
+    team_distribution_report_df, team_distribution_summary = build_team_distribution_report(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+    )
     market_shadow_rows = int(len(full_market_df))
     market_shadow_non_points_rows = (
         int(
@@ -882,6 +898,29 @@ def build_daily_summary(
     for warning in correlation_exposure_summary.get("warnings", []) or []:
         lines.append(f"- warning: {warning}")
 
+    lines.extend(["", TEAM_DISTRIBUTION_TITLE, "-" * 72])
+    lines.append(f"- scope: {TEAM_DISTRIBUTION_OBSERVATION_ONLY_NOTE}")
+    lines.append(f"- txt artifact: {team_distribution_text_path}")
+    lines.append(f"- csv artifact: {team_distribution_csv_path}")
+    lines.append(
+        "- summary: "
+        f"total_teams={int(team_distribution_summary.get('total_teams') or 0)}, "
+        f"teams_with_elite={int(team_distribution_summary.get('teams_with_elite') or 0)}, "
+        f"teams_with_paper={int(team_distribution_summary.get('teams_with_paper') or 0)}, "
+        f"teams_cap_limited={int(team_distribution_summary.get('teams_cap_limited') or 0)}, "
+        f"teams_context_rejected={int(team_distribution_summary.get('teams_context_rejected') or 0)}, "
+        f"most_represented={_safe_text(team_distribution_summary.get('most_represented_team')) or 'none'} "
+        f"({int(team_distribution_summary.get('most_represented_count') or 0)} rows)"
+    )
+    lines.append("- top 10 teams:")
+    if team_distribution_report_df.empty:
+        lines.append("  - None")
+    else:
+        for _, row in team_distribution_report_df.head(10).iterrows():
+            lines.append(f"  - {team_distribution_report_row_line(row)}")
+    for warning in team_distribution_summary.get("warnings", []) or []:
+        lines.append(f"- warning: {warning}")
+
     lines.extend(["", "Kelly Stakes", "-" * 72])
     if kelly_eligible.empty:
         lines.append("- None")
@@ -1044,6 +1083,10 @@ def build_daily_summary(
         "correlation_exposure_report_path": str(correlation_exposure_text_path),
         "correlation_exposure_report_csv_path": str(correlation_exposure_csv_path),
         "correlation_exposure_summary": correlation_exposure_summary,
+        "team_distribution_report_count": int(len(team_distribution_report_df)),
+        "team_distribution_report_path": str(team_distribution_text_path),
+        "team_distribution_report_csv_path": str(team_distribution_csv_path),
+        "team_distribution_summary": team_distribution_summary,
         "market_shadow_history_path": str(market_shadow_history_path),
         "market_readiness_summary_path": str(market_readiness_summary_path),
         "market_shadow_rows": market_shadow_rows,
@@ -1115,6 +1158,12 @@ def write_daily_summary_outputs(
             runtime_root=runtime_root,
         )
     )
+    team_dist_text_path, team_dist_csv_path, team_dist_df, team_dist_summary = (
+        write_team_distribution_report(
+            prediction_date=prediction_date,
+            runtime_root=runtime_root,
+        )
+    )
     summary, metadata = build_daily_summary(
         prediction_date=prediction_date,
         runtime_root=runtime_root,
@@ -1146,6 +1195,10 @@ def write_daily_summary_outputs(
     metadata["correlation_exposure_report_csv_path"] = str(correlation_csv_path)
     metadata["correlation_exposure_report_count"] = int(len(correlation_df))
     metadata["correlation_exposure_summary"] = correlation_summary
+    metadata["team_distribution_report_path"] = str(team_dist_text_path)
+    metadata["team_distribution_report_csv_path"] = str(team_dist_csv_path)
+    metadata["team_distribution_report_count"] = int(len(team_dist_df))
+    metadata["team_distribution_summary"] = team_dist_summary
     if shadow_result:
         metadata["market_shadow_rows"] = int(shadow_result["current_date_rows"])
         metadata["market_shadow_non_points_rows"] = int(shadow_result["current_date_non_points_rows"])
