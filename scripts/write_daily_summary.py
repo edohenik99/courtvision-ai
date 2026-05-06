@@ -53,6 +53,13 @@ from courtvision.reporting.paper_kelly_performance import (
     summarize_paper_kelly_history,
     write_paper_kelly_performance_report,
 )
+from courtvision.reporting.correlation_exposure import (
+    REPORT_TITLE as CORRELATION_EXPOSURE_TITLE,
+    build_correlation_exposure_report,
+    report_paths_for_date as correlation_exposure_report_paths_for_date,
+    report_row_line as correlation_exposure_row_line,
+    write_correlation_exposure_report,
+)
 from scripts.history_tracking import PLAYER_POINTS_MARKET, persist_market_shadow_history
 
 RUN_HEALTH_RECOMMENDATIONS: dict[str, str] = {
@@ -596,6 +603,14 @@ def build_daily_summary(
         paper_kelly_history,
         through_date=prediction_date,
     )
+    correlation_exposure_text_path, correlation_exposure_csv_path = correlation_exposure_report_paths_for_date(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+    )
+    correlation_exposure_report, correlation_exposure_summary = build_correlation_exposure_report(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+    )
     market_shadow_rows = int(len(full_market_df))
     market_shadow_non_points_rows = (
         int(
@@ -812,6 +827,34 @@ def build_daily_summary(
         for _, row in paper_kelly_performance_report.head(10).iterrows():
             lines.append(f"  - {paper_kelly_performance_row_line(row)}")
 
+    lines.extend(["", CORRELATION_EXPOSURE_TITLE, "-" * 72])
+    lines.append("- scope: observation only; no eligibility, scoring, gate, or stake changes.")
+    lines.append(f"- txt artifact: {correlation_exposure_text_path}")
+    lines.append(f"- csv artifact: {correlation_exposure_csv_path}")
+    lines.append(
+        "- summary: "
+        f"risk={_safe_text(correlation_exposure_summary.get('risk_label')) or 'low'}, "
+        f"total_rows={int(correlation_exposure_summary.get('total_rows') or 0)}, "
+        f"repeated_player_count={int(correlation_exposure_summary.get('repeated_player_count') or 0)}, "
+        f"max_rows_per_player={int(correlation_exposure_summary.get('max_rows_per_player') or 0)}, "
+        f"max_rows_per_game={int(correlation_exposure_summary.get('max_rows_per_game') or 0)}, "
+        f"max_rows_per_team={int(correlation_exposure_summary.get('max_rows_per_team') or 0)}, "
+        f"dominant_side={_safe_text(correlation_exposure_summary.get('dominant_side')) or 'none'}, "
+        f"dominant_side_share={_format_pct(correlation_exposure_summary.get('dominant_side_share'))}, "
+        "multi_bucket_players="
+        f"{int(correlation_exposure_summary.get('players_in_multiple_buckets') or 0)}, "
+        "multi_market_same_direction_players="
+        f"{int(correlation_exposure_summary.get('players_multiple_markets_same_direction') or 0)}"
+    )
+    lines.append("- top risk groups:")
+    if correlation_exposure_report.empty:
+        lines.append("  - None")
+    else:
+        for _, row in correlation_exposure_report.head(10).iterrows():
+            lines.append(f"  - {correlation_exposure_row_line(row)}")
+    for warning in correlation_exposure_summary.get("warnings", []) or []:
+        lines.append(f"- warning: {warning}")
+
     lines.extend(["", "Kelly Stakes", "-" * 72])
     if kelly_eligible.empty:
         lines.append("- None")
@@ -967,6 +1010,10 @@ def build_daily_summary(
         "paper_kelly_performance_report_path": str(paper_kelly_performance_text_path),
         "paper_kelly_performance_report_csv_path": str(paper_kelly_performance_csv_path),
         "paper_kelly_performance_summary": paper_kelly_performance_summary,
+        "correlation_exposure_report_count": int(len(correlation_exposure_report)),
+        "correlation_exposure_report_path": str(correlation_exposure_text_path),
+        "correlation_exposure_report_csv_path": str(correlation_exposure_csv_path),
+        "correlation_exposure_summary": correlation_exposure_summary,
         "market_shadow_history_path": str(market_shadow_history_path),
         "market_readiness_summary_path": str(market_readiness_summary_path),
         "market_shadow_rows": market_shadow_rows,
@@ -1032,6 +1079,12 @@ def write_daily_summary_outputs(
             history_root=history_root,
         )
     )
+    correlation_text_path, correlation_csv_path, correlation_df, correlation_summary = (
+        write_correlation_exposure_report(
+            prediction_date=prediction_date,
+            runtime_root=runtime_root,
+        )
+    )
     summary, metadata = build_daily_summary(
         prediction_date=prediction_date,
         runtime_root=runtime_root,
@@ -1059,6 +1112,10 @@ def write_daily_summary_outputs(
     metadata["paper_kelly_performance_report_count"] = int(len(paper_performance_df))
     metadata["paper_kelly_performance_current_date_rows"] = int(paper_persist_result["current_date_rows"])
     metadata["paper_kelly_performance_pending_rows"] = int(paper_persist_result["pending_rows"])
+    metadata["correlation_exposure_report_path"] = str(correlation_text_path)
+    metadata["correlation_exposure_report_csv_path"] = str(correlation_csv_path)
+    metadata["correlation_exposure_report_count"] = int(len(correlation_df))
+    metadata["correlation_exposure_summary"] = correlation_summary
     if shadow_result:
         metadata["market_shadow_rows"] = int(shadow_result["current_date_rows"])
         metadata["market_shadow_non_points_rows"] = int(shadow_result["current_date_non_points_rows"])
