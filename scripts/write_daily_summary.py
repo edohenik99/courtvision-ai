@@ -138,6 +138,48 @@ def _is_truthy(value: Any) -> bool:
     return str(value).strip().lower() in {"true", "1", "yes", "y"}
 
 
+def _elite_artifact_has_no_rows(path: Path, elite_df: pd.DataFrame) -> bool:
+    return path.exists() and (not isinstance(elite_df, pd.DataFrame) or elite_df.empty)
+
+
+def _kelly_df_for_reporting(
+    *,
+    elite_path: Path,
+    elite_df: pd.DataFrame,
+    kelly_df: pd.DataFrame,
+    warnings: list[str],
+) -> pd.DataFrame:
+    if _elite_artifact_has_no_rows(elite_path, elite_df):
+        if isinstance(kelly_df, pd.DataFrame) and not kelly_df.empty:
+            warnings.append(
+                "Ignoring Kelly stakes artifact because elite board has 0 rows; "
+                "treating Kelly exposure as zero for reporting."
+            )
+        return pd.DataFrame(columns=list(kelly_df.columns) if isinstance(kelly_df, pd.DataFrame) else [])
+    return kelly_df
+
+
+def _empty_kelly_decision_performance(reason: str) -> dict[str, Any]:
+    empty = {
+        "count": 0,
+        "graded_count": 0,
+        "pending_count": 0,
+        "wins": 0,
+        "losses": 0,
+        "pushes": 0,
+        "hit_rate": None,
+        "roi": None,
+        "status": "insufficient_sample",
+    }
+    return {
+        "status": "insufficient_sample",
+        "reason": reason,
+        "overall": empty,
+        "by_kelly_eligible": {"true": empty, "false": empty},
+        "by_skip_reason": {},
+    }
+
+
 def _sort_for_display(df: pd.DataFrame) -> pd.DataFrame:
     for col in ("quality_score", "expected_value", "edge", "edge_pct"):
         if col in df.columns:
@@ -450,9 +492,21 @@ def build_daily_summary(
     diagnostics_dir = runtime_root / "diagnostics"
     warnings: list[str] = []
 
-    elite_df = _read_csv(operator_dir / f"elite_board_{prediction_date}.csv", warnings)
-    kelly_df = _read_csv(operator_dir / f"kelly_stakes_{prediction_date}.csv", warnings)
+    elite_path = operator_dir / f"elite_board_{prediction_date}.csv"
+    kelly_path = operator_dir / f"kelly_stakes_{prediction_date}.csv"
+    elite_df = _read_csv(elite_path, warnings)
+    kelly_df = (
+        _read_csv(kelly_path, [])
+        if _elite_artifact_has_no_rows(elite_path, elite_df)
+        else _read_csv(kelly_path, warnings)
+    )
     full_market_df = _read_csv(operator_dir / f"full_market_board_{prediction_date}.csv", warnings)
+    kelly_df = _kelly_df_for_reporting(
+        elite_path=elite_path,
+        elite_df=elite_df,
+        kelly_df=kelly_df,
+        warnings=warnings,
+    )
     shadow = _read_json(diagnostics_dir / f"market_shadow_grading_{prediction_date}.json", warnings)
     readiness = _read_json(diagnostics_dir / f"market_performance_readiness_{prediction_date}.json", warnings)
     manual_context = _read_json(diagnostics_dir / f"manual_context_{prediction_date}.json", warnings)
@@ -539,11 +593,14 @@ def build_daily_summary(
         else {}
     )
     if not kelly_decision_performance:
-        kelly_decision_performance = build_kelly_decision_performance(
-            prediction_date=prediction_date,
-            runtime_root=runtime_root,
-            out_dir=runtime_root.parent if runtime_root.name == "runtime" else runtime_root,
-        )
+        if _elite_artifact_has_no_rows(elite_path, elite_df):
+            kelly_decision_performance = _empty_kelly_decision_performance("elite_board_empty")
+        else:
+            kelly_decision_performance = build_kelly_decision_performance(
+                prediction_date=prediction_date,
+                runtime_root=runtime_root,
+                out_dir=runtime_root.parent if runtime_root.name == "runtime" else runtime_root,
+            )
     pending_grading = int(shadow_totals.get("pending_picks") or 0)
 
     readiness_markets = readiness.get("markets", []) if isinstance(readiness, dict) else []

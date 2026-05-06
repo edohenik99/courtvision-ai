@@ -231,6 +231,27 @@ def _count_rows(df: pd.DataFrame) -> int:
     return 0 if not isinstance(df, pd.DataFrame) or df.empty else int(len(df))
 
 
+def _elite_artifact_has_no_rows(path: Path, elite_df: pd.DataFrame) -> bool:
+    return path.exists() and (not isinstance(elite_df, pd.DataFrame) or elite_df.empty)
+
+
+def _kelly_df_for_reporting(
+    *,
+    elite_path: Path,
+    elite_df: pd.DataFrame,
+    kelly_df: pd.DataFrame,
+    warnings: list[str],
+) -> pd.DataFrame:
+    if _elite_artifact_has_no_rows(elite_path, elite_df):
+        if isinstance(kelly_df, pd.DataFrame) and not kelly_df.empty:
+            warnings.append(
+                "Ignoring Kelly stakes artifact because elite board has 0 rows; "
+                "treating Kelly exposure as zero for reporting."
+            )
+        return pd.DataFrame(columns=list(kelly_df.columns) if isinstance(kelly_df, pd.DataFrame) else [])
+    return kelly_df
+
+
 def _nonempty_text_series(series: pd.Series) -> pd.Series:
     return series.fillna("").astype(str).str.strip().replace("", pd.NA).dropna()
 
@@ -1322,7 +1343,9 @@ def build_quality_summary(
     quality_json_path = operator_dir / f"quality_summary_{prediction_date}.json"
     previous_payload = _read_json(quality_json_path, [], optional=True) if quality_json_path.exists() else {}
 
-    elite_df = _read_csv(operator_dir / f"elite_board_{prediction_date}.csv", warnings, optional=False)
+    elite_path = operator_dir / f"elite_board_{prediction_date}.csv"
+    kelly_path = operator_dir / f"kelly_stakes_{prediction_date}.csv"
+    elite_df = _read_csv(elite_path, warnings, optional=False)
     full_market_df = _read_csv(operator_dir / f"full_market_board_{prediction_date}.csv", warnings)
     sgp_path = operator_dir / f"sgp_board_{prediction_date}.csv"
     sgp_df = _read_csv(
@@ -1330,7 +1353,17 @@ def build_quality_summary(
         warnings,
         empty_warning=f"SGP board artifact is empty; expected columns unavailable: {sgp_path}",
     )
-    kelly_df = _read_csv(operator_dir / f"kelly_stakes_{prediction_date}.csv", warnings)
+    kelly_df = (
+        _read_csv(kelly_path, [])
+        if _elite_artifact_has_no_rows(elite_path, elite_df)
+        else _read_csv(kelly_path, warnings)
+    )
+    kelly_df = _kelly_df_for_reporting(
+        elite_path=elite_path,
+        elite_df=elite_df,
+        kelly_df=kelly_df,
+        warnings=warnings,
+    )
     player_predictions_df = _read_csv(research_dir / f"player_predictions_{prediction_date}.csv", warnings)
     player_baselines_df = _read_csv(
         model_dir / "player_baselines.csv",
@@ -1369,7 +1402,10 @@ def build_quality_summary(
     full_market_count = _safe_int(prediction_summary.get("full_market_count"))
     if full_market_count is None:
         full_market_count = _safe_int(board_counts.get("full_market")) or _count_rows(full_market_df)
-    elite_count = _safe_int(prediction_summary.get("elite_count"))
+    if _elite_artifact_has_no_rows(elite_path, elite_df):
+        elite_count = 0
+    else:
+        elite_count = _safe_int(prediction_summary.get("elite_count"))
     if elite_count is None:
         elite_count = _safe_int(board_counts.get("elite")) or _count_rows(elite_df)
     kelly_count = _count_rows(kelly_df)
