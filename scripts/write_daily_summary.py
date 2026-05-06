@@ -37,6 +37,12 @@ from courtvision.reporting.promotion_readiness import (
     report_row_line as promotion_readiness_report_row_line,
     write_promotion_readiness_report,
 )
+from courtvision.reporting.paper_kelly_simulation import (
+    SIMULATION_WARNING as PAPER_KELLY_SIMULATION_WARNING,
+    build_paper_kelly_simulation,
+    report_paths_for_date as paper_kelly_report_paths_for_date,
+    write_paper_kelly_simulation,
+)
 from scripts.history_tracking import PLAYER_POINTS_MARKET, persist_market_shadow_history
 
 RUN_HEALTH_RECOMMENDATIONS: dict[str, str] = {
@@ -552,6 +558,20 @@ def build_daily_summary(
         read_market_shadow_history(market_shadow_history_path),
         through_date=prediction_date,
     )
+    paper_kelly_text_path, paper_kelly_csv_path = paper_kelly_report_paths_for_date(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+    )
+    paper_kelly_simulation = build_paper_kelly_simulation(
+        prediction_date=prediction_date,
+        combo_under_watchlist=combo_under_watchlist,
+        high_caution_over_watchlist=high_caution_over_watchlist,
+    )
+    paper_kelly_exposure = (
+        float(pd.to_numeric(paper_kelly_simulation.get("simulated_stake", pd.Series(dtype=float)), errors="coerce").fillna(0).sum())
+        if not paper_kelly_simulation.empty
+        else 0.0
+    )
     market_shadow_rows = int(len(full_market_df))
     market_shadow_non_points_rows = (
         int(
@@ -713,6 +733,36 @@ def build_daily_summary(
         for _, row in promotion_readiness_report.head(5).iterrows():
             lines.append(f"  - {promotion_readiness_report_row_line(row)}")
 
+    lines.extend(["", "Paper Kelly Simulation — Observation Only / No Real Stake", "-" * 72])
+    lines.append(f"- total paper rows: {int(len(paper_kelly_simulation))}")
+    lines.append(f"- paper exposure: {paper_kelly_exposure:.6f}")
+    lines.append(f"- txt artifact: {paper_kelly_text_path}")
+    lines.append(f"- csv artifact: {paper_kelly_csv_path}")
+    lines.append(f"- warning: {PAPER_KELLY_SIMULATION_WARNING}")
+    lines.append("- exposure by bucket:")
+    if paper_kelly_simulation.empty:
+        lines.append("  - none")
+    else:
+        bucket_exposure = paper_kelly_simulation.groupby("paper_bucket", sort=True)["simulated_stake"].sum()
+        for bucket, value in bucket_exposure.items():
+            lines.append(f"  - {bucket}: {float(value):.6f}")
+    lines.append("- top 10 simulated EV rows:")
+    if paper_kelly_simulation.empty:
+        lines.append("  - None")
+    else:
+        top_rows = paper_kelly_simulation.sort_values("simulated_ev", ascending=False, kind="mergesort").head(10)
+        for _, row in top_rows.iterrows():
+            lines.append(
+                "  - "
+                f"{_safe_text(row.get('player_name')) or 'Unknown'}: "
+                f"{_safe_text(row.get('market_type')) or 'unknown'} "
+                f"{_safe_text(row.get('selection')) or 'unknown'} "
+                f"{_safe_text(row.get('line')) or 'n/a'} "
+                f"bucket={_safe_text(row.get('paper_bucket')) or 'unknown'} "
+                f"stake={_format_num(row.get('simulated_stake'), 6)} "
+                f"ev={_format_num(row.get('simulated_ev'), 6)}"
+            )
+
     lines.extend(["", "Kelly Stakes", "-" * 72])
     if kelly_eligible.empty:
         lines.append("- None")
@@ -859,6 +909,10 @@ def build_daily_summary(
         "promotion_readiness_report_count": int(len(promotion_readiness_report)),
         "promotion_readiness_report_path": str(promotion_readiness_text_path),
         "promotion_readiness_report_csv_path": str(promotion_readiness_csv_path),
+        "paper_kelly_simulation_count": int(len(paper_kelly_simulation)),
+        "paper_kelly_simulation_exposure": round(paper_kelly_exposure, 6),
+        "paper_kelly_simulation_path": str(paper_kelly_text_path),
+        "paper_kelly_simulation_csv_path": str(paper_kelly_csv_path),
         "market_shadow_history_path": str(market_shadow_history_path),
         "market_readiness_summary_path": str(market_readiness_summary_path),
         "market_shadow_rows": market_shadow_rows,
@@ -916,6 +970,12 @@ def write_daily_summary_outputs(
         runtime_root=runtime_root,
         history_root=history_root,
     )
+    paper_text_path, paper_csv_path, paper_df = write_paper_kelly_simulation(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        combo_under_watchlist=combo_under_df,
+        high_caution_over_watchlist=watchlist_df,
+    )
     metadata["high_caution_over_watchlist_path"] = str(watchlist_path)
     metadata["high_caution_over_watchlist_count"] = int(len(watchlist_df))
     metadata["combo_under_watchlist_path"] = str(combo_under_path)
@@ -923,6 +983,15 @@ def write_daily_summary_outputs(
     metadata["promotion_readiness_report_path"] = str(promotion_text_path)
     metadata["promotion_readiness_report_csv_path"] = str(promotion_csv_path)
     metadata["promotion_readiness_report_count"] = int(len(promotion_df))
+    metadata["paper_kelly_simulation_path"] = str(paper_text_path)
+    metadata["paper_kelly_simulation_csv_path"] = str(paper_csv_path)
+    metadata["paper_kelly_simulation_count"] = int(len(paper_df))
+    metadata["paper_kelly_simulation_exposure"] = round(
+        float(pd.to_numeric(paper_df.get("simulated_stake", pd.Series(dtype=float)), errors="coerce").fillna(0).sum())
+        if not paper_df.empty
+        else 0.0,
+        6,
+    )
     if shadow_result:
         metadata["market_shadow_rows"] = int(shadow_result["current_date_rows"])
         metadata["market_shadow_non_points_rows"] = int(shadow_result["current_date_non_points_rows"])
@@ -954,6 +1023,7 @@ def main(argv: list[str] | None = None) -> int:
         f"high_caution_over_watchlist={metadata['high_caution_over_watchlist_count']} "
         f"combo_under_watchlist={metadata['combo_under_watchlist_count']} "
         f"promotion_readiness={metadata['promotion_readiness_report_count']} "
+        f"paper_kelly_simulation={metadata['paper_kelly_simulation_count']} "
         f"market_shadow_rows={metadata['market_shadow_rows']} "
         f"market_shadow_non_points={metadata['market_shadow_non_points_rows']} "
         f"exposure={metadata['total_exposure']:.2f} "

@@ -1,0 +1,312 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+
+REPORT_FILE_PREFIX = "paper_kelly_simulation"
+ROW_STAKE_CAP = 0.0025
+PLAYER_EXPOSURE_CAP = 0.005
+GAME_EXPOSURE_CAP = 0.01
+SIMULATION_WARNING = "Simulation only; no real stake and no real Kelly eligibility."
+
+REPORT_COLUMNS: tuple[str, ...] = (
+    "prediction_date",
+    "paper_bucket",
+    "player_name",
+    "team_abbr",
+    "opponent",
+    "market_type",
+    "selection",
+    "line",
+    "odds",
+    "edge",
+    "confidence",
+    "quality_score",
+    "context_pick_alignment",
+    "context_caution_level",
+    "simulated_fraction",
+    "simulated_stake",
+    "simulated_ev",
+    "real_kelly_eligible",
+    "simulation_only",
+    "reason_not_real_kelly",
+)
+
+
+def _safe_text(value: Any, default: str = "") -> str:
+    if value is None:
+        return default
+    try:
+        if pd.isna(value):
+            return default
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "none", "null"}:
+        return default
+    return text
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    text = _safe_text(value)
+    if not text:
+        return default
+    try:
+        number = float(text)
+    except (TypeError, ValueError):
+        return default
+    return number if number == number else default
+
+
+def _read_csv(path: Path) -> pd.DataFrame:
+    if not path.exists() or path.stat().st_size == 0:
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path, low_memory=False)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame()
+
+
+def _prepared_source_frame(
+    df: pd.DataFrame,
+    *,
+    paper_bucket: str,
+    reason_not_real_kelly: str,
+) -> pd.DataFrame:
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame(columns=REPORT_COLUMNS)
+
+    prepared = df.copy()
+    fallback_columns = {
+        "team_abbr": "team",
+        "line": "sportsbook_line",
+        "odds": "american_odds",
+    }
+    for column, fallback in fallback_columns.items():
+        if column not in prepared.columns and fallback in prepared.columns:
+            prepared[column] = prepared[fallback]
+    for column in REPORT_COLUMNS:
+        if column not in prepared.columns:
+            prepared[column] = ""
+    prepared["paper_bucket"] = paper_bucket
+    prepared["reason_not_real_kelly"] = reason_not_real_kelly
+    return prepared[list(REPORT_COLUMNS)].copy()
+
+
+def _game_key(row: pd.Series) -> str:
+    if _safe_text(row.get("game_id")):
+        return f"game:{_safe_text(row.get('game_id')).lower()}"
+    team = _safe_text(row.get("team_abbr")).upper()
+    opponent = _safe_text(row.get("opponent")).upper()
+    return "|".join(sorted(value for value in (team, opponent) if value)) or "unknown_game"
+
+
+def _paper_fraction(row: pd.Series) -> float:
+    edge = abs(_safe_float(row.get("edge")))
+    confidence = _safe_float(row.get("confidence"), default=0.0)
+    if confidence > 1.0:
+        confidence = confidence / 100.0
+    if edge <= 0 or confidence <= 0:
+        return 0.0
+    return min(ROW_STAKE_CAP, edge * confidence / 1000.0)
+
+
+def _paper_ev(row: pd.Series, stake: float) -> float:
+    if stake <= 0:
+        return 0.0
+    edge = abs(_safe_float(row.get("edge")))
+    line = max(abs(_safe_float(row.get("line"), default=1.0)), 1.0)
+    confidence = _safe_float(row.get("confidence"), default=0.0)
+    if confidence > 1.0:
+        confidence = confidence / 100.0
+    edge_ratio = min(edge / line, 0.25)
+    return stake * edge_ratio * max(confidence, 0.0)
+
+
+def _apply_paper_caps(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(columns=REPORT_COLUMNS)
+
+    working = df.copy()
+    working["_requested_fraction"] = working.apply(_paper_fraction, axis=1)
+    working["_pre_cap_ev"] = working.apply(
+        lambda row: _paper_ev(row, float(row["_requested_fraction"])),
+        axis=1,
+    )
+    working = working.sort_values(
+        ["_pre_cap_ev", "_requested_fraction"],
+        ascending=[False, False],
+        kind="mergesort",
+    )
+    player_exposure: dict[str, float] = {}
+    game_exposure: dict[str, float] = {}
+    simulated_fractions: list[float] = []
+    simulated_evs: list[float] = []
+    for _, row in working.iterrows():
+        player_key = _safe_text(row.get("player_name"), default="unknown_player").lower()
+        game_key = _game_key(row)
+        requested = float(row["_requested_fraction"])
+        player_remaining = max(PLAYER_EXPOSURE_CAP - player_exposure.get(player_key, 0.0), 0.0)
+        game_remaining = max(GAME_EXPOSURE_CAP - game_exposure.get(game_key, 0.0), 0.0)
+        stake = min(requested, player_remaining, game_remaining)
+        stake = max(stake, 0.0)
+        player_exposure[player_key] = player_exposure.get(player_key, 0.0) + stake
+        game_exposure[game_key] = game_exposure.get(game_key, 0.0) + stake
+        simulated_fractions.append(round(stake, 6))
+        simulated_evs.append(round(_paper_ev(row, stake), 6))
+
+    working["simulated_fraction"] = simulated_fractions
+    working["simulated_stake"] = simulated_fractions
+    working["simulated_ev"] = simulated_evs
+    working["real_kelly_eligible"] = False
+    working["simulation_only"] = True
+    working = working.sort_values(
+        ["simulated_ev", "simulated_fraction"],
+        ascending=[False, False],
+        kind="mergesort",
+    )
+    return working[list(REPORT_COLUMNS)].reset_index(drop=True)
+
+
+def build_paper_kelly_simulation(
+    *,
+    prediction_date: str,
+    combo_under_watchlist: pd.DataFrame | None = None,
+    high_caution_over_watchlist: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    frames = [
+        _prepared_source_frame(
+            combo_under_watchlist if isinstance(combo_under_watchlist, pd.DataFrame) else pd.DataFrame(),
+            paper_bucket="combo_under_watchlist",
+            reason_not_real_kelly="combo_market_not_real_kelly_eligible",
+        ),
+        _prepared_source_frame(
+            high_caution_over_watchlist if isinstance(high_caution_over_watchlist, pd.DataFrame) else pd.DataFrame(),
+            paper_bucket="high_caution_over_watchlist",
+            reason_not_real_kelly="high_caution_over_context_blocked",
+        ),
+    ]
+    non_empty_frames = [frame for frame in frames if not frame.empty]
+    if not non_empty_frames:
+        return pd.DataFrame(columns=REPORT_COLUMNS)
+    combined = pd.concat(non_empty_frames, ignore_index=True)
+    combined["prediction_date"] = combined["prediction_date"].replace("", str(prediction_date))
+    return _apply_paper_caps(combined)
+
+
+def report_paths_for_date(
+    *,
+    prediction_date: str,
+    runtime_root: str | Path = "outputs/runtime",
+) -> tuple[Path, Path]:
+    operator_dir = Path(runtime_root) / "operator"
+    stem = f"{REPORT_FILE_PREFIX}_{prediction_date}"
+    return operator_dir / f"{stem}.txt", operator_dir / f"{stem}.csv"
+
+
+def _bucket_exposure_lines(report_df: pd.DataFrame) -> list[str]:
+    if report_df.empty:
+        return ["- none"]
+    grouped = report_df.groupby("paper_bucket", sort=True)["simulated_stake"].sum()
+    return [f"- {bucket}: {value:.6f}" for bucket, value in grouped.items()]
+
+
+def _row_line(row: pd.Series) -> str:
+    return (
+        f"{_safe_text(row.get('player_name'), default='Unknown')}: "
+        f"{_safe_text(row.get('market_type'), default='unknown')} "
+        f"{_safe_text(row.get('selection'), default='unknown')} "
+        f"{_safe_text(row.get('line'), default='n/a')} "
+        f"bucket={_safe_text(row.get('paper_bucket'), default='unknown')} "
+        f"stake={_safe_float(row.get('simulated_stake')):.6f} "
+        f"ev={_safe_float(row.get('simulated_ev')):.6f}"
+    )
+
+
+def render_paper_kelly_text(
+    *,
+    prediction_date: str,
+    report_df: pd.DataFrame,
+    csv_path: Path,
+) -> str:
+    total_exposure = float(pd.to_numeric(report_df.get("simulated_stake", pd.Series(dtype=float)), errors="coerce").fillna(0).sum())
+    lines = [
+        f"Paper Kelly Simulation - {prediction_date}",
+        "=" * 72,
+        SIMULATION_WARNING,
+        "Stake/exposure values are bankroll fractions, not dollars.",
+        f"CSV artifact: {csv_path}",
+        "",
+        "Summary",
+        "-" * 72,
+        f"- total paper rows: {int(len(report_df))}",
+        f"- paper exposure: {total_exposure:.6f}",
+        "- exposure by bucket:",
+        *_bucket_exposure_lines(report_df),
+        "",
+        "Top 10 Simulated EV Rows",
+        "-" * 72,
+    ]
+    if report_df.empty:
+        lines.append("- None")
+    else:
+        top = report_df.sort_values("simulated_ev", ascending=False, kind="mergesort").head(10)
+        for _, row in top.iterrows():
+            lines.append(f"- {_row_line(row)}")
+    return "\n".join(lines) + "\n"
+
+
+def write_paper_kelly_simulation(
+    *,
+    prediction_date: str,
+    runtime_root: str | Path = "outputs/runtime",
+    combo_under_watchlist: pd.DataFrame | None = None,
+    high_caution_over_watchlist: pd.DataFrame | None = None,
+) -> tuple[Path, Path, pd.DataFrame]:
+    runtime_root = Path(runtime_root)
+    text_path, csv_path = report_paths_for_date(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+    )
+    operator_dir = runtime_root / "operator"
+    combo_df = (
+        combo_under_watchlist
+        if isinstance(combo_under_watchlist, pd.DataFrame)
+        else _read_csv(operator_dir / f"combo_under_watchlist_{prediction_date}.csv")
+    )
+    high_df = (
+        high_caution_over_watchlist
+        if isinstance(high_caution_over_watchlist, pd.DataFrame)
+        else _read_csv(operator_dir / f"high_caution_over_watchlist_{prediction_date}.csv")
+    )
+    report_df = build_paper_kelly_simulation(
+        prediction_date=prediction_date,
+        combo_under_watchlist=combo_df,
+        high_caution_over_watchlist=high_df,
+    )
+    text_path.parent.mkdir(parents=True, exist_ok=True)
+    report_df.to_csv(csv_path, index=False)
+    text_path.write_text(
+        render_paper_kelly_text(
+            prediction_date=prediction_date,
+            report_df=report_df,
+            csv_path=csv_path,
+        ),
+        encoding="utf-8",
+    )
+    return text_path, csv_path, report_df
+
+
+__all__ = [
+    "GAME_EXPOSURE_CAP",
+    "PLAYER_EXPOSURE_CAP",
+    "REPORT_COLUMNS",
+    "ROW_STAKE_CAP",
+    "SIMULATION_WARNING",
+    "build_paper_kelly_simulation",
+    "render_paper_kelly_text",
+    "report_paths_for_date",
+    "write_paper_kelly_simulation",
+]
