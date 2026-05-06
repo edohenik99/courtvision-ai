@@ -759,6 +759,7 @@ def build_daily_summary(
                 f"{_safe_text(row.get('selection')) or 'unknown'} "
                 f"{_safe_text(row.get('line')) or 'n/a'} "
                 f"bucket={_safe_text(row.get('paper_bucket')) or 'unknown'} "
+                f"dir_edge={_format_num(row.get('directional_edge'), 3)} "
                 f"stake={_format_num(row.get('simulated_stake'), 6)} "
                 f"ev={_format_num(row.get('simulated_ev'), 6)}"
             )

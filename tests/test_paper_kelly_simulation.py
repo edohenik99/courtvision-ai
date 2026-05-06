@@ -21,17 +21,22 @@ def _write_csv(path: Path, rows: list[dict], columns: list[str] | None = None) -
     pd.DataFrame(rows, columns=columns).to_csv(path, index=False)
 
 
-def _combo_row(player_name: str = "Combo Under") -> dict:
+def _combo_row(
+    player_name: str = "Combo Under",
+    *,
+    edge: float = -2.5,
+    selection: str = "under",
+) -> dict:
     return {
         "prediction_date": "2026-05-06",
         "player_name": player_name,
         "team_abbr": "BOS",
         "opponent": "PHI",
         "market_type": "player_points_rebounds_assists",
-        "selection": "under",
+        "selection": selection,
         "line": 36.5,
         "odds": -110,
-        "edge": -2.5,
+        "edge": edge,
         "confidence": 0.75,
         "quality_score": 82.0,
         "context_pick_alignment": "aligned",
@@ -39,7 +44,7 @@ def _combo_row(player_name: str = "Combo Under") -> dict:
     }
 
 
-def _high_caution_row(player_name: str = "High Caution Over") -> dict:
+def _high_caution_row(player_name: str = "High Caution Over", *, edge: float = 4.5) -> dict:
     return {
         "prediction_date": "2026-05-06",
         "player_name": player_name,
@@ -49,7 +54,7 @@ def _high_caution_row(player_name: str = "High Caution Over") -> dict:
         "selection": "over",
         "line": 27.5,
         "odds": -115,
-        "edge": 4.5,
+        "edge": edge,
         "confidence": 0.80,
         "quality_score": 88.0,
         "context_pick_alignment": "conflicted",
@@ -92,6 +97,43 @@ def test_paper_kelly_file_generated(tmp_path: Path) -> None:
     assert "total paper rows: 2" in text_path.read_text(encoding="utf-8")
 
 
+def test_over_with_positive_edge_gets_paper_stake() -> None:
+    report = build_paper_kelly_simulation(
+        prediction_date="2026-05-06",
+        high_caution_over_watchlist=pd.DataFrame([_high_caution_row(edge=3.0)]),
+    )
+
+    row = report.iloc[0]
+    assert row["edge"] == 3.0
+    assert row["directional_edge"] == 3.0
+    assert row["simulated_stake"] > 0
+
+
+def test_under_with_negative_edge_gets_paper_stake() -> None:
+    report = build_paper_kelly_simulation(
+        prediction_date="2026-05-06",
+        combo_under_watchlist=pd.DataFrame([_combo_row(edge=-2.0)]),
+    )
+
+    row = report.iloc[0]
+    assert row["edge"] == -2.0
+    assert row["directional_edge"] == 2.0
+    assert row["simulated_stake"] > 0
+
+
+def test_under_with_positive_edge_gets_no_paper_stake() -> None:
+    report = build_paper_kelly_simulation(
+        prediction_date="2026-05-06",
+        combo_under_watchlist=pd.DataFrame([_combo_row(edge=2.0)]),
+    )
+
+    row = report.iloc[0]
+    assert row["edge"] == 2.0
+    assert row["directional_edge"] == -2.0
+    assert row["simulated_stake"] == 0.0
+    assert row["simulated_ev"] == 0.0
+
+
 def test_paper_kelly_caps_and_real_kelly_flags() -> None:
     rows = [_combo_row("Same Player"), _combo_row("Same Player"), _high_caution_row("Other Player")]
 
@@ -109,6 +151,27 @@ def test_paper_kelly_caps_and_real_kelly_flags() -> None:
     assert float(by_game.max()) <= GAME_EXPOSURE_CAP
     assert set(report["real_kelly_eligible"].astype(str).str.lower()) == {"false"}
     assert set(report["simulation_only"].astype(str).str.lower()) == {"true"}
+
+
+def test_combo_under_watchlist_contributes_positive_exposure_when_favorable() -> None:
+    combo = _combo_row("Favorable Combo", edge=-2.5)
+    combo["team_abbr"] = "NYK"
+    combo["opponent"] = "PHI"
+    high_rows = [_high_caution_row(f"High Caution {index}", edge=6.0) for index in range(8)]
+
+    report = build_paper_kelly_simulation(
+        prediction_date="2026-05-06",
+        combo_under_watchlist=pd.DataFrame([combo]),
+        high_caution_over_watchlist=pd.DataFrame(high_rows),
+    )
+
+    combo_exposure = report.loc[
+        report["paper_bucket"] == "combo_under_watchlist",
+        "simulated_stake",
+    ].sum()
+    total_exposure = report["simulated_stake"].sum()
+    assert combo_exposure > 0
+    assert total_exposure <= GAME_EXPOSURE_CAP
 
 
 def test_real_kelly_file_unchanged_by_paper_simulation(tmp_path: Path) -> None:

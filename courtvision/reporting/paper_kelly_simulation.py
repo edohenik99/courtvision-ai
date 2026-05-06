@@ -10,6 +10,10 @@ ROW_STAKE_CAP = 0.0025
 PLAYER_EXPOSURE_CAP = 0.005
 GAME_EXPOSURE_CAP = 0.01
 SIMULATION_WARNING = "Simulation only; no real stake and no real Kelly eligibility."
+PAPER_BUCKET_PRIORITY = {
+    "combo_under_watchlist": 0,
+    "high_caution_over_watchlist": 1,
+}
 
 REPORT_COLUMNS: tuple[str, ...] = (
     "prediction_date",
@@ -22,6 +26,7 @@ REPORT_COLUMNS: tuple[str, ...] = (
     "line",
     "odds",
     "edge",
+    "directional_edge",
     "confidence",
     "quality_score",
     "context_pick_alignment",
@@ -103,8 +108,23 @@ def _game_key(row: pd.Series) -> str:
     return "|".join(sorted(value for value in (team, opponent) if value)) or "unknown_game"
 
 
+def _directional_edge(row: pd.Series) -> float:
+    edge = _safe_float(row.get("edge"))
+    selection = _safe_text(row.get("selection")).lower()
+    if selection == "over":
+        return edge
+    if selection == "under":
+        return -edge
+    return abs(edge)
+
+
+def _bucket_priority(row: pd.Series) -> int:
+    bucket = _safe_text(row.get("paper_bucket"))
+    return PAPER_BUCKET_PRIORITY.get(bucket, 99)
+
+
 def _paper_fraction(row: pd.Series) -> float:
-    edge = abs(_safe_float(row.get("edge")))
+    edge = _directional_edge(row)
     confidence = _safe_float(row.get("confidence"), default=0.0)
     if confidence > 1.0:
         confidence = confidence / 100.0
@@ -116,7 +136,9 @@ def _paper_fraction(row: pd.Series) -> float:
 def _paper_ev(row: pd.Series, stake: float) -> float:
     if stake <= 0:
         return 0.0
-    edge = abs(_safe_float(row.get("edge")))
+    edge = _directional_edge(row)
+    if edge <= 0:
+        return 0.0
     line = max(abs(_safe_float(row.get("line"), default=1.0)), 1.0)
     confidence = _safe_float(row.get("confidence"), default=0.0)
     if confidence > 1.0:
@@ -130,14 +152,16 @@ def _apply_paper_caps(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=REPORT_COLUMNS)
 
     working = df.copy()
+    working["directional_edge"] = working.apply(_directional_edge, axis=1)
+    working["_bucket_priority"] = working.apply(_bucket_priority, axis=1)
     working["_requested_fraction"] = working.apply(_paper_fraction, axis=1)
     working["_pre_cap_ev"] = working.apply(
         lambda row: _paper_ev(row, float(row["_requested_fraction"])),
         axis=1,
     )
     working = working.sort_values(
-        ["_pre_cap_ev", "_requested_fraction"],
-        ascending=[False, False],
+        ["_bucket_priority", "_pre_cap_ev", "_requested_fraction"],
+        ascending=[True, False, False],
         kind="mergesort",
     )
     player_exposure: dict[str, float] = {}
@@ -220,6 +244,7 @@ def _row_line(row: pd.Series) -> str:
         f"{_safe_text(row.get('selection'), default='unknown')} "
         f"{_safe_text(row.get('line'), default='n/a')} "
         f"bucket={_safe_text(row.get('paper_bucket'), default='unknown')} "
+        f"dir_edge={_safe_float(row.get('directional_edge')):.3f} "
         f"stake={_safe_float(row.get('simulated_stake')):.6f} "
         f"ev={_safe_float(row.get('simulated_ev')):.6f}"
     )
