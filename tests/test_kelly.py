@@ -283,6 +283,25 @@ class TestConservativeKellyLogic:
         assert stake.skip_reason == ""
         assert stake.stake_amount > 0
 
+    def test_non_player_points_market_remains_non_kelly_eligible(self):
+        fieldnames = ["player_name", "market_type", "selection", "odds", "confidence", "edge_pct", "side_edge_pct", "context_caution_level"]
+        edge_col = _validate_columns(fieldnames)
+        row = _kelly_row(
+            player_name="Shadow Rebounds",
+            selection="over",
+            context_caution_level="low",
+            edge="0.50",
+            confidence="1.0",
+        )
+        row["market_type"] = "player_rebounds"
+
+        stake = _build_stake_row(row, edge_col, bankroll=1000.0)
+
+        assert stake.eligible is False
+        assert stake.skip_reason == "kelly_points_only_market_lock"
+        assert stake.stake_amount == 0
+        assert stake.stake_fraction == 0
+
     def test_existing_exposure_cap_still_works(self, tmp_path):
         input_path = tmp_path / "elite_board.csv"
         output_path = tmp_path / "kelly_stakes.csv"

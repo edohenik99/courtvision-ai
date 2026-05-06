@@ -9,12 +9,17 @@ import pandas as pd
 
 from scripts.dashboard import load_dashboard_data
 from scripts.history_tracking import (
+    MARKET_READINESS_COLUMNS,
+    MARKET_SHADOW_HISTORY_COLUMNS,
     grade_completed_picks,
+    migrate_market_shadow_history_schema,
     migrate_pick_history_schema,
+    persist_market_shadow_history,
     persist_daily_picks,
     update_performance_summaries,
     PICK_HISTORY_COLUMNS,
 )
+from scripts.write_daily_summary import write_daily_summary_outputs
 
 
 def _write_elite_board(path: Path, rows: list[dict]) -> None:
@@ -80,6 +85,43 @@ def _history_row(
         "context_caution_level": context_caution_level,
         "context_pick_alignment": context_pick_alignment,
         "line_source": line_source,
+    }
+
+
+def _shadow_row(
+    player_name: str,
+    *,
+    prediction_date: str = "2026-05-06",
+    market_type: str = "player_points",
+    selection: str = "over",
+    line: float = 10.5,
+    edge: float = 2.0,
+    confidence: float = 0.75,
+    result_status: str = "pending",
+    kelly_projected_skip_reason: str = "",
+) -> dict:
+    return {
+        "prediction_date": prediction_date,
+        "player_name": player_name,
+        "player_id": f"id-{player_name}",
+        "team_abbr": "BOS",
+        "opponent": "NYK",
+        "market_type": market_type,
+        "selection": selection,
+        "line": line,
+        "model_projection": line + edge,
+        "edge": edge,
+        "confidence": confidence,
+        "quality_score": 80.0,
+        "selection_score": 70.0,
+        "odds": -110,
+        "line_source": "fixture_live_market",
+        "context_pick_alignment": "aligned",
+        "context_caution_level": "low",
+        "context_conflict_cause": "",
+        "kelly_projected_skip_reason": kelly_projected_skip_reason,
+        "final_elite_rejection_reason": "",
+        "result_status": result_status,
     }
 
 
@@ -588,6 +630,177 @@ def test_cross_slate_sample_status_and_graded_hit_rate(tmp_path: Path) -> None:
     assert under["sample_status"] == "insufficient_sample"
     assert not _bool_value(under["calibration_eligible"])
     assert "insufficient_sample" in under["calibration_exclusion_reason"]
+
+
+def test_market_shadow_history_is_created_from_full_market(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "outputs" / "runtime"
+    history_root = tmp_path / "data" / "history"
+    date = "2026-05-06"
+    _write_elite_board(
+        runtime_root / "operator" / f"full_market_board_{date}.csv",
+        [
+            _shadow_row("Points Player", prediction_date=date, market_type="player_points"),
+            _shadow_row(
+                "Rebounds Player",
+                prediction_date=date,
+                market_type="player_rebounds",
+                kelly_projected_skip_reason="kelly_points_only_market_lock",
+            ),
+        ],
+    )
+
+    result = persist_market_shadow_history(
+        prediction_date=date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+
+    assert result["current_date_rows"] == 2
+    assert result["current_date_non_points_rows"] == 1
+    shadow_path = history_root / "market_shadow_history.csv"
+    readiness_path = history_root / "market_readiness_summary.csv"
+    assert shadow_path.exists()
+    assert readiness_path.exists()
+    shadow = pd.read_csv(shadow_path, keep_default_na=False)
+    assert list(shadow.columns) == list(MARKET_SHADOW_HISTORY_COLUMNS)
+    assert set(shadow["market_type"]) == {"player_points", "player_rebounds"}
+    non_points = shadow[shadow["market_type"] == "player_rebounds"].iloc[0]
+    assert non_points["kelly_projected_skip_reason"] == "kelly_points_only_market_lock"
+    assert str(non_points["calibration_eligible"]).lower() == "false"
+
+
+def test_market_shadow_history_migrates_existing_rows_safely(tmp_path: Path) -> None:
+    history_root = tmp_path / "data" / "history"
+    history_root.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        [
+            {
+                "prediction_date": "2026-05-01",
+                "player_name": "Legacy Shadow",
+                "market_type": "player_assists",
+                "selection": "over",
+                "line": 5.5,
+                "extra_legacy_column": "keep-me",
+            }
+        ]
+    ).to_csv(history_root / "market_shadow_history.csv", index=False)
+
+    result = migrate_market_shadow_history_schema(history_root=history_root)
+
+    assert result["status"] == "ok"
+    assert "player_id" in result["added_columns"]
+    migrated = pd.read_csv(history_root / "market_shadow_history.csv", keep_default_na=False)
+    assert len(migrated) == 1
+    assert migrated.iloc[0]["player_name"] == "Legacy Shadow"
+    assert migrated.iloc[0]["extra_legacy_column"] == "keep-me"
+    for column in MARKET_SHADOW_HISTORY_COLUMNS:
+        assert column in migrated.columns
+    result2 = migrate_market_shadow_history_schema(history_root=history_root)
+    assert result2["added_columns"] == []
+    assert len(pd.read_csv(history_root / "market_shadow_history.csv")) == 1
+
+
+def test_market_readiness_summary_is_created_with_sample_status(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "outputs" / "runtime"
+    history_root = tmp_path / "data" / "history"
+    date = "2026-05-06"
+    rows = [
+        _shadow_row(f"Hit {idx}", prediction_date=date, market_type="player_rebounds", result_status="hit", line=idx + 1)
+        for idx in range(2)
+    ]
+    rows.append(_shadow_row("Miss", prediction_date=date, market_type="player_rebounds", result_status="miss", line=10.5))
+    rows.append(_shadow_row("Push", prediction_date=date, market_type="player_rebounds", result_status="push", line=11.5))
+    rows.append(_shadow_row("Pending", prediction_date=date, market_type="player_rebounds", result_status="pending", line=12.5))
+    _write_elite_board(runtime_root / "operator" / f"full_market_board_{date}.csv", rows)
+
+    persist_market_shadow_history(
+        prediction_date=date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+
+    readiness = pd.read_csv(history_root / "market_readiness_summary.csv", keep_default_na=False)
+    assert list(readiness.columns) == list(MARKET_READINESS_COLUMNS)
+    assert len(readiness) == 1
+    row = readiness.iloc[0]
+    assert row["market_type"] == "player_rebounds"
+    assert int(row["total"]) == 5
+    assert int(row["graded_total"]) == 3
+    assert int(row["hits"]) == 2
+    assert int(row["misses"]) == 1
+    assert int(row["pushes"]) == 1
+    assert int(row["pending"]) == 1
+    assert float(row["hit_rate"]) == 0.6667
+    assert row["sample_status"] == "insufficient_sample"
+    assert str(row["calibration_eligible"]).lower() == "false"
+
+
+def test_market_shadow_history_does_not_modify_elite_or_kelly_outputs(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "outputs" / "runtime"
+    history_root = tmp_path / "data" / "history"
+    date = "2026-05-06"
+    operator = runtime_root / "operator"
+    _write_elite_board(operator / f"full_market_board_{date}.csv", [_shadow_row("Shadow Only", prediction_date=date)])
+    _write_elite_board(operator / f"elite_board_{date}.csv", [_shadow_row("Elite Sentinel", prediction_date=date)])
+    _write_elite_board(
+        operator / f"kelly_stakes_{date}.csv",
+        [{"player_name": "Kelly Sentinel", "market_type": "player_points", "eligible": True, "stake_amount": 10.0}],
+    )
+    elite_path = operator / f"elite_board_{date}.csv"
+    kelly_path = operator / f"kelly_stakes_{date}.csv"
+    elite_before = elite_path.read_bytes()
+    kelly_before = kelly_path.read_bytes()
+
+    persist_market_shadow_history(
+        prediction_date=date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+
+    assert elite_path.read_bytes() == elite_before
+    assert kelly_path.read_bytes() == kelly_before
+
+
+def test_daily_summary_includes_market_expansion_shadow_tracking(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "outputs" / "runtime"
+    history_root = tmp_path / "data" / "history"
+    date = "2026-05-06"
+    operator = runtime_root / "operator"
+    diagnostics = runtime_root / "diagnostics"
+    _write_elite_board(operator / f"elite_board_{date}.csv", [_shadow_row("Elite Points", prediction_date=date)])
+    _write_elite_board(
+        operator / f"kelly_stakes_{date}.csv",
+        [{"player_name": "Elite Points", "market_type": "player_points", "eligible": True, "stake_amount": 8.0, "expected_value": 1.0}],
+    )
+    _write_elite_board(
+        operator / f"full_market_board_{date}.csv",
+        [
+            _shadow_row("Elite Points", prediction_date=date, market_type="player_points"),
+            _shadow_row("Assist Shadow", prediction_date=date, market_type="player_assists"),
+            _shadow_row("Rebound Shadow", prediction_date=date, market_type="player_rebounds"),
+        ],
+    )
+    diagnostics.mkdir(parents=True, exist_ok=True)
+    (diagnostics / f"market_shadow_grading_{date}.json").write_text(
+        json.dumps({"kelly_decision_performance": {"by_kelly_eligible": {"true": {}, "false": {}}}}),
+        encoding="utf-8",
+    )
+
+    output_path, metadata = write_daily_summary_outputs(
+        prediction_date=date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+
+    text = output_path.read_text(encoding="utf-8")
+    assert "Market Expansion Shadow Tracking" in text
+    assert "- total shadow rows: 3" in text
+    assert "- non-points rows: 2" in text
+    assert "Observation only; not Kelly eligible." in text
+    assert metadata["market_shadow_rows"] == 3
+    assert metadata["market_shadow_non_points_rows"] == 2
+    assert (history_root / "market_shadow_history.csv").exists()
+    assert (history_root / "market_readiness_summary.csv").exists()
 
 
 def test_grading_empty_result_warning_is_emitted(tmp_path: Path, capsys) -> None:

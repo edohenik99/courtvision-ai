@@ -37,6 +37,56 @@ PICK_HISTORY_COLUMNS = [
     "line_source",
 ]
 
+MARKET_SHADOW_HISTORY_COLUMNS = [
+    "prediction_date",
+    "player_name",
+    "player_id",
+    "team_abbr",
+    "opponent",
+    "market_type",
+    "selection",
+    "line",
+    "model_projection",
+    "edge",
+    "confidence",
+    "quality_score",
+    "selection_score",
+    "odds",
+    "line_source",
+    "context_pick_alignment",
+    "context_caution_level",
+    "context_conflict_cause",
+    "kelly_projected_skip_reason",
+    "final_elite_rejection_reason",
+    "result_status",
+    "actual_value",
+    "hit",
+    "miss",
+    "push",
+    "shadow_roi",
+    "calibration_eligible",
+    "calibration_exclusion_reason",
+]
+
+MARKET_READINESS_COLUMNS = [
+    "market_type",
+    "selection",
+    "edge_bucket",
+    "confidence_bucket",
+    "context_pick_alignment",
+    "context_caution_level",
+    "total",
+    "graded_total",
+    "hits",
+    "misses",
+    "pushes",
+    "pending",
+    "hit_rate",
+    "sample_status",
+    "calibration_eligible",
+    "calibration_exclusion_reason",
+]
+
 CONTEXT_CROSS_SLATE_COLUMNS = [
     "dimension",
     "group_value",
@@ -60,6 +110,7 @@ LEGACY_METADATA_DIMENSIONS = {
     "context_pick_alignment",
 }
 BLANK_GROUP_VALUE = "(blank)"
+PLAYER_POINTS_MARKET = "player_points"
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -114,6 +165,14 @@ def _sample_status(graded_total: int) -> str:
     return "usable_sample"
 
 
+def _market_readiness_sample_status(graded_total: int) -> str:
+    if graded_total <= 0:
+        return "no_graded_results"
+    if graded_total < 30:
+        return "insufficient_sample"
+    return "usable_sample"
+
+
 def _context_group_value(series: pd.Series) -> pd.Series:
     group_col = series.fillna("").astype(str).str.strip()
     group_col = group_col.replace({"nan": "", "none": "", "None": ""})
@@ -147,6 +206,98 @@ def _load_csv(path: Path, columns: list[str] | None = None) -> pd.DataFrame:
 def _write_csv(path: Path, df: pd.DataFrame) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False)
+
+
+def _read_csv_preserve_schema(path: Path, columns: list[str]) -> pd.DataFrame:
+    if not path.exists() or path.stat().st_size == 0:
+        return pd.DataFrame(columns=columns)
+    try:
+        df = pd.read_csv(path, keep_default_na=False)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame(columns=columns)
+    for column in columns:
+        if column not in df.columns:
+            df[column] = ""
+    ordered_columns = columns + [column for column in df.columns if column not in columns]
+    return df[ordered_columns]
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"true", "1", "yes", "y"}
+
+
+def _american_to_shadow_roi(odds: Any, result_status: str) -> float | str:
+    status = _safe_text(result_status).lower()
+    if status == "miss":
+        return -1.0
+    if status == "push":
+        return 0.0
+    if status != "hit":
+        return ""
+    odds_value = _safe_float(odds, default=float("nan"))
+    if odds_value != odds_value:
+        return ""
+    if odds_value > 0:
+        return round(float(odds_value) / 100.0, 6)
+    if odds_value < 0:
+        return round(100.0 / abs(float(odds_value)), 6)
+    return ""
+
+
+def _shadow_result_flags(row: pd.Series | dict[str, Any]) -> tuple[str, bool, bool, bool]:
+    result_status = _safe_text(row.get("result_status"), default="pending").lower()
+    hit = _truthy(row.get("hit")) or result_status == "hit"
+    miss = _truthy(row.get("miss")) or result_status == "miss"
+    push = _truthy(row.get("push")) or result_status == "push"
+    if hit:
+        result_status = "hit"
+    elif miss:
+        result_status = "miss"
+    elif push:
+        result_status = "push"
+    elif result_status not in {"pending", "hit", "miss", "push"}:
+        result_status = "pending"
+    return result_status, hit, miss, push
+
+
+def _row_calibration_fields(result_status: str, selection: str) -> tuple[bool, str]:
+    reasons: list[str] = []
+    selection_norm = _safe_text(selection).lower()
+    status_norm = _safe_text(result_status).lower()
+    if selection_norm not in CALIBRATION_SELECTIONS:
+        reason_value = selection_norm.replace(" ", "_") or "blank"
+        reasons.append(f"unsupported_selection_{reason_value}")
+    if status_norm == "pending":
+        reasons.append("no_graded_results")
+    elif status_norm == "push":
+        reasons.append("push_excluded_from_hit_rate")
+    elif status_norm not in {"hit", "miss"}:
+        reasons.append("ungraded_result")
+    return not reasons, ";".join(reasons)
+
+
+def _market_shadow_key_columns(df: pd.DataFrame) -> list[str]:
+    candidates = [
+        "prediction_date",
+        "player_name",
+        "player_id",
+        "market_type",
+        "selection",
+        "line",
+    ]
+    return [column for column in candidates if column in df.columns]
+
+
+def _with_shadow_occurrence(df: pd.DataFrame, key_columns: list[str]) -> pd.DataFrame:
+    working = df.copy()
+    if not key_columns or working.empty:
+        working["_shadow_occurrence"] = 0
+        return working
+    key_frame = working[key_columns].fillna("").astype(str)
+    working["_shadow_occurrence"] = key_frame.groupby(key_columns, sort=False).cumcount()
+    return working
 
 
 def _provider_from_audit_summary(audit_summary_path: Path) -> str:
@@ -218,6 +369,247 @@ def migrate_pick_history_schema(
     if added:
         _write_csv(pick_history_path, df[PICK_HISTORY_COLUMNS])
     return {"status": "ok", "added_columns": added, "total_rows": len(df)}
+
+
+def migrate_market_shadow_history_schema(
+    history_root: str | Path = "data/history",
+) -> dict[str, Any]:
+    """Add missing market shadow columns without dropping existing rows or extras."""
+
+    history_root_path = Path(history_root)
+    shadow_history_path = history_root_path / "market_shadow_history.csv"
+    if not shadow_history_path.exists():
+        return {"status": "no_file", "added_columns": [], "total_rows": 0}
+
+    try:
+        existing_columns = list(pd.read_csv(shadow_history_path, nrows=0).columns)
+    except pd.errors.EmptyDataError:
+        existing_columns = []
+    df = _read_csv_preserve_schema(shadow_history_path, MARKET_SHADOW_HISTORY_COLUMNS)
+    added = [column for column in MARKET_SHADOW_HISTORY_COLUMNS if column not in existing_columns]
+    if added:
+        _write_csv(shadow_history_path, df)
+    return {"status": "ok", "added_columns": added, "total_rows": len(df)}
+
+
+def _normalize_market_shadow_rows(
+    full_market_df: pd.DataFrame,
+    *,
+    prediction_date: str,
+    result_status: str = "pending",
+) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    if not isinstance(full_market_df, pd.DataFrame) or full_market_df.empty:
+        return pd.DataFrame(columns=MARKET_SHADOW_HISTORY_COLUMNS)
+
+    for _, row in full_market_df.iterrows():
+        status = _safe_text(row.get("result_status"), default=result_status).lower()
+        if status not in {"pending", "hit", "miss", "push"}:
+            status = result_status
+        hit = status == "hit"
+        miss = status == "miss"
+        push = status == "push"
+        calibration_eligible, calibration_reason = _row_calibration_fields(
+            status,
+            _safe_text(row.get("selection")).lower(),
+        )
+        line_value = row.get("line") if "line" in row.index else row.get("sportsbook_line")
+        model_projection = (
+            row.get("model_projection")
+            if "model_projection" in row.index
+            else row.get("projection")
+        )
+        shadow_roi = row.get("shadow_roi") if "shadow_roi" in row.index else ""
+        if _safe_text(shadow_roi) == "":
+            shadow_roi = _american_to_shadow_roi(row.get("odds"), status)
+        rows.append(
+            {
+                "prediction_date": _safe_text(row.get("prediction_date"), default=prediction_date),
+                "player_name": _safe_text(row.get("player_name")) or _safe_text(row.get("entity_name")),
+                "player_id": _safe_text(row.get("player_id")),
+                "team_abbr": _safe_text(row.get("team_abbr")) or _safe_text(row.get("team")),
+                "opponent": _safe_text(row.get("opponent")),
+                "market_type": _safe_text(row.get("market_type")) or _safe_text(row.get("market")),
+                "selection": _safe_text(row.get("selection")).lower(),
+                "line": line_value,
+                "model_projection": model_projection,
+                "edge": row.get("edge"),
+                "confidence": row.get("confidence"),
+                "quality_score": row.get("quality_score"),
+                "selection_score": row.get("selection_score"),
+                "odds": row.get("odds"),
+                "line_source": _safe_text(row.get("line_source")),
+                "context_pick_alignment": _safe_text(row.get("context_pick_alignment")),
+                "context_caution_level": _safe_text(row.get("context_caution_level")),
+                "context_conflict_cause": _safe_text(row.get("context_conflict_cause")),
+                "kelly_projected_skip_reason": _safe_text(row.get("kelly_projected_skip_reason")),
+                "final_elite_rejection_reason": _safe_text(row.get("final_elite_rejection_reason")),
+                "result_status": status,
+                "actual_value": row.get("actual_value") if "actual_value" in row.index else "",
+                "hit": hit,
+                "miss": miss,
+                "push": push,
+                "shadow_roi": shadow_roi,
+                "calibration_eligible": calibration_eligible,
+                "calibration_exclusion_reason": calibration_reason,
+            }
+        )
+
+    return pd.DataFrame(rows, columns=MARKET_SHADOW_HISTORY_COLUMNS)
+
+
+def build_market_readiness_summary(history_df: pd.DataFrame) -> pd.DataFrame:
+    if not isinstance(history_df, pd.DataFrame) or history_df.empty:
+        return pd.DataFrame(columns=MARKET_READINESS_COLUMNS)
+
+    df = history_df.copy()
+    for column in MARKET_SHADOW_HISTORY_COLUMNS:
+        if column not in df.columns:
+            df[column] = ""
+    df["edge_bucket"] = pd.to_numeric(df["edge"], errors="coerce").apply(
+        lambda value: _abs_edge_bucket(value) if value == value else "unknown"
+    )
+    df["confidence_bucket"] = pd.to_numeric(df["confidence"], errors="coerce").apply(_confidence_bucket)
+
+    group_columns = [
+        "market_type",
+        "selection",
+        "edge_bucket",
+        "confidence_bucket",
+        "context_pick_alignment",
+        "context_caution_level",
+    ]
+    for column in group_columns:
+        df[column] = _context_group_value(df[column])
+
+    rows: list[dict[str, Any]] = []
+    for group_values, segment in df.groupby(group_columns, sort=True, dropna=False):
+        statuses = segment.apply(_shadow_result_flags, axis=1)
+        hits = int(sum(flag[1] for flag in statuses))
+        misses = int(sum(flag[2] for flag in statuses))
+        pushes = int(sum(flag[3] for flag in statuses))
+        pending = int(len(segment) - hits - misses - pushes)
+        graded_total = hits + misses
+        sample_status = _market_readiness_sample_status(graded_total)
+        calibration_eligible = sample_status == "usable_sample"
+        rows.append(
+            {
+                "market_type": group_values[0],
+                "selection": group_values[1],
+                "edge_bucket": group_values[2],
+                "confidence_bucket": group_values[3],
+                "context_pick_alignment": group_values[4],
+                "context_caution_level": group_values[5],
+                "total": int(len(segment)),
+                "graded_total": graded_total,
+                "hits": hits,
+                "misses": misses,
+                "pushes": pushes,
+                "pending": pending,
+                "hit_rate": round(float(hits / graded_total), 4) if graded_total else "",
+                "sample_status": sample_status,
+                "calibration_eligible": calibration_eligible,
+                "calibration_exclusion_reason": "" if calibration_eligible else sample_status,
+            }
+        )
+    return pd.DataFrame(rows, columns=MARKET_READINESS_COLUMNS)
+
+
+def update_market_readiness_summary(
+    history_root: str | Path = "data/history",
+) -> tuple[Path, pd.DataFrame]:
+    history_root_path = Path(history_root)
+    shadow_history_path = history_root_path / "market_shadow_history.csv"
+    readiness_path = history_root_path / "market_readiness_summary.csv"
+    history_df = _read_csv_preserve_schema(shadow_history_path, MARKET_SHADOW_HISTORY_COLUMNS)
+    readiness = build_market_readiness_summary(history_df)
+    _write_csv(readiness_path, readiness)
+    return readiness_path, readiness
+
+
+def persist_market_shadow_history(
+    prediction_date: str,
+    runtime_root: str | Path = "outputs/runtime",
+    history_root: str | Path = "data/history",
+    result_status: str = "pending",
+) -> dict[str, Any]:
+    runtime_root_path = Path(runtime_root)
+    history_root_path = Path(history_root)
+    full_market_path = runtime_root_path / "operator" / f"full_market_board_{prediction_date}.csv"
+    shadow_history_path = history_root_path / "market_shadow_history.csv"
+
+    if not full_market_path.exists():
+        raise FileNotFoundError(f"Missing full market board CSV: {full_market_path}")
+
+    try:
+        full_market_df = pd.read_csv(full_market_path, low_memory=False)
+    except pd.errors.EmptyDataError:
+        full_market_df = pd.DataFrame(columns=MARKET_SHADOW_HISTORY_COLUMNS)
+
+    incoming = _normalize_market_shadow_rows(
+        full_market_df,
+        prediction_date=prediction_date,
+        result_status=result_status,
+    )
+    existing = _read_csv_preserve_schema(shadow_history_path, MARKET_SHADOW_HISTORY_COLUMNS)
+    existing_count = int(len(existing))
+
+    key_frame = incoming if not incoming.empty else existing
+    key_columns = _market_shadow_key_columns(key_frame)
+    if key_columns:
+        existing_with_occurrence = _with_shadow_occurrence(existing, key_columns)
+        incoming_with_occurrence = _with_shadow_occurrence(incoming, key_columns)
+        if existing_with_occurrence.empty:
+            combined = incoming_with_occurrence.copy()
+        elif incoming_with_occurrence.empty:
+            combined = existing_with_occurrence.copy()
+        else:
+            combined = pd.concat([existing_with_occurrence, incoming_with_occurrence], ignore_index=True)
+        combined = combined.drop_duplicates(
+            subset=key_columns + ["_shadow_occurrence"],
+            keep="first",
+        ).drop(columns=["_shadow_occurrence"])
+    elif existing.empty:
+        combined = incoming.copy()
+    elif incoming.empty:
+        combined = existing.copy()
+    else:
+        combined = pd.concat([existing, incoming], ignore_index=True)
+    for column in MARKET_SHADOW_HISTORY_COLUMNS:
+        if column not in combined.columns:
+            combined[column] = ""
+    ordered_columns = MARKET_SHADOW_HISTORY_COLUMNS + [
+        column for column in combined.columns if column not in MARKET_SHADOW_HISTORY_COLUMNS
+    ]
+    combined = combined[ordered_columns].sort_values(
+        ["prediction_date", "market_type", "player_name", "selection", "line"],
+        kind="mergesort",
+    ).reset_index(drop=True)
+    _write_csv(shadow_history_path, combined)
+
+    readiness_path, readiness = update_market_readiness_summary(history_root=history_root_path)
+    current_date_rows = combined[combined["prediction_date"].astype(str) == str(prediction_date)].copy()
+    current_market_counts = (
+        current_date_rows["market_type"].fillna("unknown").astype(str).str.strip().replace("", "unknown").value_counts()
+        if not current_date_rows.empty and "market_type" in current_date_rows.columns
+        else pd.Series(dtype=int)
+    )
+    non_points_rows = (
+        int(current_date_rows["market_type"].astype(str).str.strip().str.lower().ne(PLAYER_POINTS_MARKET).sum())
+        if not current_date_rows.empty and "market_type" in current_date_rows.columns
+        else 0
+    )
+    return {
+        "market_shadow_history_path": shadow_history_path,
+        "market_readiness_summary_path": readiness_path,
+        "incoming_rows": int(len(incoming)),
+        "new_rows": max(int(len(combined)) - existing_count, 0),
+        "total_rows": int(len(combined)),
+        "current_date_rows": int(len(current_date_rows)),
+        "current_date_non_points_rows": non_points_rows,
+        "current_date_market_counts": {str(k): int(v) for k, v in current_market_counts.items()},
+        "readiness_rows": int(len(readiness)),
+    }
 
 
 def persist_daily_picks(

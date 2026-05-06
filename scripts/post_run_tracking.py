@@ -12,6 +12,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from scripts.history_tracking import (
     grade_completed_picks,
+    persist_market_shadow_history,
     persist_daily_picks,
     update_performance_summaries,
 )
@@ -73,6 +74,17 @@ def main() -> int:
     print(f"persisted_today_rows={persist_result['appended_rows']}")
     print(f"today_elite_count={persist_result['appended_rows']}")
 
+    shadow_result = persist_market_shadow_history(
+        prediction_date=args.prediction_date,
+        runtime_root=args.runtime_root,
+        history_root=args.history_root,
+        result_status=args.result_status,
+    )
+    print(f"market_shadow_rows_today={shadow_result['current_date_rows']}")
+    print(f"market_shadow_non_points_today={shadow_result['current_date_non_points_rows']}")
+    print(f"market_shadow_history_csv={shadow_result['market_shadow_history_path']}")
+    print(f"market_readiness_summary_csv={shadow_result['market_readiness_summary_path']}")
+
     if args.grade_pending:
         grade_result = grade_completed_picks(history_root=args.history_root, runtime_root=args.runtime_root)
         print(f"graded_updates={grade_result['updated_rows']}")
@@ -88,4 +100,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -22,6 +22,7 @@ from courtvision.reporting.high_caution_over_watchlist import (
     watchlist_row_line,
     write_high_caution_over_watchlist,
 )
+from scripts.history_tracking import PLAYER_POINTS_MARKET, persist_market_shadow_history
 
 RUN_HEALTH_RECOMMENDATIONS: dict[str, str] = {
     "HEALTHY": "Run is bet-ready within configured staking limits.",
@@ -426,8 +427,10 @@ def build_daily_summary(
     *,
     prediction_date: str,
     runtime_root: str | Path = "outputs/runtime",
+    history_root: str | Path = "data/history",
 ) -> tuple[str, dict[str, Any]]:
     runtime_root = Path(runtime_root)
+    history_root = Path(history_root)
     operator_dir = runtime_root / "operator"
     diagnostics_dir = runtime_root / "diagnostics"
     warnings: list[str] = []
@@ -464,6 +467,30 @@ def build_daily_summary(
     high_caution_over_watchlist_path = watchlist_path_for_date(
         prediction_date=prediction_date,
         runtime_root=runtime_root,
+    )
+    market_shadow_history_path = history_root / "market_shadow_history.csv"
+    market_readiness_summary_path = history_root / "market_readiness_summary.csv"
+    market_shadow_rows = int(len(full_market_df))
+    market_shadow_non_points_rows = (
+        int(
+            full_market_df["market_type"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .ne(PLAYER_POINTS_MARKET)
+            .sum()
+        )
+        if not full_market_df.empty and "market_type" in full_market_df.columns
+        else 0
+    )
+    market_shadow_counts = (
+        Counter(
+            _safe_text(value) or "unknown"
+            for value in full_market_df["market_type"]
+        )
+        if not full_market_df.empty and "market_type" in full_market_df.columns
+        else Counter()
     )
     run_health = _daily_run_health_summary(
         elite_df=elite_df,
@@ -564,6 +591,19 @@ def build_daily_summary(
     else:
         for _, row in high_caution_over_watchlist.head(5).iterrows():
             lines.append(f"  - {watchlist_row_line(row)}")
+
+    lines.extend(["", "Market Expansion Shadow Tracking", "-" * 72])
+    lines.append(f"- total shadow rows: {market_shadow_rows}")
+    lines.append(f"- non-points rows: {market_shadow_non_points_rows}")
+    lines.append(f"- shadow history artifact: {market_shadow_history_path}")
+    lines.append(f"- readiness artifact: {market_readiness_summary_path}")
+    lines.append("- top markets by shadow rows:")
+    if market_shadow_counts:
+        for market, count in market_shadow_counts.most_common(5):
+            lines.append(f"  - {market}: {count}")
+    else:
+        lines.append("  - None")
+    lines.append("- warning: Observation only; not Kelly eligible.")
 
     lines.extend(["", "Kelly Stakes", "-" * 72])
     if kelly_eligible.empty:
@@ -706,6 +746,11 @@ def build_daily_summary(
         "elite_context_safety_gate_rejected_count": elite_context_gate_count,
         "high_caution_over_watchlist_count": int(len(high_caution_over_watchlist)),
         "high_caution_over_watchlist_path": str(high_caution_over_watchlist_path),
+        "market_shadow_history_path": str(market_shadow_history_path),
+        "market_readiness_summary_path": str(market_readiness_summary_path),
+        "market_shadow_rows": market_shadow_rows,
+        "market_shadow_non_points_rows": market_shadow_non_points_rows,
+        "market_shadow_top_markets": dict(market_shadow_counts.most_common(5)),
         "full_market_context_conflict_cause_counts": full_market_context_conflict_causes,
         "stale_team_not_in_game_count": int(full_market_context_conflict_causes.get("stale_team_not_in_game", 0)),
         "run_health": run_health,
@@ -728,15 +773,34 @@ def write_daily_summary_outputs(
     *,
     prediction_date: str,
     runtime_root: str | Path = "outputs/runtime",
+    history_root: str | Path = "data/history",
 ) -> tuple[Path, dict[str, Any]]:
     runtime_root = Path(runtime_root)
-    summary, metadata = build_daily_summary(prediction_date=prediction_date, runtime_root=runtime_root)
+    history_root = Path(history_root)
+    shadow_result: dict[str, Any] | None = None
+    full_market_path = runtime_root / "operator" / f"full_market_board_{prediction_date}.csv"
+    if full_market_path.exists():
+        shadow_result = persist_market_shadow_history(
+            prediction_date=prediction_date,
+            runtime_root=runtime_root,
+            history_root=history_root,
+        )
+    summary, metadata = build_daily_summary(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
     watchlist_path, watchlist_df = write_high_caution_over_watchlist(
         prediction_date=prediction_date,
         runtime_root=runtime_root,
     )
     metadata["high_caution_over_watchlist_path"] = str(watchlist_path)
     metadata["high_caution_over_watchlist_count"] = int(len(watchlist_df))
+    if shadow_result:
+        metadata["market_shadow_rows"] = int(shadow_result["current_date_rows"])
+        metadata["market_shadow_non_points_rows"] = int(shadow_result["current_date_non_points_rows"])
+        metadata["market_shadow_history_path"] = str(shadow_result["market_shadow_history_path"])
+        metadata["market_readiness_summary_path"] = str(shadow_result["market_readiness_summary_path"])
     output_path = runtime_root / "operator" / f"daily_summary_{prediction_date}.txt"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(summary, encoding="utf-8")
@@ -747,10 +811,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Write the operator daily summary report.")
     parser.add_argument("--prediction-date", required=True)
     parser.add_argument("--runtime-root", default="outputs/runtime")
+    parser.add_argument("--history-root", default="data/history")
     args = parser.parse_args(argv)
     output_path, metadata = write_daily_summary_outputs(
         prediction_date=args.prediction_date,
         runtime_root=args.runtime_root,
+        history_root=args.history_root,
     )
     print(f"daily_summary_txt={output_path}")
     print(
@@ -759,6 +825,8 @@ def main(argv: list[str] | None = None) -> int:
         f"kelly_eligible={metadata['kelly_eligible_count']} "
         f"run_health={metadata['run_health_status']} "
         f"high_caution_over_watchlist={metadata['high_caution_over_watchlist_count']} "
+        f"market_shadow_rows={metadata['market_shadow_rows']} "
+        f"market_shadow_non_points={metadata['market_shadow_non_points_rows']} "
         f"exposure={metadata['total_exposure']:.2f} "
         f"expected_ev={metadata['expected_ev']:.2f} "
         f"pending_grading={metadata['pending_grading_count']}"
