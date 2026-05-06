@@ -31,6 +31,13 @@ REQUIRED_HISTORY_COLUMNS: tuple[str, ...] = (
     "context_caution_level",
     "simulated_fraction",
     "simulated_stake",
+    "pre_cap_simulated_stake",
+    "cap_adjustment_reason",
+    "player_exposure_after_cap",
+    "team_exposure_after_cap",
+    "game_exposure_after_cap",
+    "side_exposure_after_cap",
+    "bucket_exposure_after_cap",
     "simulated_ev",
     "real_kelly_eligible",
     "simulation_only",
@@ -50,6 +57,7 @@ GROUP_COLUMNS: tuple[str, ...] = (
     "context_caution_level",
     "directional_edge_bucket",
     "confidence_bucket",
+    "cap_adjustment_reason",
 )
 
 REPORT_COLUMNS: tuple[str, ...] = GROUP_COLUMNS + (
@@ -60,6 +68,9 @@ REPORT_COLUMNS: tuple[str, ...] = GROUP_COLUMNS + (
     "pushes",
     "pending",
     "hit_rate",
+    "pre_cap_exposure",
+    "post_cap_exposure",
+    "exposure_reduced",
     "paper_profit",
     "paper_roi",
     "sample_status",
@@ -477,6 +488,7 @@ def _history_through_date(history_df: pd.DataFrame, through_date: str | None = N
         df[column] = df[column].map(_normalize_group_value)
     df["paper_profit"] = pd.to_numeric(df["paper_profit"], errors="coerce")
     df["simulated_stake"] = pd.to_numeric(df["simulated_stake"], errors="coerce")
+    df["pre_cap_simulated_stake"] = pd.to_numeric(df["pre_cap_simulated_stake"], errors="coerce")
     return df
 
 
@@ -498,6 +510,12 @@ def summarize_paper_kelly_history(
             "paper_profit": 0.0,
             "paper_roi": "",
             "sample_status": "no_graded_results",
+            "pre_cap_exposure": 0.0,
+            "post_cap_exposure": 0.0,
+            "exposure_reduced": 0.0,
+            "paper_profit_by_cap_reason": {},
+            "paper_roi_by_cap_reason": {},
+            "pending_by_cap_reason": {},
         }
     hits = int(df["result_status"].eq("hit").sum())
     misses = int(df["result_status"].eq("miss").sum())
@@ -506,6 +524,27 @@ def summarize_paper_kelly_history(
     graded_total = hits + misses + pushes
     paper_profit = float(df["paper_profit"].fillna(0.0).sum())
     roi_stake = float(df.loc[df["result_status"].isin(HIT_MISS_STATUSES), "simulated_stake"].fillna(0.0).sum())
+
+    pre_cap_series = df["pre_cap_simulated_stake"].fillna(df["simulated_stake"]).fillna(0.0)
+    pre_cap_exposure = float(pre_cap_series.sum())
+    post_cap_exposure = float(df["simulated_stake"].fillna(0.0).sum())
+    exposure_reduced = pre_cap_exposure - post_cap_exposure
+
+    cap_reason_col = df["cap_adjustment_reason"].fillna("unknown").astype(str).str.strip().str.lower()
+    cap_reason_col = cap_reason_col.replace("", "unknown")
+    working = df.copy()
+    working["_cap_reason"] = cap_reason_col
+    paper_profit_by_cap: dict[str, Any] = {}
+    paper_roi_by_cap: dict[str, Any] = {}
+    pending_by_cap: dict[str, int] = {}
+    for reason, seg in working.groupby("_cap_reason"):
+        reason_str = str(reason)
+        seg_profit = float(seg["paper_profit"].fillna(0.0).sum())
+        seg_roi_stake = float(seg.loc[seg["result_status"].isin(HIT_MISS_STATUSES), "simulated_stake"].fillna(0.0).sum())
+        paper_profit_by_cap[reason_str] = round(seg_profit, 6)
+        paper_roi_by_cap[reason_str] = round(float(seg_profit / seg_roi_stake), 6) if seg_roi_stake else ""
+        pending_by_cap[reason_str] = int((~seg["result_status"].isin(FINAL_STATUSES)).sum())
+
     return {
         "total": int(len(df)),
         "graded_total": graded_total,
@@ -517,6 +556,12 @@ def summarize_paper_kelly_history(
         "paper_profit": round(paper_profit, 6),
         "paper_roi": round(float(paper_profit / roi_stake), 6) if roi_stake else "",
         "sample_status": _sample_status(graded_total),
+        "pre_cap_exposure": round(pre_cap_exposure, 6),
+        "post_cap_exposure": round(post_cap_exposure, 6),
+        "exposure_reduced": round(exposure_reduced, 6),
+        "paper_profit_by_cap_reason": paper_profit_by_cap,
+        "paper_roi_by_cap_reason": paper_roi_by_cap,
+        "pending_by_cap_reason": pending_by_cap,
     }
 
 
@@ -538,6 +583,13 @@ def build_paper_kelly_performance_report(
         graded_total = hits + misses + pushes
         profit = float(segment["paper_profit"].fillna(0.0).sum())
         roi_stake = float(segment.loc[segment["result_status"].isin(HIT_MISS_STATUSES), "simulated_stake"].fillna(0.0).sum())
+        pre_cap = float(
+            segment["pre_cap_simulated_stake"]
+            .fillna(segment["simulated_stake"])
+            .fillna(0.0)
+            .sum()
+        )
+        post_cap = float(segment["simulated_stake"].fillna(0.0).sum())
         rows.append(
             {
                 "paper_bucket": group_values[0],
@@ -547,6 +599,7 @@ def build_paper_kelly_performance_report(
                 "context_caution_level": group_values[4],
                 "directional_edge_bucket": group_values[5],
                 "confidence_bucket": group_values[6],
+                "cap_adjustment_reason": group_values[7],
                 "total": int(len(segment)),
                 "graded_total": graded_total,
                 "hits": hits,
@@ -554,6 +607,9 @@ def build_paper_kelly_performance_report(
                 "pushes": pushes,
                 "pending": pending,
                 "hit_rate": round(float(hits / (hits + misses)), 4) if hits + misses else "",
+                "pre_cap_exposure": round(pre_cap, 6),
+                "post_cap_exposure": round(post_cap, 6),
+                "exposure_reduced": round(pre_cap - post_cap, 6),
                 "paper_profit": round(profit, 6),
                 "paper_roi": round(float(profit / roi_stake), 6) if roi_stake else "",
                 "sample_status": _sample_status(graded_total),
@@ -585,6 +641,9 @@ def report_row_line(row: pd.Series) -> str:
         f"pending={int(row.get('pending') or 0)}, "
         f"hit_rate={_format_value(row.get('hit_rate'))}, "
         f"paper_roi={_format_value(row.get('paper_roi'))}, "
+        f"pre_cap={_format_value(row.get('pre_cap_exposure'))}, "
+        f"post_cap={_format_value(row.get('post_cap_exposure'))}, "
+        f"reduced={_format_value(row.get('exposure_reduced'))}, "
         f"status={_format_value(row.get('sample_status'))}"
     )
 
@@ -617,10 +676,31 @@ def render_paper_kelly_performance_text(
         f"- paper_profit: {summary['paper_profit']:.6f}",
         f"- paper_roi: {_format_value(summary['paper_roi'])}",
         f"- sample_status: {summary['sample_status']}",
+        f"- pre_cap_exposure: {summary['pre_cap_exposure']:.6f}",
+        f"- post_cap_exposure: {summary['post_cap_exposure']:.6f}",
+        f"- exposure_reduced: {summary['exposure_reduced']:.6f}",
+        "",
+        "Cap Exposure by Reason",
+        "-" * 72,
+    ]
+    profit_by_cap = summary.get("paper_profit_by_cap_reason", {})
+    roi_by_cap = summary.get("paper_roi_by_cap_reason", {})
+    pending_by_cap_map = summary.get("pending_by_cap_reason", {})
+    if not profit_by_cap:
+        lines.append("- None")
+    else:
+        for reason in sorted(profit_by_cap):
+            profit_val = profit_by_cap[reason]
+            roi_val = _format_value(roi_by_cap.get(reason))
+            pending_val = pending_by_cap_map.get(reason, 0)
+            lines.append(
+                f"- {reason}: profit={profit_val:.6f}, roi={roi_val}, pending={pending_val}"
+            )
+    lines.extend([
         "",
         "Grouped Performance",
         "-" * 72,
-    ]
+    ])
     if report_df.empty:
         lines.append("- None")
     else:

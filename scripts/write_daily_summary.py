@@ -589,6 +589,25 @@ def build_daily_summary(
         if not paper_kelly_simulation.empty
         else 0.0
     )
+    paper_kelly_pre_cap_exposure = (
+        float(pd.to_numeric(paper_kelly_simulation.get("pre_cap_simulated_stake", pd.Series(dtype=float)), errors="coerce").fillna(0).sum())
+        if not paper_kelly_simulation.empty
+        else 0.0
+    )
+    paper_kelly_cap_reduced = paper_kelly_pre_cap_exposure - paper_kelly_exposure
+    cap_reason_counts: dict[str, int] = {}
+    if not paper_kelly_simulation.empty and "cap_adjustment_reason" in paper_kelly_simulation.columns:
+        reason_series = (
+            paper_kelly_simulation["cap_adjustment_reason"]
+            .fillna("none")
+            .astype(str)
+            .str.strip()
+            .str.lower()
+        )
+        cap_reason_counts = {
+            str(reason): int(count)
+            for reason, count in reason_series.value_counts().head(5).items()
+        }
     paper_kelly_history_csv_path = paper_kelly_history_path(history_root)
     paper_kelly_performance_text_path, paper_kelly_performance_csv_path = paper_kelly_performance_report_paths_for_date(
         prediction_date=prediction_date,
@@ -774,7 +793,9 @@ def build_daily_summary(
 
     lines.extend(["", "Paper Kelly Simulation — Observation Only / No Real Stake", "-" * 72])
     lines.append(f"- total paper rows: {int(len(paper_kelly_simulation))}")
-    lines.append(f"- paper exposure: {paper_kelly_exposure:.6f}")
+    lines.append(f"- pre-cap exposure: {paper_kelly_pre_cap_exposure:.6f}")
+    lines.append(f"- post-cap exposure: {paper_kelly_exposure:.6f}")
+    lines.append(f"- exposure reduced by caps: {paper_kelly_cap_reduced:.6f}")
     lines.append(f"- txt artifact: {paper_kelly_text_path}")
     lines.append(f"- csv artifact: {paper_kelly_csv_path}")
     lines.append(f"- warning: {PAPER_KELLY_SIMULATION_WARNING}")
@@ -785,6 +806,12 @@ def build_daily_summary(
         bucket_exposure = paper_kelly_simulation.groupby("paper_bucket", sort=True)["simulated_stake"].sum()
         for bucket, value in bucket_exposure.items():
             lines.append(f"  - {bucket}: {float(value):.6f}")
+    lines.append("- top cap reasons:")
+    if cap_reason_counts:
+        for reason, count in sorted(cap_reason_counts.items(), key=lambda x: x[1], reverse=True):
+            lines.append(f"  - {reason}: {count}")
+    else:
+        lines.append("  - none")
     lines.append("- top 10 simulated EV rows:")
     if paper_kelly_simulation.empty:
         lines.append("  - None")
@@ -1003,6 +1030,9 @@ def build_daily_summary(
         "promotion_readiness_report_csv_path": str(promotion_readiness_csv_path),
         "paper_kelly_simulation_count": int(len(paper_kelly_simulation)),
         "paper_kelly_simulation_exposure": round(paper_kelly_exposure, 6),
+        "paper_kelly_pre_cap_exposure": round(paper_kelly_pre_cap_exposure, 6),
+        "paper_kelly_cap_reduced": round(paper_kelly_cap_reduced, 6),
+        "paper_kelly_cap_reason_counts": cap_reason_counts,
         "paper_kelly_simulation_path": str(paper_kelly_text_path),
         "paper_kelly_simulation_csv_path": str(paper_kelly_csv_path),
         "paper_kelly_history_path": str(paper_kelly_history_csv_path),
