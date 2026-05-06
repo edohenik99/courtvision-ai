@@ -15,6 +15,13 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from courtvision.reporting.kelly_performance import build_kelly_decision_performance
+from courtvision.reporting.combo_under_watchlist import (
+    OBSERVATION_ONLY_NOTE as COMBO_UNDER_OBSERVATION_ONLY_NOTE,
+    build_combo_under_watchlist,
+    watchlist_path_for_date as combo_under_watchlist_path_for_date,
+    watchlist_row_line as combo_under_watchlist_row_line,
+    write_combo_under_watchlist,
+)
 from courtvision.reporting.high_caution_over_watchlist import (
     OBSERVATION_ONLY_NOTE,
     build_high_caution_over_watchlist,
@@ -468,6 +475,11 @@ def build_daily_summary(
         prediction_date=prediction_date,
         runtime_root=runtime_root,
     )
+    combo_under_watchlist = build_combo_under_watchlist(full_market_df)
+    combo_under_watchlist_path = combo_under_watchlist_path_for_date(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+    )
     market_shadow_history_path = history_root / "market_shadow_history.csv"
     market_readiness_summary_path = history_root / "market_readiness_summary.csv"
     market_shadow_rows = int(len(full_market_df))
@@ -604,6 +616,17 @@ def build_daily_summary(
     else:
         lines.append("  - None")
     lines.append("- warning: Observation only; not Kelly eligible.")
+
+    lines.extend(["", "Combo UNDER Promotion Watchlist — Observation Only / No Kelly", "-" * 72])
+    lines.append(f"- watchlist row count: {int(len(combo_under_watchlist))}")
+    lines.append(f"- artifact: {combo_under_watchlist_path}")
+    lines.append(f"- note: {COMBO_UNDER_OBSERVATION_ONLY_NOTE}")
+    lines.append("- top 5 by absolute edge:")
+    if combo_under_watchlist.empty:
+        lines.append("  - None")
+    else:
+        for _, row in combo_under_watchlist.head(5).iterrows():
+            lines.append(f"  - {combo_under_watchlist_row_line(row)}")
 
     lines.extend(["", "Kelly Stakes", "-" * 72])
     if kelly_eligible.empty:
@@ -746,6 +769,8 @@ def build_daily_summary(
         "elite_context_safety_gate_rejected_count": elite_context_gate_count,
         "high_caution_over_watchlist_count": int(len(high_caution_over_watchlist)),
         "high_caution_over_watchlist_path": str(high_caution_over_watchlist_path),
+        "combo_under_watchlist_count": int(len(combo_under_watchlist)),
+        "combo_under_watchlist_path": str(combo_under_watchlist_path),
         "market_shadow_history_path": str(market_shadow_history_path),
         "market_readiness_summary_path": str(market_readiness_summary_path),
         "market_shadow_rows": market_shadow_rows,
@@ -794,8 +819,14 @@ def write_daily_summary_outputs(
         prediction_date=prediction_date,
         runtime_root=runtime_root,
     )
+    combo_under_path, combo_under_df = write_combo_under_watchlist(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+    )
     metadata["high_caution_over_watchlist_path"] = str(watchlist_path)
     metadata["high_caution_over_watchlist_count"] = int(len(watchlist_df))
+    metadata["combo_under_watchlist_path"] = str(combo_under_path)
+    metadata["combo_under_watchlist_count"] = int(len(combo_under_df))
     if shadow_result:
         metadata["market_shadow_rows"] = int(shadow_result["current_date_rows"])
         metadata["market_shadow_non_points_rows"] = int(shadow_result["current_date_non_points_rows"])
@@ -825,6 +856,7 @@ def main(argv: list[str] | None = None) -> int:
         f"kelly_eligible={metadata['kelly_eligible_count']} "
         f"run_health={metadata['run_health_status']} "
         f"high_caution_over_watchlist={metadata['high_caution_over_watchlist_count']} "
+        f"combo_under_watchlist={metadata['combo_under_watchlist_count']} "
         f"market_shadow_rows={metadata['market_shadow_rows']} "
         f"market_shadow_non_points={metadata['market_shadow_non_points_rows']} "
         f"exposure={metadata['total_exposure']:.2f} "
