@@ -29,6 +29,14 @@ from courtvision.reporting.high_caution_over_watchlist import (
     watchlist_row_line,
     write_high_caution_over_watchlist,
 )
+from courtvision.reporting.promotion_readiness import (
+    OBSERVATION_ONLY_NOTE as PROMOTION_READINESS_OBSERVATION_ONLY_NOTE,
+    build_promotion_readiness_report,
+    read_market_shadow_history,
+    report_paths_for_date as promotion_readiness_report_paths_for_date,
+    report_row_line as promotion_readiness_report_row_line,
+    write_promotion_readiness_report,
+)
 from scripts.history_tracking import PLAYER_POINTS_MARKET, persist_market_shadow_history
 
 RUN_HEALTH_RECOMMENDATIONS: dict[str, str] = {
@@ -482,6 +490,14 @@ def build_daily_summary(
     )
     market_shadow_history_path = history_root / "market_shadow_history.csv"
     market_readiness_summary_path = history_root / "market_readiness_summary.csv"
+    promotion_readiness_text_path, promotion_readiness_csv_path = promotion_readiness_report_paths_for_date(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+    )
+    promotion_readiness_report = build_promotion_readiness_report(
+        read_market_shadow_history(market_shadow_history_path),
+        through_date=prediction_date,
+    )
     market_shadow_rows = int(len(full_market_df))
     market_shadow_non_points_rows = (
         int(
@@ -628,6 +644,18 @@ def build_daily_summary(
         for _, row in combo_under_watchlist.head(5).iterrows():
             lines.append(f"  - {combo_under_watchlist_row_line(row)}")
 
+    lines.extend(["", "Promotion Readiness — Observation Only", "-" * 72])
+    lines.append(f"- report row count: {int(len(promotion_readiness_report))}")
+    lines.append(f"- txt artifact: {promotion_readiness_text_path}")
+    lines.append(f"- csv artifact: {promotion_readiness_csv_path}")
+    lines.append(f"- note: {PROMOTION_READINESS_OBSERVATION_ONLY_NOTE}")
+    lines.append("- top 5 by promotion status/sample:")
+    if promotion_readiness_report.empty:
+        lines.append("  - None")
+    else:
+        for _, row in promotion_readiness_report.head(5).iterrows():
+            lines.append(f"  - {promotion_readiness_report_row_line(row)}")
+
     lines.extend(["", "Kelly Stakes", "-" * 72])
     if kelly_eligible.empty:
         lines.append("- None")
@@ -771,6 +799,9 @@ def build_daily_summary(
         "high_caution_over_watchlist_path": str(high_caution_over_watchlist_path),
         "combo_under_watchlist_count": int(len(combo_under_watchlist)),
         "combo_under_watchlist_path": str(combo_under_watchlist_path),
+        "promotion_readiness_report_count": int(len(promotion_readiness_report)),
+        "promotion_readiness_report_path": str(promotion_readiness_text_path),
+        "promotion_readiness_report_csv_path": str(promotion_readiness_csv_path),
         "market_shadow_history_path": str(market_shadow_history_path),
         "market_readiness_summary_path": str(market_readiness_summary_path),
         "market_shadow_rows": market_shadow_rows,
@@ -823,10 +854,18 @@ def write_daily_summary_outputs(
         prediction_date=prediction_date,
         runtime_root=runtime_root,
     )
+    promotion_text_path, promotion_csv_path, promotion_df = write_promotion_readiness_report(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
     metadata["high_caution_over_watchlist_path"] = str(watchlist_path)
     metadata["high_caution_over_watchlist_count"] = int(len(watchlist_df))
     metadata["combo_under_watchlist_path"] = str(combo_under_path)
     metadata["combo_under_watchlist_count"] = int(len(combo_under_df))
+    metadata["promotion_readiness_report_path"] = str(promotion_text_path)
+    metadata["promotion_readiness_report_csv_path"] = str(promotion_csv_path)
+    metadata["promotion_readiness_report_count"] = int(len(promotion_df))
     if shadow_result:
         metadata["market_shadow_rows"] = int(shadow_result["current_date_rows"])
         metadata["market_shadow_non_points_rows"] = int(shadow_result["current_date_non_points_rows"])
@@ -857,6 +896,7 @@ def main(argv: list[str] | None = None) -> int:
         f"run_health={metadata['run_health_status']} "
         f"high_caution_over_watchlist={metadata['high_caution_over_watchlist_count']} "
         f"combo_under_watchlist={metadata['combo_under_watchlist_count']} "
+        f"promotion_readiness={metadata['promotion_readiness_report_count']} "
         f"market_shadow_rows={metadata['market_shadow_rows']} "
         f"market_shadow_non_points={metadata['market_shadow_non_points_rows']} "
         f"exposure={metadata['total_exposure']:.2f} "
