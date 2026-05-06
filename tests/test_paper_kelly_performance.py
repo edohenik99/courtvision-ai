@@ -8,7 +8,9 @@ from courtvision.reporting.paper_kelly_performance import (
     HISTORY_COLUMNS,
     REPORT_COLUMNS,
     REPORT_TITLE,
+    build_paper_kelly_performance_report,
     persist_paper_kelly_history,
+    read_paper_kelly_history,
     write_paper_kelly_performance_report,
 )
 
@@ -30,6 +32,8 @@ def _paper_row(
     directional_edge: float = 2.5,
     confidence: float = 0.75,
     stake: float = 0.002,
+    pre_cap_stake: float | None = None,
+    cap_reason: str = "none",
 ) -> dict:
     return {
         "prediction_date": prediction_date,
@@ -49,6 +53,13 @@ def _paper_row(
         "context_caution_level": "low",
         "simulated_fraction": stake,
         "simulated_stake": stake,
+        "pre_cap_simulated_stake": pre_cap_stake if pre_cap_stake is not None else stake,
+        "cap_adjustment_reason": cap_reason,
+        "player_exposure_after_cap": stake,
+        "team_exposure_after_cap": stake,
+        "game_exposure_after_cap": stake,
+        "side_exposure_after_cap": stake,
+        "bucket_exposure_after_cap": stake,
         "simulated_ev": 0.00012,
         "real_kelly_eligible": False,
         "simulation_only": True,
@@ -234,3 +245,112 @@ def test_candidate_scoring_py_is_untouched_by_paper_performance() -> None:
     content = path.read_text(encoding="utf-8")
     assert "paper_kelly_performance" not in content
     assert "paper_kelly_history" not in content
+
+
+def test_paper_history_migrates_old_rows_without_cap_columns(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "outputs" / "runtime"
+    history_root = tmp_path / "data" / "history"
+    old_date = "2026-05-01"
+    new_date = "2026-05-06"
+
+    old_columns = [
+        "prediction_date", "paper_bucket", "player_name", "team_abbr", "opponent",
+        "market_type", "selection", "line", "odds", "edge", "directional_edge",
+        "confidence", "quality_score", "context_pick_alignment", "context_caution_level",
+        "simulated_fraction", "simulated_stake", "simulated_ev", "real_kelly_eligible",
+        "simulation_only", "reason_not_real_kelly", "result_status", "actual_value",
+        "paper_profit", "paper_roi", "grading_skip_reason",
+    ]
+    old_row = {col: "" for col in old_columns}
+    old_row.update({
+        "prediction_date": old_date, "paper_bucket": "combo_under_watchlist",
+        "player_name": "Old Player", "team_abbr": "BOS", "opponent": "NYK",
+        "market_type": "player_points_rebounds", "selection": "under", "line": "28.5",
+        "simulated_stake": "0.001", "result_status": "hit", "paper_profit": "0.0009",
+    })
+    old_history_path = history_root / "paper_kelly_history.csv"
+    old_history_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame([old_row], columns=old_columns).to_csv(old_history_path, index=False)
+
+    _write_paper_source(runtime_root, new_date, [_paper_row("New Player", prediction_date=new_date)])
+    persist_paper_kelly_history(prediction_date=new_date, runtime_root=runtime_root, history_root=history_root)
+
+    history = pd.read_csv(old_history_path, keep_default_na=False)
+    assert list(history.columns) == list(HISTORY_COLUMNS)
+    old_rows = history[history["prediction_date"].astype(str) == old_date]
+    assert len(old_rows) == 1
+    assert old_rows.iloc[0]["pre_cap_simulated_stake"] == ""
+    assert old_rows.iloc[0]["cap_adjustment_reason"] == ""
+    assert old_rows.iloc[0]["player_exposure_after_cap"] == ""
+    new_rows = history[history["prediction_date"].astype(str) == new_date]
+    assert len(new_rows) == 1
+    assert new_rows.iloc[0]["cap_adjustment_reason"] == "none"
+
+
+def test_new_cap_columns_persist_in_history(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "outputs" / "runtime"
+    history_root = tmp_path / "data" / "history"
+    date = "2026-05-06"
+
+    capped_row = _paper_row(
+        "Capped Player",
+        prediction_date=date,
+        stake=0.0015,
+        pre_cap_stake=0.0025,
+        cap_reason="player_exposure_cap player_selection_exposure_cap",
+    )
+    uncapped_row = _paper_row(
+        "Uncapped Player",
+        prediction_date=date,
+        line=27.5,
+        stake=0.002,
+        pre_cap_stake=0.002,
+        cap_reason="none",
+    )
+    _write_paper_source(runtime_root, date, [capped_row, uncapped_row])
+    persist_paper_kelly_history(prediction_date=date, runtime_root=runtime_root, history_root=history_root)
+
+    history = pd.read_csv(history_root / "paper_kelly_history.csv", keep_default_na=False)
+    assert list(history.columns) == list(HISTORY_COLUMNS)
+    capped = history[history["player_name"] == "Capped Player"].iloc[0]
+    uncapped = history[history["player_name"] == "Uncapped Player"].iloc[0]
+    assert float(capped["pre_cap_simulated_stake"]) == 0.0025
+    assert float(capped["simulated_stake"]) == 0.0015
+    assert capped["cap_adjustment_reason"] == "player_exposure_cap player_selection_exposure_cap"
+    assert float(uncapped["pre_cap_simulated_stake"]) == 0.002
+    assert uncapped["cap_adjustment_reason"] == "none"
+    assert float(capped["player_exposure_after_cap"]) == 0.0015
+    assert float(capped["team_exposure_after_cap"]) == 0.0015
+
+
+def test_report_groups_by_cap_adjustment_reason(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "outputs" / "runtime"
+    history_root = tmp_path / "data" / "history"
+    date = "2026-05-06"
+
+    _write_paper_source(
+        runtime_root,
+        date,
+        [
+            _paper_row("Player A", prediction_date=date, line=28.5, cap_reason="player_exposure_cap"),
+            _paper_row("Player B", prediction_date=date, line=29.5, cap_reason="none"),
+            _paper_row("Player C", prediction_date=date, line=30.5, cap_reason="game_exposure_cap"),
+        ],
+    )
+    persist_paper_kelly_history(prediction_date=date, runtime_root=runtime_root, history_root=history_root)
+    history = read_paper_kelly_history(history_root / "paper_kelly_history.csv")
+    report = build_paper_kelly_performance_report(history, through_date=date)
+
+    assert list(report.columns) == list(REPORT_COLUMNS)
+    assert "cap_adjustment_reason" in report.columns
+    assert "pre_cap_exposure" in report.columns
+    assert "post_cap_exposure" in report.columns
+    assert "exposure_reduced" in report.columns
+    cap_reasons_in_report = set(report["cap_adjustment_reason"].astype(str).str.lower())
+    assert "player_exposure_cap" in cap_reasons_in_report
+    # "none" is treated as null by _safe_text and normalizes to "unknown"
+    assert "unknown" in cap_reasons_in_report
+    assert "game_exposure_cap" in cap_reasons_in_report
+    assert int(report["total"].sum()) == 3
+    for _, row in report.iterrows():
+        assert float(row["pre_cap_exposure"]) >= float(row["post_cap_exposure"]) - 1e-9
