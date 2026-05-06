@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -7,8 +8,13 @@ import pandas as pd
 
 REPORT_FILE_PREFIX = "paper_kelly_simulation"
 ROW_STAKE_CAP = 0.0025
+TOTAL_PAPER_EXPOSURE_CAP = 0.02
 PLAYER_EXPOSURE_CAP = 0.005
+PLAYER_SELECTION_EXPOSURE_CAP = 0.0035
+TEAM_EXPOSURE_CAP = 0.0075
 GAME_EXPOSURE_CAP = 0.01
+SIDE_EXPOSURE_CAP = 0.008
+PAPER_BUCKET_EXPOSURE_CAP = 0.01
 SIMULATION_WARNING = "Simulation only; no real stake and no real Kelly eligibility."
 PAPER_BUCKET_PRIORITY = {
     "combo_under_watchlist": 0,
@@ -31,9 +37,16 @@ REPORT_COLUMNS: tuple[str, ...] = (
     "quality_score",
     "context_pick_alignment",
     "context_caution_level",
+    "pre_cap_simulated_stake",
     "simulated_fraction",
     "simulated_stake",
     "simulated_ev",
+    "cap_adjustment_reason",
+    "player_exposure_after_cap",
+    "team_exposure_after_cap",
+    "game_exposure_after_cap",
+    "side_exposure_after_cap",
+    "bucket_exposure_after_cap",
     "real_kelly_eligible",
     "simulation_only",
     "reason_not_real_kelly",
@@ -108,6 +121,26 @@ def _game_key(row: pd.Series) -> str:
     return "|".join(sorted(value for value in (team, opponent) if value)) or "unknown_game"
 
 
+def _team_key(row: pd.Series) -> str:
+    return _safe_text(row.get("team_abbr"), default="unknown_team").upper()
+
+
+def _side_key(row: pd.Series) -> str:
+    return _safe_text(row.get("selection"), default="unknown_side").lower()
+
+
+def _bucket_key(row: pd.Series) -> str:
+    return _safe_text(row.get("paper_bucket"), default="unknown_bucket").lower()
+
+
+def _player_key(row: pd.Series) -> str:
+    return _safe_text(row.get("player_name"), default="unknown_player").lower()
+
+
+def _player_side_key(row: pd.Series) -> str:
+    return f"{_player_key(row)}|{_side_key(row)}"
+
+
 def _directional_edge(row: pd.Series) -> float:
     edge = _safe_float(row.get("edge"))
     selection = _safe_text(row.get("selection")).lower()
@@ -147,6 +180,33 @@ def _paper_ev(row: pd.Series, stake: float) -> float:
     return stake * edge_ratio * max(confidence, 0.0)
 
 
+def _cap_reason(requested: float, stake: float, remaining_by_reason: dict[str, float]) -> str:
+    if requested <= 0:
+        return "no_positive_directional_edge"
+    if stake >= requested - 1e-12:
+        return "none"
+    limiting = [
+        reason
+        for reason, remaining in remaining_by_reason.items()
+        if remaining <= stake + 1e-12
+    ]
+    return ";".join(limiting) if limiting else "correlation_cap"
+
+
+def _exposure_lines(report_df: pd.DataFrame, group_column: str, *, limit: int = 10) -> list[str]:
+    if report_df.empty or group_column not in report_df.columns:
+        return ["- none"]
+    grouped = (
+        report_df.assign(_stake=pd.to_numeric(report_df["simulated_stake"], errors="coerce").fillna(0.0))
+        .groupby(group_column, sort=True)["_stake"]
+        .sum()
+        .sort_values(ascending=False, kind="mergesort")
+    )
+    if grouped.empty:
+        return ["- none"]
+    return [f"- {key}: {float(value):.6f}" for key, value in grouped.head(limit).items()]
+
+
 def _apply_paper_caps(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=REPORT_COLUMNS)
@@ -165,25 +225,73 @@ def _apply_paper_caps(df: pd.DataFrame) -> pd.DataFrame:
         kind="mergesort",
     )
     player_exposure: dict[str, float] = {}
+    player_side_exposure: dict[str, float] = {}
+    team_exposure: dict[str, float] = {}
     game_exposure: dict[str, float] = {}
+    side_exposure: dict[str, float] = {}
+    bucket_exposure: dict[str, float] = {}
+    total_exposure = 0.0
+    pre_cap_stakes: list[float] = []
     simulated_fractions: list[float] = []
     simulated_evs: list[float] = []
+    cap_reasons: list[str] = []
+    player_after: list[float] = []
+    team_after: list[float] = []
+    game_after: list[float] = []
+    side_after: list[float] = []
+    bucket_after: list[float] = []
     for _, row in working.iterrows():
-        player_key = _safe_text(row.get("player_name"), default="unknown_player").lower()
+        player_key = _player_key(row)
+        player_side_key = _player_side_key(row)
+        team_key = _team_key(row)
         game_key = _game_key(row)
+        side_key = _side_key(row)
+        bucket_key = _bucket_key(row)
         requested = float(row["_requested_fraction"])
-        player_remaining = max(PLAYER_EXPOSURE_CAP - player_exposure.get(player_key, 0.0), 0.0)
-        game_remaining = max(GAME_EXPOSURE_CAP - game_exposure.get(game_key, 0.0), 0.0)
-        stake = min(requested, player_remaining, game_remaining)
+        remaining_by_reason = {
+            "total_paper_exposure_cap": max(TOTAL_PAPER_EXPOSURE_CAP - total_exposure, 0.0),
+            "player_exposure_cap": max(PLAYER_EXPOSURE_CAP - player_exposure.get(player_key, 0.0), 0.0),
+            "player_selection_exposure_cap": max(
+                PLAYER_SELECTION_EXPOSURE_CAP - player_side_exposure.get(player_side_key, 0.0),
+                0.0,
+            ),
+            "team_exposure_cap": max(TEAM_EXPOSURE_CAP - team_exposure.get(team_key, 0.0), 0.0),
+            "game_exposure_cap": max(GAME_EXPOSURE_CAP - game_exposure.get(game_key, 0.0), 0.0),
+            "side_exposure_cap": max(SIDE_EXPOSURE_CAP - side_exposure.get(side_key, 0.0), 0.0),
+            "paper_bucket_exposure_cap": max(
+                PAPER_BUCKET_EXPOSURE_CAP - bucket_exposure.get(bucket_key, 0.0),
+                0.0,
+            ),
+        }
+        stake = min(requested, *remaining_by_reason.values())
         stake = max(stake, 0.0)
+        total_exposure += stake
         player_exposure[player_key] = player_exposure.get(player_key, 0.0) + stake
+        player_side_exposure[player_side_key] = player_side_exposure.get(player_side_key, 0.0) + stake
+        team_exposure[team_key] = team_exposure.get(team_key, 0.0) + stake
         game_exposure[game_key] = game_exposure.get(game_key, 0.0) + stake
+        side_exposure[side_key] = side_exposure.get(side_key, 0.0) + stake
+        bucket_exposure[bucket_key] = bucket_exposure.get(bucket_key, 0.0) + stake
+        pre_cap_stakes.append(round(requested, 6))
         simulated_fractions.append(round(stake, 6))
         simulated_evs.append(round(_paper_ev(row, stake), 6))
+        cap_reasons.append(_cap_reason(requested, stake, remaining_by_reason))
+        player_after.append(round(player_exposure[player_key], 6))
+        team_after.append(round(team_exposure[team_key], 6))
+        game_after.append(round(game_exposure[game_key], 6))
+        side_after.append(round(side_exposure[side_key], 6))
+        bucket_after.append(round(bucket_exposure[bucket_key], 6))
 
+    working["pre_cap_simulated_stake"] = pre_cap_stakes
     working["simulated_fraction"] = simulated_fractions
     working["simulated_stake"] = simulated_fractions
     working["simulated_ev"] = simulated_evs
+    working["cap_adjustment_reason"] = cap_reasons
+    working["player_exposure_after_cap"] = player_after
+    working["team_exposure_after_cap"] = team_after
+    working["game_exposure_after_cap"] = game_after
+    working["side_exposure_after_cap"] = side_after
+    working["bucket_exposure_after_cap"] = bucket_after
     working["real_kelly_eligible"] = False
     working["simulation_only"] = True
     working = working.sort_values(
@@ -237,6 +345,25 @@ def _bucket_exposure_lines(report_df: pd.DataFrame) -> list[str]:
     return [f"- {bucket}: {value:.6f}" for bucket, value in grouped.items()]
 
 
+def _game_exposure_lines(report_df: pd.DataFrame) -> list[str]:
+    if report_df.empty:
+        return ["- none"]
+    working = report_df.copy()
+    working["_game_key"] = working.apply(_game_key, axis=1)
+    return _exposure_lines(working, "_game_key")
+
+
+def _cap_adjustment_reason_lines(report_df: pd.DataFrame) -> list[str]:
+    if report_df.empty or "cap_adjustment_reason" not in report_df.columns:
+        return ["- none"]
+    reasons: Counter[str] = Counter()
+    for raw_reason in report_df["cap_adjustment_reason"].fillna("").astype(str):
+        for reason in raw_reason.split(";"):
+            reason = reason.strip() or "none"
+            reasons[reason] += 1
+    return [f"- {reason}: {count}" for reason, count in reasons.most_common(10)]
+
+
 def _row_line(row: pd.Series) -> str:
     return (
         f"{_safe_text(row.get('player_name'), default='Unknown')}: "
@@ -245,8 +372,10 @@ def _row_line(row: pd.Series) -> str:
         f"{_safe_text(row.get('line'), default='n/a')} "
         f"bucket={_safe_text(row.get('paper_bucket'), default='unknown')} "
         f"dir_edge={_safe_float(row.get('directional_edge')):.3f} "
+        f"pre_cap={_safe_float(row.get('pre_cap_simulated_stake')):.6f} "
         f"stake={_safe_float(row.get('simulated_stake')):.6f} "
-        f"ev={_safe_float(row.get('simulated_ev')):.6f}"
+        f"ev={_safe_float(row.get('simulated_ev')):.6f} "
+        f"cap={_safe_text(row.get('cap_adjustment_reason'), default='none')}"
     )
 
 
@@ -256,7 +385,13 @@ def render_paper_kelly_text(
     report_df: pd.DataFrame,
     csv_path: Path,
 ) -> str:
-    total_exposure = float(pd.to_numeric(report_df.get("simulated_stake", pd.Series(dtype=float)), errors="coerce").fillna(0).sum())
+    total_pre_cap_exposure = float(
+        pd.to_numeric(report_df.get("pre_cap_simulated_stake", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()
+    )
+    total_exposure = float(
+        pd.to_numeric(report_df.get("simulated_stake", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()
+    )
+    exposure_reduced = max(total_pre_cap_exposure - total_exposure, 0.0)
     lines = [
         f"Paper Kelly Simulation - {prediction_date}",
         "=" * 72,
@@ -267,8 +402,23 @@ def render_paper_kelly_text(
         "Summary",
         "-" * 72,
         f"- total paper rows: {int(len(report_df))}",
-        f"- paper exposure: {total_exposure:.6f}",
-        "- exposure by bucket:",
+        f"- total pre-cap exposure: {total_pre_cap_exposure:.6f}",
+        f"- total post-cap exposure: {total_exposure:.6f}",
+        f"- exposure reduced by caps: {exposure_reduced:.6f}",
+        "- top cap adjustment reasons:",
+        *_cap_adjustment_reason_lines(report_df),
+        "",
+        "Exposure After Caps",
+        "-" * 72,
+        "- by player:",
+        *_exposure_lines(report_df, "player_name"),
+        "- by team:",
+        *_exposure_lines(report_df, "team_abbr"),
+        "- by game:",
+        *_game_exposure_lines(report_df),
+        "- by side:",
+        *_exposure_lines(report_df, "selection"),
+        "- by bucket:",
         *_bucket_exposure_lines(report_df),
         "",
         "Top 10 Simulated EV Rows",
@@ -326,10 +476,15 @@ def write_paper_kelly_simulation(
 
 __all__ = [
     "GAME_EXPOSURE_CAP",
+    "PAPER_BUCKET_EXPOSURE_CAP",
     "PLAYER_EXPOSURE_CAP",
+    "PLAYER_SELECTION_EXPOSURE_CAP",
     "REPORT_COLUMNS",
     "ROW_STAKE_CAP",
+    "SIDE_EXPOSURE_CAP",
     "SIMULATION_WARNING",
+    "TEAM_EXPOSURE_CAP",
+    "TOTAL_PAPER_EXPOSURE_CAP",
     "build_paper_kelly_simulation",
     "render_paper_kelly_text",
     "report_paths_for_date",

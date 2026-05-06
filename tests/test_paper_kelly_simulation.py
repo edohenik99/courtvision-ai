@@ -6,10 +6,15 @@ import pandas as pd
 
 from courtvision.reporting.paper_kelly_simulation import (
     GAME_EXPOSURE_CAP,
+    PAPER_BUCKET_EXPOSURE_CAP,
     PLAYER_EXPOSURE_CAP,
+    PLAYER_SELECTION_EXPOSURE_CAP,
     REPORT_COLUMNS,
     ROW_STAKE_CAP,
+    SIDE_EXPOSURE_CAP,
     SIMULATION_WARNING,
+    TEAM_EXPOSURE_CAP,
+    TOTAL_PAPER_EXPOSURE_CAP,
     build_paper_kelly_simulation,
     write_paper_kelly_simulation,
 )
@@ -63,6 +68,24 @@ def _high_caution_row(player_name: str = "High Caution Over", *, edge: float = 4
         "kelly_projected_skip_reason": "context_high_caution_over",
         "final_elite_rejection_reason": "elite_reject_context_high_caution_over",
     }
+
+
+def _high_caution_row_for(
+    index: int,
+    *,
+    player_name: str | None = None,
+    team_abbr: str = "NYK",
+    opponent: str = "PHI",
+    selection: str = "over",
+    edge: float = 8.0,
+) -> dict:
+    row = _high_caution_row(player_name or f"High Caution {index}", edge=edge)
+    row["team_abbr"] = team_abbr
+    row["opponent"] = opponent
+    row["selection"] = selection
+    row["market_type"] = f"player_points_{index}" if index else "player_points"
+    row["line"] = 10.5 + index
+    return row
 
 
 def _kelly_row() -> dict:
@@ -154,6 +177,110 @@ def test_paper_kelly_caps_and_real_kelly_flags() -> None:
     assert set(report["simulation_only"].astype(str).str.lower()) == {"true"}
 
 
+def test_repeated_player_rows_are_capped_by_player_direction() -> None:
+    rows = [
+        _high_caution_row_for(index, player_name="Same Player", team_abbr=f"T{index}", opponent=f"O{index}")
+        for index in range(6)
+    ]
+
+    report = build_paper_kelly_simulation(
+        prediction_date="2026-05-06",
+        high_caution_over_watchlist=pd.DataFrame(rows),
+    )
+
+    player_exposure = report.groupby("player_name")["simulated_stake"].sum()
+    player_side_exposure = report.groupby(["player_name", "selection"])["simulated_stake"].sum()
+    reasons = ";".join(report["cap_adjustment_reason"].astype(str).tolist())
+    assert float(player_exposure.loc["Same Player"]) <= PLAYER_EXPOSURE_CAP
+    assert float(player_side_exposure.loc[("Same Player", "over")]) <= PLAYER_SELECTION_EXPOSURE_CAP
+    assert "player_selection_exposure_cap" in reasons
+
+
+def test_repeated_game_rows_are_capped() -> None:
+    high_rows = [
+        _high_caution_row_for(index, team_abbr=("BOS" if index % 2 == 0 else "NYK"), opponent=("NYK" if index % 2 == 0 else "BOS"))
+        for index in range(4)
+    ]
+    combo_rows = [
+        _combo_row(f"Combo Game {index}", edge=-8.0)
+        | {
+            "team_abbr": "BOS" if index % 2 == 0 else "NYK",
+            "opponent": "NYK" if index % 2 == 0 else "BOS",
+            "line": 20.5 + index,
+        }
+        for index in range(4)
+    ]
+
+    report = build_paper_kelly_simulation(
+        prediction_date="2026-05-06",
+        combo_under_watchlist=pd.DataFrame(combo_rows),
+        high_caution_over_watchlist=pd.DataFrame(high_rows),
+    )
+
+    assert float(report["simulated_stake"].sum()) <= GAME_EXPOSURE_CAP + 1e-9
+    assert pd.to_numeric(report["game_exposure_after_cap"], errors="coerce").max() <= GAME_EXPOSURE_CAP + 1e-9
+    assert "game_exposure_cap" in ";".join(report["cap_adjustment_reason"].astype(str).tolist())
+
+
+def test_repeated_team_rows_are_capped() -> None:
+    rows = [
+        _high_caution_row_for(index, team_abbr="NYK", opponent=f"O{index}", selection="over")
+        for index in range(8)
+    ]
+
+    report = build_paper_kelly_simulation(
+        prediction_date="2026-05-06",
+        high_caution_over_watchlist=pd.DataFrame(rows),
+    )
+
+    team_exposure = report.loc[report["team_abbr"] == "NYK", "simulated_stake"].sum()
+    assert float(team_exposure) <= TEAM_EXPOSURE_CAP + 1e-9
+    assert pd.to_numeric(report["team_exposure_after_cap"], errors="coerce").max() <= TEAM_EXPOSURE_CAP + 1e-9
+    assert "team_exposure_cap" in ";".join(report["cap_adjustment_reason"].astype(str).tolist())
+
+
+def test_side_concentration_is_capped() -> None:
+    rows = [
+        _high_caution_row_for(index, team_abbr=f"T{index}", opponent=f"O{index}", selection="over")
+        for index in range(8)
+    ]
+
+    report = build_paper_kelly_simulation(
+        prediction_date="2026-05-06",
+        high_caution_over_watchlist=pd.DataFrame(rows),
+    )
+
+    over_exposure = report.loc[report["selection"] == "over", "simulated_stake"].sum()
+    assert float(over_exposure) <= SIDE_EXPOSURE_CAP + 1e-9
+    assert pd.to_numeric(report["side_exposure_after_cap"], errors="coerce").max() <= SIDE_EXPOSURE_CAP + 1e-9
+    assert "side_exposure_cap" in ";".join(report["cap_adjustment_reason"].astype(str).tolist())
+
+
+def test_paper_bucket_exposure_is_capped() -> None:
+    rows = [
+        _high_caution_row_for(
+            index,
+            team_abbr=f"T{index}",
+            opponent=f"O{index}",
+            selection=("over" if index % 2 == 0 else "milestone"),
+        )
+        for index in range(8)
+    ]
+
+    report = build_paper_kelly_simulation(
+        prediction_date="2026-05-06",
+        high_caution_over_watchlist=pd.DataFrame(rows),
+    )
+
+    bucket_exposure = report.loc[
+        report["paper_bucket"] == "high_caution_over_watchlist",
+        "simulated_stake",
+    ].sum()
+    assert float(bucket_exposure) <= PAPER_BUCKET_EXPOSURE_CAP + 1e-9
+    assert pd.to_numeric(report["bucket_exposure_after_cap"], errors="coerce").max() <= PAPER_BUCKET_EXPOSURE_CAP + 1e-9
+    assert "paper_bucket_exposure_cap" in ";".join(report["cap_adjustment_reason"].astype(str).tolist())
+
+
 def test_combo_under_watchlist_contributes_positive_exposure_when_favorable() -> None:
     combo = _combo_row("Favorable Combo", edge=-2.5)
     combo["team_abbr"] = "NYK"
@@ -173,6 +300,47 @@ def test_combo_under_watchlist_contributes_positive_exposure_when_favorable() ->
     total_exposure = report["simulated_stake"].sum()
     assert combo_exposure > 0
     assert total_exposure <= GAME_EXPOSURE_CAP
+
+
+def test_high_caution_over_watchlist_receives_exposure_but_is_capped() -> None:
+    rows = [
+        _high_caution_row_for(index, team_abbr=f"T{index}", opponent=f"O{index}", selection="over")
+        for index in range(8)
+    ]
+
+    report = build_paper_kelly_simulation(
+        prediction_date="2026-05-06",
+        high_caution_over_watchlist=pd.DataFrame(rows),
+    )
+
+    high_exposure = report.loc[
+        report["paper_bucket"] == "high_caution_over_watchlist",
+        "simulated_stake",
+    ].sum()
+    assert high_exposure > 0
+    assert high_exposure <= PAPER_BUCKET_EXPOSURE_CAP + 1e-9
+    assert high_exposure <= SIDE_EXPOSURE_CAP + 1e-9
+
+
+def test_total_paper_exposure_cap_still_applies() -> None:
+    combo_rows = [
+        _combo_row(f"Combo {index}", edge=-8.0)
+        | {"team_abbr": f"C{index}", "opponent": f"D{index}", "line": 20.5 + index}
+        for index in range(12)
+    ]
+    high_rows = [
+        _high_caution_row_for(index, team_abbr=f"T{index}", opponent=f"O{index}", selection="over")
+        for index in range(12)
+    ]
+
+    report = build_paper_kelly_simulation(
+        prediction_date="2026-05-06",
+        combo_under_watchlist=pd.DataFrame(combo_rows),
+        high_caution_over_watchlist=pd.DataFrame(high_rows),
+    )
+
+    assert float(report["simulated_stake"].sum()) <= TOTAL_PAPER_EXPOSURE_CAP + 1e-9
+    assert float(report["pre_cap_simulated_stake"].sum()) >= float(report["simulated_stake"].sum())
 
 
 def test_real_kelly_file_unchanged_by_paper_simulation(tmp_path: Path) -> None:
