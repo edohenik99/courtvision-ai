@@ -43,6 +43,16 @@ from courtvision.reporting.paper_kelly_simulation import (
     report_paths_for_date as paper_kelly_report_paths_for_date,
     write_paper_kelly_simulation,
 )
+from courtvision.reporting.paper_kelly_performance import (
+    REPORT_TITLE as PAPER_KELLY_PERFORMANCE_TITLE,
+    build_paper_kelly_performance_report,
+    history_path as paper_kelly_history_path,
+    read_paper_kelly_history,
+    report_paths_for_date as paper_kelly_performance_report_paths_for_date,
+    report_row_line as paper_kelly_performance_row_line,
+    summarize_paper_kelly_history,
+    write_paper_kelly_performance_report,
+)
 from scripts.history_tracking import PLAYER_POINTS_MARKET, persist_market_shadow_history
 
 RUN_HEALTH_RECOMMENDATIONS: dict[str, str] = {
@@ -572,6 +582,20 @@ def build_daily_summary(
         if not paper_kelly_simulation.empty
         else 0.0
     )
+    paper_kelly_history_csv_path = paper_kelly_history_path(history_root)
+    paper_kelly_performance_text_path, paper_kelly_performance_csv_path = paper_kelly_performance_report_paths_for_date(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+    )
+    paper_kelly_history = read_paper_kelly_history(paper_kelly_history_csv_path)
+    paper_kelly_performance_report = build_paper_kelly_performance_report(
+        paper_kelly_history,
+        through_date=prediction_date,
+    )
+    paper_kelly_performance_summary = summarize_paper_kelly_history(
+        paper_kelly_history,
+        through_date=prediction_date,
+    )
     market_shadow_rows = int(len(full_market_df))
     market_shadow_non_points_rows = (
         int(
@@ -764,6 +788,30 @@ def build_daily_summary(
                 f"ev={_format_num(row.get('simulated_ev'), 6)}"
             )
 
+    lines.extend(["", PAPER_KELLY_PERFORMANCE_TITLE, "-" * 72])
+    lines.append("- scope: reporting/history only; no real Kelly promotion.")
+    lines.append(f"- history artifact: {paper_kelly_history_csv_path}")
+    lines.append(f"- txt artifact: {paper_kelly_performance_text_path}")
+    lines.append(f"- csv artifact: {paper_kelly_performance_csv_path}")
+    lines.append(
+        "- summary: "
+        f"total={int(paper_kelly_performance_summary.get('total') or 0)}, "
+        f"graded_total={int(paper_kelly_performance_summary.get('graded_total') or 0)}, "
+        f"hits={int(paper_kelly_performance_summary.get('hits') or 0)}, "
+        f"misses={int(paper_kelly_performance_summary.get('misses') or 0)}, "
+        f"pushes={int(paper_kelly_performance_summary.get('pushes') or 0)}, "
+        f"pending={int(paper_kelly_performance_summary.get('pending') or 0)}, "
+        f"hit_rate={_format_pct(paper_kelly_performance_summary.get('hit_rate'))}, "
+        f"paper_roi={_format_pct(paper_kelly_performance_summary.get('paper_roi'))}, "
+        f"sample_status={_safe_text(paper_kelly_performance_summary.get('sample_status')) or 'no_graded_results'}"
+    )
+    lines.append("- grouped performance:")
+    if paper_kelly_performance_report.empty:
+        lines.append("  - None")
+    else:
+        for _, row in paper_kelly_performance_report.head(10).iterrows():
+            lines.append(f"  - {paper_kelly_performance_row_line(row)}")
+
     lines.extend(["", "Kelly Stakes", "-" * 72])
     if kelly_eligible.empty:
         lines.append("- None")
@@ -914,6 +962,11 @@ def build_daily_summary(
         "paper_kelly_simulation_exposure": round(paper_kelly_exposure, 6),
         "paper_kelly_simulation_path": str(paper_kelly_text_path),
         "paper_kelly_simulation_csv_path": str(paper_kelly_csv_path),
+        "paper_kelly_history_path": str(paper_kelly_history_csv_path),
+        "paper_kelly_performance_report_count": int(len(paper_kelly_performance_report)),
+        "paper_kelly_performance_report_path": str(paper_kelly_performance_text_path),
+        "paper_kelly_performance_report_csv_path": str(paper_kelly_performance_csv_path),
+        "paper_kelly_performance_summary": paper_kelly_performance_summary,
         "market_shadow_history_path": str(market_shadow_history_path),
         "market_readiness_summary_path": str(market_readiness_summary_path),
         "market_shadow_rows": market_shadow_rows,
@@ -953,11 +1006,6 @@ def write_daily_summary_outputs(
             runtime_root=runtime_root,
             history_root=history_root,
         )
-    summary, metadata = build_daily_summary(
-        prediction_date=prediction_date,
-        runtime_root=runtime_root,
-        history_root=history_root,
-    )
     watchlist_path, watchlist_df = write_high_caution_over_watchlist(
         prediction_date=prediction_date,
         runtime_root=runtime_root,
@@ -977,6 +1025,18 @@ def write_daily_summary_outputs(
         combo_under_watchlist=combo_under_df,
         high_caution_over_watchlist=watchlist_df,
     )
+    paper_performance_text_path, paper_performance_csv_path, paper_performance_df, paper_persist_result = (
+        write_paper_kelly_performance_report(
+            prediction_date=prediction_date,
+            runtime_root=runtime_root,
+            history_root=history_root,
+        )
+    )
+    summary, metadata = build_daily_summary(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
     metadata["high_caution_over_watchlist_path"] = str(watchlist_path)
     metadata["high_caution_over_watchlist_count"] = int(len(watchlist_df))
     metadata["combo_under_watchlist_path"] = str(combo_under_path)
@@ -993,6 +1053,12 @@ def write_daily_summary_outputs(
         else 0.0,
         6,
     )
+    metadata["paper_kelly_history_path"] = str(paper_persist_result["paper_kelly_history_path"])
+    metadata["paper_kelly_performance_report_path"] = str(paper_performance_text_path)
+    metadata["paper_kelly_performance_report_csv_path"] = str(paper_performance_csv_path)
+    metadata["paper_kelly_performance_report_count"] = int(len(paper_performance_df))
+    metadata["paper_kelly_performance_current_date_rows"] = int(paper_persist_result["current_date_rows"])
+    metadata["paper_kelly_performance_pending_rows"] = int(paper_persist_result["pending_rows"])
     if shadow_result:
         metadata["market_shadow_rows"] = int(shadow_result["current_date_rows"])
         metadata["market_shadow_non_points_rows"] = int(shadow_result["current_date_non_points_rows"])

@@ -13,6 +13,7 @@ from courtvision.reporting.paper_kelly_simulation import (
     build_paper_kelly_simulation,
     write_paper_kelly_simulation,
 )
+from courtvision.reporting.paper_kelly_performance import REPORT_TITLE as PAPER_KELLY_PERFORMANCE_TITLE
 from scripts.write_daily_summary import write_daily_summary_outputs
 
 
@@ -243,9 +244,14 @@ def test_daily_summary_includes_paper_kelly_simulation_section(tmp_path: Path) -
     text = output_path.read_text(encoding="utf-8")
     assert "Paper Kelly Simulation" in text
     assert SIMULATION_WARNING in text
+    assert PAPER_KELLY_PERFORMANCE_TITLE in text
     assert metadata["paper_kelly_simulation_count"] == 2
+    assert metadata["paper_kelly_performance_current_date_rows"] == 2
     assert Path(metadata["paper_kelly_simulation_path"]).exists()
     assert Path(metadata["paper_kelly_simulation_csv_path"]).exists()
+    assert Path(metadata["paper_kelly_history_path"]).exists()
+    assert Path(metadata["paper_kelly_performance_report_path"]).exists()
+    assert Path(metadata["paper_kelly_performance_report_csv_path"]).exists()
     assert pd.read_csv(operator / f"kelly_stakes_{prediction_date}.csv").equals(pd.DataFrame([_kelly_row()]))
 
 
