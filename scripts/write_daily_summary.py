@@ -15,6 +15,13 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from courtvision.reporting.kelly_performance import build_kelly_decision_performance
+from courtvision.reporting.high_caution_over_watchlist import (
+    OBSERVATION_ONLY_NOTE,
+    build_high_caution_over_watchlist,
+    watchlist_path_for_date,
+    watchlist_row_line,
+    write_high_caution_over_watchlist,
+)
 
 RUN_HEALTH_RECOMMENDATIONS: dict[str, str] = {
     "HEALTHY": "Run is bet-ready within configured staking limits.",
@@ -453,6 +460,11 @@ def build_daily_summary(
     full_market_alignment = _alignment_counts(full_market_df)
     full_market_context_conflict_causes = _context_conflict_cause_counts(full_market_df)
     elite_context_gate_count = _elite_context_gate_count(full_market_df)
+    high_caution_over_watchlist = build_high_caution_over_watchlist(full_market_df)
+    high_caution_over_watchlist_path = watchlist_path_for_date(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+    )
     run_health = _daily_run_health_summary(
         elite_df=elite_df,
         full_market_df=full_market_df,
@@ -541,6 +553,17 @@ def build_daily_summary(
     lines.append("- full_market context conflict causes:")
     for cause, count in sorted(full_market_context_conflict_causes.items()):
         lines.append(f"  - {cause}: {count}")
+
+    lines.extend(["", "High-Caution OVER Watchlist — Observation Only / No Stake", "-" * 72])
+    lines.append(f"- watchlist row count: {int(len(high_caution_over_watchlist))}")
+    lines.append(f"- artifact: {high_caution_over_watchlist_path}")
+    lines.append(f"- note: {OBSERVATION_ONLY_NOTE}")
+    lines.append("- top 5 by edge:")
+    if high_caution_over_watchlist.empty:
+        lines.append("  - None")
+    else:
+        for _, row in high_caution_over_watchlist.head(5).iterrows():
+            lines.append(f"  - {watchlist_row_line(row)}")
 
     lines.extend(["", "Kelly Stakes", "-" * 72])
     if kelly_eligible.empty:
@@ -681,6 +704,8 @@ def build_daily_summary(
         "elite_medium_caution_count": elite_caution["medium"],
         "elite_low_caution_count": elite_caution["low"],
         "elite_context_safety_gate_rejected_count": elite_context_gate_count,
+        "high_caution_over_watchlist_count": int(len(high_caution_over_watchlist)),
+        "high_caution_over_watchlist_path": str(high_caution_over_watchlist_path),
         "full_market_context_conflict_cause_counts": full_market_context_conflict_causes,
         "stale_team_not_in_game_count": int(full_market_context_conflict_causes.get("stale_team_not_in_game", 0)),
         "run_health": run_health,
@@ -706,6 +731,12 @@ def write_daily_summary_outputs(
 ) -> tuple[Path, dict[str, Any]]:
     runtime_root = Path(runtime_root)
     summary, metadata = build_daily_summary(prediction_date=prediction_date, runtime_root=runtime_root)
+    watchlist_path, watchlist_df = write_high_caution_over_watchlist(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+    )
+    metadata["high_caution_over_watchlist_path"] = str(watchlist_path)
+    metadata["high_caution_over_watchlist_count"] = int(len(watchlist_df))
     output_path = runtime_root / "operator" / f"daily_summary_{prediction_date}.txt"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(summary, encoding="utf-8")
@@ -727,6 +758,7 @@ def main(argv: list[str] | None = None) -> int:
         f"elite={metadata['elite_count']} "
         f"kelly_eligible={metadata['kelly_eligible_count']} "
         f"run_health={metadata['run_health_status']} "
+        f"high_caution_over_watchlist={metadata['high_caution_over_watchlist_count']} "
         f"exposure={metadata['total_exposure']:.2f} "
         f"expected_ev={metadata['expected_ev']:.2f} "
         f"pending_grading={metadata['pending_grading_count']}"

@@ -11,6 +11,13 @@ from typing import Any, Iterable, Sequence
 
 import pandas as pd
 
+from courtvision.reporting.high_caution_over_watchlist import (
+    OBSERVATION_ONLY_NOTE,
+    build_high_caution_over_watchlist,
+    watchlist_path_for_date,
+    write_high_caution_over_watchlist,
+)
+
 ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER = "elite_reject_context_high_caution_over"
 CONTEXT_CONFLICT_CAUSE_BUCKETS: tuple[str, ...] = (
     "playoff_only",
@@ -24,6 +31,7 @@ CONTEXT_CONFLICT_CAUSE_BUCKETS: tuple[str, ...] = (
 PREDICTION_ARTIFACT_NAMES: tuple[str, ...] = (
     "elite_board",
     "full_market_board",
+    "high_caution_over_watchlist",
     "sgp_board",
     "elite_pipeline_audit",
     "elite_pipeline_audit_summary",
@@ -1415,6 +1423,11 @@ def build_quality_summary(
     kelly_safety = _kelly_safety_summary(kelly_df)
     risk_exposure = _exposure_summary(kelly_df, elite_df)
     elite_context_safety = _elite_context_safety_summary(full_market_df, elite_df)
+    high_caution_over_watchlist = build_high_caution_over_watchlist(full_market_df)
+    high_caution_over_watchlist_path = watchlist_path_for_date(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+    )
     rejection_reasons_market_rows, rejection_counts_by_market = _rejection_reasons_by_market(
         audit_summary=audit_summary,
         market_availability=market_availability,
@@ -1490,6 +1503,13 @@ def build_quality_summary(
         },
         "kelly_safety_summary": kelly_safety,
         "elite_context_safety_gate": elite_context_safety,
+        "high_caution_over_watchlist": {
+            "path": str(high_caution_over_watchlist_path),
+            "row_count": int(len(high_caution_over_watchlist)),
+            "observation_only": True,
+            "note": OBSERVATION_ONLY_NOTE,
+            "source": str(operator_dir / f"full_market_board_{prediction_date}.csv"),
+        },
         "risk_exposure_summary": risk_exposure,
         "board_movement_summary": board_movement,
         "date_isolation_check": date_isolation,
@@ -1522,6 +1542,7 @@ def _format_quality_summary_text(payload: dict[str, Any]) -> str:
     market_coverage = payload.get("market_coverage", {})
     kelly = payload["kelly_safety_summary"]
     elite_context_safety = payload.get("elite_context_safety_gate", {})
+    high_caution_over_watchlist = payload.get("high_caution_over_watchlist", {})
     exposure = payload["risk_exposure_summary"]
     movement = payload["board_movement_summary"]
     isolation = payload["date_isolation_check"]
@@ -1641,6 +1662,18 @@ def _format_quality_summary_text(payload: dict[str, Any]) -> str:
                 indent="  - ",
             ),
             f"- status: {elite_context_safety.get('status', 'unknown')}",
+        ]
+    )
+
+    lines.extend(
+        [
+            "",
+            "High-Caution OVER Watchlist",
+            "-" * 72,
+            f"- path: {high_caution_over_watchlist.get('path', 'unavailable')}",
+            f"- row count: {high_caution_over_watchlist.get('row_count', 0)}",
+            f"- observation_only: {high_caution_over_watchlist.get('observation_only', True)}",
+            f"- note: {high_caution_over_watchlist.get('note', OBSERVATION_ONLY_NOTE)}",
         ]
     )
 
@@ -1777,6 +1810,10 @@ def write_quality_summary_outputs(
     extra_prediction_artifact_paths: Sequence[str | Path] | None = None,
 ) -> tuple[Path, Path, dict[str, Any]]:
     runtime_root = Path(runtime_root)
+    write_high_caution_over_watchlist(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+    )
     text, payload = build_quality_summary(
         prediction_date=prediction_date,
         runtime_root=runtime_root,

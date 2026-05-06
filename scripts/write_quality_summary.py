@@ -31,6 +31,9 @@ def main(argv: list[str] | None = None) -> int:
     funnel = payload["candidate_funnel"]
     print(f"quality_summary_txt={text_path}")
     print(f"quality_summary_json={json_path}")
+    watchlist = payload.get("high_caution_over_watchlist", {})
+    if isinstance(watchlist, dict) and watchlist.get("path"):
+        print(f"high_caution_over_watchlist_csv={watchlist['path']}")
     history_csv = Path(args.runtime_root) / "operator" / QUALITY_HISTORY_CSV_NAME
     history_jsonl = Path(args.runtime_root) / "operator" / QUALITY_HISTORY_JSONL_NAME
     if history_csv.exists():
