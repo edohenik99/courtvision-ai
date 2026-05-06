@@ -669,6 +669,104 @@ def test_market_shadow_history_is_created_from_full_market(tmp_path: Path) -> No
     assert str(non_points["calibration_eligible"]).lower() == "false"
 
 
+def test_market_shadow_history_replaces_same_prediction_date_on_rerun(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "outputs" / "runtime"
+    history_root = tmp_path / "data" / "history"
+    date = "2026-05-06"
+    other_date = "2026-05-05"
+
+    _write_elite_board(
+        runtime_root / "operator" / f"full_market_board_{date}.csv",
+        [
+            _shadow_row("Old Current A", prediction_date=date, market_type="player_rebounds", result_status="hit", line=4.5),
+            _shadow_row("Old Current B", prediction_date=date, market_type="player_rebounds", result_status="miss", line=5.5),
+        ],
+    )
+    first = persist_market_shadow_history(
+        prediction_date=date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+    assert first["current_date_rows"] == 2
+
+    _write_elite_board(
+        runtime_root / "operator" / f"full_market_board_{other_date}.csv",
+        [
+            _shadow_row("Other Date", prediction_date=other_date, market_type="player_rebounds", result_status="hit", line=6.5),
+        ],
+    )
+    persist_market_shadow_history(
+        prediction_date=other_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+
+    _write_elite_board(
+        runtime_root / "operator" / f"full_market_board_{date}.csv",
+        [
+            _shadow_row("New Current A", prediction_date=date, market_type="player_rebounds", result_status="miss", line=7.5),
+            _shadow_row("New Current B", prediction_date=date, market_type="player_rebounds", result_status="pending", line=8.5),
+            _shadow_row("New Current C", prediction_date=date, market_type="player_assists", result_status="pending", line=9.5),
+        ],
+    )
+
+    second = persist_market_shadow_history(
+        prediction_date=date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+
+    assert second["replaced_rows"] == 2
+    assert second["current_date_rows"] == 3
+    shadow = pd.read_csv(history_root / "market_shadow_history.csv", keep_default_na=False)
+    assert len(shadow[shadow["prediction_date"].astype(str) == date]) == 3
+    assert len(shadow[shadow["prediction_date"].astype(str) == other_date]) == 1
+    assert "Old Current A" not in set(shadow["player_name"])
+    assert "Other Date" in set(shadow["player_name"])
+
+
+def test_market_readiness_summary_uses_replaced_shadow_history_rows(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "outputs" / "runtime"
+    history_root = tmp_path / "data" / "history"
+    date = "2026-05-06"
+    other_date = "2026-05-05"
+
+    _write_elite_board(
+        runtime_root / "operator" / f"full_market_board_{date}.csv",
+        [
+            _shadow_row("Old Hit", prediction_date=date, market_type="player_rebounds", result_status="hit", line=4.5),
+            _shadow_row("Old Miss", prediction_date=date, market_type="player_rebounds", result_status="miss", line=5.5),
+        ],
+    )
+    persist_market_shadow_history(prediction_date=date, runtime_root=runtime_root, history_root=history_root)
+
+    _write_elite_board(
+        runtime_root / "operator" / f"full_market_board_{other_date}.csv",
+        [
+            _shadow_row("Other Hit", prediction_date=other_date, market_type="player_rebounds", result_status="hit", line=6.5),
+        ],
+    )
+    persist_market_shadow_history(prediction_date=other_date, runtime_root=runtime_root, history_root=history_root)
+
+    _write_elite_board(
+        runtime_root / "operator" / f"full_market_board_{date}.csv",
+        [
+            _shadow_row("Replacement Miss", prediction_date=date, market_type="player_rebounds", result_status="miss", line=7.5),
+        ],
+    )
+    persist_market_shadow_history(prediction_date=date, runtime_root=runtime_root, history_root=history_root)
+
+    readiness = pd.read_csv(history_root / "market_readiness_summary.csv", keep_default_na=False)
+    rows = readiness[readiness["market_type"] == "player_rebounds"]
+    assert len(rows) == 1
+    row = rows.iloc[0]
+    assert int(row["total"]) == 2
+    assert int(row["graded_total"]) == 2
+    assert int(row["hits"]) == 1
+    assert int(row["misses"]) == 1
+    assert float(row["hit_rate"]) == 0.5
+
+
 def test_market_shadow_history_migrates_existing_rows_safely(tmp_path: Path) -> None:
     history_root = tmp_path / "data" / "history"
     history_root.mkdir(parents=True, exist_ok=True)

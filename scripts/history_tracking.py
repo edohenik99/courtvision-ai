@@ -278,28 +278,6 @@ def _row_calibration_fields(result_status: str, selection: str) -> tuple[bool, s
     return not reasons, ";".join(reasons)
 
 
-def _market_shadow_key_columns(df: pd.DataFrame) -> list[str]:
-    candidates = [
-        "prediction_date",
-        "player_name",
-        "player_id",
-        "market_type",
-        "selection",
-        "line",
-    ]
-    return [column for column in candidates if column in df.columns]
-
-
-def _with_shadow_occurrence(df: pd.DataFrame, key_columns: list[str]) -> pd.DataFrame:
-    working = df.copy()
-    if not key_columns or working.empty:
-        working["_shadow_occurrence"] = 0
-        return working
-    key_frame = working[key_columns].fillna("").astype(str)
-    working["_shadow_occurrence"] = key_frame.groupby(key_columns, sort=False).cumcount()
-    return working
-
-
 def _provider_from_audit_summary(audit_summary_path: Path) -> str:
     if not audit_summary_path.exists():
         return "unknown"
@@ -552,29 +530,20 @@ def persist_market_shadow_history(
         result_status=result_status,
     )
     existing = _read_csv_preserve_schema(shadow_history_path, MARKET_SHADOW_HISTORY_COLUMNS)
-    existing_count = int(len(existing))
+    same_date_mask = (
+        existing["prediction_date"].astype(str).eq(str(prediction_date))
+        if "prediction_date" in existing.columns
+        else pd.Series(False, index=existing.index)
+    )
+    replaced_rows = int(same_date_mask.sum())
+    preserved_existing = existing.loc[~same_date_mask].copy()
 
-    key_frame = incoming if not incoming.empty else existing
-    key_columns = _market_shadow_key_columns(key_frame)
-    if key_columns:
-        existing_with_occurrence = _with_shadow_occurrence(existing, key_columns)
-        incoming_with_occurrence = _with_shadow_occurrence(incoming, key_columns)
-        if existing_with_occurrence.empty:
-            combined = incoming_with_occurrence.copy()
-        elif incoming_with_occurrence.empty:
-            combined = existing_with_occurrence.copy()
-        else:
-            combined = pd.concat([existing_with_occurrence, incoming_with_occurrence], ignore_index=True)
-        combined = combined.drop_duplicates(
-            subset=key_columns + ["_shadow_occurrence"],
-            keep="first",
-        ).drop(columns=["_shadow_occurrence"])
-    elif existing.empty:
+    if preserved_existing.empty:
         combined = incoming.copy()
     elif incoming.empty:
-        combined = existing.copy()
+        combined = preserved_existing.copy()
     else:
-        combined = pd.concat([existing, incoming], ignore_index=True)
+        combined = pd.concat([preserved_existing, incoming], ignore_index=True)
     for column in MARKET_SHADOW_HISTORY_COLUMNS:
         if column not in combined.columns:
             combined[column] = ""
@@ -603,7 +572,8 @@ def persist_market_shadow_history(
         "market_shadow_history_path": shadow_history_path,
         "market_readiness_summary_path": readiness_path,
         "incoming_rows": int(len(incoming)),
-        "new_rows": max(int(len(combined)) - existing_count, 0),
+        "replaced_rows": replaced_rows,
+        "new_rows": max(int(len(incoming)) - replaced_rows, 0),
         "total_rows": int(len(combined)),
         "current_date_rows": int(len(current_date_rows)),
         "current_date_non_points_rows": non_points_rows,
