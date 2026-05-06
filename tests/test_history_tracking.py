@@ -11,6 +11,8 @@ from scripts.dashboard import load_dashboard_data
 from scripts.history_tracking import (
     MARKET_READINESS_COLUMNS,
     MARKET_SHADOW_HISTORY_COLUMNS,
+    backfill_market_shadow_history,
+    discover_full_market_board_dates,
     grade_completed_picks,
     migrate_market_shadow_history_schema,
     migrate_pick_history_schema,
@@ -723,6 +725,176 @@ def test_market_shadow_history_replaces_same_prediction_date_on_rerun(tmp_path: 
     assert len(shadow[shadow["prediction_date"].astype(str) == other_date]) == 1
     assert "Old Current A" not in set(shadow["player_name"])
     assert "Other Date" in set(shadow["player_name"])
+
+
+def test_market_shadow_backfill_discovers_full_market_board_dates(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "outputs" / "runtime"
+    operator = runtime_root / "operator"
+    _write_elite_board(operator / "full_market_board_2026-05-02.csv", [_shadow_row("A", prediction_date="2026-05-02")])
+    _write_elite_board(operator / "full_market_board_2026-05-01.csv", [_shadow_row("B", prediction_date="2026-05-01")])
+    _write_elite_board(operator / "full_market_board_bad-date.csv", [_shadow_row("Ignored")])
+
+    discovered = discover_full_market_board_dates(runtime_root=runtime_root)
+
+    assert list(discovered) == ["2026-05-01", "2026-05-02"]
+    assert discovered["2026-05-01"].name == "full_market_board_2026-05-01.csv"
+
+
+def test_market_shadow_backfill_dry_run_does_not_write_history(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "outputs" / "runtime"
+    history_root = tmp_path / "data" / "history"
+    date = "2026-05-06"
+    _write_elite_board(
+        runtime_root / "operator" / f"full_market_board_{date}.csv",
+        [
+            _shadow_row("Points", prediction_date=date, market_type="player_points"),
+            _shadow_row("Assists", prediction_date=date, market_type="player_assists"),
+        ],
+    )
+
+    result = backfill_market_shadow_history(
+        runtime_root=runtime_root,
+        history_root=history_root,
+        dry_run=True,
+    )
+
+    assert result["dry_run"] is True
+    assert result["would_backfill_dates"] == [date]
+    assert result["backfilled_dates"] == []
+    assert result["total_incoming_rows"] == 2
+    assert not (history_root / "market_shadow_history.csv").exists()
+    assert not (history_root / "market_readiness_summary.csv").exists()
+
+
+def test_market_shadow_backfill_persists_missing_dates_and_skips_existing(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "outputs" / "runtime"
+    history_root = tmp_path / "data" / "history"
+    missing_date = "2026-05-05"
+    existing_date = "2026-05-06"
+
+    _write_elite_board(
+        runtime_root / "operator" / f"full_market_board_{missing_date}.csv",
+        [_shadow_row("Backfill Me", prediction_date=missing_date, market_type="player_rebounds")],
+    )
+    _write_elite_board(
+        runtime_root / "operator" / f"full_market_board_{existing_date}.csv",
+        [_shadow_row("Do Not Replace", prediction_date=existing_date, market_type="player_assists")],
+    )
+    history_root.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        [_shadow_row("Existing Sentinel", prediction_date=existing_date, market_type="player_points")]
+    ).to_csv(history_root / "market_shadow_history.csv", index=False)
+
+    result = backfill_market_shadow_history(
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+
+    assert result["backfilled_dates"] == [missing_date]
+    assert result["skipped_existing_dates"] == [existing_date]
+    shadow = pd.read_csv(history_root / "market_shadow_history.csv", keep_default_na=False)
+    assert set(shadow["prediction_date"].astype(str)) == {missing_date, existing_date}
+    assert "Backfill Me" in set(shadow["player_name"])
+    assert "Existing Sentinel" in set(shadow["player_name"])
+    assert "Do Not Replace" not in set(shadow["player_name"])
+    assert (history_root / "market_readiness_summary.csv").exists()
+
+
+def test_market_shadow_backfill_reports_count_mismatch_without_replace(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "outputs" / "runtime"
+    history_root = tmp_path / "data" / "history"
+    date = "2026-05-06"
+    _write_elite_board(
+        runtime_root / "operator" / f"full_market_board_{date}.csv",
+        [
+            _shadow_row("Board A", prediction_date=date, market_type="player_points", line=10.5),
+            _shadow_row("Board B", prediction_date=date, market_type="player_assists", line=5.5),
+        ],
+    )
+    history_root.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        [_shadow_row("Existing Incomplete", prediction_date=date, market_type="player_points", line=10.5)]
+    ).to_csv(history_root / "market_shadow_history.csv", index=False)
+
+    result = backfill_market_shadow_history(
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+
+    assert result["backfilled_dates"] == []
+    assert result["skipped_existing_dates"] == []
+    assert result["count_mismatch_dates"] == [date]
+    assert result["count_mismatch_details"] == [
+        {"prediction_date": date, "existing_rows": 1, "board_rows": 2}
+    ]
+    shadow = pd.read_csv(history_root / "market_shadow_history.csv", keep_default_na=False)
+    assert len(shadow) == 1
+    assert set(shadow["player_name"]) == {"Existing Incomplete"}
+
+
+def test_market_shadow_backfill_replace_existing_fixes_count_mismatch(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "outputs" / "runtime"
+    history_root = tmp_path / "data" / "history"
+    date = "2026-05-06"
+    _write_elite_board(
+        runtime_root / "operator" / f"full_market_board_{date}.csv",
+        [
+            _shadow_row("Board A", prediction_date=date, market_type="player_points", line=10.5),
+            _shadow_row("Board B", prediction_date=date, market_type="player_assists", line=5.5),
+        ],
+    )
+    history_root.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        [_shadow_row("Existing Incomplete", prediction_date=date, market_type="player_points", line=10.5)]
+    ).to_csv(history_root / "market_shadow_history.csv", index=False)
+
+    result = backfill_market_shadow_history(
+        runtime_root=runtime_root,
+        history_root=history_root,
+        replace_existing=True,
+    )
+
+    assert result["backfilled_dates"] == [date]
+    assert result["count_mismatch_dates"] == [date]
+    assert result["total_replaced_rows"] == 1
+    shadow = pd.read_csv(history_root / "market_shadow_history.csv", keep_default_na=False)
+    assert len(shadow) == 2
+    assert set(shadow["player_name"]) == {"Board A", "Board B"}
+    readiness = pd.read_csv(history_root / "market_readiness_summary.csv", keep_default_na=False)
+    assert int(readiness["total"].sum()) == 2
+
+
+def test_market_shadow_backfill_replace_existing_is_idempotent(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "outputs" / "runtime"
+    history_root = tmp_path / "data" / "history"
+    date = "2026-05-06"
+    _write_elite_board(
+        runtime_root / "operator" / f"full_market_board_{date}.csv",
+        [
+            _shadow_row("Replacement A", prediction_date=date, market_type="player_rebounds", line=4.5),
+            _shadow_row("Replacement B", prediction_date=date, market_type="player_assists", line=5.5),
+        ],
+    )
+
+    first = backfill_market_shadow_history(
+        runtime_root=runtime_root,
+        history_root=history_root,
+        replace_existing=True,
+    )
+    second = backfill_market_shadow_history(
+        runtime_root=runtime_root,
+        history_root=history_root,
+        replace_existing=True,
+    )
+
+    assert first["backfilled_dates"] == [date]
+    assert second["backfilled_dates"] == [date]
+    assert second["total_replaced_rows"] == 2
+    shadow = pd.read_csv(history_root / "market_shadow_history.csv", keep_default_na=False)
+    assert len(shadow) == 2
+    assert len(shadow[shadow["prediction_date"].astype(str) == date]) == 2
+    readiness = pd.read_csv(history_root / "market_readiness_summary.csv", keep_default_na=False)
+    assert int(readiness["total"].sum()) == 2
 
 
 def test_market_readiness_summary_uses_replaced_shadow_history_rows(tmp_path: Path) -> None:

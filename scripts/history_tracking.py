@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -111,6 +112,7 @@ LEGACY_METADATA_DIMENSIONS = {
 }
 BLANK_GROUP_VALUE = "(blank)"
 PLAYER_POINTS_MARKET = "player_points"
+FULL_MARKET_BOARD_PATTERN = re.compile(r"^full_market_board_(\d{4}-\d{2}-\d{2})\.csv$")
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -220,6 +222,22 @@ def _read_csv_preserve_schema(path: Path, columns: list[str]) -> pd.DataFrame:
             df[column] = ""
     ordered_columns = columns + [column for column in df.columns if column not in columns]
     return df[ordered_columns]
+
+
+def _full_market_board_date(path: Path) -> str | None:
+    match = FULL_MARKET_BOARD_PATTERN.match(path.name)
+    return match.group(1) if match else None
+
+
+def _full_market_row_count(path: Path) -> int:
+    try:
+        return int(len(pd.read_csv(path, low_memory=False)))
+    except pd.errors.EmptyDataError:
+        return 0
+
+
+def _unique_sorted_dates(values: list[str]) -> list[str]:
+    return sorted({str(value).strip() for value in values if str(value).strip()})
 
 
 def _truthy(value: Any) -> bool:
@@ -505,6 +523,19 @@ def update_market_readiness_summary(
     return readiness_path, readiness
 
 
+def discover_full_market_board_dates(runtime_root: str | Path = "outputs/runtime") -> dict[str, Path]:
+    runtime_root_path = Path(runtime_root)
+    operator_root = runtime_root_path / "operator"
+    boards: dict[str, Path] = {}
+    if not operator_root.exists():
+        return boards
+    for path in sorted(operator_root.glob("full_market_board_*.csv")):
+        prediction_date = _full_market_board_date(path)
+        if prediction_date:
+            boards[prediction_date] = path
+    return boards
+
+
 def persist_market_shadow_history(
     prediction_date: str,
     runtime_root: str | Path = "outputs/runtime",
@@ -579,6 +610,138 @@ def persist_market_shadow_history(
         "current_date_non_points_rows": non_points_rows,
         "current_date_market_counts": {str(k): int(v) for k, v in current_market_counts.items()},
         "readiness_rows": int(len(readiness)),
+    }
+
+
+def backfill_market_shadow_history(
+    *,
+    runtime_root: str | Path = "outputs/runtime",
+    history_root: str | Path = "data/history",
+    dates: list[str] | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    replace_existing: bool = False,
+    dry_run: bool = False,
+    result_status: str = "pending",
+) -> dict[str, Any]:
+    """Backfill shadow history from historical full-market boards.
+
+    Default behavior is conservative: only dates missing from
+    market_shadow_history.csv are written. Existing dates with row counts that
+    differ from their full-market board are reported as count mismatches and
+    require replace_existing=True to refresh.
+    """
+
+    runtime_root_path = Path(runtime_root)
+    history_root_path = Path(history_root)
+    shadow_history_path = history_root_path / "market_shadow_history.csv"
+    readiness_path = history_root_path / "market_readiness_summary.csv"
+    boards = discover_full_market_board_dates(runtime_root_path)
+
+    requested_dates = _unique_sorted_dates(dates or list(boards.keys()))
+    missing_full_market_dates = [prediction_date for prediction_date in requested_dates if prediction_date not in boards]
+    selected_dates = [prediction_date for prediction_date in requested_dates if prediction_date in boards]
+    if start_date:
+        selected_dates = [prediction_date for prediction_date in selected_dates if prediction_date >= str(start_date)]
+    if end_date:
+        selected_dates = [prediction_date for prediction_date in selected_dates if prediction_date <= str(end_date)]
+
+    existing = _read_csv_preserve_schema(shadow_history_path, MARKET_SHADOW_HISTORY_COLUMNS)
+    if not existing.empty and "prediction_date" in existing.columns:
+        existing_date_series = existing["prediction_date"].astype(str).str.strip()
+        existing_counts = {str(k): int(v) for k, v in existing_date_series.value_counts().items() if str(k).strip()}
+    else:
+        existing_counts = {}
+    existing_dates = set(existing_counts)
+    board_row_counts = {prediction_date: _full_market_row_count(boards[prediction_date]) for prediction_date in selected_dates}
+
+    complete_existing_dates = [
+        prediction_date
+        for prediction_date in selected_dates
+        if prediction_date in existing_counts and existing_counts[prediction_date] == board_row_counts[prediction_date]
+    ]
+    count_mismatch_details = [
+        {
+            "prediction_date": prediction_date,
+            "existing_rows": existing_counts[prediction_date],
+            "board_rows": board_row_counts[prediction_date],
+        }
+        for prediction_date in selected_dates
+        if prediction_date in existing_counts and existing_counts[prediction_date] != board_row_counts[prediction_date]
+    ]
+    count_mismatch_dates = [str(detail["prediction_date"]) for detail in count_mismatch_details]
+    missing_shadow_dates = [prediction_date for prediction_date in selected_dates if prediction_date not in existing_counts]
+
+    skipped_existing_dates = [] if replace_existing else complete_existing_dates
+    backfill_dates = selected_dates if replace_existing else missing_shadow_dates
+
+    date_results: list[dict[str, Any]] = []
+    total_incoming_rows = 0
+    total_replaced_rows = 0
+    total_current_date_rows = 0
+    for prediction_date in backfill_dates:
+        board_path = boards[prediction_date]
+        board_rows = board_row_counts[prediction_date]
+        if dry_run:
+            date_results.append(
+                {
+                    "prediction_date": prediction_date,
+                    "full_market_board_path": board_path,
+                    "board_rows": board_rows,
+                    "incoming_rows": board_rows,
+                    "replaced_rows": int((existing["prediction_date"].astype(str) == prediction_date).sum())
+                    if not existing.empty and "prediction_date" in existing.columns
+                    else 0,
+                    "current_date_rows": board_rows,
+                    "dry_run": True,
+                }
+            )
+            total_incoming_rows += board_rows
+            total_current_date_rows += board_rows
+            continue
+
+        result = persist_market_shadow_history(
+            prediction_date=prediction_date,
+            runtime_root=runtime_root_path,
+            history_root=history_root_path,
+            result_status=result_status,
+        )
+        date_results.append(
+            {
+                "prediction_date": prediction_date,
+                "full_market_board_path": board_path,
+                "board_rows": board_rows,
+                **result,
+                "dry_run": False,
+            }
+        )
+        total_incoming_rows += int(result["incoming_rows"])
+        total_replaced_rows += int(result["replaced_rows"])
+        total_current_date_rows += int(result["current_date_rows"])
+
+    return {
+        "runtime_root": runtime_root_path,
+        "history_root": history_root_path,
+        "market_shadow_history_path": shadow_history_path,
+        "market_readiness_summary_path": readiness_path,
+        "full_market_board_dates": sorted(boards),
+        "selected_dates": selected_dates,
+        "missing_full_market_dates": missing_full_market_dates,
+        "existing_shadow_dates": sorted(existing_dates),
+        "skipped_existing_dates": skipped_existing_dates,
+        "complete_existing_dates": complete_existing_dates,
+        "count_mismatch_dates": count_mismatch_dates,
+        "count_mismatch_details": count_mismatch_details,
+        "missing_shadow_dates": missing_shadow_dates,
+        "backfilled_dates": [] if dry_run else backfill_dates,
+        "would_backfill_dates": backfill_dates if dry_run else [],
+        "replace_existing": replace_existing,
+        "dry_run": dry_run,
+        "dates_processed": int(len(backfill_dates)),
+        "total_incoming_rows": int(total_incoming_rows),
+        "total_replaced_rows": int(total_replaced_rows),
+        "total_current_date_rows": int(total_current_date_rows),
+        "date_results": date_results,
     }
 
 
