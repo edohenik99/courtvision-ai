@@ -17,6 +17,7 @@ from courtvision.reporting.high_caution_over_watchlist import (
     watchlist_path_for_date,
     write_high_caution_over_watchlist,
 )
+from courtvision.reporting.same_opponent_rematch import annotate_operator_board_files, manual_review_summary
 
 ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER = "elite_reject_context_high_caution_over"
 CONTEXT_CONFLICT_CAUSE_BUCKETS: tuple[str, ...] = (
@@ -1459,6 +1460,15 @@ def build_quality_summary(
     kelly_safety = _kelly_safety_summary(kelly_df)
     risk_exposure = _exposure_summary(kelly_df, elite_df)
     elite_context_safety = _elite_context_safety_summary(full_market_df, elite_df)
+    elite_manual_review = manual_review_summary(elite_df)
+    full_market_manual_review = manual_review_summary(full_market_df)
+    manual_review = {
+        "same_opponent_under_warning_count": full_market_manual_review["same_opponent_under_warning_count"],
+        "manual_review_required_count": full_market_manual_review["manual_review_required_count"],
+        "elite_same_opponent_under_warning_count": elite_manual_review["same_opponent_under_warning_count"],
+        "elite_manual_review_required_count": elite_manual_review["manual_review_required_count"],
+        "mode": "passive_diagnostic_only",
+    }
     high_caution_over_watchlist = build_high_caution_over_watchlist(full_market_df)
     high_caution_over_watchlist_path = watchlist_path_for_date(
         prediction_date=prediction_date,
@@ -1492,6 +1502,12 @@ def build_quality_summary(
             "Elite board is empty after the context safety gate; no-bet is preferred "
             "over filling elite with Kelly-blocked high-caution OVERs."
         )
+    if manual_review["manual_review_required_count"]:
+        coverage_warnings.append(
+            "Manual review required for "
+            f"{manual_review['manual_review_required_count']} full-market row(s); "
+            "same-opponent rematch flags are diagnostic only."
+        )
     board_movement = _board_movement_summary(
         previous_payload=previous_payload,
         current_elite_count=elite_count,
@@ -1524,6 +1540,9 @@ def build_quality_summary(
         "slate_provider_counts": slate_provider_counts,
         "player_baseline_coverage": player_baseline_coverage,
         "candidate_funnel": candidate_funnel,
+        "same_opponent_under_warning_count": manual_review["same_opponent_under_warning_count"],
+        "manual_review_required_count": manual_review["manual_review_required_count"],
+        "manual_review_summary": manual_review,
         "top_rejection_reasons": rejection_reasons,
         "market_coverage": {
             "config": {
@@ -1578,6 +1597,7 @@ def _format_quality_summary_text(payload: dict[str, Any]) -> str:
     market_coverage = payload.get("market_coverage", {})
     kelly = payload["kelly_safety_summary"]
     elite_context_safety = payload.get("elite_context_safety_gate", {})
+    manual_review = payload.get("manual_review_summary", {}) if isinstance(payload.get("manual_review_summary"), dict) else {}
     high_caution_over_watchlist = payload.get("high_caution_over_watchlist", {})
     exposure = payload["risk_exposure_summary"]
     movement = payload["board_movement_summary"]
@@ -1698,6 +1718,23 @@ def _format_quality_summary_text(payload: dict[str, Any]) -> str:
                 indent="  - ",
             ),
             f"- status: {elite_context_safety.get('status', 'unknown')}",
+        ]
+    )
+
+    lines.extend(
+        [
+            "",
+            "Manual Review Warnings",
+            "-" * 72,
+            "- full_market same_opponent_under_warning_count: "
+            f"{manual_review.get('same_opponent_under_warning_count', payload.get('same_opponent_under_warning_count', 0))}",
+            "- full_market manual_review_required_count: "
+            f"{manual_review.get('manual_review_required_count', payload.get('manual_review_required_count', 0))}",
+            "- elite same_opponent_under_warning_count: "
+            f"{manual_review.get('elite_same_opponent_under_warning_count', 0)}",
+            "- elite manual_review_required_count: "
+            f"{manual_review.get('elite_manual_review_required_count', 0)}",
+            f"- mode: {manual_review.get('mode', 'passive_diagnostic_only')}",
         ]
     )
 
@@ -1846,6 +1883,10 @@ def write_quality_summary_outputs(
     extra_prediction_artifact_paths: Sequence[str | Path] | None = None,
 ) -> tuple[Path, Path, dict[str, Any]]:
     runtime_root = Path(runtime_root)
+    annotate_operator_board_files(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+    )
     write_high_caution_over_watchlist(
         prediction_date=prediction_date,
         runtime_root=runtime_root,

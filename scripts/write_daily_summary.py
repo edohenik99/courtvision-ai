@@ -53,6 +53,7 @@ from courtvision.reporting.paper_kelly_performance import (
     summarize_paper_kelly_history,
     write_paper_kelly_performance_report,
 )
+from courtvision.reporting.same_opponent_rematch import annotate_operator_board_files, manual_review_summary
 from courtvision.reporting.correlation_exposure import (
     REPORT_TITLE as CORRELATION_EXPOSURE_TITLE,
     build_correlation_exposure_report,
@@ -256,6 +257,24 @@ def _manual_context_lines(row: pd.Series) -> list[str]:
         f"  manual_confidence_adjustment: {_safe_text(row.get('manual_confidence_adjustment')) or 'n/a'}",
         f"  manual_context_reason: {_safe_text(row.get('manual_context_reason')) or 'n/a'}",
         f"  manual_context_applied: {_safe_text(row.get('manual_context_applied')) or 'False'}",
+    ]
+
+
+def _has_manual_review(row: pd.Series) -> bool:
+    return _is_truthy(row.get("manual_review_required")) or _is_truthy(row.get("same_opponent_under_warning"))
+
+
+def _manual_review_lines(row: pd.Series) -> list[str]:
+    return [
+        f"  manual_review_required: {_safe_text(row.get('manual_review_required')) or 'False'}",
+        f"  manual_review_reason: {_safe_text(row.get('manual_review_reason')) or 'n/a'}",
+        f"  same_opponent_recent_games: {_safe_text(row.get('same_opponent_recent_games')) or '0'}",
+        f"  same_opponent_last_actual_points: {_safe_text(row.get('same_opponent_last_actual_points')) or 'n/a'}",
+        f"  same_opponent_last_line: {_safe_text(row.get('same_opponent_last_line')) or 'n/a'}",
+        f"  same_opponent_last_selection: {_safe_text(row.get('same_opponent_last_selection')) or 'n/a'}",
+        f"  same_opponent_last_result_status: {_safe_text(row.get('same_opponent_last_result_status')) or 'n/a'}",
+        f"  same_opponent_under_warning: {_safe_text(row.get('same_opponent_under_warning')) or 'False'}",
+        f"  same_opponent_warning_reason: {_safe_text(row.get('same_opponent_warning_reason')) or 'n/a'}",
     ]
 
 
@@ -562,6 +581,8 @@ def build_daily_summary(
     elite_caution = _caution_counts(elite_df)
     full_market_alignment = _alignment_counts(full_market_df)
     full_market_context_conflict_causes = _context_conflict_cause_counts(full_market_df)
+    elite_manual_review = manual_review_summary(elite_df)
+    full_market_manual_review = manual_review_summary(full_market_df)
     elite_context_gate_count = _elite_context_gate_count(full_market_df)
     high_caution_over_watchlist = build_high_caution_over_watchlist(full_market_df)
     high_caution_over_watchlist_path = watchlist_path_for_date(
@@ -731,8 +752,23 @@ def build_daily_summary(
             lines.append(_pick_line(row))
             if _has_manual_context(row):
                 lines.extend(_manual_context_lines(row))
+            if _has_manual_review(row):
+                lines.extend(_manual_review_lines(row))
             if _has_context_preview(row):
                 lines.extend(_context_preview_lines(row))
+
+    lines.extend(["", "Manual Review Warnings", "-" * 72])
+    lines.append(
+        "- elite: "
+        f"same_opponent_under_warning_count={elite_manual_review['same_opponent_under_warning_count']}, "
+        f"manual_review_required_count={elite_manual_review['manual_review_required_count']}"
+    )
+    lines.append(
+        "- full_market: "
+        f"same_opponent_under_warning_count={full_market_manual_review['same_opponent_under_warning_count']}, "
+        f"manual_review_required_count={full_market_manual_review['manual_review_required_count']}"
+    )
+    lines.append("- mode: passive_diagnostic_only")
 
     lines.extend(["", "Context-Pick Alignment", "-" * 72])
     lines.append(
@@ -1018,6 +1054,7 @@ def build_daily_summary(
     lines.append("- Kelly stakes locked to player_points only.")
     lines.append("- Context preview signals do not alter projections.")
     lines.append("- High-caution conflicted OVER context gates final elite admission and Kelly staking.")
+    lines.append("- Same-opponent rematch manual-review flags are diagnostic only; no pick is removed automatically.")
     if elite_context_gate_count:
         lines.append(
             f"- Elite context safety gate excluded {elite_context_gate_count} "
@@ -1060,6 +1097,10 @@ def build_daily_summary(
         "elite_medium_caution_count": elite_caution["medium"],
         "elite_low_caution_count": elite_caution["low"],
         "elite_context_safety_gate_rejected_count": elite_context_gate_count,
+        "same_opponent_under_warning_count": full_market_manual_review["same_opponent_under_warning_count"],
+        "manual_review_required_count": full_market_manual_review["manual_review_required_count"],
+        "elite_same_opponent_under_warning_count": elite_manual_review["same_opponent_under_warning_count"],
+        "elite_manual_review_required_count": elite_manual_review["manual_review_required_count"],
         "high_caution_over_watchlist_count": int(len(high_caution_over_watchlist)),
         "high_caution_over_watchlist_path": str(high_caution_over_watchlist_path),
         "combo_under_watchlist_count": int(len(combo_under_watchlist)),
@@ -1119,6 +1160,11 @@ def write_daily_summary_outputs(
     runtime_root = Path(runtime_root)
     history_root = Path(history_root)
     shadow_result: dict[str, Any] | None = None
+    same_opponent_board_result = annotate_operator_board_files(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
     full_market_path = runtime_root / "operator" / f"full_market_board_{prediction_date}.csv"
     if full_market_path.exists():
         shadow_result = persist_market_shadow_history(
@@ -1199,6 +1245,7 @@ def write_daily_summary_outputs(
     metadata["team_distribution_report_csv_path"] = str(team_dist_csv_path)
     metadata["team_distribution_report_count"] = int(len(team_dist_df))
     metadata["team_distribution_summary"] = team_dist_summary
+    metadata["same_opponent_board_annotation"] = same_opponent_board_result
     if shadow_result:
         metadata["market_shadow_rows"] = int(shadow_result["current_date_rows"])
         metadata["market_shadow_non_points_rows"] = int(shadow_result["current_date_non_points_rows"])
@@ -1229,6 +1276,8 @@ def main(argv: list[str] | None = None) -> int:
         f"run_health={metadata['run_health_status']} "
         f"high_caution_over_watchlist={metadata['high_caution_over_watchlist_count']} "
         f"combo_under_watchlist={metadata['combo_under_watchlist_count']} "
+        f"same_opponent_under_warnings={metadata['same_opponent_under_warning_count']} "
+        f"manual_review_required={metadata['manual_review_required_count']} "
         f"promotion_readiness={metadata['promotion_readiness_report_count']} "
         f"paper_kelly_simulation={metadata['paper_kelly_simulation_count']} "
         f"market_shadow_rows={metadata['market_shadow_rows']} "

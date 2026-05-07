@@ -52,6 +52,11 @@ from courtvision.calibration.grading_summary import (
     summarize_player_points_uplift_audit,
 )
 from courtvision.reporting.kelly_performance import build_kelly_decision_performance, kelly_perf_log_lines
+from courtvision.reporting.same_opponent_rematch import (
+    SameOpponentRematchLookup,
+    annotate_same_opponent_rematches,
+    manual_review_summary,
+)
 from courtvision.data.bdl_odds_adapter import (
     REQUIRED_COLUMNS as BDL_REQUIRED_COLUMNS,
     filter_valid_odds,
@@ -8279,6 +8284,10 @@ def _build_report_text(
         "team_board_count",
         "near_miss_count",
         "rejected_count",
+        "same_opponent_under_warning_count",
+        "manual_review_required_count",
+        "elite_same_opponent_under_warning_count",
+        "elite_manual_review_required_count",
     ]:
         if key in summary:
             lines.append(f"{key}: {summary.get(key)}")
@@ -8366,6 +8375,27 @@ def _build_report_text(
             f"manual_context_applied={_safe_report_text(row.get('manual_context_applied')) or 'False'}",
         ]
 
+    def _truthy_report(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        return _safe_report_text(value).lower() in {"true", "1", "yes", "y"}
+
+    def _has_manual_review(row: pd.Series) -> bool:
+        return _truthy_report(row.get("manual_review_required")) or _truthy_report(row.get("same_opponent_under_warning"))
+
+    def _manual_review_bits(row: pd.Series) -> list[str]:
+        return [
+            f"manual_review_required={_safe_report_text(row.get('manual_review_required')) or 'False'}",
+            f"manual_review_reason={_safe_report_text(row.get('manual_review_reason')) or 'n/a'}",
+            f"same_opponent_under_warning={_safe_report_text(row.get('same_opponent_under_warning')) or 'False'}",
+            f"same_opponent_warning_reason={_safe_report_text(row.get('same_opponent_warning_reason')) or 'n/a'}",
+            f"same_opponent_recent_games={_safe_report_text(row.get('same_opponent_recent_games')) or '0'}",
+            f"same_opponent_last_actual_points={_safe_report_text(row.get('same_opponent_last_actual_points')) or 'n/a'}",
+            f"same_opponent_last_line={_safe_report_text(row.get('same_opponent_last_line')) or 'n/a'}",
+            f"same_opponent_last_selection={_safe_report_text(row.get('same_opponent_last_selection')) or 'n/a'}",
+            f"same_opponent_last_result_status={_safe_report_text(row.get('same_opponent_last_result_status')) or 'n/a'}",
+        ]
+
     def _append_section(title: str, df: pd.DataFrame, limit: int = 10) -> None:
         lines.append(title)
         if df.empty:
@@ -8400,6 +8430,8 @@ def _build_report_text(
                     bits.append(f"reason={row.get('reason', '')}")
             if title == "Elite Board" and _has_manual_context(row):
                 bits.extend(_manual_context_bits(row))
+            if title in {"Elite Board", "Full Market Board"} and _has_manual_review(row):
+                bits.extend(_manual_review_bits(row))
             lines.append(f"{label} | " + " | ".join(bits))
         lines.append("")
 
@@ -8478,8 +8510,18 @@ def _build_elite_decision_report_text(prediction_date: str, elite_df: pd.DataFra
             ]
         )
 
+    def _truthy(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        return _safe(value).lower() in {"true", "1", "yes", "y"}
+
+    def _has_manual_review(row: pd.Series) -> bool:
+        return _truthy(row.get("manual_review_required")) or _truthy(row.get("same_opponent_under_warning"))
+
     rows_with_context = 0
     rows_with_context_preview = 0
+    manual_review_required_count = 0
+    same_opponent_under_warning_count = 0
     caution_counts = {"high": 0, "medium": 0, "low": 0}
     for _, row in elite_df.iterrows():
         player = _safe(row.get("player_name")) or _safe(row.get("entity_name")) or "Unknown"
@@ -8508,10 +8550,25 @@ def _build_elite_decision_report_text(prediction_date: str, elite_df: pd.DataFra
             lines.append(f"  context_pick_alignment={_safe(row.get('context_pick_alignment')) or 'insufficient_data'}")
             lines.append(f"  context_caution_level={caution_level}")
             lines.append(f"  context_preview_applied={_safe(row.get('context_preview_applied')) or 'False'}")
+        if _has_manual_review(row):
+            manual_review_required_count += 1 if _truthy(row.get("manual_review_required")) else 0
+            same_opponent_under_warning_count += 1 if _truthy(row.get("same_opponent_under_warning")) else 0
+            lines.append(f"  manual_review_required={_safe(row.get('manual_review_required')) or 'False'}")
+            lines.append(f"  manual_review_reason={_safe(row.get('manual_review_reason')) or 'n/a'}")
+            lines.append(f"  same_opponent_recent_games={_safe(row.get('same_opponent_recent_games')) or '0'}")
+            lines.append(f"  same_opponent_last_actual_points={_safe(row.get('same_opponent_last_actual_points')) or 'n/a'}")
+            lines.append(f"  same_opponent_last_line={_safe(row.get('same_opponent_last_line')) or 'n/a'}")
+            lines.append(f"  same_opponent_last_selection={_safe(row.get('same_opponent_last_selection')) or 'n/a'}")
+            lines.append(f"  same_opponent_last_result_status={_safe(row.get('same_opponent_last_result_status')) or 'n/a'}")
+            lines.append(f"  same_opponent_under_warning={_safe(row.get('same_opponent_under_warning')) or 'False'}")
+            lines.append(f"  same_opponent_warning_reason={_safe(row.get('same_opponent_warning_reason')) or 'n/a'}")
         lines.append("")
 
     lines.append(f"elite_picks_with_manual_context={rows_with_context}")
     lines.append("manual_context_mode=passive_diagnostic_only")
+    lines.append(f"manual_review_required_count={manual_review_required_count}")
+    lines.append(f"same_opponent_under_warning_count={same_opponent_under_warning_count}")
+    lines.append("manual_review_mode=passive_diagnostic_only")
     lines.append(f"elite_picks_with_context_preview={rows_with_context_preview}")
     lines.append(f"elite_high_caution_count={caution_counts['high']}")
     lines.append(f"elite_medium_caution_count={caution_counts['medium']}")
@@ -8577,6 +8634,23 @@ def _write_cli_outputs(
         elite_df=elite_df,
         full_market_df=full_market_df,
     )
+    same_opponent_lookup = SameOpponentRematchLookup.from_history(Path(__file__).resolve().parent / "data" / "history")
+    full_market_df = annotate_same_opponent_rematches(
+        full_market_df,
+        prediction_date=prediction_date,
+        lookup=same_opponent_lookup,
+    )
+    elite_df = annotate_same_opponent_rematches(
+        elite_df,
+        prediction_date=prediction_date,
+        lookup=same_opponent_lookup,
+    )
+    full_market_manual_review = manual_review_summary(full_market_df)
+    elite_manual_review = manual_review_summary(elite_df)
+    summary["same_opponent_under_warning_count"] = full_market_manual_review["same_opponent_under_warning_count"]
+    summary["manual_review_required_count"] = full_market_manual_review["manual_review_required_count"]
+    summary["elite_same_opponent_under_warning_count"] = elite_manual_review["same_opponent_under_warning_count"]
+    summary["elite_manual_review_required_count"] = elite_manual_review["manual_review_required_count"]
     diagnostics_df = audit_policy.diagnostics_dataframe(board_diagnostics)
 
     combined_df = pd.concat([elite_df, rejected_df], ignore_index=True) if not elite_df.empty or not rejected_df.empty else pd.DataFrame()
