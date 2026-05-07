@@ -459,6 +459,258 @@ class TestConservativeKellyLogic:
         assert "review_before_bet_count=1" in log
 
 
+_REQUIRED_POLICY_COLUMNS = ("review_status", "stake_policy", "operator_action", "operator_note")
+
+
+class TestReviewPolicyOutput:
+    """Tests for review_status / stake_policy / operator_action / operator_note fields."""
+
+    def _make_input_csv(self, tmp_path, rows):
+        path = tmp_path / "elite_board.csv"
+        with path.open("w", encoding="utf-8", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
+        return path
+
+    def _two_rows(self):
+        return [
+            {
+                **_kelly_row(player_name="Hold Pick", selection="under", edge="0.10", confidence="0.75"),
+                "manual_review_required": "True",
+                "manual_review_reason": "same_opponent_under_warning",
+                "same_opponent_under_warning": "True",
+                "same_opponent_warning_reason": "last_same_opponent_actual_exceeded_current_under_line",
+            },
+            {
+                **_kelly_row(player_name="Clear Pick", selection="under", edge="0.10", confidence="0.75"),
+                "manual_review_required": "False",
+                "manual_review_reason": "",
+                "same_opponent_under_warning": "False",
+                "same_opponent_warning_reason": "",
+            },
+        ]
+
+    # ------------------------------------------------------------------
+    # Unit-level (StakeRow object) tests
+    # ------------------------------------------------------------------
+
+    def test_manual_review_required_sets_hold_policy(self):
+        fieldnames = ["player_name", "market_type", "selection", "odds", "confidence",
+                      "edge_pct", "side_edge_pct", "manual_review_required",
+                      "manual_review_reason", "same_opponent_warning_reason"]
+        edge_col = _validate_columns(fieldnames)
+        row = {
+            **_kelly_row(selection="under", edge="0.10", confidence="0.75"),
+            "manual_review_required": "True",
+            "manual_review_reason": "same_opponent_under_warning",
+            "same_opponent_under_warning": "True",
+            "same_opponent_warning_reason": "last_same_opponent_actual_exceeded_current_under_line",
+        }
+        stake = _build_stake_row(row, edge_col, bankroll=1000.0)
+
+        assert stake.review_status == "REVIEW_REQUIRED"
+        assert stake.stake_policy == "HOLD"
+        assert stake.operator_action == "DO_NOT_BET_UNTIL_REVIEWED"
+        assert "manual_review_reason=same_opponent_under_warning" in stake.operator_note
+        assert "same_opponent_warning_reason=last_same_opponent_actual_exceeded_current_under_line" in stake.operator_note
+
+    def test_clear_pick_sets_normal_policy(self):
+        fieldnames = ["player_name", "market_type", "selection", "odds", "confidence",
+                      "edge_pct", "side_edge_pct", "manual_review_required"]
+        edge_col = _validate_columns(fieldnames)
+        row = {**_kelly_row(selection="under", edge="0.10", confidence="0.75"), "manual_review_required": "False"}
+        stake = _build_stake_row(row, edge_col, bankroll=1000.0)
+
+        assert stake.review_status == "CLEAR"
+        assert stake.stake_policy == "NORMAL"
+        assert stake.operator_action == "OK_TO_CONSIDER"
+        assert stake.operator_note == ""
+
+    def test_stake_amount_unchanged_by_review_policy(self):
+        """stake_amount must be byte-for-byte identical regardless of manual_review_required."""
+        fieldnames = ["player_name", "market_type", "selection", "odds", "confidence",
+                      "edge_pct", "side_edge_pct", "manual_review_required",
+                      "manual_review_reason", "same_opponent_warning_reason"]
+        edge_col = _validate_columns(fieldnames)
+
+        base = _kelly_row(selection="under", edge="0.10", confidence="0.75", odds="-110")
+        row_review = {**base, "manual_review_required": "True",
+                      "manual_review_reason": "same_opponent_under_warning",
+                      "same_opponent_warning_reason": "last_same_opponent_actual_exceeded_current_under_line"}
+        row_clean = {**base, "manual_review_required": "False",
+                     "manual_review_reason": "", "same_opponent_warning_reason": ""}
+
+        stake_review = _build_stake_row(row_review, edge_col, bankroll=1000.0)
+        stake_clean = _build_stake_row(row_clean, edge_col, bankroll=1000.0)
+
+        assert stake_review.stake_amount == stake_clean.stake_amount, (
+            f"stake_amount must not change: review={stake_review.stake_amount} clean={stake_clean.stake_amount}"
+        )
+        assert stake_review.stake_fraction == stake_clean.stake_fraction
+        assert stake_review.eligible == stake_clean.eligible
+
+    # ------------------------------------------------------------------
+    # CSV column presence – the primary regression the user hit
+    # ------------------------------------------------------------------
+
+    def test_csv_contains_all_four_required_policy_columns(self, tmp_path):
+        """The written CSV header must include every one of the four policy columns."""
+        rows = self._two_rows()
+        input_path = self._make_input_csv(tmp_path, rows)
+        output_path = tmp_path / "kelly_stakes.csv"
+
+        rc = main(["--prediction-date", "2026-05-07", "--bankroll", "1000",
+                   "--input-csv", str(input_path), "--output-csv", str(output_path),
+                   "--max-daily-exposure", "1.0"])
+
+        assert rc == 0
+        with output_path.open("r", encoding="utf-8", newline="") as fh:
+            header = next(csv.reader(fh))
+
+        missing = [col for col in _REQUIRED_POLICY_COLUMNS if col not in header]
+        assert missing == [], f"missing required columns: {missing}"
+
+    def test_review_policy_fields_in_csv_output(self, tmp_path):
+        """End-to-end: written CSV rows have correct values and stake math is unchanged."""
+        rows = self._two_rows()
+        input_path = self._make_input_csv(tmp_path, rows)
+        output_path = tmp_path / "kelly_stakes.csv"
+
+        rc = main(["--prediction-date", "2026-05-07", "--bankroll", "1000",
+                   "--input-csv", str(input_path), "--output-csv", str(output_path),
+                   "--max-daily-exposure", "1.0"])
+
+        assert rc == 0
+        with output_path.open("r", encoding="utf-8", newline="") as fh:
+            header = next(csv.reader(fh))
+
+        # Column presence
+        missing = [col for col in _REQUIRED_POLICY_COLUMNS if col not in header]
+        assert missing == [], f"missing required columns: {missing}"
+
+        out = {row["player_name"]: row for row in csv.DictReader(output_path.open("r", encoding="utf-8", newline=""))}
+        hold = out["Hold Pick"]
+        clear = out["Clear Pick"]
+
+        assert hold["review_status"] == "REVIEW_REQUIRED"
+        assert hold["stake_policy"] == "HOLD"
+        assert hold["operator_action"] == "DO_NOT_BET_UNTIL_REVIEWED"
+        assert "manual_review_reason=same_opponent_under_warning" in hold["operator_note"]
+        assert "same_opponent_warning_reason=last_same_opponent_actual_exceeded_current_under_line" in hold["operator_note"]
+
+        assert clear["review_status"] == "CLEAR"
+        assert clear["stake_policy"] == "NORMAL"
+        assert clear["operator_action"] == "OK_TO_CONSIDER"
+        assert clear["operator_note"] == ""
+
+        # Stake math unchanged
+        assert float(hold["stake_amount"]) == float(clear["stake_amount"])
+        assert float(hold["stake_fraction"]) == float(clear["stake_fraction"])
+
+    # ------------------------------------------------------------------
+    # Ajay regression: manual-review row has HOLD, clean row has NORMAL,
+    # and stake_amount is identical for both.
+    # ------------------------------------------------------------------
+
+    def test_ajay_regression_hold_policy_and_stake_unchanged(self, tmp_path):
+        """
+        Regression: Ajay's under pick triggered same_opponent_under_warning.
+        The written CSV must have stake_policy=HOLD for that row and
+        stake_policy=NORMAL for a clean row, with stake_amount identical.
+        """
+        rows = [
+            {
+                **_kelly_row(player_name="Ajay Kumar", selection="under",
+                             edge="0.12", confidence="0.78", odds="-115"),
+                "manual_review_required": "True",
+                "manual_review_reason": "same_opponent_under_warning",
+                "same_opponent_under_warning": "True",
+                "same_opponent_warning_reason": "last_same_opponent_actual_exceeded_current_under_line",
+            },
+            {
+                **_kelly_row(player_name="Clean Player", selection="under",
+                             edge="0.12", confidence="0.78", odds="-115"),
+                "manual_review_required": "False",
+                "manual_review_reason": "",
+                "same_opponent_under_warning": "False",
+                "same_opponent_warning_reason": "",
+            },
+        ]
+        input_path = self._make_input_csv(tmp_path, rows)
+        output_path = tmp_path / "kelly_stakes.csv"
+
+        rc = main(["--prediction-date", "2026-05-07", "--bankroll", "1000",
+                   "--input-csv", str(input_path), "--output-csv", str(output_path),
+                   "--max-daily-exposure", "1.0"])
+
+        assert rc == 0
+
+        # Column presence first
+        with output_path.open("r", encoding="utf-8", newline="") as fh:
+            header = next(csv.reader(fh))
+        missing = [col for col in _REQUIRED_POLICY_COLUMNS if col not in header]
+        assert missing == [], f"missing required columns: {missing}"
+
+        out = {row["player_name"]: row for row in csv.DictReader(output_path.open("r", encoding="utf-8", newline=""))}
+        ajay = out["Ajay Kumar"]
+        clean = out["Clean Player"]
+
+        # Policy values
+        assert ajay["stake_policy"] == "HOLD", f"expected HOLD, got {ajay['stake_policy']!r}"
+        assert ajay["review_status"] == "REVIEW_REQUIRED"
+        assert ajay["operator_action"] == "DO_NOT_BET_UNTIL_REVIEWED"
+        assert clean["stake_policy"] == "NORMAL", f"expected NORMAL, got {clean['stake_policy']!r}"
+        assert clean["review_status"] == "CLEAR"
+        assert clean["operator_action"] == "OK_TO_CONSIDER"
+
+        # Stake math unchanged
+        assert float(ajay["stake_amount"]) == float(clean["stake_amount"]), (
+            f"stake_amount changed: Ajay={ajay['stake_amount']} Clean={clean['stake_amount']}"
+        )
+        assert float(ajay["stake_fraction"]) == float(clean["stake_fraction"])
+
+    # ------------------------------------------------------------------
+    # Console [COUNT] lines
+    # ------------------------------------------------------------------
+
+    def test_review_policy_counts_in_console_log(self, tmp_path, capsys):
+        """All four new [COUNT] lines must appear with correct values."""
+        rows = [
+            {
+                **_kelly_row(player_name="Hold A", selection="under", edge="0.10", confidence="0.75"),
+                "manual_review_required": "True",
+                "manual_review_reason": "same_opponent_under_warning",
+                "same_opponent_warning_reason": "last_same_opponent_actual_exceeded_current_under_line",
+            },
+            {
+                **_kelly_row(player_name="Hold B", selection="under", edge="0.10", confidence="0.75"),
+                "manual_review_required": "True",
+                "manual_review_reason": "same_opponent_under_warning",
+                "same_opponent_warning_reason": "last_same_opponent_actual_exceeded_current_under_line",
+            },
+            {
+                **_kelly_row(player_name="Clear C", selection="under", edge="0.10", confidence="0.75"),
+                "manual_review_required": "False",
+                "manual_review_reason": "",
+                "same_opponent_warning_reason": "",
+            },
+        ]
+        input_path = self._make_input_csv(tmp_path, rows)
+        output_path = tmp_path / "kelly_stakes.csv"
+
+        rc = main(["--prediction-date", "2026-05-07", "--bankroll", "1000",
+                   "--input-csv", str(input_path), "--output-csv", str(output_path),
+                   "--max-daily-exposure", "1.0"])
+
+        assert rc == 0
+        log = capsys.readouterr().out
+        assert "[COUNT] review_required_count=2" in log
+        assert "[COUNT] hold_policy_count=2" in log
+        assert "[COUNT] clear_policy_count=1" in log
+        assert "[COUNT] do_not_bet_until_reviewed_count=2" in log
+
+
 class TestConfigConstants:
     """Test configuration constants."""
 

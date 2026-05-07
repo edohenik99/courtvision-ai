@@ -86,6 +86,10 @@ class StakeRow:
     manual_review_required: bool
     manual_review_reason: str
     recommended_action: str
+    review_status: str
+    stake_policy: str
+    operator_action: str
+    operator_note: str
 
 
 def _log(msg: str) -> None:
@@ -211,6 +215,23 @@ def _build_stake_row(row: dict[str, str], edge_col: str, bankroll: float) -> Sta
     same_opponent_under_warning = _is_truthy(row.get("same_opponent_under_warning"))
     manual_review_required = _is_truthy(row.get("manual_review_required"))
     recommended_action = REVIEW_BEFORE_BET_ACTION if manual_review_required else OK_TO_CONSIDER_ACTION
+    _manual_review_reason_raw = str(row.get("manual_review_reason", "") or "").strip()
+    _same_opponent_warning_reason_raw = str(row.get("same_opponent_warning_reason", "") or "").strip()
+    if manual_review_required:
+        review_status = "REVIEW_REQUIRED"
+        stake_policy = "HOLD"
+        operator_action = "DO_NOT_BET_UNTIL_REVIEWED"
+        _note_parts = []
+        if _manual_review_reason_raw:
+            _note_parts.append(f"manual_review_reason={_manual_review_reason_raw}")
+        if _same_opponent_warning_reason_raw:
+            _note_parts.append(f"same_opponent_warning_reason={_same_opponent_warning_reason_raw}")
+        operator_note = "; ".join(_note_parts) if _note_parts else "manual_review_required"
+    else:
+        review_status = "CLEAR"
+        stake_policy = "NORMAL"
+        operator_action = "OK_TO_CONSIDER"
+        operator_note = ""
     if market_type and market_type != "player_points":
         skip_reason = "kelly_points_only_market_lock"
         eligible = False
@@ -289,6 +310,10 @@ def _build_stake_row(row: dict[str, str], edge_col: str, bankroll: float) -> Sta
         manual_review_required=manual_review_required,
         manual_review_reason=str(row.get("manual_review_reason", "") or ""),
         recommended_action=recommended_action,
+        review_status=review_status,
+        stake_policy=stake_policy,
+        operator_action=operator_action,
+        operator_note=operator_note,
     )
 
 
@@ -321,6 +346,10 @@ def _write_stakes(output_path: Path, stakes: list[StakeRow], bankroll: float, pr
         "manual_review_required",
         "manual_review_reason",
         "recommended_action",
+        "review_status",
+        "stake_policy",
+        "operator_action",
+        "operator_note",
     ]
     with output_path.open("w", encoding="utf-8", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=fieldnames)
@@ -353,6 +382,10 @@ def _write_stakes(output_path: Path, stakes: list[StakeRow], bankroll: float, pr
                 "manual_review_required": s.manual_review_required,
                 "manual_review_reason": s.manual_review_reason,
                 "recommended_action": s.recommended_action,
+                "review_status": s.review_status,
+                "stake_policy": s.stake_policy,
+                "operator_action": s.operator_action,
+                "operator_note": s.operator_note,
             })
 
 
@@ -423,10 +456,18 @@ def main(argv: list[str] | None = None) -> int:
     skipped = [s for s in stakes if not s.eligible]
     manual_review_required_count = sum(1 for s in stakes if s.manual_review_required)
     review_before_bet_count = sum(1 for s in stakes if s.recommended_action == REVIEW_BEFORE_BET_ACTION)
+    review_required_count = sum(1 for s in stakes if s.review_status == "REVIEW_REQUIRED")
+    hold_policy_count = sum(1 for s in stakes if s.stake_policy == "HOLD")
+    clear_policy_count = sum(1 for s in stakes if s.stake_policy == "NORMAL")
+    do_not_bet_until_reviewed_count = sum(1 for s in stakes if s.operator_action == "DO_NOT_BET_UNTIL_REVIEWED")
 
     _log(f"eligible_picks={len(eligible)} skipped_picks={len(skipped)}")
     _log(f"manual_review_required_count={manual_review_required_count}")
     _log(f"review_before_bet_count={review_before_bet_count}")
+    _log(f"review_required_count={review_required_count}")
+    _log(f"hold_policy_count={hold_policy_count}")
+    _log(f"clear_policy_count={clear_policy_count}")
+    _log(f"do_not_bet_until_reviewed_count={do_not_bet_until_reviewed_count}")
     eligible_side_counts: dict[str, int] = {}
     for s in eligible:
         side = str(s.selection or "").strip().lower()
@@ -435,6 +476,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[COUNT] kelly_under_rows={int(eligible_side_counts.get('under', 0))}", flush=True)
     print(f"[COUNT] manual_review_required_count={manual_review_required_count}", flush=True)
     print(f"[COUNT] review_before_bet_count={review_before_bet_count}", flush=True)
+    print(f"[COUNT] review_required_count={review_required_count}", flush=True)
+    print(f"[COUNT] hold_policy_count={hold_policy_count}", flush=True)
+    print(f"[COUNT] clear_policy_count={clear_policy_count}", flush=True)
+    print(f"[COUNT] do_not_bet_until_reviewed_count={do_not_bet_until_reviewed_count}", flush=True)
 
     # Aggregate skip reasons
     if skipped:
@@ -477,7 +522,8 @@ def main(argv: list[str] | None = None) -> int:
             f"frac={s.stake_fraction:.4f} amount=${s.stake_amount:.2f} ev=${s.expected_value:.2f} "
             f"dampener={s.stake_dampener_factor:g} reason={s.stake_dampener_reason or 'none'} "
             f"recommended_action={s.recommended_action} "
-            f"manual_review_required={s.manual_review_required}"
+            f"manual_review_required={s.manual_review_required} "
+            f"review_status={s.review_status} stake_policy={s.stake_policy}"
         )
 
     total_exposure = round(sum(s.stake_amount for s in eligible), 2)

@@ -599,6 +599,18 @@ def build_daily_summary(
         if not kelly_df.empty and "recommended_action" in kelly_df.columns
         else 0
     )
+    kelly_review_policy_hold_count = (
+        int(
+            kelly_df["stake_policy"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .eq("HOLD")
+            .sum()
+        )
+        if not kelly_df.empty and "stake_policy" in kelly_df.columns
+        else 0
+    )
     counts = _market_counts(full_market_df)
     elite_alignment = _alignment_counts(elite_df)
     elite_caution = _caution_counts(elite_df)
@@ -990,6 +1002,9 @@ def build_daily_summary(
     lines.append(f"Expected EV: {_format_money(expected_ev)}")
     lines.append(f"manual_review_required_count: {kelly_manual_review_required_count}")
     lines.append(f"review_before_bet_count: {kelly_review_before_bet_count}")
+    lines.append(f"hold_policy_count: {kelly_review_policy_hold_count}")
+    lines.append(f"clear_policy_count: {len(kelly_df) - kelly_review_policy_hold_count if not kelly_df.empty else 0}")
+    lines.append(f"do_not_bet_until_reviewed_count: {kelly_review_policy_hold_count}")
 
     lines.extend(["", "Kelly Decision Performance", "-" * 72])
     by_eligible = kelly_decision_performance.get("by_kelly_eligible", {}) if isinstance(kelly_decision_performance, dict) else {}

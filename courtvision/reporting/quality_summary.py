@@ -93,6 +93,7 @@ QUALITY_HISTORY_COLUMNS: tuple[str, ...] = (
     "kelly_skipped_count",
     "high_caution_over_skip_count",
     "medium_neutral_over_dampened_count",
+    "kelly_review_policy_hold_count",
     "total_stake",
     "total_expected_value",
     "max_player_exposure",
@@ -436,6 +437,7 @@ def _kelly_safety_summary(kelly_df: pd.DataFrame) -> dict[str, Any]:
             "total_stake_reduction_from_dampeners": 0.0,
             "manual_review_required_count": 0,
             "review_before_bet_count": 0,
+            "review_policy_hold_count": 0,
         }
 
     eligible_col = "kelly_eligible" if "kelly_eligible" in kelly_df.columns else "eligible"
@@ -473,6 +475,13 @@ def _kelly_safety_summary(kelly_df: pd.DataFrame) -> dict[str, Any]:
         .str.strip()
         .eq("REVIEW_BEFORE_BET")
     )
+    review_policy_hold = (
+        kelly_df.get("stake_policy", pd.Series("", index=kelly_df.index))
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .eq("HOLD")
+    )
     return {
         "total_rows": int(len(kelly_df)),
         "kelly_eligible_count": int(eligible_mask.sum()),
@@ -484,6 +493,7 @@ def _kelly_safety_summary(kelly_df: pd.DataFrame) -> dict[str, Any]:
         "total_stake_reduction_from_dampeners": round(float(stake_reduction), 2),
         "manual_review_required_count": int(manual_review_required.sum()),
         "review_before_bet_count": int(review_before_bet.sum()),
+        "review_policy_hold_count": int(review_policy_hold.sum()),
     }
 
 
@@ -1247,6 +1257,7 @@ def _quality_history_row(payload: dict[str, Any], *, fallback_prediction_date: s
             _first_present(kelly, ("context_high_caution_over_skip_count", "high_caution_over_skip_count"))
         ),
         "medium_neutral_over_dampened_count": _history_int(kelly.get("medium_neutral_over_dampened_count")),
+        "kelly_review_policy_hold_count": _history_int(kelly.get("review_policy_hold_count")),
         "total_stake": _history_float(kelly.get("total_stake")),
         "total_expected_value": _history_float(kelly.get("total_expected_value")),
         "max_player_exposure": _history_float(exposure.get("max_player_exposure")),
@@ -1831,6 +1842,10 @@ def _format_quality_summary_text(payload: dict[str, Any]) -> str:
             f"- total stake reduction from dampeners: ${kelly['total_stake_reduction_from_dampeners']:.2f}",
             f"- manual_review_required_count: {kelly.get('manual_review_required_count', 0)}",
             f"- review_before_bet_count: {kelly.get('review_before_bet_count', 0)}",
+            f"- review_policy_hold_count: {kelly.get('review_policy_hold_count', 0)}",
+            f"- hold_policy_count: {kelly.get('review_policy_hold_count', 0)}",
+            f"- clear_policy_count: {int(kelly.get('total_rows', 0)) - int(kelly.get('review_policy_hold_count', 0))}",
+            f"- do_not_bet_until_reviewed_count: {kelly.get('review_policy_hold_count', 0)}",
             "",
             "Risk / Exposure Summary",
             "-" * 72,
