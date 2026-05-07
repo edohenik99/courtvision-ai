@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -67,6 +68,8 @@ REPORT_COLUMNS: tuple[str, ...] = GROUP_COLUMNS + (
     "misses",
     "pushes",
     "pending",
+    "open_pending",
+    "stale_pending",
     "hit_rate",
     "pre_cap_exposure",
     "post_cap_exposure",
@@ -80,6 +83,9 @@ FINAL_STATUSES = {"hit", "miss", "push"}
 HIT_MISS_STATUSES = {"hit", "miss"}
 TERMINAL_NON_GRADED_STATUSES = {"void", "unsupported"}
 PENDING_STATUS = "pending"
+GAME_NOT_FINAL_REASON = "game_not_final"
+OPEN_GAME_STATUSES = {"scheduled", "scheduled_future_iso_status", "not_started", "pre_game", "in_progress", "live"}
+TERMINAL_GAME_STATUSES = {"final", "final_status", "completed", "complete", "closed", "post_game"}
 
 
 def _safe_text(value: Any, default: str = "") -> str:
@@ -132,6 +138,10 @@ def _normalize_result_status(value: Any) -> str:
     if text in TERMINAL_NON_GRADED_STATUSES:
         return text
     return PENDING_STATUS
+
+
+def _today_iso() -> str:
+    return datetime.now().date().isoformat()
 
 
 def _truthy(value: Any) -> bool:
@@ -500,6 +510,31 @@ def _history_through_date(history_df: pd.DataFrame, through_date: str | None = N
     return df
 
 
+def _open_pending_mask(df: pd.DataFrame) -> pd.Series:
+    if df.empty or "result_status" not in df.columns:
+        return pd.Series(False, index=df.index)
+    pending = df["result_status"].eq(PENDING_STATUS)
+    dates = (
+        df["prediction_date"].map(_safe_text)
+        if "prediction_date" in df.columns
+        else pd.Series("", index=df.index)
+    )
+    reasons = (
+        df["grading_skip_reason"].map(lambda value: _safe_text(value).lower())
+        if "grading_skip_reason" in df.columns
+        else pd.Series("", index=df.index)
+    )
+    game_statuses = pd.Series("", index=df.index)
+    for column in ("game_status", "game_status_bucket"):
+        if column in df.columns:
+            game_statuses = game_statuses.mask(game_statuses.eq(""), df[column].map(lambda value: _safe_text(value).lower()))
+    return pending & (
+        reasons.eq(GAME_NOT_FINAL_REASON)
+        | game_statuses.isin(OPEN_GAME_STATUSES)
+        | (dates.ge(_today_iso()) & ~game_statuses.isin(TERMINAL_GAME_STATUSES))
+    )
+
+
 def summarize_paper_kelly_history(
     history_df: pd.DataFrame,
     *,
@@ -514,6 +549,8 @@ def summarize_paper_kelly_history(
             "misses": 0,
             "pushes": 0,
             "pending": 0,
+            "open_pending": 0,
+            "stale_pending": 0,
             "hit_rate": "",
             "paper_profit": 0.0,
             "paper_roi": "",
@@ -529,6 +566,8 @@ def summarize_paper_kelly_history(
     misses = int(df["result_status"].eq("miss").sum())
     pushes = int(df["result_status"].eq("push").sum())
     pending = int(df["result_status"].eq(PENDING_STATUS).sum())
+    open_pending = int(_open_pending_mask(df).sum())
+    stale_pending = pending - open_pending
     graded_total = hits + misses + pushes
     paper_profit = float(df["paper_profit"].fillna(0.0).sum())
     roi_stake = float(df.loc[df["result_status"].isin(HIT_MISS_STATUSES), "simulated_stake"].fillna(0.0).sum())
@@ -560,6 +599,8 @@ def summarize_paper_kelly_history(
         "misses": misses,
         "pushes": pushes,
         "pending": pending,
+        "open_pending": open_pending,
+        "stale_pending": stale_pending,
         "hit_rate": round(float(hits / (hits + misses)), 4) if hits + misses else "",
         "paper_profit": round(paper_profit, 6),
         "paper_roi": round(float(paper_profit / roi_stake), 6) if roi_stake else "",
@@ -588,6 +629,8 @@ def build_paper_kelly_performance_report(
         misses = int(segment["result_status"].eq("miss").sum())
         pushes = int(segment["result_status"].eq("push").sum())
         pending = int(segment["result_status"].eq(PENDING_STATUS).sum())
+        open_pending = int(_open_pending_mask(segment).sum())
+        stale_pending = pending - open_pending
         graded_total = hits + misses + pushes
         profit = float(segment["paper_profit"].fillna(0.0).sum())
         roi_stake = float(segment.loc[segment["result_status"].isin(HIT_MISS_STATUSES), "simulated_stake"].fillna(0.0).sum())
@@ -614,6 +657,8 @@ def build_paper_kelly_performance_report(
                 "misses": misses,
                 "pushes": pushes,
                 "pending": pending,
+                "open_pending": open_pending,
+                "stale_pending": stale_pending,
                 "hit_rate": round(float(hits / (hits + misses)), 4) if hits + misses else "",
                 "pre_cap_exposure": round(pre_cap, 6),
                 "post_cap_exposure": round(post_cap, 6),
@@ -647,6 +692,8 @@ def report_row_line(row: pd.Series) -> str:
         f"misses={int(row.get('misses') or 0)}, "
         f"pushes={int(row.get('pushes') or 0)}, "
         f"pending={int(row.get('pending') or 0)}, "
+        f"open_pending={int(row.get('open_pending') or 0)}, "
+        f"stale_pending={int(row.get('stale_pending') or 0)}, "
         f"hit_rate={_format_value(row.get('hit_rate'))}, "
         f"paper_roi={_format_value(row.get('paper_roi'))}, "
         f"pre_cap={_format_value(row.get('pre_cap_exposure'))}, "
@@ -680,6 +727,8 @@ def render_paper_kelly_performance_text(
         f"- misses: {summary['misses']}",
         f"- pushes: {summary['pushes']}",
         f"- pending: {summary['pending']}",
+        f"- open_pending: {summary['open_pending']}",
+        f"- stale_pending: {summary['stale_pending']}",
         f"- hit_rate: {_format_value(summary['hit_rate'])}",
         f"- paper_profit: {summary['paper_profit']:.6f}",
         f"- paper_roi: {_format_value(summary['paper_roi'])}",

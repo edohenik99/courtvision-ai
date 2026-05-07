@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pandas as pd
 
 from courtvision.reporting.paper_kelly_performance import summarize_paper_kelly_history
-from scripts.repair_pending_grades import repair_pending_grades
+from scripts import repair_pending_grades as repair_module
+from scripts.repair_pending_grades import repair_all_completed_grades, repair_pending_grades
 from scripts.write_daily_summary import write_daily_summary_outputs
 
 
@@ -89,9 +91,15 @@ def _shadow_row(
     }
 
 
-def _pick_row(player_name: str, *, result_status: str = "miss", actual_value: str = "") -> dict:
+def _pick_row(
+    player_name: str,
+    *,
+    prediction_date: str = "2026-05-05",
+    result_status: str = "miss",
+    actual_value: str = "",
+) -> dict:
     return {
-        "prediction_date": "2026-05-05",
+        "prediction_date": prediction_date,
         "run_timestamp": "2026-05-05T12:00:00+00:00",
         "player_name": player_name,
         "player_id": "",
@@ -115,9 +123,16 @@ def _pick_row(player_name: str, *, result_status: str = "miss", actual_value: st
     }
 
 
-def _paper_row(player_name: str, *, result_status: str = "pending") -> dict:
+def _paper_row(
+    player_name: str,
+    *,
+    prediction_date: str = "2026-05-05",
+    result_status: str = "pending",
+    actual_value: str = "",
+    grading_skip_reason: str = "market_shadow_history_result_pending",
+) -> dict:
     return {
-        "prediction_date": "2026-05-05",
+        "prediction_date": prediction_date,
         "paper_bucket": "repair_test",
         "player_name": player_name,
         "team_abbr": "OKC",
@@ -146,10 +161,10 @@ def _paper_row(player_name: str, *, result_status: str = "pending") -> dict:
         "simulation_only": True,
         "reason_not_real_kelly": "test",
         "result_status": result_status,
-        "actual_value": "",
+        "actual_value": actual_value,
         "paper_profit": "",
         "paper_roi": "",
-        "grading_skip_reason": "market_shadow_history_result_pending",
+        "grading_skip_reason": grading_skip_reason,
     }
 
 
@@ -221,18 +236,135 @@ def test_fixture_rows_are_removed_and_do_not_affect_readiness_or_paper_reports(t
 
 
 def test_paper_void_rows_are_not_reported_as_pending() -> None:
+    current_date = repair_module._today_iso()
     history = pd.DataFrame(
         [
             _paper_row("Void Row", result_status="void"),
             _paper_row("Pending Row", result_status="pending"),
+            _paper_row(
+                "Open Row",
+                prediction_date=current_date,
+                result_status="pending",
+                grading_skip_reason="game_not_final",
+            ),
         ]
     )
 
     summary = summarize_paper_kelly_history(history)
 
-    assert summary["total"] == 2
+    assert summary["total"] == 3
     assert summary["graded_total"] == 0
-    assert summary["pending"] == 1
+    assert summary["pending"] == 2
+    assert summary["open_pending"] == 1
+    assert summary["stale_pending"] == 1
+
+
+def test_all_completed_repairs_old_stale_pending_rows(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "outputs" / "runtime"
+    history_root = tmp_path / "data" / "history"
+    old_date = "2026-05-04"
+    _write_csv(
+        runtime_root / "history" / "result_feedback.csv",
+        [_feedback_row("Backlog Player", prediction_date=old_date, actual_value=14.0)],
+    )
+    _write_csv(history_root / "pick_history.csv", [_pick_row("Backlog Player", prediction_date=old_date, result_status="pending")])
+    _write_csv(history_root / "market_shadow_history.csv", [_shadow_row("Backlog Player", prediction_date=old_date)])
+    _write_csv(history_root / "paper_kelly_history.csv", [_paper_row("Backlog Player", prediction_date=old_date)])
+
+    exit_code = repair_module.main(
+        [
+            "--all-completed",
+            "--through-date",
+            "2026-05-06",
+            "--history-root",
+            str(history_root),
+            "--runtime-root",
+            str(runtime_root),
+        ]
+    )
+
+    assert exit_code == 0
+    for filename in ("pick_history.csv", "market_shadow_history.csv", "paper_kelly_history.csv"):
+        history = pd.read_csv(history_root / filename, keep_default_na=False)
+        row = history.iloc[0]
+        assert row["result_status"] == "hit"
+        assert float(row["actual_value"]) == 14.0
+    audit_files = list((runtime_root / "diagnostics").glob("pending_repair_audit_*.json"))
+    report_files = list((runtime_root / "operator").glob("pending_repair_report_*.txt"))
+    assert len(audit_files) == 1
+    assert len(report_files) == 1
+    audit = json.loads(audit_files[0].read_text(encoding="utf-8"))
+    assert audit["mode"] == "all_completed"
+    assert audit["summary"]["stale_pending"] == 0
+    assert audit["summary"]["repaired_rows"] == 3
+
+
+def test_current_date_game_not_final_rows_remain_pending_open_game(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "outputs" / "runtime"
+    history_root = tmp_path / "data" / "history"
+    current_date = repair_module._today_iso()
+    _write_csv(history_root / "market_shadow_history.csv", [_shadow_row("Open Slate Player", prediction_date=current_date)])
+
+    result = repair_all_completed_grades(
+        history_root=history_root,
+        runtime_root=runtime_root,
+        include_current_date=True,
+    )
+
+    shadow = pd.read_csv(history_root / "market_shadow_history.csv", keep_default_na=False)
+    row = shadow.iloc[0]
+    assert row["result_status"] == "pending"
+    assert row["grading_skip_reason"] == "game_not_final"
+    assert result["summary"]["total_pending"] == 1
+    assert result["summary"]["open_game_pending"] == 1
+    assert result["summary"]["stale_pending"] == 0
+
+
+def test_completed_rows_cannot_stay_plain_pending_without_reason(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "outputs" / "runtime"
+    history_root = tmp_path / "data" / "history"
+    old_date = "2026-05-04"
+    _write_csv(history_root / "market_shadow_history.csv", [_shadow_row("Missing Result", prediction_date=old_date)])
+
+    result = repair_all_completed_grades(
+        history_root=history_root,
+        runtime_root=runtime_root,
+        through_date="2026-05-06",
+    )
+
+    shadow = pd.read_csv(history_root / "market_shadow_history.csv", keep_default_na=False)
+    row = shadow.iloc[0]
+    assert row["result_status"] == "void"
+    assert row["actual_value"] == ""
+    assert row["grading_skip_reason"] in {"provider_unavailable", "player_stat_match_missing"}
+    assert result["summary"]["stale_pending"] == 0
+    assert result["summary"]["voided_rows"] == 1
+
+
+def test_all_completed_hit_miss_rows_cannot_have_blank_actual_value(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "outputs" / "runtime"
+    history_root = tmp_path / "data" / "history"
+    old_date = "2026-05-04"
+    _write_csv(
+        runtime_root / "history" / "result_feedback.csv",
+        [_feedback_row("Actual Repair", prediction_date=old_date, actual_value=18.0)],
+    )
+    _write_csv(
+        history_root / "market_shadow_history.csv",
+        [_shadow_row("Actual Repair", prediction_date=old_date, result_status="miss", actual_value="")],
+    )
+
+    result = repair_all_completed_grades(
+        history_root=history_root,
+        runtime_root=runtime_root,
+        through_date="2026-05-06",
+    )
+
+    shadow = pd.read_csv(history_root / "market_shadow_history.csv", keep_default_na=False)
+    row = shadow.iloc[0]
+    assert row["result_status"] == "miss"
+    assert float(row["actual_value"]) == 18.0
+    assert result["summary"]["final_missing_actual_rows"] == 0
 
 
 def test_daily_summary_does_not_reset_repaired_shadow_rows(tmp_path: Path) -> None:
