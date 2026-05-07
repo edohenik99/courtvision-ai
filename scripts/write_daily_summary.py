@@ -527,7 +527,13 @@ def _kelly_line(row: pd.Series) -> str:
     ev = _format_money(_safe_float(row.get("expected_value")))
     edge = _format_pct(row.get("edge_pct"))
     caution = _safe_text(row.get("context_caution_level")) or "insufficient_data"
-    return f"- {player}: {market} {side} {line} stake={stake} EV={ev} edge={edge} caution={caution}"
+    action = _safe_text(row.get("recommended_action")) or "OK_TO_CONSIDER"
+    reason = _safe_text(row.get("manual_review_reason"))
+    reason_text = f" manual_review_reason={reason}" if reason else ""
+    return (
+        f"- {player}: {market} {side} {line} stake={stake} EV={ev} "
+        f"edge={edge} caution={caution} recommended_action={action}{reason_text}"
+    )
 
 
 def build_daily_summary(
@@ -575,6 +581,23 @@ def build_daily_summary(
         float(pd.to_numeric(kelly_eligible.get("expected_value", pd.Series(dtype=float)), errors="coerce").fillna(0).sum())
         if not kelly_eligible.empty
         else 0.0
+    )
+    kelly_manual_review_required_count = (
+        int(kelly_df["manual_review_required"].map(_is_truthy).sum())
+        if not kelly_df.empty and "manual_review_required" in kelly_df.columns
+        else 0
+    )
+    kelly_review_before_bet_count = (
+        int(
+            kelly_df["recommended_action"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .eq("REVIEW_BEFORE_BET")
+            .sum()
+        )
+        if not kelly_df.empty and "recommended_action" in kelly_df.columns
+        else 0
     )
     counts = _market_counts(full_market_df)
     elite_alignment = _alignment_counts(elite_df)
@@ -965,6 +988,8 @@ def build_daily_summary(
             lines.append(_kelly_line(row))
     lines.append(f"Total exposure: {_format_money(total_exposure)}")
     lines.append(f"Expected EV: {_format_money(expected_ev)}")
+    lines.append(f"manual_review_required_count: {kelly_manual_review_required_count}")
+    lines.append(f"review_before_bet_count: {kelly_review_before_bet_count}")
 
     lines.extend(["", "Kelly Decision Performance", "-" * 72])
     by_eligible = kelly_decision_performance.get("by_kelly_eligible", {}) if isinstance(kelly_decision_performance, dict) else {}
@@ -1101,6 +1126,8 @@ def build_daily_summary(
         "manual_review_required_count": full_market_manual_review["manual_review_required_count"],
         "elite_same_opponent_under_warning_count": elite_manual_review["same_opponent_under_warning_count"],
         "elite_manual_review_required_count": elite_manual_review["manual_review_required_count"],
+        "kelly_manual_review_required_count": kelly_manual_review_required_count,
+        "kelly_review_before_bet_count": kelly_review_before_bet_count,
         "high_caution_over_watchlist_count": int(len(high_caution_over_watchlist)),
         "high_caution_over_watchlist_path": str(high_caution_over_watchlist_path),
         "combo_under_watchlist_count": int(len(combo_under_watchlist)),
@@ -1278,6 +1305,8 @@ def main(argv: list[str] | None = None) -> int:
         f"combo_under_watchlist={metadata['combo_under_watchlist_count']} "
         f"same_opponent_under_warnings={metadata['same_opponent_under_warning_count']} "
         f"manual_review_required={metadata['manual_review_required_count']} "
+        f"kelly_manual_review_required={metadata['kelly_manual_review_required_count']} "
+        f"review_before_bet={metadata['kelly_review_before_bet_count']} "
         f"promotion_readiness={metadata['promotion_readiness_report_count']} "
         f"paper_kelly_simulation={metadata['paper_kelly_simulation_count']} "
         f"market_shadow_rows={metadata['market_shadow_rows']} "

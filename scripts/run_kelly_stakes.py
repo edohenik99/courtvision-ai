@@ -57,6 +57,8 @@ EDGE_COLUMN_PREFERENCE: tuple[str, ...] = ("side_edge_pct", "edge_pct", "edge")
 DEFAULT_MAX_DAILY_EXPOSURE: float = 0.08
 MEDIUM_NEUTRAL_OVER_DAMPENER_FACTOR: float = 0.5
 MEDIUM_NEUTRAL_OVER_DAMPENER_REASON: str = "medium_neutral_over_dampener"
+REVIEW_BEFORE_BET_ACTION: str = "REVIEW_BEFORE_BET"
+OK_TO_CONSIDER_ACTION: str = "OK_TO_CONSIDER"
 
 
 @dataclass
@@ -79,6 +81,11 @@ class StakeRow:
     context_pick_alignment: str
     stake_dampener_reason: str
     stake_dampener_factor: float
+    same_opponent_under_warning: bool
+    same_opponent_warning_reason: str
+    manual_review_required: bool
+    manual_review_reason: str
+    recommended_action: str
 
 
 def _log(msg: str) -> None:
@@ -95,6 +102,12 @@ def _to_float(value: Any) -> float | None:
     if math.isnan(f) or math.isinf(f):
         return None
     return f
+
+
+def _is_truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"true", "1", "yes", "y"}
 
 
 def _american_to_decimal(american: float) -> float | None:
@@ -195,6 +208,9 @@ def _build_stake_row(row: dict[str, str], edge_col: str, bankroll: float) -> Sta
     market_type = str(row.get("market_type", "") or "").strip().lower()
     context_caution_level = str(row.get("context_caution_level", "") or "").strip().lower()
     context_pick_alignment = str(row.get("context_pick_alignment", "") or "").strip().lower()
+    same_opponent_under_warning = _is_truthy(row.get("same_opponent_under_warning"))
+    manual_review_required = _is_truthy(row.get("manual_review_required"))
+    recommended_action = REVIEW_BEFORE_BET_ACTION if manual_review_required else OK_TO_CONSIDER_ACTION
     if market_type and market_type != "player_points":
         skip_reason = "kelly_points_only_market_lock"
         eligible = False
@@ -268,6 +284,11 @@ def _build_stake_row(row: dict[str, str], edge_col: str, bankroll: float) -> Sta
         context_pick_alignment=str(row.get("context_pick_alignment", "") or ""),
         stake_dampener_reason=stake_dampener_reason,
         stake_dampener_factor=stake_dampener_factor,
+        same_opponent_under_warning=same_opponent_under_warning,
+        same_opponent_warning_reason=str(row.get("same_opponent_warning_reason", "") or ""),
+        manual_review_required=manual_review_required,
+        manual_review_reason=str(row.get("manual_review_reason", "") or ""),
+        recommended_action=recommended_action,
     )
 
 
@@ -295,6 +316,11 @@ def _write_stakes(output_path: Path, stakes: list[StakeRow], bankroll: float, pr
         "context_pick_alignment",
         "stake_dampener_reason",
         "stake_dampener_factor",
+        "same_opponent_under_warning",
+        "same_opponent_warning_reason",
+        "manual_review_required",
+        "manual_review_reason",
+        "recommended_action",
     ]
     with output_path.open("w", encoding="utf-8", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=fieldnames)
@@ -322,6 +348,11 @@ def _write_stakes(output_path: Path, stakes: list[StakeRow], bankroll: float, pr
                 "context_pick_alignment": s.context_pick_alignment,
                 "stake_dampener_reason": s.stake_dampener_reason,
                 "stake_dampener_factor": s.stake_dampener_factor,
+                "same_opponent_under_warning": s.same_opponent_under_warning,
+                "same_opponent_warning_reason": s.same_opponent_warning_reason,
+                "manual_review_required": s.manual_review_required,
+                "manual_review_reason": s.manual_review_reason,
+                "recommended_action": s.recommended_action,
             })
 
 
@@ -390,14 +421,20 @@ def main(argv: list[str] | None = None) -> int:
 
     eligible = [s for s in stakes if s.eligible]
     skipped = [s for s in stakes if not s.eligible]
+    manual_review_required_count = sum(1 for s in stakes if s.manual_review_required)
+    review_before_bet_count = sum(1 for s in stakes if s.recommended_action == REVIEW_BEFORE_BET_ACTION)
 
     _log(f"eligible_picks={len(eligible)} skipped_picks={len(skipped)}")
+    _log(f"manual_review_required_count={manual_review_required_count}")
+    _log(f"review_before_bet_count={review_before_bet_count}")
     eligible_side_counts: dict[str, int] = {}
     for s in eligible:
         side = str(s.selection or "").strip().lower()
         eligible_side_counts[side] = eligible_side_counts.get(side, 0) + 1
     print(f"[COUNT] kelly_over_rows={int(eligible_side_counts.get('over', 0))}", flush=True)
     print(f"[COUNT] kelly_under_rows={int(eligible_side_counts.get('under', 0))}", flush=True)
+    print(f"[COUNT] manual_review_required_count={manual_review_required_count}", flush=True)
+    print(f"[COUNT] review_before_bet_count={review_before_bet_count}", flush=True)
 
     # Aggregate skip reasons
     if skipped:
@@ -438,7 +475,9 @@ def main(argv: list[str] | None = None) -> int:
             f"line={s.line} odds={s.american_odds} dec={s.decimal_odds} "
             f"edge_pct={s.edge_pct} conf={s.confidence} "
             f"frac={s.stake_fraction:.4f} amount=${s.stake_amount:.2f} ev=${s.expected_value:.2f} "
-            f"dampener={s.stake_dampener_factor:g} reason={s.stake_dampener_reason or 'none'}"
+            f"dampener={s.stake_dampener_factor:g} reason={s.stake_dampener_reason or 'none'} "
+            f"recommended_action={s.recommended_action} "
+            f"manual_review_required={s.manual_review_required}"
         )
 
     total_exposure = round(sum(s.stake_amount for s in eligible), 2)

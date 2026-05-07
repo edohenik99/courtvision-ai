@@ -48,6 +48,8 @@ def main(argv: list[str] | None = None) -> int:
         f"kelly_eligible={kelly['kelly_eligible_count']} "
         f"high_caution_over_skips={kelly['context_high_caution_over_skip_count']} "
         f"medium_neutral_over_dampeners={kelly['medium_neutral_over_dampened_count']} "
+        f"kelly_manual_review_required={kelly.get('manual_review_required_count', 0)} "
+        f"review_before_bet={kelly.get('review_before_bet_count', 0)} "
         f"same_opponent_under_warnings={payload.get('same_opponent_under_warning_count', 0)} "
         f"manual_review_required={payload.get('manual_review_required_count', 0)}"
     )

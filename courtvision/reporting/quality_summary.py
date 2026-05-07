@@ -434,6 +434,8 @@ def _kelly_safety_summary(kelly_df: pd.DataFrame) -> dict[str, Any]:
             "context_high_caution_over_skip_count": 0,
             "medium_neutral_over_dampened_count": 0,
             "total_stake_reduction_from_dampeners": 0.0,
+            "manual_review_required_count": 0,
+            "review_before_bet_count": 0,
         }
 
     eligible_col = "kelly_eligible" if "kelly_eligible" in kelly_df.columns else "eligible"
@@ -461,6 +463,16 @@ def _kelly_safety_summary(kelly_df: pd.DataFrame) -> dict[str, Any]:
             stake_reduction += (float(amount) / float(factor)) - float(amount)
 
     skip_reason = kelly_df.get("skip_reason", pd.Series("", index=kelly_df.index)).fillna("").astype(str).str.strip()
+    manual_review_required = (
+        kelly_df.get("manual_review_required", pd.Series(False, index=kelly_df.index)).map(_is_truthy)
+    )
+    review_before_bet = (
+        kelly_df.get("recommended_action", pd.Series("", index=kelly_df.index))
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .eq("REVIEW_BEFORE_BET")
+    )
     return {
         "total_rows": int(len(kelly_df)),
         "kelly_eligible_count": int(eligible_mask.sum()),
@@ -470,6 +482,8 @@ def _kelly_safety_summary(kelly_df: pd.DataFrame) -> dict[str, Any]:
         "context_high_caution_over_skip_count": int(skip_reason.eq("context_high_caution_over").sum()),
         "medium_neutral_over_dampened_count": int(dampened_mask.sum()),
         "total_stake_reduction_from_dampeners": round(float(stake_reduction), 2),
+        "manual_review_required_count": int(manual_review_required.sum()),
+        "review_before_bet_count": int(review_before_bet.sum()),
     }
 
 
@@ -1815,6 +1829,8 @@ def _format_quality_summary_text(payload: dict[str, Any]) -> str:
             f"- context_high_caution_over skip count: {kelly['context_high_caution_over_skip_count']}",
             f"- medium_neutral_over_dampener count: {kelly['medium_neutral_over_dampened_count']}",
             f"- total stake reduction from dampeners: ${kelly['total_stake_reduction_from_dampeners']:.2f}",
+            f"- manual_review_required_count: {kelly.get('manual_review_required_count', 0)}",
+            f"- review_before_bet_count: {kelly.get('review_before_bet_count', 0)}",
             "",
             "Risk / Exposure Summary",
             "-" * 72,

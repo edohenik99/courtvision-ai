@@ -388,6 +388,76 @@ class TestConservativeKellyLogic:
         assert float(out["stake_amount"]) == 10.0
         assert float(out["stake_fraction"]) == 0.01
 
+    def test_output_carries_manual_review_action_metadata(self, tmp_path, capsys):
+        input_path = tmp_path / "elite_board.csv"
+        output_path = tmp_path / "kelly_stakes.csv"
+        rows = [
+            {
+                **_kelly_row(
+                    player_name="Review Under",
+                    selection="under",
+                    edge="0.50",
+                    confidence="1.0",
+                    odds="-110",
+                ),
+                "same_opponent_under_warning": "True",
+                "same_opponent_warning_reason": "last_same_opponent_actual_exceeded_current_under_line",
+                "manual_review_required": "True",
+                "manual_review_reason": "same_opponent_under_warning",
+            },
+            {
+                **_kelly_row(
+                    player_name="Clean Under",
+                    selection="under",
+                    edge="0.50",
+                    confidence="1.0",
+                    odds="-110",
+                ),
+                "same_opponent_under_warning": "False",
+                "same_opponent_warning_reason": "",
+                "manual_review_required": "False",
+                "manual_review_reason": "",
+            },
+        ]
+        with input_path.open("w", encoding="utf-8", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
+
+        rc = main(
+            [
+                "--prediction-date",
+                "2026-05-07",
+                "--bankroll",
+                "1000",
+                "--input-csv",
+                str(input_path),
+                "--output-csv",
+                str(output_path),
+                "--max-daily-exposure",
+                "1.0",
+            ]
+        )
+
+        assert rc == 0
+        out_rows = {
+            row["player_name"]: row
+            for row in csv.DictReader(output_path.open("r", encoding="utf-8", newline=""))
+        }
+        review = out_rows["Review Under"]
+        clean = out_rows["Clean Under"]
+        assert review["same_opponent_under_warning"] == "True"
+        assert review["same_opponent_warning_reason"] == "last_same_opponent_actual_exceeded_current_under_line"
+        assert review["manual_review_required"] == "True"
+        assert review["manual_review_reason"] == "same_opponent_under_warning"
+        assert review["recommended_action"] == "REVIEW_BEFORE_BET"
+        assert clean["same_opponent_under_warning"] == "False"
+        assert clean["manual_review_required"] == "False"
+        assert clean["recommended_action"] == "OK_TO_CONSIDER"
+        log = capsys.readouterr().out
+        assert "manual_review_required_count=1" in log
+        assert "review_before_bet_count=1" in log
+
 
 class TestConfigConstants:
     """Test configuration constants."""
