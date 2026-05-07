@@ -78,6 +78,7 @@ REPORT_COLUMNS: tuple[str, ...] = GROUP_COLUMNS + (
 
 FINAL_STATUSES = {"hit", "miss", "push"}
 HIT_MISS_STATUSES = {"hit", "miss"}
+TERMINAL_NON_GRADED_STATUSES = {"void", "unsupported"}
 PENDING_STATUS = "pending"
 
 
@@ -128,6 +129,8 @@ def _normalize_result_status(value: Any) -> str:
         return "miss"
     if text == "push":
         return "push"
+    if text in TERMINAL_NON_GRADED_STATUSES:
+        return text
     return PENDING_STATUS
 
 
@@ -183,7 +186,12 @@ def _source_result_payload(row: pd.Series, *, source_name: str) -> dict[str, Any
             status = "miss"
         elif "push" in row.index and _truthy(row.get("push")):
             status = "push"
-    reason = "" if status in FINAL_STATUSES else f"{source_name}_result_pending"
+    if status in FINAL_STATUSES:
+        reason = ""
+    elif status in TERMINAL_NON_GRADED_STATUSES:
+        reason = _safe_text(row.get("grading_skip_reason")) or status
+    else:
+        reason = f"{source_name}_result_pending"
     return {
         "result_status": status,
         "actual_value": _actual_value(row),
@@ -278,7 +286,7 @@ def _lookup_result_for_row(
             return {
                 "result_status": status,
                 "actual_value": payload.get("actual_value", ""),
-                "grading_skip_reason": "" if status in FINAL_STATUSES else str(payload.get("grading_skip_reason") or "result_pending"),
+            "grading_skip_reason": "" if status in FINAL_STATUSES else str(payload.get("grading_skip_reason") or "result_pending"),
             }
     return {
         "result_status": PENDING_STATUS,
@@ -520,7 +528,7 @@ def summarize_paper_kelly_history(
     hits = int(df["result_status"].eq("hit").sum())
     misses = int(df["result_status"].eq("miss").sum())
     pushes = int(df["result_status"].eq("push").sum())
-    pending = int((~df["result_status"].isin(FINAL_STATUSES)).sum())
+    pending = int(df["result_status"].eq(PENDING_STATUS).sum())
     graded_total = hits + misses + pushes
     paper_profit = float(df["paper_profit"].fillna(0.0).sum())
     roi_stake = float(df.loc[df["result_status"].isin(HIT_MISS_STATUSES), "simulated_stake"].fillna(0.0).sum())
@@ -543,7 +551,7 @@ def summarize_paper_kelly_history(
         seg_roi_stake = float(seg.loc[seg["result_status"].isin(HIT_MISS_STATUSES), "simulated_stake"].fillna(0.0).sum())
         paper_profit_by_cap[reason_str] = round(seg_profit, 6)
         paper_roi_by_cap[reason_str] = round(float(seg_profit / seg_roi_stake), 6) if seg_roi_stake else ""
-        pending_by_cap[reason_str] = int((~seg["result_status"].isin(FINAL_STATUSES)).sum())
+        pending_by_cap[reason_str] = int(seg["result_status"].eq(PENDING_STATUS).sum())
 
     return {
         "total": int(len(df)),
@@ -579,7 +587,7 @@ def build_paper_kelly_performance_report(
         hits = int(segment["result_status"].eq("hit").sum())
         misses = int(segment["result_status"].eq("miss").sum())
         pushes = int(segment["result_status"].eq("push").sum())
-        pending = int((~segment["result_status"].isin(FINAL_STATUSES)).sum())
+        pending = int(segment["result_status"].eq(PENDING_STATUS).sum())
         graded_total = hits + misses + pushes
         profit = float(segment["paper_profit"].fillna(0.0).sum())
         roi_stake = float(segment.loc[segment["result_status"].isin(HIT_MISS_STATUSES), "simulated_stake"].fillna(0.0).sum())

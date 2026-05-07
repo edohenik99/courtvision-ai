@@ -81,7 +81,15 @@ MARKET_SHADOW_PRESERVED_GRADED_COLUMNS = [
     "shadow_roi",
     "calibration_eligible",
     "calibration_exclusion_reason",
+    "grading_skip_reason",
+    "same_opponent_recent_games",
+    "same_opponent_last_actual_points",
+    "same_opponent_last_line",
+    "same_opponent_last_selection",
+    "same_opponent_last_result_status",
+    "same_opponent_under_warning",
 ]
+MARKET_SHADOW_PRESERVED_RESULT_STATUSES = {"hit", "miss", "push", "void", "unsupported"}
 
 MARKET_READINESS_COLUMNS = [
     "market_type",
@@ -240,7 +248,7 @@ def _preserve_existing_market_shadow_grades(
         return incoming
 
     graded_existing = existing_same_date[
-        existing_same_date["result_status"].astype(str).str.strip().str.lower().isin({"hit", "miss", "push"})
+        existing_same_date["result_status"].astype(str).str.strip().str.lower().isin(MARKET_SHADOW_PRESERVED_RESULT_STATUSES)
     ].copy()
     if graded_existing.empty:
         return incoming
@@ -257,6 +265,8 @@ def _preserve_existing_market_shadow_grades(
 
     preserved = incoming.copy()
     for column in MARKET_SHADOW_PRESERVED_GRADED_COLUMNS:
+        if column in graded_existing.columns and column not in preserved.columns:
+            preserved[column] = ""
         if column in preserved.columns:
             preserved[column] = preserved[column].astype("object")
     for idx, row in preserved.iterrows():
