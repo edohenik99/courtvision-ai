@@ -934,6 +934,116 @@ def test_market_shadow_history_replaces_same_prediction_date_on_rerun(tmp_path: 
     assert "Other Date" in set(shadow["player_name"])
 
 
+def test_market_shadow_history_preserves_graded_fields_on_same_date_refresh(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "outputs" / "runtime"
+    history_root = tmp_path / "data" / "history"
+    date = "2026-05-06"
+    other_date = "2026-05-05"
+    graded_row = _shadow_row(
+        "Preserve Combo",
+        prediction_date=date,
+        market_type="player_points_rebounds",
+        line=30.5,
+        result_status="hit",
+    )
+    graded_row.update(
+        {
+            "actual_value": 32.0,
+            "hit": True,
+            "miss": False,
+            "push": False,
+            "shadow_roi": 0.909091,
+            "calibration_eligible": True,
+            "calibration_exclusion_reason": "",
+        }
+    )
+    stale_row = _shadow_row("Stale Same Date", prediction_date=date, market_type="player_assists", line=6.5)
+    other_row = _shadow_row("Other Date", prediction_date=other_date, market_type="player_rebounds", line=8.5)
+    history_root.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame([graded_row, stale_row, other_row]).to_csv(history_root / "market_shadow_history.csv", index=False)
+    _write_elite_board(
+        runtime_root / "operator" / f"full_market_board_{date}.csv",
+        [
+            _shadow_row("Preserve Combo", prediction_date=date, market_type="player_points_rebounds", line=30.5),
+            _shadow_row("New Same Date", prediction_date=date, market_type="player_assists", line=5.5),
+        ],
+    )
+
+    result = persist_market_shadow_history(
+        prediction_date=date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+
+    assert result["replaced_rows"] == 2
+    assert result["current_date_rows"] == 2
+    shadow = pd.read_csv(history_root / "market_shadow_history.csv", keep_default_na=False)
+    same_date = shadow[shadow["prediction_date"].astype(str) == date]
+    preserved = same_date[same_date["player_name"] == "Preserve Combo"].iloc[0]
+    new_row = same_date[same_date["player_name"] == "New Same Date"].iloc[0]
+    assert len(same_date) == 2
+    assert "Stale Same Date" not in set(shadow["player_name"])
+    assert "Other Date" in set(shadow["player_name"])
+    assert preserved["result_status"] == "hit"
+    assert float(preserved["actual_value"]) == 32.0
+    assert str(preserved["hit"]).lower() == "true"
+    assert float(preserved["shadow_roi"]) == 0.909091
+    assert str(preserved["calibration_eligible"]).lower() == "true"
+    assert new_row["result_status"] == "pending"
+    assert new_row["actual_value"] == ""
+    readiness = pd.read_csv(history_root / "market_readiness_summary.csv", keep_default_na=False)
+    combo_readiness = readiness[readiness["market_type"] == "player_points_rebounds"].iloc[0]
+    assert int(combo_readiness["graded_total"]) == 1
+    assert int(combo_readiness["hits"]) == 1
+
+
+def test_market_shadow_history_refresh_preserves_market_type_from_real_board_schema(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "outputs" / "runtime"
+    history_root = tmp_path / "data" / "history"
+    date = "2026-05-06"
+    history_root.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        [_shadow_row("Stale Same Date", prediction_date=date, market_type="player_points", line=10.5)]
+    ).to_csv(history_root / "market_shadow_history.csv", index=False)
+    _write_elite_board(
+        runtime_root / "operator" / f"full_market_board_{date}.csv",
+        [
+            {
+                **_shadow_row("Prop Type Combo", prediction_date=date, market_type="", line=30.5),
+                "prop_type": "player_points_rebounds",
+                "raw_prop_type": "points_rebounds",
+            },
+            {
+                **_shadow_row("Raw Type Combo", prediction_date=date, market_type="", line=24.5),
+                "prop_type": "",
+                "raw_prop_type": "points_assists",
+            },
+            {
+                **_shadow_row("Raw Type Component", prediction_date=date, market_type="", line=7.5),
+                "prop_type": "",
+                "raw_prop_type": "rebounds",
+            },
+        ],
+    )
+
+    result = persist_market_shadow_history(
+        prediction_date=date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+
+    assert result["current_date_rows"] == 3
+    shadow = pd.read_csv(history_root / "market_shadow_history.csv", keep_default_na=False)
+    same_date = shadow[shadow["prediction_date"].astype(str) == date]
+    assert same_date["market_type"].value_counts().sort_index().to_dict() == {
+        "player_points_assists": 1,
+        "player_points_rebounds": 1,
+        "player_rebounds": 1,
+    }
+    assert int(same_date["market_type"].str.contains("points_", regex=False).sum()) == 2
+    assert "nan" not in set(same_date["market_type"].astype(str).str.lower())
+
+
 def test_market_shadow_backfill_discovers_full_market_board_dates(tmp_path: Path) -> None:
     runtime_root = tmp_path / "outputs" / "runtime"
     operator = runtime_root / "operator"

@@ -33,6 +33,18 @@ STAT_SOURCE_LOCAL = "local_artifacts"
 STAT_SOURCE_PROVIDER = "provider_api"
 STAT_SOURCE_NONE = "none"
 STAT_SOURCE_MODES = {"local", "auto", "provider"}
+MARKET_TYPE_ALIASES = {
+    "points": "player_points",
+    "rebounds": "player_rebounds",
+    "assists": "player_assists",
+    "points_rebounds": "player_points_rebounds",
+    "points_assists": "player_points_assists",
+    "rebounds_assists": "player_rebounds_assists",
+    "points_rebounds_assists": "player_points_rebounds_assists",
+    "threes": "player_3pt_made",
+    "3pt_made": "player_3pt_made",
+    "three_pointers_made": "player_3pt_made",
+}
 
 
 @dataclass
@@ -93,8 +105,8 @@ def _write_shadow_history(path: Path, df: pd.DataFrame) -> None:
 def _normalize_market_type(value: Any) -> str:
     text = _safe_text(value).lower()
     if text == "player_threes":
-        return "player_3pt_made"
-    return text
+        text = "threes"
+    return MARKET_TYPE_ALIASES.get(text, text)
 
 
 def _player_name(row: pd.Series) -> str:
@@ -110,7 +122,11 @@ def _team_abbr(row: pd.Series) -> str:
 
 
 def _market_type(row: pd.Series) -> str:
-    return _normalize_market_type(_safe_text(row.get("market_type")) or _safe_text(row.get("market")))
+    for column in ("market_type", "market", "prop_type", "raw_prop_type"):
+        market_type = _normalize_market_type(row.get(column))
+        if market_type:
+            return market_type
+    return ""
 
 
 def _prediction_date(row: pd.Series) -> str:

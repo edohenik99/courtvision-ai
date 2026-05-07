@@ -72,6 +72,16 @@ MARKET_SHADOW_HISTORY_COLUMNS = [
     "calibration_eligible",
     "calibration_exclusion_reason",
 ]
+MARKET_SHADOW_PRESERVED_GRADED_COLUMNS = [
+    "result_status",
+    "actual_value",
+    "hit",
+    "miss",
+    "push",
+    "shadow_roi",
+    "calibration_eligible",
+    "calibration_exclusion_reason",
+]
 
 MARKET_READINESS_COLUMNS = [
     "market_type",
@@ -122,6 +132,20 @@ VOID_RESULT_STATUS = "void"
 UNSUPPORTED_RESULT_STATUS = "unsupported"
 GAME_NOT_FINAL_REASON = "game_not_final"
 UNSUPPORTED_GRADING_REASONS = {"unsupported_market", "unsupported_selection"}
+MARKET_TYPE_ALIASES = {
+    "points": "player_points",
+    "rebounds": "player_rebounds",
+    "assists": "player_assists",
+    "points_rebounds": "player_points_rebounds",
+    "points_assists": "player_points_assists",
+    "rebounds_assists": "player_rebounds_assists",
+    "points_rebounds_assists": "player_points_rebounds_assists",
+    "steals": "player_steals",
+    "blocks": "player_blocks",
+    "threes": "player_3pt_made",
+    "3pt_made": "player_3pt_made",
+    "three_pointers_made": "player_3pt_made",
+}
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -138,6 +162,26 @@ def _safe_text(value: Any, default: str = "") -> str:
         return default
     text = str(value).strip()
     return text if text else default
+
+
+def _safe_non_null_text(value: Any, default: str = "") -> str:
+    text = _safe_text(value, default=default)
+    return default if text.lower() in {"nan", "none", "null", "<na>"} else text
+
+
+def _normalize_market_type_value(value: Any) -> str:
+    text = _safe_non_null_text(value).lower().replace(" ", "_")
+    if not text:
+        return ""
+    return MARKET_TYPE_ALIASES.get(text, text)
+
+
+def _market_shadow_market_type(row: pd.Series | dict[str, Any]) -> str:
+    for column in ("market_type", "market", "prop_type", "raw_prop_type"):
+        market_type = _normalize_market_type_value(row.get(column))
+        if market_type:
+            return market_type
+    return ""
 
 
 def _today_iso() -> str:
@@ -168,6 +212,67 @@ def _line_key(value: Any) -> str:
         return f"{float(s):.4f}"
     except (TypeError, ValueError):
         return s.lower()
+
+
+def _market_shadow_match_key(
+    row: pd.Series | dict[str, Any],
+    *,
+    include_player_id: bool,
+) -> tuple[str, str, str, str, str, str, str, str]:
+    player_id = _safe_text(row.get("player_id")).lower() if include_player_id else ""
+    return (
+        _safe_text(row.get("prediction_date")).lower(),
+        player_id,
+        _safe_text(row.get("player_name")).lower(),
+        _safe_text(row.get("team_abbr")).upper(),
+        _safe_text(row.get("opponent")).upper(),
+        _normalize_market_type_value(row.get("market_type")),
+        _safe_text(row.get("selection")).lower(),
+        _line_key(row.get("line")),
+    )
+
+
+def _preserve_existing_market_shadow_grades(
+    incoming: pd.DataFrame,
+    existing_same_date: pd.DataFrame,
+) -> pd.DataFrame:
+    if incoming.empty or existing_same_date.empty:
+        return incoming
+
+    graded_existing = existing_same_date[
+        existing_same_date["result_status"].astype(str).str.strip().str.lower().isin({"hit", "miss", "push"})
+    ].copy()
+    if graded_existing.empty:
+        return incoming
+
+    by_player_id: dict[tuple[str, str, str, str, str, str, str, str], pd.Series] = {}
+    fallback_counts: Counter[tuple[str, str, str, str, str, str, str, str]] = Counter()
+    fallback_rows: dict[tuple[str, str, str, str, str, str, str, str], pd.Series] = {}
+    for _, row in graded_existing.iterrows():
+        if _safe_text(row.get("player_id")):
+            by_player_id[_market_shadow_match_key(row, include_player_id=True)] = row
+        fallback_key = _market_shadow_match_key(row, include_player_id=False)
+        fallback_counts[fallback_key] += 1
+        fallback_rows[fallback_key] = row
+
+    preserved = incoming.copy()
+    for column in MARKET_SHADOW_PRESERVED_GRADED_COLUMNS:
+        if column in preserved.columns:
+            preserved[column] = preserved[column].astype("object")
+    for idx, row in preserved.iterrows():
+        existing_row = None
+        if _safe_text(row.get("player_id")):
+            existing_row = by_player_id.get(_market_shadow_match_key(row, include_player_id=True))
+        if existing_row is None:
+            fallback_key = _market_shadow_match_key(row, include_player_id=False)
+            if fallback_counts.get(fallback_key, 0) == 1:
+                existing_row = fallback_rows.get(fallback_key)
+        if existing_row is None:
+            continue
+        for column in MARKET_SHADOW_PRESERVED_GRADED_COLUMNS:
+            if column in preserved.columns and column in existing_row.index:
+                preserved.at[idx, column] = existing_row.get(column)
+    return preserved
 
 
 def _confidence_bucket(value: float) -> str:
@@ -451,7 +556,7 @@ def _normalize_market_shadow_rows(
                 "player_id": _safe_text(row.get("player_id")),
                 "team_abbr": _safe_text(row.get("team_abbr")) or _safe_text(row.get("team")),
                 "opponent": _safe_text(row.get("opponent")),
-                "market_type": _safe_text(row.get("market_type")) or _safe_text(row.get("market")),
+                "market_type": _market_shadow_market_type(row),
                 "selection": _safe_text(row.get("selection")).lower(),
                 "line": line_value,
                 "model_projection": model_projection,
@@ -593,6 +698,8 @@ def persist_market_shadow_history(
         else pd.Series(False, index=existing.index)
     )
     replaced_rows = int(same_date_mask.sum())
+    existing_same_date = existing.loc[same_date_mask].copy()
+    incoming = _preserve_existing_market_shadow_grades(incoming, existing_same_date)
     preserved_existing = existing.loc[~same_date_mask].copy()
 
     if preserved_existing.empty:

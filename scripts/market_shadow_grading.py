@@ -117,6 +117,7 @@ def _graded_lookup(runtime_root: Path, history_root: Path, prediction_date: str)
         runtime_root / "history" / f"graded_picks_{prediction_date}.csv",
         runtime_root / "research" / f"grading_results_{prediction_date}.csv",
         history_root / "pick_history.csv",
+        history_root / "market_shadow_history.csv",
     ]
     lookup: dict[tuple[str, str, str, str], str] = {}
     for path in sources:

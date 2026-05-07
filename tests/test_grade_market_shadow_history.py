@@ -6,6 +6,8 @@ import pandas as pd
 
 import scripts.grade_market_shadow_history as subject
 from scripts.grade_market_shadow_history import grade_market_shadow_history, main as grade_shadow_main
+from scripts.market_shadow_grading import write_market_shadow_outputs
+from scripts.write_daily_summary import write_daily_summary_outputs
 
 
 def _shadow_row(
@@ -83,6 +85,13 @@ def _write_result_feedback(runtime_root: Path, rows: list[dict]) -> Path:
     return path
 
 
+def _write_operator_csv(runtime_root: Path, filename: str, rows: list[dict]) -> Path:
+    path = runtime_root / "operator" / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows).to_csv(path, index=False)
+    return path
+
+
 def test_combo_shadow_grading_updates_combo_rows_only(tmp_path: Path) -> None:
     runtime_root = tmp_path / "outputs" / "runtime"
     history_root = tmp_path / "data" / "history"
@@ -121,6 +130,71 @@ def test_combo_shadow_grading_updates_combo_rows_only(tmp_path: Path) -> None:
     assert int(combo_readiness["total"]) == 1
     assert int(combo_readiness["graded_total"]) == 1
     assert int(combo_readiness["hits"]) == 1
+
+
+def test_combo_shadow_market_type_accepts_raw_prop_type_aliases() -> None:
+    assert subject._market_type(pd.Series({"market_type": "points_rebounds"})) == "player_points_rebounds"
+    assert subject._market_type(pd.Series({"market_type": "", "raw_prop_type": "points_assists"})) == "player_points_assists"
+
+
+def test_daily_summary_preserves_graded_combo_shadow_rows_and_report_counts(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "outputs" / "runtime"
+    history_root = tmp_path / "data" / "history"
+    date = "2026-05-06"
+    full_market_rows = [
+        _shadow_row("Combo Star", prediction_date=date, market_type="player_points_rebounds", line=30.5),
+        _shadow_row("Assist Shadow", prediction_date=date, market_type="player_assists", line=5.5),
+    ]
+    _write_operator_csv(runtime_root, f"full_market_board_{date}.csv", full_market_rows)
+    _write_operator_csv(runtime_root, f"elite_board_{date}.csv", [_shadow_row("Elite Points", prediction_date=date)])
+    _write_operator_csv(
+        runtime_root,
+        f"kelly_stakes_{date}.csv",
+        [
+            {
+                "player_name": "Elite Points",
+                "market_type": "player_points",
+                "eligible": True,
+                "stake_amount": 8.0,
+                "expected_value": 1.0,
+            }
+        ],
+    )
+    _write_shadow_history(history_root, full_market_rows)
+    _write_result_feedback(
+        runtime_root,
+        [
+            _actual_row("Combo Star", "player_points", 22.0, prediction_date=date),
+            _actual_row("Combo Star", "player_rebounds", 10.0, prediction_date=date),
+        ],
+    )
+
+    grade_result = grade_market_shadow_history(runtime_root=runtime_root, history_root=history_root, dates=[date])
+    diagnostics_path, report_path, payload = write_market_shadow_outputs(
+        prediction_date=date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+
+    assert grade_result["updated_rows"] == 1
+    assert payload["totals"]["graded_picks"] == 1
+    assert "Totals: total=2 graded=1 pending=1" in report_path.read_text(encoding="utf-8")
+    assert diagnostics_path.exists()
+
+    write_daily_summary_outputs(prediction_date=date, runtime_root=runtime_root, history_root=history_root)
+    shadow_after_summary = pd.read_csv(history_root / "market_shadow_history.csv", keep_default_na=False)
+    same_date = shadow_after_summary[shadow_after_summary["prediction_date"].astype(str) == date]
+    combo = same_date[same_date["player_name"] == "Combo Star"].iloc[0]
+    assert len(same_date) == 2
+    assert same_date["player_name"].tolist().count("Combo Star") == 1
+    assert combo["result_status"] == "hit"
+    assert float(combo["actual_value"]) == 32.0
+    assert str(combo["hit"]).lower() == "true"
+    assert int(same_date["result_status"].astype(str).eq("pending").sum()) == 1
+
+    after_first_summary = (history_root / "market_shadow_history.csv").read_bytes()
+    write_daily_summary_outputs(prediction_date=date, runtime_root=runtime_root, history_root=history_root)
+    assert (history_root / "market_shadow_history.csv").read_bytes() == after_first_summary
 
 
 def test_combo_shadow_grading_dry_run_does_not_write(tmp_path: Path) -> None:
