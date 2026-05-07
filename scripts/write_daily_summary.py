@@ -566,6 +566,7 @@ def build_daily_summary(
     shadow = _read_json(diagnostics_dir / f"market_shadow_grading_{prediction_date}.json", warnings)
     readiness = _read_json(diagnostics_dir / f"market_performance_readiness_{prediction_date}.json", warnings)
     manual_context = _read_json(diagnostics_dir / f"manual_context_{prediction_date}.json", warnings)
+    manual_review_history_df = _read_csv(history_root / "manual_review_history.csv", [])
 
     kelly_eligible = (
         kelly_df[kelly_df["eligible"].map(_is_truthy)].copy()
@@ -611,6 +612,25 @@ def build_daily_summary(
         if not kelly_df.empty and "stake_policy" in kelly_df.columns
         else 0
     )
+    _mr_date_df = (
+        manual_review_history_df[
+            manual_review_history_df["prediction_date"].astype(str).str.strip().eq(str(prediction_date))
+        ].copy()
+        if not manual_review_history_df.empty and "prediction_date" in manual_review_history_df.columns
+        else pd.DataFrame()
+    )
+    _mr_decisions = (
+        _mr_date_df["decision"].fillna("").astype(str).str.strip()
+        if not _mr_date_df.empty and "decision" in _mr_date_df.columns
+        else pd.Series(dtype=str)
+    )
+    mr_total = int(len(_mr_date_df))
+    mr_pending = int(_mr_decisions.eq("undecided").sum())
+    mr_skipped = int(_mr_decisions.eq("skip").sum())
+    mr_played = int(_mr_decisions.eq("play").sum())
+    mr_reduced = int(_mr_decisions.eq("reduce_stake").sum())
+    mr_decisions_recorded = mr_total - mr_pending
+
     counts = _market_counts(full_market_df)
     elite_alignment = _alignment_counts(elite_df)
     elite_caution = _caution_counts(elite_df)
@@ -1005,6 +1025,16 @@ def build_daily_summary(
     lines.append(f"hold_policy_count: {kelly_review_policy_hold_count}")
     lines.append(f"clear_policy_count: {len(kelly_df) - kelly_review_policy_hold_count if not kelly_df.empty else 0}")
     lines.append(f"do_not_bet_until_reviewed_count: {kelly_review_policy_hold_count}")
+
+    lines.extend(["", "Manual Review Decisions", "-" * 72])
+    lines.append(f"- manual_review_picks: {mr_total}")
+    lines.append(f"- decisions_recorded: {mr_decisions_recorded}")
+    lines.append(f"- pending: {mr_pending}")
+    lines.append(f"- skipped: {mr_skipped}")
+    lines.append(f"- played: {mr_played}")
+    lines.append(f"- reduced_stake: {mr_reduced}")
+    if mr_total == 0:
+        lines.append("- no manual review decisions recorded for this date")
 
     lines.extend(["", "Kelly Decision Performance", "-" * 72])
     by_eligible = kelly_decision_performance.get("by_kelly_eligible", {}) if isinstance(kelly_decision_performance, dict) else {}

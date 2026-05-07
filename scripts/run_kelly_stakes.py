@@ -64,6 +64,8 @@ OK_TO_CONSIDER_ACTION: str = "OK_TO_CONSIDER"
 @dataclass
 class StakeRow:
     player_name: str
+    team_abbr: str
+    opponent: str
     market_type: str
     selection: str
     line: float | None
@@ -212,11 +214,15 @@ def _build_stake_row(row: dict[str, str], edge_col: str, bankroll: float) -> Sta
     market_type = str(row.get("market_type", "") or "").strip().lower()
     context_caution_level = str(row.get("context_caution_level", "") or "").strip().lower()
     context_pick_alignment = str(row.get("context_pick_alignment", "") or "").strip().lower()
+    team_abbr = str(row.get("team_abbr", "") or "").strip()
+    opponent = str(row.get("opponent", "") or "").strip()
     same_opponent_under_warning = _is_truthy(row.get("same_opponent_under_warning"))
     manual_review_required = _is_truthy(row.get("manual_review_required"))
     recommended_action = REVIEW_BEFORE_BET_ACTION if manual_review_required else OK_TO_CONSIDER_ACTION
     _manual_review_reason_raw = str(row.get("manual_review_reason", "") or "").strip()
     _same_opponent_warning_reason_raw = str(row.get("same_opponent_warning_reason", "") or "").strip()
+    if not same_opponent_under_warning and "same_opponent_under_warning" in _manual_review_reason_raw:
+        same_opponent_under_warning = True
     if manual_review_required:
         review_status = "REVIEW_REQUIRED"
         stake_policy = "HOLD"
@@ -288,6 +294,8 @@ def _build_stake_row(row: dict[str, str], edge_col: str, bankroll: float) -> Sta
 
     return StakeRow(
         player_name=str(row.get("player_name", "")),
+        team_abbr=team_abbr,
+        opponent=opponent,
         market_type=str(row.get("market_type", "")),
         selection=str(row.get("selection", "")),
         line=line,
@@ -322,6 +330,8 @@ def _write_stakes(output_path: Path, stakes: list[StakeRow], bankroll: float, pr
     fieldnames = [
         "prediction_date",
         "player_name",
+        "team_abbr",
+        "opponent",
         "market_type",
         "selection",
         "line",
@@ -358,6 +368,8 @@ def _write_stakes(output_path: Path, stakes: list[StakeRow], bankroll: float, pr
             writer.writerow({
                 "prediction_date": prediction_date,
                 "player_name": s.player_name,
+                "team_abbr": s.team_abbr,
+                "opponent": s.opponent,
                 "market_type": s.market_type,
                 "selection": s.selection,
                 "line": "" if s.line is None else f"{s.line:g}",
