@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pandas as pd
+
 from courtvision.ratings.power_rating import DEFAULT_RATING, expected_score
 
 DEFAULT_HOME_COURT_ADVANTAGE: float = 50.0
@@ -117,6 +119,71 @@ def get_matchup_context(
         "team_power_context_applied": True,
         "team_power_context_missing_reason": "",
     }
+
+
+def apply_power_rating_context_to_df(
+    df: pd.DataFrame,
+    ratings: dict[str, float] | None = None,
+    home_court_advantage: float = DEFAULT_HOME_COURT_ADVANTAGE,
+    team_col: str = "team_abbr",
+    opponent_col: str = "opponent",
+    home_away_col: str = "home_away",
+) -> pd.DataFrame:
+    """Attach POWER_RATING_CONTEXT_COLUMNS to a board DataFrame in-place.
+
+    Derives home/away team IDs from (team_col, opponent_col, home_away_col),
+    computes matchup context once per unique game, and broadcasts to all rows
+    of that game.  Safe defaults fill every column when ratings are empty or
+    the required columns are absent.  Never raises.
+
+    Args:
+        df: Board DataFrame to enrich.
+        ratings: team_id → power rating. Pass None or {} for all safe defaults.
+        home_court_advantage: Rating-point bonus for the home team.
+        team_col: Column name for the focal team's abbreviation.
+        opponent_col: Column name for the opponent's abbreviation.
+        home_away_col: Column name for the "home"/"away" indicator.
+
+    Returns:
+        df with all POWER_RATING_CONTEXT_COLUMNS added.
+    """
+    if ratings is None:
+        ratings = {}
+
+    _safe = _safe_default("team_power_context_missing=no_ratings_provided")
+    for col in POWER_RATING_CONTEXT_COLUMNS:
+        df[col] = _safe[col]
+
+    if df.empty or not {team_col, opponent_col, home_away_col}.issubset(df.columns):
+        return df
+
+    team_s = df[team_col].fillna("").astype(str).str.strip()
+    opp_s = df[opponent_col].fillna("").astype(str).str.strip()
+    ha_s = df[home_away_col].fillna("").astype(str).str.strip().str.lower()
+
+    is_home = ha_s == "home"
+    is_away = ha_s == "away"
+    valid = is_home | is_away
+
+    home_ids = team_s.where(is_home, opp_s).where(valid, "")
+    away_ids = opp_s.where(is_home, team_s).where(valid, "")
+
+    game_keys: list[tuple[str, str]] = list(zip(home_ids, away_ids))
+    unique_keys: set[tuple[str, str]] = set(game_keys)
+
+    game_contexts: dict[tuple[str, str], dict[str, Any]] = {}
+    for h, a in unique_keys:
+        if h and a:
+            game_contexts[(h, a)] = get_matchup_context(h, a, ratings, home_court_advantage)
+        else:
+            game_contexts[(h, a)] = _safe_default(
+                "team_power_context_missing=missing_team_id_or_home_away"
+            )
+
+    for col in POWER_RATING_CONTEXT_COLUMNS:
+        df[col] = [game_contexts[k][col] for k in game_keys]
+
+    return df
 
 
 def get_matchup_context_batch(

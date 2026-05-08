@@ -1,11 +1,13 @@
 """Tests for courtvision/context/game_strength.py — CourtVision Power Rating matchup context."""
 from __future__ import annotations
 
+import pandas as pd
 import pytest
 
 from courtvision.context.game_strength import (
     DEFAULT_HOME_COURT_ADVANTAGE,
     POWER_RATING_CONTEXT_COLUMNS,
+    apply_power_rating_context_to_df,
     get_matchup_context,
     get_matchup_context_batch,
 )
@@ -143,3 +145,74 @@ class TestMatchupContextBatch:
         result = get_matchup_context_batch(matchups, _RATINGS)[0]
         for col in POWER_RATING_CONTEXT_COLUMNS:
             assert col in result, f"missing column: {col}"
+
+
+class TestApplyPowerRatingContextToDf:
+
+    def _board_df(self):
+        return pd.DataFrame([
+            {"team_abbr": "LAL", "opponent": "GSW", "home_away": "home", "player_name": "P1"},
+            {"team_abbr": "GSW", "opponent": "LAL", "home_away": "away", "player_name": "P2"},
+            {"team_abbr": "BOS", "opponent": "MIA", "home_away": "home", "player_name": "P3"},
+            {"team_abbr": "MIA", "opponent": "BOS", "home_away": "away", "player_name": "P4"},
+        ])
+
+    def test_all_context_columns_added(self):
+        df = apply_power_rating_context_to_df(self._board_df(), ratings={})
+        for col in POWER_RATING_CONTEXT_COLUMNS:
+            assert col in df.columns, f"missing column: {col}"
+
+    def test_empty_ratings_produces_safe_defaults(self):
+        df = apply_power_rating_context_to_df(self._board_df(), ratings={})
+        assert not df["team_power_context_applied"].any()
+
+    def test_rated_teams_produce_applied_true(self):
+        df = apply_power_rating_context_to_df(self._board_df(), ratings=_RATINGS)
+        assert df["team_power_context_applied"].all()
+
+    def test_none_ratings_treated_as_empty(self):
+        df = apply_power_rating_context_to_df(self._board_df(), ratings=None)
+        assert not df["team_power_context_applied"].any()
+
+    def test_home_row_and_away_row_share_same_win_probability(self):
+        df = apply_power_rating_context_to_df(self._board_df(), ratings=_RATINGS)
+        lal_row = df[df["team_abbr"] == "LAL"].iloc[0]
+        gsw_row = df[df["team_abbr"] == "GSW"].iloc[0]
+        assert abs(lal_row["home_win_probability"] - gsw_row["home_win_probability"]) < 1e-9
+
+    def test_missing_required_columns_returns_safe_defaults(self):
+        df = pd.DataFrame([{"team_abbr": "LAL", "player_name": "P1"}])
+        result = apply_power_rating_context_to_df(df, ratings=_RATINGS)
+        for col in POWER_RATING_CONTEXT_COLUMNS:
+            assert col in result.columns, f"missing column: {col}"
+        assert not result["team_power_context_applied"].any()
+
+    def test_empty_dataframe_returns_empty_with_context_columns(self):
+        df = apply_power_rating_context_to_df(pd.DataFrame(), ratings=_RATINGS)
+        assert isinstance(df, pd.DataFrame)
+
+    def test_missing_team_abbr_produces_safe_default_row(self):
+        df = pd.DataFrame([
+            {"team_abbr": "", "opponent": "GSW", "home_away": "home", "player_name": "P1"},
+            {"team_abbr": "BOS", "opponent": "MIA", "home_away": "home", "player_name": "P2"},
+        ])
+        result = apply_power_rating_context_to_df(df, ratings=_RATINGS)
+        empty_row = result[result["player_name"] == "P1"]
+        assert not empty_row["team_power_context_applied"].iloc[0]
+
+    def test_unknown_home_away_value_produces_safe_default(self):
+        df = pd.DataFrame([
+            {"team_abbr": "LAL", "opponent": "GSW", "home_away": "neutral", "player_name": "P1"},
+        ])
+        result = apply_power_rating_context_to_df(df, ratings=_RATINGS)
+        assert not result["team_power_context_applied"].iloc[0]
+
+    def test_original_columns_preserved(self):
+        df = apply_power_rating_context_to_df(self._board_df(), ratings={})
+        assert "player_name" in df.columns
+        assert list(df["player_name"]) == ["P1", "P2", "P3", "P4"]
+
+    def test_win_probabilities_sum_to_one_per_game(self):
+        df = apply_power_rating_context_to_df(self._board_df(), ratings=_RATINGS)
+        for _, row in df.iterrows():
+            assert abs(row["home_win_probability"] + row["away_win_probability"] - 1.0) < 1e-6

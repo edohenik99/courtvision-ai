@@ -17,6 +17,7 @@ from courtvision.reporting.high_caution_over_watchlist import (
     watchlist_path_for_date,
     write_high_caution_over_watchlist,
 )
+from courtvision.context.game_strength import apply_power_rating_context_to_df
 from courtvision.reporting.same_opponent_rematch import annotate_operator_board_files, manual_review_summary
 
 ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER = "elite_reject_context_high_caution_over"
@@ -551,6 +552,44 @@ def _exposure_summary(kelly_df: pd.DataFrame, elite_df: pd.DataFrame) -> dict[st
         "max_team_exposure": round(max(by_team.values()) if by_team else 0.0, 2),
         "max_game_exposure": round(max(by_game.values()) if by_game else 0.0, 2),
         "warnings": warnings,
+    }
+
+
+def _power_rating_context_summary(df: pd.DataFrame) -> dict[str, Any]:
+    """Summarise CourtVision Power Rating context columns present on a board DataFrame."""
+    _empty: dict[str, Any] = {
+        "total_rows": 0,
+        "context_applied_count": 0,
+        "context_missing_count": 0,
+        "blowout_risk_distribution": {},
+        "competitiveness_distribution": {},
+        "observation_only": True,
+    }
+    if df is None or df.empty:
+        return _empty
+    if "team_power_context_applied" not in df.columns:
+        return _empty
+
+    applied = df["team_power_context_applied"].map(lambda x: x is True or str(x).lower() == "true")
+    applied_count = int(applied.sum())
+    missing_count = int((~applied).sum())
+
+    blowout_dist: dict[str, int] = {}
+    comp_dist: dict[str, int] = {}
+    if "blowout_risk" in df.columns:
+        for val, cnt in df["blowout_risk"].value_counts().items():
+            blowout_dist[str(val)] = int(cnt)
+    if "expected_competitiveness" in df.columns:
+        for val, cnt in df["expected_competitiveness"].value_counts().items():
+            comp_dist[str(val)] = int(cnt)
+
+    return {
+        "total_rows": int(len(df)),
+        "context_applied_count": applied_count,
+        "context_missing_count": missing_count,
+        "blowout_risk_distribution": blowout_dist,
+        "competitiveness_distribution": comp_dist,
+        "observation_only": True,
     }
 
 
@@ -1538,6 +1577,11 @@ def build_quality_summary(
         current_elite_count=elite_count,
         current_kelly_count=kelly_count,
     )
+
+    _full_market_enriched = full_market_df.copy() if not full_market_df.empty else full_market_df
+    apply_power_rating_context_to_df(_full_market_enriched, ratings={})
+    power_rating_context = _power_rating_context_summary(_full_market_enriched)
+
     final_warnings = warnings + coverage_warnings + risk_exposure.get("warnings", [])
 
     run_identity = {
@@ -1593,6 +1637,7 @@ def build_quality_summary(
         "risk_exposure_summary": risk_exposure,
         "board_movement_summary": board_movement,
         "date_isolation_check": date_isolation,
+        "power_rating_context": power_rating_context,
         "warnings": final_warnings,
     }
     payload = _json_safe(payload)
@@ -1894,6 +1939,20 @@ def _format_quality_summary_text(payload: dict[str, Any]) -> str:
         lines.append("- mismatched artifacts:")
         for row in isolation["mismatched_artifacts"]:
             lines.append(f"  - artifact_date={row['artifact_date']} path={row['path']}")
+
+    pr_ctx = payload.get("power_rating_context", {}) if isinstance(payload.get("power_rating_context"), dict) else {}
+    lines.extend(["", "CourtVision Power Rating Context", "-" * 72])
+    if pr_ctx:
+        lines.append(f"- observation_only: {pr_ctx.get('observation_only', True)}")
+        lines.append(f"- total_rows: {pr_ctx.get('total_rows', 0)}")
+        lines.append(f"- context_applied_count: {pr_ctx.get('context_applied_count', 0)}")
+        lines.append(f"- context_missing_count: {pr_ctx.get('context_missing_count', 0)}")
+        blowout_dist = pr_ctx.get("blowout_risk_distribution", {})
+        lines.append(f"- blowout_risk: HIGH={blowout_dist.get('HIGH', 0)}  MEDIUM={blowout_dist.get('MEDIUM', 0)}  LOW={blowout_dist.get('LOW', 0)}  UNKNOWN={blowout_dist.get('UNKNOWN', 0)}")
+        comp_dist = pr_ctx.get("competitiveness_distribution", {})
+        lines.append(f"- expected_competitiveness: HIGH={comp_dist.get('HIGH', 0)}  MEDIUM={comp_dist.get('MEDIUM', 0)}  LOW={comp_dist.get('LOW', 0)}  UNKNOWN={comp_dist.get('UNKNOWN', 0)}")
+    else:
+        lines.append("- not available")
 
     lines.extend(["", "Warnings", "-" * 72])
     if warnings:
