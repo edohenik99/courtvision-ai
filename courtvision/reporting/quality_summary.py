@@ -1644,7 +1644,7 @@ def build_quality_summary(
         current_kelly_count=kelly_count,
     )
 
-    _power_ratings = get_latest_team_power_ratings()
+    _power_ratings = get_latest_team_power_ratings(as_of_date=prediction_date)
     _full_market_enriched = full_market_df.copy() if not full_market_df.empty else full_market_df
     apply_power_rating_context_to_df(_full_market_enriched, ratings=_power_ratings)
     power_rating_context = _power_rating_context_summary(_full_market_enriched)

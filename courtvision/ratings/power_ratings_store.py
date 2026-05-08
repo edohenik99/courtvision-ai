@@ -19,6 +19,7 @@ team_abbr column on full_market and elite board DataFrames.
 """
 from __future__ import annotations
 
+from datetime import date as _date_type
 from pathlib import Path
 from typing import Any
 
@@ -340,7 +341,10 @@ def load_game_results(path: str | Path | None = None) -> pd.DataFrame:
         return pd.DataFrame(columns=list(GAME_RESULTS_COLUMNS))
 
 
-def build_current_power_ratings(games_df: pd.DataFrame) -> dict[str, float]:
+def build_current_power_ratings(
+    games_df: pd.DataFrame,
+    as_of_date: str | _date_type | None = None,
+) -> dict[str, float]:
     """Build current team Power Ratings from a completed-games DataFrame.
 
     Processes games chronologically via build_team_power_rating_history and
@@ -349,12 +353,20 @@ def build_current_power_ratings(games_df: pd.DataFrame) -> dict[str, float]:
     Args:
         games_df: DataFrame with required columns date, home_team_id,
             away_team_id, home_score, away_score.
+        as_of_date: When provided, only games with date < as_of_date are used.
+            Accepts YYYY-MM-DD strings or datetime.date objects.  Keeps
+            pre-game-date ratings safe for pregame predictions.
 
     Returns:
         dict[team_id → power_rating] or {} when games_df is empty/invalid.
     """
     if games_df is None or games_df.empty:
         return {}
+    if as_of_date is not None:
+        as_of_str = str(as_of_date)[:10]
+        games_df = games_df[games_df["date"].astype(str).str[:10] < as_of_str]
+        if games_df.empty:
+            return {}
     history = build_team_power_rating_history(games_df)
     if history.empty:
         return {}
@@ -369,6 +381,7 @@ def build_current_power_ratings(games_df: pd.DataFrame) -> dict[str, float]:
 
 def get_latest_team_power_ratings(
     path: str | Path | None = None,
+    as_of_date: str | _date_type | None = None,
 ) -> dict[str, float]:
     """Load game results from disk and return current team Power Ratings.
 
@@ -379,12 +392,15 @@ def get_latest_team_power_ratings(
     Args:
         path: Path to the game results CSV.  Defaults to
             data/history/game_results.csv.
+        as_of_date: When provided, only games with date < as_of_date are used.
+            Pass the prediction date to get ratings that were available
+            before that day's games were played.
 
     Returns:
         dict[team_id → power_rating], or {} when data are unavailable.
     """
     try:
         games_df = load_game_results(path)
-        return build_current_power_ratings(games_df)
+        return build_current_power_ratings(games_df, as_of_date=as_of_date)
     except Exception:
         return {}

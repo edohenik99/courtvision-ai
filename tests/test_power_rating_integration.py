@@ -769,3 +769,133 @@ class TestWritePowerRatingDiagnosticsCSV:
         summary["diagnostics_csv_path"] = str(_pr_diag_path) if _pr_diag_path else None
         assert "diagnostics_csv_path" in summary
         assert summary["diagnostics_csv_path"] is not None
+
+
+# ---------------------------------------------------------------------------
+# as_of_date safety
+# ---------------------------------------------------------------------------
+
+class TestAsOfDateSupport:
+    """Ratings for a prediction date must never include same-day game results."""
+
+    def _games_df(self) -> pd.DataFrame:
+        return pd.DataFrame([
+            {"date": "2026-05-05", "home_team_id": "OKC", "away_team_id": "LAL",
+             "home_score": "110", "away_score": "100", "game_id": "G1",
+             "home_team_name": "", "away_team_name": ""},
+            {"date": "2026-05-06", "home_team_id": "LAL", "away_team_id": "OKC",
+             "home_score": "108", "away_score": "119", "game_id": "G2",
+             "home_team_name": "", "away_team_name": ""},
+            {"date": "2026-05-07", "home_team_id": "OKC", "away_team_id": "LAL",
+             "home_score": "115", "away_score": "109", "game_id": "G3",
+             "home_team_name": "", "away_team_name": ""},
+        ])
+
+    def _write_csv(self, tmp_path) -> Path:
+        p = tmp_path / "game_results.csv"
+        self._games_df().to_csv(p, index=False)
+        return p
+
+    # --- core as-of-date filtering ---
+
+    def test_ratings_for_2026_05_07_exclude_same_day_games(self, tmp_path):
+        p = self._write_csv(tmp_path)
+        ratings = get_latest_team_power_ratings(p, as_of_date="2026-05-07")
+        # Only 2026-05-05 and 2026-05-06 games used; 2026-05-07 is excluded
+        games_df = load_game_results(p)
+        expected = build_current_power_ratings(
+            games_df[games_df["date"] < "2026-05-07"]
+        )
+        assert ratings == expected
+
+    def test_ratings_for_2026_05_08_include_2026_05_07_games(self, tmp_path):
+        p = self._write_csv(tmp_path)
+        ratings_08 = get_latest_team_power_ratings(p, as_of_date="2026-05-08")
+        ratings_all = build_current_power_ratings(load_game_results(p))
+        # All three games fall before 2026-05-08 so the sets must be equal
+        assert ratings_08 == ratings_all
+
+    def test_same_day_game_shifts_rating_when_included(self, tmp_path):
+        p = self._write_csv(tmp_path)
+        ratings_before = get_latest_team_power_ratings(p, as_of_date="2026-05-07")
+        ratings_after = get_latest_team_power_ratings(p, as_of_date="2026-05-08")
+        # Game 3 (OKC win on 2026-05-07) shifts ratings — the dicts must differ
+        assert ratings_before != ratings_after
+
+    def test_build_current_power_ratings_as_of_date_excludes_same_day(self):
+        from courtvision.ratings.power_rating import DEFAULT_RATING
+        games = self._games_df()
+        # as_of 2026-05-07: only 2026-05-05 and 2026-05-06 used (both OKC wins)
+        ratings = build_current_power_ratings(games, as_of_date="2026-05-07")
+        assert ratings["OKC"] > DEFAULT_RATING
+        assert ratings["LAL"] < DEFAULT_RATING
+
+    def test_build_current_power_ratings_as_of_date_next_day_includes_game(self):
+        games = self._games_df()
+        r07 = build_current_power_ratings(games, as_of_date="2026-05-07")
+        r08 = build_current_power_ratings(games, as_of_date="2026-05-08")
+        # The 2026-05-07 OKC win pushes OKC higher once it's included
+        assert r08["OKC"] > r07["OKC"]
+
+    # --- safe defaults for missing/empty/malformed history ---
+
+    def test_missing_history_returns_empty_with_as_of_date(self, tmp_path):
+        ratings = get_latest_team_power_ratings(
+            tmp_path / "nonexistent.csv", as_of_date="2026-05-07"
+        )
+        assert ratings == {}
+
+    def test_empty_history_returns_empty_with_as_of_date(self, tmp_path):
+        p = tmp_path / "game_results.csv"
+        pd.DataFrame(columns=list(GAME_RESULTS_COLUMNS)).to_csv(p, index=False)
+        assert get_latest_team_power_ratings(p, as_of_date="2026-05-07") == {}
+
+    def test_malformed_history_returns_empty_with_as_of_date(self, tmp_path):
+        p = tmp_path / "game_results.csv"
+        p.write_text("col_a,col_b\n1,2\n")
+        assert get_latest_team_power_ratings(p, as_of_date="2026-05-07") == {}
+
+    def test_as_of_date_before_all_games_returns_empty(self, tmp_path):
+        p = self._write_csv(tmp_path)
+        assert get_latest_team_power_ratings(p, as_of_date="2026-05-01") == {}
+
+    def test_none_as_of_date_matches_no_argument(self, tmp_path):
+        p = self._write_csv(tmp_path)
+        assert (
+            get_latest_team_power_ratings(p, as_of_date=None)
+            == get_latest_team_power_ratings(p)
+        )
+
+    # --- board enrichment fields unchanged ---
+
+    def test_no_edge_quality_score_kelly_stake_changes_with_as_of_date(self, tmp_path):
+        p = self._write_csv(tmp_path)
+        ratings = get_latest_team_power_ratings(p, as_of_date="2026-05-07")
+        board = pd.DataFrame([
+            {"team_abbr": "OKC", "opponent": "LAL", "home_away": "home",
+             "player_name": "P1", "edge": 0.07, "quality_score": 0.80,
+             "kelly_fraction": 0.03, "stake_amount": 30.0},
+        ])
+        edge_before = board["edge"].iloc[0]
+        qs_before = board["quality_score"].iloc[0]
+        stake_before = board["stake_amount"].iloc[0]
+        kelly_before = board["kelly_fraction"].iloc[0]
+        apply_power_rating_context_to_df(board, ratings=ratings)
+        assert board["edge"].iloc[0] == edge_before
+        assert board["quality_score"].iloc[0] == qs_before
+        assert board["stake_amount"].iloc[0] == stake_before
+        assert board["kelly_fraction"].iloc[0] == kelly_before
+
+    def test_board_enrichment_still_works_with_as_of_date(self, tmp_path):
+        from courtvision.context.game_strength import POWER_RATING_CONTEXT_COLUMNS
+        p = self._write_csv(tmp_path)
+        ratings = get_latest_team_power_ratings(p, as_of_date="2026-05-08")
+        board = pd.DataFrame([
+            {"team_abbr": "OKC", "opponent": "LAL", "home_away": "home",
+             "player_name": "P1", "edge": 0.07, "quality_score": 0.80},
+            {"team_abbr": "LAL", "opponent": "OKC", "home_away": "away",
+             "player_name": "P2", "edge": 0.05, "quality_score": 0.72},
+        ])
+        apply_power_rating_context_to_df(board, ratings=ratings)
+        for col in POWER_RATING_CONTEXT_COLUMNS:
+            assert col in board.columns
