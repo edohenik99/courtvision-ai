@@ -7,11 +7,21 @@ from .power_rating import (
     regress_to_mean,
     update_power_rating,
 )
+from .power_ratings_store import (
+    GAME_RESULTS_COLUMNS,
+    build_current_power_ratings,
+    get_latest_team_power_ratings,
+    load_game_results,
+)
 
 __all__ = [
     "DEFAULT_RATING",
+    "GAME_RESULTS_COLUMNS",
+    "build_current_power_ratings",
     "build_team_power_rating_history",
     "expected_score",
+    "get_latest_team_power_ratings",
+    "load_game_results",
     "regress_to_mean",
     "update_power_rating",
 ]

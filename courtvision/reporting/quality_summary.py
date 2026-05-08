@@ -18,6 +18,7 @@ from courtvision.reporting.high_caution_over_watchlist import (
     write_high_caution_over_watchlist,
 )
 from courtvision.context.game_strength import apply_power_rating_context_to_df
+from courtvision.ratings.power_ratings_store import get_latest_team_power_ratings
 from courtvision.reporting.same_opponent_rematch import annotate_operator_board_files, manual_review_summary
 
 ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER = "elite_reject_context_high_caution_over"
@@ -1578,8 +1579,9 @@ def build_quality_summary(
         current_kelly_count=kelly_count,
     )
 
+    _power_ratings = get_latest_team_power_ratings()
     _full_market_enriched = full_market_df.copy() if not full_market_df.empty else full_market_df
-    apply_power_rating_context_to_df(_full_market_enriched, ratings={})
+    apply_power_rating_context_to_df(_full_market_enriched, ratings=_power_ratings)
     power_rating_context = _power_rating_context_summary(_full_market_enriched)
 
     final_warnings = warnings + coverage_warnings + risk_exposure.get("warnings", [])

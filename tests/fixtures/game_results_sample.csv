@@ -1,0 +1,11 @@
+date,home_team_id,away_team_id,home_score,away_score,game_id,home_team_name,away_team_name
+2026-04-19,OKC,LAL,118,104,G001,Thunder,Lakers
+2026-04-21,OKC,LAL,112,108,G002,Thunder,Lakers
+2026-04-24,LAL,OKC,115,109,G003,Lakers,Thunder
+2026-04-26,LAL,OKC,108,119,G004,Lakers,Thunder
+2026-04-28,OKC,LAL,125,112,G005,Thunder,Lakers
+2026-04-19,CLE,DET,100,94,G006,Cavaliers,Pistons
+2026-04-21,CLE,DET,110,102,G007,Cavaliers,Pistons
+2026-04-24,DET,CLE,115,108,G008,Pistons,Cavaliers
+2026-04-26,DET,CLE,103,115,G009,Pistons,Cavaliers
+2026-04-28,CLE,DET,118,105,G010,Cavaliers,Pistons
