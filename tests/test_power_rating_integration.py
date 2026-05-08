@@ -19,7 +19,10 @@ from courtvision.context.game_strength import (
     apply_power_rating_context_to_df,
 )
 from courtvision.ratings.power_ratings_store import (
+    GAME_RESULTS_COLUMNS,
+    append_game_results,
     build_current_power_ratings,
+    games_df_to_results,
     get_latest_team_power_ratings,
     load_game_results,
 )
@@ -350,3 +353,297 @@ class TestRealRatingsEndToEnd:
         summary = _power_rating_context_summary(df)
         assert summary["context_applied_count"] == 0
         assert summary["context_missing_count"] == len(self._board_with_fixture_teams())
+
+
+# ---------------------------------------------------------------------------
+# Game results history helpers
+# ---------------------------------------------------------------------------
+
+def _make_raw_games_df(rows: list[dict]) -> pd.DataFrame:
+    return pd.DataFrame(rows)
+
+
+def _final_game(game_id: str, date: str, home_abbr: str, away_abbr: str,
+                home_score: int, away_score: int, status: str = "Final",
+                home_name: str = "", away_name: str = "") -> dict:
+    return {
+        "id": game_id,
+        "date": date,
+        "status": status,
+        "home_team": {"abbreviation": home_abbr, "full_name": home_name},
+        "visitor_team": {"abbreviation": away_abbr, "full_name": away_name},
+        "home_team_score": home_score,
+        "visitor_team_score": away_score,
+    }
+
+
+class TestGamesDfToResults:
+
+    def test_final_games_included(self):
+        raw = _make_raw_games_df([
+            _final_game("G1", "2026-05-01", "OKC", "LAL", 110, 100),
+            _final_game("G2", "2026-05-02", "CLE", "DET", 105, 98),
+        ])
+        result = games_df_to_results(raw, fallback_date="2026-05-01")
+        assert len(result) == 2
+        assert set(result.columns) == set(GAME_RESULTS_COLUMNS)
+
+    def test_non_final_games_skipped(self):
+        raw = _make_raw_games_df([
+            {"id": "G1", "date": "2026-05-01", "status": "Scheduled",
+             "home_team": {"abbreviation": "OKC"}, "visitor_team": {"abbreviation": "LAL"},
+             "home_team_score": 0, "visitor_team_score": 0},
+        ])
+        result = games_df_to_results(raw, fallback_date="2026-05-01")
+        assert len(result) == 0
+
+    def test_missing_scores_skipped(self):
+        raw = _make_raw_games_df([
+            {"id": "G1", "date": "2026-05-01", "status": "Final",
+             "home_team": {"abbreviation": "OKC"}, "visitor_team": {"abbreviation": "LAL"},
+             "home_team_score": None, "visitor_team_score": None},
+        ])
+        result = games_df_to_results(raw, fallback_date="2026-05-01")
+        assert len(result) == 0
+
+    def test_missing_abbreviation_skipped(self):
+        raw = _make_raw_games_df([
+            {"id": "G1", "date": "2026-05-01", "status": "Final",
+             "home_team": {}, "visitor_team": {},
+             "home_team_score": 110, "visitor_team_score": 100},
+        ])
+        result = games_df_to_results(raw, fallback_date="2026-05-01")
+        assert len(result) == 0
+
+    def test_abbreviations_uppercased(self):
+        raw = _make_raw_games_df([
+            {"id": "G1", "date": "2026-05-01", "status": "Final",
+             "home_team": {"abbreviation": "okc"}, "visitor_team": {"abbreviation": "lal"},
+             "home_team_score": 110, "visitor_team_score": 100},
+        ])
+        result = games_df_to_results(raw, fallback_date="2026-05-01")
+        assert len(result) == 1
+        assert result.iloc[0]["home_team_id"] == "OKC"
+        assert result.iloc[0]["away_team_id"] == "LAL"
+
+    def test_fallback_date_used_when_date_missing(self):
+        raw = _make_raw_games_df([
+            {"id": "G1", "status": "Final",
+             "home_team": {"abbreviation": "OKC"}, "visitor_team": {"abbreviation": "LAL"},
+             "home_team_score": 110, "visitor_team_score": 100},
+        ])
+        result = games_df_to_results(raw, fallback_date="2026-05-07")
+        assert result.iloc[0]["date"] == "2026-05-07"
+
+    def test_empty_dataframe_returns_empty(self):
+        result = games_df_to_results(pd.DataFrame(), fallback_date="2026-05-01")
+        assert isinstance(result, pd.DataFrame)
+        assert len(result) == 0
+
+    def test_none_returns_empty(self):
+        result = games_df_to_results(None, fallback_date="2026-05-01")
+        assert isinstance(result, pd.DataFrame)
+        assert len(result) == 0
+
+    def test_complete_status_also_accepted(self):
+        raw = _make_raw_games_df([
+            {"id": "G1", "date": "2026-05-01", "status": "complete",
+             "home_team": {"abbreviation": "OKC"}, "visitor_team": {"abbreviation": "LAL"},
+             "home_team_score": 110, "visitor_team_score": 100},
+        ])
+        result = games_df_to_results(raw, fallback_date="2026-05-01")
+        assert len(result) == 1
+
+    def test_nonzero_scores_with_blank_status_skipped(self):
+        raw = _make_raw_games_df([
+            {"id": "G1", "date": "2026-05-01", "status": "",
+             "home_team": {"abbreviation": "OKC"}, "visitor_team": {"abbreviation": "LAL"},
+             "home_team_score": 110, "visitor_team_score": 100},
+        ])
+        result = games_df_to_results(raw, fallback_date="2026-05-01")
+        assert len(result) == 0
+
+    def test_nonzero_scores_with_q3_status_skipped(self):
+        raw = _make_raw_games_df([
+            _final_game("G1", "2026-05-01", "OKC", "LAL", 110, 100, status="Q3"),
+        ])
+        result = games_df_to_results(raw, fallback_date="2026-05-01")
+        assert len(result) == 0
+
+    def test_nonzero_scores_with_halftime_status_skipped(self):
+        raw = _make_raw_games_df([
+            _final_game("G1", "2026-05-01", "OKC", "LAL", 110, 100, status="Halftime"),
+        ])
+        result = games_df_to_results(raw, fallback_date="2026-05-01")
+        assert len(result) == 0
+
+    def test_nonzero_scores_with_in_progress_status_skipped(self):
+        raw = _make_raw_games_df([
+            _final_game("G1", "2026-05-01", "OKC", "LAL", 110, 100, status="In Progress"),
+        ])
+        result = games_df_to_results(raw, fallback_date="2026-05-01")
+        assert len(result) == 0
+
+    def test_final_status_with_valid_scores_accepted(self):
+        raw = _make_raw_games_df([
+            _final_game("G1", "2026-05-01", "OKC", "LAL", 110, 100, status="Final"),
+        ])
+        result = games_df_to_results(raw, fallback_date="2026-05-01")
+        assert len(result) == 1
+
+    def test_final_status_with_zero_home_score_skipped(self):
+        raw = _make_raw_games_df([
+            _final_game("G1", "2026-05-01", "OKC", "LAL", 0, 100, status="Final"),
+        ])
+        result = games_df_to_results(raw, fallback_date="2026-05-01")
+        assert len(result) == 0
+
+    def test_final_status_with_zero_away_score_skipped(self):
+        raw = _make_raw_games_df([
+            _final_game("G1", "2026-05-01", "OKC", "LAL", 110, 0, status="Final"),
+        ])
+        result = games_df_to_results(raw, fallback_date="2026-05-01")
+        assert len(result) == 0
+
+    def test_final_status_with_negative_score_skipped(self):
+        raw = _make_raw_games_df([
+            _final_game("G1", "2026-05-01", "OKC", "LAL", -1, 100, status="Final"),
+        ])
+        result = games_df_to_results(raw, fallback_date="2026-05-01")
+        assert len(result) == 0
+
+    def test_final_ot_status_with_valid_scores_accepted(self):
+        raw = _make_raw_games_df([
+            _final_game("G1", "2026-05-01", "OKC", "LAL", 110, 100, status="Final/OT"),
+        ])
+        result = games_df_to_results(raw, fallback_date="2026-05-01")
+        assert len(result) == 1
+
+    def test_missing_status_with_nonzero_scores_skipped(self):
+        raw = _make_raw_games_df([
+            {"id": "G1", "date": "2026-05-01",
+             "home_team": {"abbreviation": "OKC"}, "visitor_team": {"abbreviation": "LAL"},
+             "home_team_score": 110, "visitor_team_score": 100},
+        ])
+        result = games_df_to_results(raw, fallback_date="2026-05-01")
+        assert len(result) == 0
+
+
+class TestAppendGameResults:
+
+    def _new_results(self) -> pd.DataFrame:
+        return pd.DataFrame([
+            {"date": "2026-05-01", "home_team_id": "OKC", "away_team_id": "LAL",
+             "home_score": "110", "away_score": "100", "game_id": "G100",
+             "home_team_name": "Thunder", "away_team_name": "Lakers"},
+            {"date": "2026-05-02", "home_team_id": "CLE", "away_team_id": "DET",
+             "home_score": "105", "away_score": "98", "game_id": "G101",
+             "home_team_name": "Cavaliers", "away_team_name": "Pistons"},
+        ])
+
+    def test_missing_history_file_created(self, tmp_path):
+        p = tmp_path / "game_results.csv"
+        summary = append_game_results(self._new_results(), path=p)
+        assert p.exists()
+        assert summary["appended"] == 2
+        assert summary["total_rows"] == 2
+
+    def test_existing_history_appended(self, tmp_path):
+        p = tmp_path / "game_results.csv"
+        append_game_results(self._new_results(), path=p)
+        extra = pd.DataFrame([
+            {"date": "2026-05-03", "home_team_id": "OKC", "away_team_id": "CLE",
+             "home_score": "112", "away_score": "108", "game_id": "G102",
+             "home_team_name": "Thunder", "away_team_name": "Cavaliers"},
+        ])
+        summary = append_game_results(extra, path=p)
+        assert summary["appended"] == 1
+        assert summary["total_rows"] == 3
+
+    def test_duplicate_game_id_not_appended(self, tmp_path):
+        p = tmp_path / "game_results.csv"
+        append_game_results(self._new_results(), path=p)
+        summary = append_game_results(self._new_results(), path=p)
+        assert summary["skipped_duplicates"] == 2
+        assert summary["total_rows"] == 2
+
+    def test_dedup_by_date_home_away_when_no_game_id(self, tmp_path):
+        p = tmp_path / "game_results.csv"
+        no_id = self._new_results().copy()
+        no_id["game_id"] = ""
+        append_game_results(no_id, path=p)
+        summary = append_game_results(no_id, path=p)
+        assert summary["total_rows"] == 2
+
+    def test_output_sorted_chronologically(self, tmp_path):
+        p = tmp_path / "game_results.csv"
+        unordered = pd.DataFrame([
+            {"date": "2026-05-03", "home_team_id": "OKC", "away_team_id": "LAL",
+             "home_score": "110", "away_score": "100", "game_id": "G103",
+             "home_team_name": "", "away_team_name": ""},
+            {"date": "2026-05-01", "home_team_id": "CLE", "away_team_id": "DET",
+             "home_score": "105", "away_score": "98", "game_id": "G101",
+             "home_team_name": "", "away_team_name": ""},
+        ])
+        append_game_results(unordered, path=p)
+        df = pd.read_csv(p)
+        assert list(df["date"]) == sorted(df["date"])
+
+    def test_updated_history_loads_via_get_latest(self, tmp_path):
+        p = tmp_path / "game_results.csv"
+        append_game_results(self._new_results(), path=p)
+        ratings = get_latest_team_power_ratings(p)
+        assert isinstance(ratings, dict)
+        assert len(ratings) > 0
+
+    def test_empty_new_df_does_not_crash(self, tmp_path):
+        p = tmp_path / "game_results.csv"
+        summary = append_game_results(pd.DataFrame(columns=list(GAME_RESULTS_COLUMNS)), path=p)
+        assert summary["appended"] == 0
+
+    def test_returns_summary_dict_keys(self, tmp_path):
+        p = tmp_path / "game_results.csv"
+        summary = append_game_results(self._new_results(), path=p)
+        for key in ("fetched", "accepted", "appended", "skipped_duplicates", "total_rows", "output_path"):
+            assert key in summary
+
+
+class TestHistoryIntegrationSafety:
+
+    def test_diagnostics_unaffected_after_append(self, tmp_path):
+        p = tmp_path / "game_results.csv"
+        new_results = pd.DataFrame([
+            {"date": "2026-05-01", "home_team_id": "OKC", "away_team_id": "LAL",
+             "home_score": "110", "away_score": "100", "game_id": "G100",
+             "home_team_name": "Thunder", "away_team_name": "Lakers"},
+        ])
+        append_game_results(new_results, path=p)
+        ratings = get_latest_team_power_ratings(p)
+        board = pd.DataFrame([
+            {"team_abbr": "OKC", "opponent": "LAL", "home_away": "home",
+             "player_name": "P1", "edge": 0.07, "quality_score": 0.80,
+             "kelly_fraction": 0.03, "stake_amount": 30.0},
+        ])
+        edge_before = board["edge"].iloc[0]
+        qs_before = board["quality_score"].iloc[0]
+        apply_power_rating_context_to_df(board, ratings=ratings)
+        assert board["edge"].iloc[0] == edge_before
+        assert board["quality_score"].iloc[0] == qs_before
+
+    def test_no_kelly_or_stake_change_after_history_update(self, tmp_path):
+        p = tmp_path / "game_results.csv"
+        new_results = pd.DataFrame([
+            {"date": "2026-05-01", "home_team_id": "OKC", "away_team_id": "LAL",
+             "home_score": "110", "away_score": "100", "game_id": "G100",
+             "home_team_name": "", "away_team_name": ""},
+        ])
+        append_game_results(new_results, path=p)
+        ratings = get_latest_team_power_ratings(p)
+        board = pd.DataFrame([
+            {"team_abbr": "OKC", "opponent": "LAL", "home_away": "home",
+             "player_name": "P1", "edge": 0.07, "quality_score": 0.80,
+             "kelly_fraction": 0.03, "stake_amount": 30.0},
+        ])
+        stakes_before = list(board["stake_amount"])
+        apply_power_rating_context_to_df(board, ratings=ratings)
+        assert list(board["stake_amount"]) == stakes_before

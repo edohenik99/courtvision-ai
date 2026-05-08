@@ -9,7 +9,9 @@ from .power_rating import (
 )
 from .power_ratings_store import (
     GAME_RESULTS_COLUMNS,
+    append_game_results,
     build_current_power_ratings,
+    games_df_to_results,
     get_latest_team_power_ratings,
     load_game_results,
 )
@@ -17,9 +19,11 @@ from .power_ratings_store import (
 __all__ = [
     "DEFAULT_RATING",
     "GAME_RESULTS_COLUMNS",
+    "append_game_results",
     "build_current_power_ratings",
     "build_team_power_rating_history",
     "expected_score",
+    "games_df_to_results",
     "get_latest_team_power_ratings",
     "load_game_results",
     "regress_to_mean",
