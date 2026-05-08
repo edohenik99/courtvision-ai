@@ -26,7 +26,10 @@ from courtvision.ratings.power_ratings_store import (
     get_latest_team_power_ratings,
     load_game_results,
 )
-from courtvision.reporting.quality_summary import _power_rating_context_summary
+from courtvision.reporting.quality_summary import (
+    _power_rating_context_summary,
+    _write_power_rating_diagnostics_csv,
+)
 
 _FIXTURE_CSV = Path(__file__).parent / "fixtures" / "game_results_sample.csv"
 
@@ -647,3 +650,122 @@ class TestHistoryIntegrationSafety:
         stakes_before = list(board["stake_amount"])
         apply_power_rating_context_to_df(board, ratings=ratings)
         assert list(board["stake_amount"]) == stakes_before
+
+
+# ---------------------------------------------------------------------------
+# Power rating diagnostics CSV
+# ---------------------------------------------------------------------------
+
+def _make_enriched_board(ratings: dict | None = None) -> pd.DataFrame:
+    if ratings is None:
+        ratings = {"OKC": 1620.0, "LAL": 1510.0, "CLE": 1590.0, "DET": 1470.0}
+    df = pd.DataFrame([
+        {"player_name": "P1", "team_abbr": "OKC", "opponent": "LAL",
+         "home_away": "home", "market_type": "PTS", "selection_side": "OVER",
+         "game_id": "G1", "edge": 0.07, "quality_score": 0.80,
+         "kelly_fraction": 0.03, "stake_amount": 30.0},
+        {"player_name": "P2", "team_abbr": "LAL", "opponent": "OKC",
+         "home_away": "away", "market_type": "AST", "selection_side": "OVER",
+         "game_id": "G1", "edge": 0.05, "quality_score": 0.72,
+         "kelly_fraction": 0.025, "stake_amount": 25.0},
+        {"player_name": "P3", "team_abbr": "CLE", "opponent": "DET",
+         "home_away": "home", "market_type": "REB", "selection_side": "UNDER",
+         "game_id": "G2", "edge": 0.06, "quality_score": 0.75,
+         "kelly_fraction": 0.02, "stake_amount": 20.0},
+    ])
+    apply_power_rating_context_to_df(df, ratings=ratings)
+    return df
+
+
+class TestWritePowerRatingDiagnosticsCSV:
+
+    def test_csv_is_written(self, tmp_path):
+        enriched = _make_enriched_board()
+        out = _write_power_rating_diagnostics_csv(enriched, "2026-05-08", tmp_path)
+        assert out is not None
+        assert out.exists()
+        assert out.name == "power_rating_context_2026-05-08.csv"
+
+    def test_csv_includes_power_rating_columns(self, tmp_path):
+        enriched = _make_enriched_board()
+        out = _write_power_rating_diagnostics_csv(enriched, "2026-05-08", tmp_path)
+        df = pd.read_csv(out)
+        for col in POWER_RATING_CONTEXT_COLUMNS:
+            assert col in df.columns, f"missing power rating column: {col}"
+
+    def test_csv_includes_board_identity_columns(self, tmp_path):
+        enriched = _make_enriched_board()
+        out = _write_power_rating_diagnostics_csv(enriched, "2026-05-08", tmp_path)
+        df = pd.read_csv(out)
+        for col in ("player_name", "team_abbr", "opponent_abbr", "market_type"):
+            assert col in df.columns, f"missing identity column: {col}"
+
+    def test_csv_derives_home_away_team_abbr(self, tmp_path):
+        enriched = _make_enriched_board()
+        out = _write_power_rating_diagnostics_csv(enriched, "2026-05-08", tmp_path)
+        df = pd.read_csv(out)
+        assert "home_team_abbr" in df.columns
+        assert "away_team_abbr" in df.columns
+        p1_row = df[df["player_name"] == "P1"].iloc[0]
+        assert p1_row["home_team_abbr"] == "OKC"
+        assert p1_row["away_team_abbr"] == "LAL"
+
+    def test_csv_row_count_matches_board(self, tmp_path):
+        enriched = _make_enriched_board()
+        out = _write_power_rating_diagnostics_csv(enriched, "2026-05-08", tmp_path)
+        df = pd.read_csv(out)
+        assert len(df) == 3
+
+    def test_missing_ratings_writes_safe_defaults(self, tmp_path):
+        enriched = _make_enriched_board(ratings={})
+        out = _write_power_rating_diagnostics_csv(enriched, "2026-05-08", tmp_path)
+        assert out is not None
+        df = pd.read_csv(out)
+        assert len(df) == 3
+        assert (df["team_power_context_applied"] == False).all()  # noqa: E712
+
+    def test_empty_df_returns_none(self, tmp_path):
+        out = _write_power_rating_diagnostics_csv(pd.DataFrame(), "2026-05-08", tmp_path)
+        assert out is None
+
+    def test_df_without_context_columns_returns_none(self, tmp_path):
+        df = pd.DataFrame([{"player_name": "P1", "team_abbr": "OKC"}])
+        out = _write_power_rating_diagnostics_csv(df, "2026-05-08", tmp_path)
+        assert out is None
+
+    def test_original_board_columns_unchanged(self, tmp_path):
+        df = pd.DataFrame([
+            {"player_name": "P1", "team_abbr": "OKC", "opponent": "LAL",
+             "home_away": "home", "market_type": "PTS", "selection_side": "OVER",
+             "game_id": "G1", "edge": 0.07, "quality_score": 0.80,
+             "kelly_fraction": 0.03, "stake_amount": 30.0},
+        ])
+        edge_before = df["edge"].iloc[0]
+        qs_before = df["quality_score"].iloc[0]
+        stake_before = df["stake_amount"].iloc[0]
+        enriched = df.copy()
+        apply_power_rating_context_to_df(enriched, ratings={"OKC": 1620.0, "LAL": 1510.0})
+        _write_power_rating_diagnostics_csv(enriched, "2026-05-08", tmp_path)
+        assert df["edge"].iloc[0] == edge_before
+        assert df["quality_score"].iloc[0] == qs_before
+        assert df["stake_amount"].iloc[0] == stake_before
+
+    def test_diagnostics_dir_created_if_missing(self, tmp_path):
+        subdir = tmp_path / "diag" / "nested"
+        enriched = _make_enriched_board()
+        out = _write_power_rating_diagnostics_csv(enriched, "2026-05-08", subdir)
+        assert out is not None
+        assert out.exists()
+
+    def test_path_returned_reflects_prediction_date(self, tmp_path):
+        enriched = _make_enriched_board()
+        out = _write_power_rating_diagnostics_csv(enriched, "2026-04-19", tmp_path)
+        assert "2026-04-19" in out.name
+
+    def test_power_rating_context_summary_has_diagnostics_path_key(self, tmp_path):
+        enriched = _make_enriched_board()
+        summary = _power_rating_context_summary(enriched)
+        _pr_diag_path = _write_power_rating_diagnostics_csv(enriched, "2026-05-08", tmp_path)
+        summary["diagnostics_csv_path"] = str(_pr_diag_path) if _pr_diag_path else None
+        assert "diagnostics_csv_path" in summary
+        assert summary["diagnostics_csv_path"] is not None

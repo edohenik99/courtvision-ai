@@ -17,7 +17,10 @@ from courtvision.reporting.high_caution_over_watchlist import (
     watchlist_path_for_date,
     write_high_caution_over_watchlist,
 )
-from courtvision.context.game_strength import apply_power_rating_context_to_df
+from courtvision.context.game_strength import (
+    POWER_RATING_CONTEXT_COLUMNS,
+    apply_power_rating_context_to_df,
+)
 from courtvision.ratings.power_ratings_store import get_latest_team_power_ratings
 from courtvision.reporting.same_opponent_rematch import annotate_operator_board_files, manual_review_summary
 
@@ -592,6 +595,68 @@ def _power_rating_context_summary(df: pd.DataFrame) -> dict[str, Any]:
         "competitiveness_distribution": comp_dist,
         "observation_only": True,
     }
+
+
+_DIAG_BOARD_SOURCE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("player_name", "player_name"),
+    ("team_abbr", "team_abbr"),
+    ("opponent", "opponent_abbr"),
+    ("market_type", "market_type"),
+    ("selection_side", "side"),
+    ("home_away", "home_away"),
+    ("game_id", "game_id"),
+)
+
+
+def _write_power_rating_diagnostics_csv(
+    enriched_df: pd.DataFrame,
+    prediction_date: str,
+    diagnostics_dir: Path,
+) -> Path | None:
+    """Write per-row Power Rating context to a diagnostics CSV.
+
+    Selects board identity columns plus all POWER_RATING_CONTEXT_COLUMNS from
+    enriched_df (which must already have had apply_power_rating_context_to_df
+    called on it).  Derives home_team_abbr and away_team_abbr from team_abbr +
+    home_away + opponent when those columns are present.  Never raises.
+
+    Args:
+        enriched_df: Full-market board DataFrame enriched with power rating context.
+        prediction_date: YYYY-MM-DD string used in the output filename.
+        diagnostics_dir: Directory to write into.
+
+    Returns:
+        Path to the written CSV, or None if enriched_df is empty/missing context.
+    """
+    if enriched_df is None or enriched_df.empty:
+        return None
+    if "team_power_context_applied" not in enriched_df.columns:
+        return None
+
+    try:
+        out_cols: dict[str, Any] = {}
+        for src, dst in _DIAG_BOARD_SOURCE_COLUMNS:
+            if src in enriched_df.columns:
+                out_cols[dst] = enriched_df[src]
+
+        if "team_abbr" in enriched_df.columns and "opponent" in enriched_df.columns and "home_away" in enriched_df.columns:
+            ha = enriched_df["home_away"].fillna("").astype(str).str.strip().str.lower()
+            team = enriched_df["team_abbr"].fillna("").astype(str)
+            opp = enriched_df["opponent"].fillna("").astype(str)
+            out_cols["home_team_abbr"] = team.where(ha == "home", opp)
+            out_cols["away_team_abbr"] = team.where(ha == "away", opp)
+
+        for col in POWER_RATING_CONTEXT_COLUMNS:
+            if col in enriched_df.columns:
+                out_cols[col] = enriched_df[col]
+
+        out_df = pd.DataFrame(out_cols)
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        out_path = diagnostics_dir / f"power_rating_context_{prediction_date}.csv"
+        out_df.to_csv(out_path, index=False)
+        return out_path
+    except Exception:
+        return None
 
 
 def _board_movement_summary(
@@ -1583,6 +1648,10 @@ def build_quality_summary(
     _full_market_enriched = full_market_df.copy() if not full_market_df.empty else full_market_df
     apply_power_rating_context_to_df(_full_market_enriched, ratings=_power_ratings)
     power_rating_context = _power_rating_context_summary(_full_market_enriched)
+    _pr_diag_path = _write_power_rating_diagnostics_csv(
+        _full_market_enriched, prediction_date, diagnostics_dir
+    )
+    power_rating_context["diagnostics_csv_path"] = str(_pr_diag_path) if _pr_diag_path else None
 
     final_warnings = warnings + coverage_warnings + risk_exposure.get("warnings", [])
 
@@ -1953,6 +2022,9 @@ def _format_quality_summary_text(payload: dict[str, Any]) -> str:
         lines.append(f"- blowout_risk: HIGH={blowout_dist.get('HIGH', 0)}  MEDIUM={blowout_dist.get('MEDIUM', 0)}  LOW={blowout_dist.get('LOW', 0)}  UNKNOWN={blowout_dist.get('UNKNOWN', 0)}")
         comp_dist = pr_ctx.get("competitiveness_distribution", {})
         lines.append(f"- expected_competitiveness: HIGH={comp_dist.get('HIGH', 0)}  MEDIUM={comp_dist.get('MEDIUM', 0)}  LOW={comp_dist.get('LOW', 0)}  UNKNOWN={comp_dist.get('UNKNOWN', 0)}")
+        diag_path = pr_ctx.get("diagnostics_csv_path")
+        if diag_path:
+            lines.append(f"- diagnostics_csv: {diag_path}")
     else:
         lines.append("- not available")
 
@@ -2010,4 +2082,5 @@ __all__ = [
     "build_quality_summary",
     "update_quality_history_from_summary",
     "write_quality_summary_outputs",
+    "_write_power_rating_diagnostics_csv",
 ]
