@@ -23,6 +23,10 @@ from courtvision.context.game_strength import (
 )
 from courtvision.ratings.power_ratings_store import get_latest_team_power_ratings
 from courtvision.reporting.same_opponent_rematch import annotate_operator_board_files, manual_review_summary
+from courtvision.reporting.fragility_shadow_eval import (
+    shadow_eval_path_for_date,
+    write_shadow_eval_report,
+)
 
 ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER = "elite_reject_context_high_caution_over"
 CONTEXT_CONFLICT_CAUSE_BUCKETS: tuple[str, ...] = (
@@ -2262,6 +2266,32 @@ def write_quality_summary_outputs(
         "path": str(trends_json),
         "status": best_status,
     }
+
+    # Phase 9: shadow eval readiness reporting (metadata only — non-operational)
+    try:
+        shadow_hist_path = history_root / "market_shadow_history.csv"
+        if shadow_hist_path.exists():
+            shadow_hist_df = pd.read_csv(shadow_hist_path, low_memory=False)
+        else:
+            shadow_hist_df = pd.DataFrame()
+        shadow_eval_json, shadow_eval_p = write_shadow_eval_report(
+            shadow_hist_df, prediction_date, runtime_root
+        )
+    except Exception:
+        shadow_eval_json = shadow_eval_path_for_date(prediction_date, runtime_root)
+        shadow_eval_p = {
+            "readiness_verdict": "not_ready_insufficient_sample",
+            "diagnostic_coverage": {},
+        }
+    _se_cov = shadow_eval_p.get("diagnostic_coverage", {})
+    payload["fragility_survivability_shadow_eval"] = {
+        "path": str(shadow_eval_json),
+        "readiness_verdict": shadow_eval_p.get("readiness_verdict", "not_ready_insufficient_sample"),
+        "graded_rows_with_diagnostics": _se_cov.get("graded_rows_with_diagnostics", 0),
+        "diagnostics_coverage_pct": _se_cov.get("diagnostics_coverage_pct", 0.0),
+        "note": "diagnostics_non_operational",
+    }
+
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     update_quality_history_from_summary(
         prediction_date=prediction_date,
