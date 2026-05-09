@@ -35,6 +35,22 @@ _CONTEXT_POWER_COLUMNS: tuple[str, ...] = (
     "team_power_context_missing_reason",
 )
 
+# String-valued context columns coerced to "UNKNOWN" when blank/missing so that
+# pd.concat receives consistent object-dtype columns and the CSV has no blanks.
+_STR_CONTEXT_COLS: tuple[str, ...] = ("blowout_risk", "expected_competitiveness")
+
+# Numeric context columns — initialised with float("nan") (float64) rather than
+# None (object) so that pd.concat sees consistent dtypes across all per-date frames
+# and does not emit a FutureWarning about all-NA object columns.
+_NUMERIC_CONTEXT_COLS: frozenset[str] = frozenset({
+    "home_team_power_rating",
+    "away_team_power_rating",
+    "power_rating_diff",
+    "home_adjusted_power_rating_diff",
+    "home_win_probability",
+    "away_win_probability",
+})
+
 
 # ---------------------------------------------------------------------------
 # Private utilities
@@ -49,6 +65,16 @@ def _safe_str(val: Any) -> str:
     except (TypeError, ValueError):
         pass
     return str(val).strip()
+
+
+def _normalize_str_col(s: pd.Series) -> pd.Series:
+    """Coerce None/NaN/blank strings to 'UNKNOWN' in a categorical context column.
+
+    Called on each per-date frame before pd.concat to ensure every frame has
+    the same object dtype for these columns, which suppresses the pandas
+    FutureWarning about concatenating all-NA object columns.
+    """
+    return s.fillna("").astype(str).str.strip().replace("", "UNKNOWN")
 
 
 def _safe_float(val: Any) -> float | None:
@@ -174,7 +200,7 @@ def join_picks_with_context(
     """
     result = picks_df.copy()
     for col in _CONTEXT_POWER_COLUMNS:
-        result[col] = None
+        result[col] = float("nan") if col in _NUMERIC_CONTEXT_COLS else None
     result["context_available"] = False
 
     if context_df is None or context_df.empty:
@@ -346,19 +372,28 @@ def build_shadow_analysis(
         ctx = load_power_rating_context(diag_dir, date)
         if ctx is None:
             for col in _CONTEXT_POWER_COLUMNS:
-                day_picks[col] = None
+                # Use float("nan") for numeric cols so every frame has float64 dtype,
+                # preventing the FutureWarning from pd.concat on mixed-dtype columns.
+                day_picks[col] = float("nan") if col in _NUMERIC_CONTEXT_COLS else None
             day_picks["context_available"] = False
             dates_without_context.append(date)
         else:
             day_picks = join_picks_with_context(day_picks, ctx)
             dates_with_context.append(date)
+        # Normalize string context columns before concat so every frame has a
+        # consistent object dtype — prevents the pandas FutureWarning about
+        # concatenating all-NA object columns.
+        for col in _STR_CONTEXT_COLS:
+            if col in day_picks.columns:
+                day_picks[col] = _normalize_str_col(day_picks[col])
         joined_frames.append(day_picks)
 
     non_empty = [f for f in joined_frames if not f.empty]
     combined = pd.concat(non_empty, ignore_index=True) if non_empty else pd.DataFrame()
 
-    combined["_adj_diff_bucket"] = combined["home_adjusted_power_rating_diff"].map(_rating_diff_bucket)
-    combined["_raw_diff_bucket"] = combined["power_rating_diff"].map(_rating_diff_bucket)
+    # Public bucket columns (no leading _) so they appear in the CSV export.
+    combined["home_adjusted_diff_bucket"] = combined["home_adjusted_power_rating_diff"].map(_rating_diff_bucket)
+    combined["raw_diff_bucket"] = combined["power_rating_diff"].map(_rating_diff_bucket)
 
     context_joined = int(combined["context_available"].sum()) if "context_available" in combined.columns else 0
     context_missing = len(combined) - context_joined
@@ -374,8 +409,8 @@ def build_shadow_analysis(
         "overall": _group_metrics(combined),
         "by_blowout_risk": _metrics_by_group(combined, "blowout_risk"),
         "by_expected_competitiveness": _metrics_by_group(combined, "expected_competitiveness"),
-        "by_home_adjusted_diff_bucket": _metrics_by_group(combined, "_adj_diff_bucket"),
-        "by_raw_diff_bucket": _metrics_by_group(combined, "_raw_diff_bucket"),
+        "by_home_adjusted_diff_bucket": _metrics_by_group(combined, "home_adjusted_diff_bucket"),
+        "by_raw_diff_bucket": _metrics_by_group(combined, "raw_diff_bucket"),
         "by_market_type": _metrics_by_group(combined, "market"),
         "by_side": _metrics_by_group(combined, "selection"),
     }, combined

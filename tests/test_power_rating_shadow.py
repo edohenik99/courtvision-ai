@@ -455,6 +455,117 @@ class TestWriteShadowOutputs:
 
 
 # ---------------------------------------------------------------------------
+# UNKNOWN normalization and FutureWarning
+# ---------------------------------------------------------------------------
+
+class TestUnknownNormalization:
+    """Verify that missing context fields surface as 'UNKNOWN' throughout."""
+
+    def test_missing_blowout_risk_becomes_unknown(self, tmp_path):
+        p = _write_picks_csv(tmp_path)
+        # No context file → all picks have no context
+        _, combined = build_shadow_analysis(["2026-05-01"], p, tmp_path)
+        assert "blowout_risk" in combined.columns
+        assert (combined["blowout_risk"] == "UNKNOWN").all()
+
+    def test_missing_expected_competitiveness_becomes_unknown(self, tmp_path):
+        p = _write_picks_csv(tmp_path)
+        _, combined = build_shadow_analysis(["2026-05-01"], p, tmp_path)
+        assert "expected_competitiveness" in combined.columns
+        assert (combined["expected_competitiveness"] == "UNKNOWN").all()
+
+    def test_json_summary_includes_unknown_blowout_risk_bucket(self, tmp_path):
+        p = _write_picks_csv(tmp_path)
+        result, _ = build_shadow_analysis(["2026-05-01"], p, tmp_path)
+        assert "UNKNOWN" in result["by_blowout_risk"]
+        assert result["by_blowout_risk"]["UNKNOWN"]["total_picks"] > 0
+
+    def test_json_summary_includes_unknown_competitiveness_bucket(self, tmp_path):
+        p = _write_picks_csv(tmp_path)
+        result, _ = build_shadow_analysis(["2026-05-01"], p, tmp_path)
+        assert "UNKNOWN" in result["by_expected_competitiveness"]
+        assert result["by_expected_competitiveness"]["UNKNOWN"]["total_picks"] > 0
+
+    def test_csv_blowout_risk_no_blanks(self, tmp_path):
+        p = _write_picks_csv(tmp_path)
+        result = write_shadow_outputs(["2026-05-01"], p, tmp_path, "2026-05-01")
+        assert result.get("csv_path") is not None
+        df = pd.read_csv(result["csv_path"])
+        assert "blowout_risk" in df.columns
+        assert df["blowout_risk"].isna().sum() == 0, "blowout_risk should have no blanks"
+        assert (df["blowout_risk"] == "UNKNOWN").all()
+
+    def test_csv_expected_competitiveness_no_blanks(self, tmp_path):
+        p = _write_picks_csv(tmp_path)
+        result = write_shadow_outputs(["2026-05-01"], p, tmp_path, "2026-05-01")
+        df = pd.read_csv(result["csv_path"])
+        assert "expected_competitiveness" in df.columns
+        assert df["expected_competitiveness"].isna().sum() == 0
+        assert (df["expected_competitiveness"] == "UNKNOWN").all()
+
+    def test_csv_bucket_columns_present_and_no_blanks(self, tmp_path):
+        p = _write_picks_csv(tmp_path)
+        result = write_shadow_outputs(["2026-05-01"], p, tmp_path, "2026-05-01")
+        df = pd.read_csv(result["csv_path"])
+        assert "home_adjusted_diff_bucket" in df.columns
+        assert "raw_diff_bucket" in df.columns
+        assert df["home_adjusted_diff_bucket"].isna().sum() == 0
+        assert df["raw_diff_bucket"].isna().sum() == 0
+
+    def test_no_future_warning_on_mixed_context_concat(self, tmp_path):
+        """Mixing a date with context and a date without must not emit FutureWarning."""
+        p = _write_picks_csv(tmp_path)
+        # Context only for 2026-05-01; 2026-05-02 picks will have no context.
+        _write_context_csv(tmp_path, "2026-05-01")
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", FutureWarning)
+            build_shadow_analysis(None, p, tmp_path)  # must not raise
+
+    def test_normalization_does_not_alter_scoring_columns(self, tmp_path):
+        """Normalizing context fields must not change edge, confidence, or quality_score."""
+        picks = _make_picks()
+        p = tmp_path / "pick_history.csv"
+        picks.to_csv(p, index=False)
+        _write_context_csv(tmp_path, "2026-05-01")
+
+        _, combined = build_shadow_analysis(None, p, tmp_path)
+
+        assert sorted(combined["edge"].tolist()) == sorted(picks["edge"].tolist())
+        assert sorted(combined["quality_score"].tolist()) == sorted(picks["quality_score"].tolist())
+        assert sorted(combined["confidence"].tolist()) == sorted(picks["confidence"].tolist())
+
+    def test_partial_context_match_unmatched_rows_are_unknown(self, tmp_path):
+        """When context exists but a pick has no matching row, it becomes UNKNOWN."""
+        rows = [
+            {
+                "prediction_date": "2026-05-01", "run_timestamp": "T",
+                "player_name": "Player A", "team": "OKC", "market": "player_points",
+                "selection": "over", "result_status": "hit", "line": 24.5,
+                "edge": 8.0, "confidence": 0.72, "quality_score": 0.81, "odds": -110, "game_id": "G1",
+            },
+            {
+                "prediction_date": "2026-05-01", "run_timestamp": "T",
+                "player_name": "Player Z", "team": "GSW", "market": "player_points",
+                "selection": "over", "result_status": "miss", "line": 20.5,
+                "edge": 5.0, "confidence": 0.65, "quality_score": 0.70, "odds": -110, "game_id": "G9",
+            },
+        ]
+        p = tmp_path / "pick_history.csv"
+        pd.DataFrame(rows).to_csv(p, index=False)
+        _write_context_csv(tmp_path, "2026-05-01")  # has context for Player A only
+
+        _, combined = build_shadow_analysis(["2026-05-01"], p, tmp_path)
+
+        player_a = combined[combined["player_name"] == "Player A"]
+        player_z = combined[combined["player_name"] == "Player Z"]
+
+        assert player_a.iloc[0]["blowout_risk"] == "HIGH"
+        assert player_z.iloc[0]["blowout_risk"] == "UNKNOWN"
+        assert player_z.iloc[0]["expected_competitiveness"] == "UNKNOWN"
+
+
+# ---------------------------------------------------------------------------
 # Safeguards: no scoring/selection/Kelly changes
 # ---------------------------------------------------------------------------
 
