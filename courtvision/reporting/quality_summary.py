@@ -502,6 +502,27 @@ def _kelly_safety_summary(kelly_df: pd.DataFrame) -> dict[str, Any]:
     }
 
 
+def _fragility_survivability_summary(df: pd.DataFrame) -> dict[str, Any]:
+    if df.empty:
+        return {
+            "rows_with_fragility": 0,
+            "fragility_high_count": 0,
+            "fragility_medium_count": 0,
+            "survivability_high_count": 0,
+            "survivability_medium_count": 0,
+        }
+    frag_bucket = df["fragility_bucket"].astype(str).str.upper() if "fragility_bucket" in df.columns else pd.Series("", index=df.index)
+    surv_bucket = df["survivability_bucket"].astype(str).str.upper() if "survivability_bucket" in df.columns else pd.Series("", index=df.index)
+    rows_with_fragility = int(df["fragility_score"].notna().sum()) if "fragility_score" in df.columns else 0
+    return {
+        "rows_with_fragility": rows_with_fragility,
+        "fragility_high_count": int(frag_bucket.eq("HIGH").sum()),
+        "fragility_medium_count": int(frag_bucket.eq("MEDIUM").sum()),
+        "survivability_high_count": int(surv_bucket.eq("HIGH").sum()),
+        "survivability_medium_count": int(surv_bucket.eq("MEDIUM").sum()),
+    }
+
+
 def _exposure_summary(kelly_df: pd.DataFrame, elite_df: pd.DataFrame) -> dict[str, Any]:
     if kelly_df.empty:
         return {
@@ -1588,6 +1609,7 @@ def build_quality_summary(
         "kelly_rows_count": kelly_count,
     }
     kelly_safety = _kelly_safety_summary(kelly_df)
+    fragility_summary = _fragility_survivability_summary(full_market_df)
     risk_exposure = _exposure_summary(kelly_df, elite_df)
     elite_context_safety = _elite_context_safety_summary(full_market_df, elite_df)
     elite_manual_review = manual_review_summary(elite_df)
@@ -1697,6 +1719,7 @@ def build_quality_summary(
             "coverage_warnings": coverage_warnings,
         },
         "kelly_safety_summary": kelly_safety,
+        "fragility_survivability_summary": fragility_summary,
         "elite_context_safety_gate": elite_context_safety,
         "high_caution_over_watchlist": {
             "path": str(high_caution_over_watchlist_path),
@@ -2038,6 +2061,210 @@ def _format_quality_summary_text(payload: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _sample_status(total: int) -> str:
+    if total < 25:
+        return "insufficient_sample"
+    if total < 100:
+        return "directional_only"
+    return "stable_enough_for_review"
+
+
+def _build_fragility_attribution_payload(prediction_date: str, history_root: Path) -> dict[str, Any]:
+    path = history_root / "market_shadow_history.csv"
+    if not path.exists():
+        return {"prediction_date": prediction_date, "status": "insufficient_sample", "total_graded_rows": 0, "notes": ["history_missing"]}
+    try:
+        df = pd.read_csv(path, low_memory=False)
+    except Exception:
+        return {"prediction_date": prediction_date, "status": "insufficient_sample", "total_graded_rows": 0, "notes": ["history_unreadable"]}
+    if df.empty:
+        return {"prediction_date": prediction_date, "status": "insufficient_sample", "total_graded_rows": 0, "notes": ["history_empty"]}
+    status = df.get("result_status", pd.Series("", index=df.index)).astype(str).str.lower()
+    graded = df[status.isin(["hit", "miss", "push"])].copy()
+    if graded.empty:
+        return {"prediction_date": prediction_date, "status": "insufficient_sample", "total_graded_rows": 0, "notes": ["no_graded_rows"]}
+
+    def _bucket_rows(col: str) -> list[dict[str, Any]]:
+        if col not in graded.columns:
+            return []
+        out: list[dict[str, Any]] = []
+        for bucket, seg in graded.groupby(graded[col].astype(str).str.upper()):
+            if not bucket:
+                continue
+            hit_rate = float((seg["result_status"].astype(str).str.lower() == "hit").mean()) if len(seg) else 0.0
+            out.append({
+                "bucket": bucket,
+                "rows": int(len(seg)),
+                "hit_rate": round(hit_rate, 4),
+                "avg_edge": round(float(pd.to_numeric(seg.get("edge", pd.Series(dtype=float)), errors="coerce").mean() or 0.0), 4),
+                "avg_confidence": round(float(pd.to_numeric(seg.get("confidence", pd.Series(dtype=float)), errors="coerce").mean() or 0.0), 4),
+                "avg_quality_score": round(float(pd.to_numeric(seg.get("quality_score", pd.Series(dtype=float)), errors="coerce").mean() or 0.0), 4),
+            })
+        return out
+
+    total = int(len(graded))
+    payload = {
+        "prediction_date": prediction_date,
+        "status": _sample_status(total),
+        "total_graded_rows": total,
+        "graded_rows_with_diagnostics": int(graded["fragility_bucket"].notna().sum()) if "fragility_bucket" in graded.columns else 0,
+        "by_fragility_bucket": _bucket_rows("fragility_bucket"),
+        "by_survivability_bucket": _bucket_rows("survivability_bucket"),
+        "high_fragility_winners_count": int(((graded.get("fragility_bucket", "").astype(str).str.upper() == "HIGH") & (graded["result_status"].astype(str).str.lower() == "hit")).sum()) if "fragility_bucket" in graded.columns else 0,
+        "high_fragility_losers_count": int(((graded.get("fragility_bucket", "").astype(str).str.upper() == "HIGH") & (graded["result_status"].astype(str).str.lower() == "miss")).sum()) if "fragility_bucket" in graded.columns else 0,
+        "low_fragility_losers_count": int(((graded.get("fragility_bucket", "").astype(str).str.upper() == "LOW") & (graded["result_status"].astype(str).str.lower() == "miss")).sum()) if "fragility_bucket" in graded.columns else 0,
+        "notes": ["diagnostics_only_not_for_decisions"],
+    }
+    return payload
+
+
+def _parse_date(value: Any) -> datetime | None:
+    text = _safe_text(value)
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except Exception:
+        try:
+            return datetime.strptime(text[:10], "%Y-%m-%d")
+        except Exception:
+            return None
+
+
+def _trend_window_payload(df: pd.DataFrame, *, window_name: str) -> dict[str, Any]:
+    total = int(len(df))
+    status = _sample_status(total)
+    if total == 0:
+        return {"window": window_name, "status": "insufficient_sample", "graded_rows": 0}
+    baseline_hit_rate = float((df["result_status"].astype(str).str.lower() == "hit").mean())
+
+    def _by_bucket(col: str) -> list[dict[str, Any]]:
+        if col not in df.columns:
+            return []
+        rows = []
+        for bucket, seg in df.groupby(df[col].astype(str).str.upper()):
+            if not bucket:
+                continue
+            hit_rate = float((seg["result_status"].astype(str).str.lower() == "hit").mean())
+            rows.append({
+                "bucket": bucket,
+                "graded_rows": int(len(seg)),
+                "hit_rate": round(hit_rate, 4),
+                "hit_rate_delta_vs_baseline": round(hit_rate - baseline_hit_rate, 4),
+                "avg_edge": round(float(pd.to_numeric(seg.get("edge", pd.Series(dtype=float)), errors="coerce").mean() or 0.0), 4),
+                "avg_confidence": round(float(pd.to_numeric(seg.get("confidence", pd.Series(dtype=float)), errors="coerce").mean() or 0.0), 4),
+                "avg_quality_score": round(float(pd.to_numeric(seg.get("quality_score", pd.Series(dtype=float)), errors="coerce").mean() or 0.0), 4),
+            })
+        return rows
+
+    return {
+        "window": window_name,
+        "status": status,
+        "graded_rows": total,
+        "baseline_hit_rate": round(baseline_hit_rate, 4),
+        "by_fragility_bucket": _by_bucket("fragility_bucket"),
+        "by_survivability_bucket": _by_bucket("survivability_bucket"),
+    }
+
+
+def _build_fragility_trends_payload(prediction_date: str, history_root: Path) -> dict[str, Any]:
+    path = history_root / "market_shadow_history.csv"
+    if not path.exists():
+        return {"prediction_date": prediction_date, "windows": [], "coverage_notes": ["history_missing"]}
+    try:
+        raw = pd.read_csv(path, low_memory=False)
+    except Exception:
+        return {"prediction_date": prediction_date, "windows": [], "coverage_notes": ["history_unreadable"]}
+    if raw.empty:
+        return {"prediction_date": prediction_date, "windows": [], "coverage_notes": ["history_empty"]}
+    status = raw.get("result_status", pd.Series("", index=raw.index)).astype(str).str.lower()
+    graded = raw[status.isin(["hit", "miss", "push"])].copy()
+    if graded.empty:
+        return {"prediction_date": prediction_date, "windows": [], "coverage_notes": ["no_graded_rows"]}
+    graded["_parsed_date"] = graded.get("prediction_date", pd.Series("", index=graded.index)).map(_parse_date)
+    as_of = _parse_date(prediction_date) or datetime.strptime(prediction_date, "%Y-%m-%d")
+    windows = [("7d", 7), ("30d", 30), ("60d", 60), ("90d", 90)]
+    payload_windows = []
+    for name, days in windows:
+        start = as_of - pd.Timedelta(days=days - 1)
+        seg = graded[(graded["_parsed_date"].notna()) & (graded["_parsed_date"] >= start) & (graded["_parsed_date"] <= as_of)]
+        payload_windows.append(_trend_window_payload(seg, window_name=name))
+    payload_windows.append(_trend_window_payload(graded, window_name="all_available"))
+    coverage_notes = []
+    if "fragility_bucket" not in graded.columns or "survivability_bucket" not in graded.columns:
+        coverage_notes.append("diagnostic_columns_missing")
+    else:
+        coverage_notes.append(
+            f"rows_with_diagnostics={int((graded['fragility_bucket'].astype(str).str.strip()!='').sum())}"
+        )
+    return {"prediction_date": prediction_date, "windows": payload_windows, "coverage_notes": coverage_notes}
+
+
+def _build_fragility_shadow_eval_payload(prediction_date: str, history_root: Path) -> dict[str, Any]:
+    path = history_root / "market_shadow_history.csv"
+    if not path.exists():
+        return {"prediction_date": prediction_date, "readiness_verdict": "not_ready_insufficient_sample", "graded_rows_with_diagnostics": 0, "notes": ["history_missing"]}
+    try:
+        df = pd.read_csv(path, low_memory=False)
+    except Exception:
+        return {"prediction_date": prediction_date, "readiness_verdict": "not_ready_insufficient_sample", "graded_rows_with_diagnostics": 0, "notes": ["history_unreadable"]}
+    if df.empty:
+        return {"prediction_date": prediction_date, "readiness_verdict": "not_ready_insufficient_sample", "graded_rows_with_diagnostics": 0, "notes": ["history_empty"]}
+    rs = df.get("result_status", pd.Series("", index=df.index)).astype(str).str.lower()
+    graded = df[rs.isin(["hit", "miss", "push"])].copy()
+    diag_mask = graded.get("fragility_bucket", pd.Series("", index=graded.index)).astype(str).str.strip().ne("")
+    graded_diag = graded[diag_mask].copy()
+    total = int(len(graded_diag))
+    overall_hit = float((graded_diag["result_status"].astype(str).str.lower() == "hit").mean()) if total else 0.0
+
+    def _hit(mask: pd.Series) -> float:
+        seg = graded_diag[mask]
+        return float((seg["result_status"].astype(str).str.lower() == "hit").mean()) if len(seg) else 0.0
+
+    frag = graded_diag.get("fragility_bucket", pd.Series("", index=graded_diag.index)).astype(str).str.upper()
+    surv = graded_diag.get("survivability_bucket", pd.Series("", index=graded_diag.index)).astype(str).str.upper()
+    high_frag_lift = _hit(frag.eq("HIGH")) - overall_hit
+    low_frag_lift = _hit(frag.eq("LOW")) - overall_hit
+    high_surv_lift = _hit(surv.eq("HIGH")) - overall_hit
+    low_surv_lift = _hit(surv.eq("LOW")) - overall_hit
+    directional = (high_frag_lift < 0 and low_frag_lift > 0) or (high_surv_lift > 0 and low_surv_lift < 0)
+    if total < 100:
+        verdict = "not_ready_insufficient_sample"
+    elif total < 300:
+        verdict = "promising_needs_more_sample" if directional else "reject_signal_no_lift"
+    else:
+        verdict = "ready_for_shadow_policy_design" if directional else "reject_signal_no_lift"
+
+    conf = pd.to_numeric(graded_diag.get("confidence", pd.Series(dtype=float)), errors="coerce")
+    qual = pd.to_numeric(graded_diag.get("quality_score", pd.Series(dtype=float)), errors="coerce")
+    edge = pd.to_numeric(graded_diag.get("edge", pd.Series(dtype=float)), errors="coerce")
+    conflict = {
+        "high_confidence_high_fragility": int(((conf >= 0.7) & frag.eq("HIGH")).sum()),
+        "high_quality_high_fragility": int(((qual >= 70) & frag.eq("HIGH")).sum()),
+        "positive_edge_high_fragility": int(((edge > 0) & frag.eq("HIGH")).sum()),
+        "high_survivability_missed": int((surv.eq("HIGH") & graded_diag["result_status"].astype(str).str.lower().eq("miss")).sum()),
+        "high_fragility_won": int((frag.eq("HIGH") & graded_diag["result_status"].astype(str).str.lower().eq("hit")).sum()),
+    }
+    return {
+        "prediction_date": prediction_date,
+        "coverage": {
+            "total_historical_rows": int(len(df)),
+            "rows_graded": int(len(graded)),
+            "rows_graded_with_diagnostics": total,
+        },
+        "predictive_lift": {
+            "high_fragility_vs_all_hit_rate_delta": round(high_frag_lift, 4),
+            "low_fragility_vs_all_hit_rate_delta": round(low_frag_lift, 4),
+            "high_survivability_vs_all_hit_rate_delta": round(high_surv_lift, 4),
+            "low_survivability_vs_all_hit_rate_delta": round(low_surv_lift, 4),
+        },
+        "conflict_analysis": conflict,
+        "readiness_verdict": verdict,
+        "graded_rows_with_diagnostics": total,
+        "notes": ["diagnostics_only_no_decision_changes"],
+    }
+
+
 def write_quality_summary_outputs(
     *,
     prediction_date: str,
@@ -2067,6 +2294,54 @@ def write_quality_summary_outputs(
     text_path = operator_dir / f"quality_summary_{prediction_date}.txt"
     json_path = operator_dir / f"quality_summary_{prediction_date}.json"
     text_path.write_text(text, encoding="utf-8")
+    json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    history_root = runtime_root.parent / "history"
+    attribution_payload = _build_fragility_attribution_payload(prediction_date, history_root)
+    attribution_json = runtime_root / "diagnostics" / f"fragility_survivability_attribution_{prediction_date}.json"
+    attribution_txt = runtime_root / "operator" / f"fragility_survivability_attribution_{prediction_date}.txt"
+    attribution_json.parent.mkdir(parents=True, exist_ok=True)
+    attribution_txt.parent.mkdir(parents=True, exist_ok=True)
+    attribution_json.write_text(json.dumps(attribution_payload, indent=2), encoding="utf-8")
+    attribution_txt.write_text(
+        "Fragility/Survivability Attribution (diagnostics-only)\n"
+        f"status: {attribution_payload.get('status')}\n"
+        f"total_graded_rows: {attribution_payload.get('total_graded_rows')}\n",
+        encoding="utf-8",
+    )
+    payload["fragility_survivability_attribution"] = {
+        "path": str(attribution_json),
+        "status": attribution_payload.get("status", "insufficient_sample"),
+        "total_graded_rows": attribution_payload.get("total_graded_rows", 0),
+    }
+    trends_payload = _build_fragility_trends_payload(prediction_date, history_root)
+    trends_json = runtime_root / "diagnostics" / f"fragility_survivability_trends_{prediction_date}.json"
+    trends_txt = runtime_root / "operator" / f"fragility_survivability_trends_{prediction_date}.txt"
+    trends_json.write_text(json.dumps(trends_payload, indent=2), encoding="utf-8")
+    best_status = trends_payload.get("windows", [{}])[-1].get("status", "insufficient_sample") if trends_payload.get("windows") else "insufficient_sample"
+    trends_txt.write_text(
+        "Fragility/Survivability Trends (diagnostics-only)\n"
+        f"status: {best_status}\n",
+        encoding="utf-8",
+    )
+    payload["fragility_survivability_trends"] = {
+        "path": str(trends_json),
+        "status": best_status,
+    }
+    shadow_eval_payload = _build_fragility_shadow_eval_payload(prediction_date, history_root)
+    shadow_eval_json = runtime_root / "diagnostics" / f"fragility_survivability_shadow_eval_{prediction_date}.json"
+    shadow_eval_txt = runtime_root / "operator" / f"fragility_survivability_shadow_eval_{prediction_date}.txt"
+    shadow_eval_json.write_text(json.dumps(shadow_eval_payload, indent=2), encoding="utf-8")
+    shadow_eval_txt.write_text(
+        "Fragility/Survivability Shadow Evaluation (diagnostics-only)\n"
+        f"readiness_verdict: {shadow_eval_payload.get('readiness_verdict')}\n",
+        encoding="utf-8",
+    )
+    payload["fragility_survivability_shadow_eval"] = {
+        "path": str(shadow_eval_json),
+        "readiness_verdict": shadow_eval_payload.get("readiness_verdict", "not_ready_insufficient_sample"),
+        "graded_rows_with_diagnostics": shadow_eval_payload.get("graded_rows_with_diagnostics", 0),
+        "caution_note": "diagnostics_only_no_decision_changes",
+    }
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     update_quality_history_from_summary(
         prediction_date=prediction_date,

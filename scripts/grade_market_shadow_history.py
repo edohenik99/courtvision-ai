@@ -102,6 +102,16 @@ def _write_shadow_history(path: Path, df: pd.DataFrame) -> None:
     df[ordered].to_csv(path, index=False)
 
 
+def _set_cell_value(frame: pd.DataFrame, idx: Any, column: str, value: Any) -> None:
+    if column not in frame.columns:
+        frame.at[idx, column] = value
+        return
+    if pd.api.types.is_string_dtype(frame[column].dtype):
+        frame.at[idx, column] = "" if value is None else str(value)
+        return
+    frame.at[idx, column] = value
+
+
 def _normalize_market_type(value: Any) -> str:
     text = _safe_text(value).lower()
     if text == "player_threes":
@@ -708,14 +718,14 @@ def grade_market_shadow_history(
             continue
 
         calibration_eligible, calibration_reason = _calibration_fields(result_status, _selection(row))
-        updated_df.at[idx, "actual_value"] = actual_value
-        updated_df.at[idx, "result_status"] = result_status
-        updated_df.at[idx, "hit"] = result_status == "hit"
-        updated_df.at[idx, "miss"] = result_status == "miss"
-        updated_df.at[idx, "push"] = result_status == "push"
-        updated_df.at[idx, "shadow_roi"] = _american_shadow_roi(row.get("odds"), result_status)
-        updated_df.at[idx, "calibration_eligible"] = calibration_eligible
-        updated_df.at[idx, "calibration_exclusion_reason"] = calibration_reason
+        _set_cell_value(updated_df, idx, "actual_value", actual_value)
+        _set_cell_value(updated_df, idx, "result_status", result_status)
+        _set_cell_value(updated_df, idx, "hit", result_status == "hit")
+        _set_cell_value(updated_df, idx, "miss", result_status == "miss")
+        _set_cell_value(updated_df, idx, "push", result_status == "push")
+        _set_cell_value(updated_df, idx, "shadow_roi", _american_shadow_roi(row.get("odds"), result_status))
+        _set_cell_value(updated_df, idx, "calibration_eligible", calibration_eligible)
+        _set_cell_value(updated_df, idx, "calibration_exclusion_reason", calibration_reason)
 
     if not dry_run and updated_rows:
         _write_shadow_history(shadow_history_path, updated_df)

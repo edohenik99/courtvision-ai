@@ -433,6 +433,18 @@ def _ensure_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     return working
 
 
+def _set_cell_value(frame: pd.DataFrame, idx: Any, column: str, value: Any) -> None:
+    """Assign values safely across object/string/arrow-backed columns."""
+    if column not in frame.columns:
+        frame.at[idx, column] = value
+        return
+    dtype = frame[column].dtype
+    if pd.api.types.is_string_dtype(dtype):
+        frame.at[idx, column] = "" if value is None else str(value)
+        return
+    frame.at[idx, column] = value
+
+
 def _needs_repair(row: pd.Series) -> bool:
     status = _row_status(row)
     actual_missing = _safe_float(row.get("actual_value")) is None
@@ -551,7 +563,7 @@ def _repair_history_df(
     for idx, row in working.loc[scoped].iterrows():
         diagnostics = lookup.same_opponent_diagnostics(row)
         for column, value in diagnostics.items():
-            working.at[idx, column] = value
+            _set_cell_value(working, idx, column, value)
 
         if not _needs_repair(row):
             continue
@@ -582,21 +594,21 @@ def _repair_history_df(
             result_status = VOID_STATUS
             reason = reason or "actual_stats_not_found"
 
-        working.at[idx, "result_status"] = result_status
-        working.at[idx, "actual_value"] = actual_value if actual_value is not None else ""
-        working.at[idx, "grading_skip_reason"] = "" if result_status in FINAL_STATUSES else reason
+        _set_cell_value(working, idx, "result_status", result_status)
+        _set_cell_value(working, idx, "actual_value", actual_value if actual_value is not None else "")
+        _set_cell_value(working, idx, "grading_skip_reason", "" if result_status in FINAL_STATUSES else reason)
         if source_name == "market_shadow_history":
-            working.at[idx, "hit"] = result_status == "hit"
-            working.at[idx, "miss"] = result_status == "miss"
-            working.at[idx, "push"] = result_status == "push"
-            working.at[idx, "shadow_roi"] = _shadow_roi(row.get("odds"), result_status)
+            _set_cell_value(working, idx, "hit", result_status == "hit")
+            _set_cell_value(working, idx, "miss", result_status == "miss")
+            _set_cell_value(working, idx, "push", result_status == "push")
+            _set_cell_value(working, idx, "shadow_roi", _shadow_roi(row.get("odds"), result_status))
             eligible, calibration_reason = _calibration_fields(result_status, _selection(row), reason)
-            working.at[idx, "calibration_eligible"] = eligible
-            working.at[idx, "calibration_exclusion_reason"] = calibration_reason
+            _set_cell_value(working, idx, "calibration_eligible", eligible)
+            _set_cell_value(working, idx, "calibration_exclusion_reason", calibration_reason)
         elif source_name == "paper_kelly_history":
             profit, roi = _paper_profit_and_roi(row, result_status)
-            working.at[idx, "paper_profit"] = profit
-            working.at[idx, "paper_roi"] = roi
+            _set_cell_value(working, idx, "paper_profit", profit)
+            _set_cell_value(working, idx, "paper_roi", roi)
         new_values = {
             column: _safe_text(working.at[idx, column])
             for column in old_values
