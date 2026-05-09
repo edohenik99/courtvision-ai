@@ -57,6 +57,7 @@ from courtvision.reporting.same_opponent_rematch import (
     annotate_same_opponent_rematches,
     manual_review_summary,
 )
+from courtvision.diagnostics.fragility import add_fragility_survivability_diagnostics
 from courtvision.data.bdl_odds_adapter import (
     REQUIRED_COLUMNS as BDL_REQUIRED_COLUMNS,
     filter_valid_odds,
@@ -7941,6 +7942,21 @@ def _write_dataframe(path: Path, df: pd.DataFrame) -> None:
     safe_df.to_csv(path, index=False)
 
 
+def _enforce_board_schema(
+    df: pd.DataFrame,
+    *,
+    expected_columns: list[str],
+) -> pd.DataFrame:
+    out = _cli_dataframe(df)
+    if not expected_columns:
+        return out
+    missing = [column for column in expected_columns if column not in out.columns]
+    for column in missing:
+        out[column] = ""
+    ordered = [*expected_columns, *[column for column in out.columns if column not in expected_columns]]
+    return out.loc[:, ordered]
+
+
 def _write_prediction_dataframe(
     path: Path,
     df: pd.DataFrame,
@@ -8645,6 +8661,17 @@ def _write_cli_outputs(
         prediction_date=prediction_date,
         lookup=same_opponent_lookup,
     )
+    full_market_df = add_fragility_survivability_diagnostics(full_market_df)
+    elite_df = add_fragility_survivability_diagnostics(elite_df)
+    canonical_board_columns: list[str] = []
+    for frame in (full_market_df, qualified_pool_df, elite_df):
+        if isinstance(frame, pd.DataFrame) and len(frame.columns) > 0:
+            canonical_board_columns = [str(column) for column in frame.columns]
+            break
+    if canonical_board_columns:
+        full_market_df = _enforce_board_schema(full_market_df, expected_columns=canonical_board_columns)
+        elite_df = _enforce_board_schema(elite_df, expected_columns=canonical_board_columns)
+
     full_market_manual_review = manual_review_summary(full_market_df)
     elite_manual_review = manual_review_summary(elite_df)
     summary["same_opponent_under_warning_count"] = full_market_manual_review["same_opponent_under_warning_count"]

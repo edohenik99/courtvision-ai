@@ -40,6 +40,12 @@ PICK_HISTORY_COLUMNS = [
     "context_caution_level",
     "context_pick_alignment",
     "line_source",
+    "fragility_score",
+    "fragility_bucket",
+    "fragility_reasons",
+    "survivability_score",
+    "survivability_bucket",
+    "survivability_reasons",
 ]
 
 MARKET_SHADOW_HISTORY_COLUMNS = [
@@ -71,6 +77,12 @@ MARKET_SHADOW_HISTORY_COLUMNS = [
     "shadow_roi",
     "calibration_eligible",
     "calibration_exclusion_reason",
+    "fragility_score",
+    "fragility_bucket",
+    "fragility_reasons",
+    "survivability_score",
+    "survivability_bucket",
+    "survivability_reasons",
 ]
 MARKET_SHADOW_PRESERVED_GRADED_COLUMNS = [
     "result_status",
@@ -1530,4 +1542,3 @@ def grade_completed_picks(
         "void_rows": void_rows,
         "skip_reasons": dict(sorted(skip_reasons.items())),
     }
-

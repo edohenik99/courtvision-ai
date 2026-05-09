@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import pytest
 
 
@@ -46,3 +48,10 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
                 item.add_marker(pytest.mark.xfail(reason=reason, run=False))
             else:
                 item.add_marker(pytest.mark.xfail(reason=reason, strict=False))
+
+
+@pytest.fixture(autouse=True)
+def _test_api_key_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep tests offline by always providing a deterministic API key."""
+    if not os.getenv("BALLDONTLIE_API_KEY"):
+        monkeypatch.setenv("BALLDONTLIE_API_KEY", "test-key")

@@ -411,3 +411,33 @@ def test_same_opponent_repeated_under_warning_is_flagged(tmp_path: Path) -> None
     assert float(row["same_opponent_last_line"]) == 15.5
     assert row["same_opponent_last_selection"] == "under"
     assert str(row["same_opponent_under_warning"]).lower() == "true"
+
+
+def test_repair_history_df_handles_arrow_string_columns() -> None:
+    base = pd.DataFrame([_shadow_row("Ajay Mitchell")])
+    base["grading_skip_reason"] = ""
+    base["same_opponent_recent_games"] = ""
+    base["same_opponent_under_warning"] = ""
+    base = base.astype(
+        {
+            "result_status": "string[pyarrow]",
+            "actual_value": "string[pyarrow]",
+            "grading_skip_reason": "string[pyarrow]",
+            "same_opponent_recent_games": "string[pyarrow]",
+            "same_opponent_under_warning": "string[pyarrow]",
+        }
+    )
+    feedback = pd.DataFrame([_feedback_row("Ajay Mitchell", actual_value=14.0)])
+    lookup = repair_module.ActualLookup(feedback)
+
+    repaired, _summary = repair_module._repair_history_df(
+        base,
+        start_date="2026-05-05",
+        end_date="2026-05-05",
+        lookup=lookup,
+        source_name="market_shadow_history",
+    )
+    row = repaired.iloc[0]
+    assert row["result_status"] == "hit"
+    assert row["actual_value"] == "14.0"
+    assert row["same_opponent_recent_games"] in {"", "0"}

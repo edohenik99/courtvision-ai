@@ -213,3 +213,44 @@ def test_operator_fixture_smoke_writes_isolated_boards_and_kelly_metadata(tmp_pa
     assert quality_payload["kelly_safety_summary"]["context_high_caution_over_skip_count"] == 1
     assert quality_payload["kelly_safety_summary"]["medium_neutral_over_dampened_count"] == 1
     assert quality_payload["date_isolation_check"]["status"] == "ok"
+
+
+def test_empty_elite_board_preserves_full_market_schema(tmp_path: Path) -> None:
+    prediction_date = "2026-05-02"
+    base_row = _operator_row(
+        prediction_date=prediction_date,
+        player_name="Schema Anchor",
+        selection="under",
+        line=18.5,
+        odds=-110,
+        edge_pct=-0.10,
+        side_edge_pct=0.10,
+        confidence=0.75,
+        context_caution_level="low",
+        context_pick_alignment="aligned",
+        team="OKC",
+        opponent="SAS",
+    )
+    full_market_fixture = pd.DataFrame([base_row]).assign(extra_diagnostic_flag="x")
+
+    paths = courtvision_ai._write_cli_outputs(
+        out_dir=tmp_path,
+        prediction_date=prediction_date,
+        fit_metrics=None,
+        prediction_outputs={
+            "selected_props": pd.DataFrame(),
+            "elite_props": pd.DataFrame(),
+            "qualified_pool_props": full_market_fixture,
+            "full_market_props": full_market_fixture,
+            "sgp_props": pd.DataFrame(),
+            "summary": {"prediction_date": prediction_date, "pipeline_mode": "schema_empty_elite"},
+            "grading_results": pd.DataFrame(),
+        },
+        verbose_outputs=False,
+    )
+
+    elite_df = pd.read_csv(paths["elite_board"])
+    full_market_df = pd.read_csv(paths["full_market_board"])
+    assert elite_df.empty
+    assert list(elite_df.columns) == list(full_market_df.columns)
+    assert "extra_diagnostic_flag" in elite_df.columns

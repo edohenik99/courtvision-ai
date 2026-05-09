@@ -132,8 +132,8 @@ class TestOddsDataFramePlayerName:
 
         df = pd.DataFrame(all_odds)
 
-        # Should have empty strings for missing data
-        assert df.iloc[0]["player_name"] is None or df.iloc[0]["player_name"] == ""
+        # Missing values can remain null/NA after DataFrame construction.
+        assert pd.isna(df.iloc[0]["player_name"]) or df.iloc[0]["player_name"] == ""
         assert df.iloc[1]["player_name"] == ""  # Empty first+last name = empty string
 
     def test_odds_dataframe_null_percentage_check(self):
