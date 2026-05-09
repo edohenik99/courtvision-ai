@@ -566,6 +566,148 @@ class TestUnknownNormalization:
 
 
 # ---------------------------------------------------------------------------
+# Schema normalization: market_type and side aliases
+# ---------------------------------------------------------------------------
+
+class TestSchemaNormalization:
+    """Verify market_type and side are derived and normalised correctly."""
+
+    def test_side_derived_from_selection(self, tmp_path):
+        p = _write_picks_csv(tmp_path)
+        _, combined = build_shadow_analysis(["2026-05-01"], p, tmp_path)
+        assert "side" in combined.columns
+        assert set(combined["side"].unique()) <= {"over", "under", "unknown"}
+
+    def test_side_derived_from_selection_side_when_selection_missing(self, tmp_path):
+        rows = [
+            {"prediction_date": "2026-05-01", "run_timestamp": "T",
+             "player_name": "Player A", "team": "OKC", "market": "player_points",
+             "selection": "", "selection_side": "OVER",
+             "result_status": "hit", "line": 24.5, "edge": 8.0,
+             "confidence": 0.72, "quality_score": 0.81, "odds": -110, "game_id": "G1"},
+        ]
+        p = tmp_path / "pick_history.csv"
+        pd.DataFrame(rows).to_csv(p, index=False)
+        _, combined = build_shadow_analysis(["2026-05-01"], p, tmp_path)
+        assert combined.iloc[0]["side"] == "over"
+
+    def test_market_type_derived_from_market(self, tmp_path):
+        p = _write_picks_csv(tmp_path)
+        _, combined = build_shadow_analysis(["2026-05-01"], p, tmp_path)
+        assert "market_type" in combined.columns
+        assert (combined["market_type"] == "player_points").all()
+
+    def test_market_type_derived_from_prop_type_when_market_missing(self, tmp_path):
+        rows = [
+            {"prediction_date": "2026-05-01", "run_timestamp": "T",
+             "player_name": "Player A", "team": "OKC", "market": "",
+             "prop_type": "player_rebounds",
+             "selection": "over", "result_status": "hit", "line": 7.5,
+             "edge": 6.0, "confidence": 0.70, "quality_score": 0.78,
+             "odds": -110, "game_id": "G1"},
+        ]
+        p = tmp_path / "pick_history.csv"
+        pd.DataFrame(rows).to_csv(p, index=False)
+        _, combined = build_shadow_analysis(["2026-05-01"], p, tmp_path)
+        assert combined.iloc[0]["market_type"] == "player_rebounds"
+
+    def test_blank_side_becomes_unknown(self, tmp_path):
+        rows = [
+            {"prediction_date": "2026-05-01", "run_timestamp": "T",
+             "player_name": "Player A", "team": "OKC", "market": "player_points",
+             "selection": "", "result_status": "hit", "line": 24.5,
+             "edge": 8.0, "confidence": 0.72, "quality_score": 0.81,
+             "odds": -110, "game_id": "G1"},
+        ]
+        p = tmp_path / "pick_history.csv"
+        pd.DataFrame(rows).to_csv(p, index=False)
+        _, combined = build_shadow_analysis(["2026-05-01"], p, tmp_path)
+        assert combined.iloc[0]["side"] == "unknown"
+
+    def test_blank_market_type_becomes_unknown(self, tmp_path):
+        rows = [
+            {"prediction_date": "2026-05-01", "run_timestamp": "T",
+             "player_name": "Player A", "team": "OKC", "market": "",
+             "selection": "over", "result_status": "hit", "line": 24.5,
+             "edge": 8.0, "confidence": 0.72, "quality_score": 0.81,
+             "odds": -110, "game_id": "G1"},
+        ]
+        p = tmp_path / "pick_history.csv"
+        pd.DataFrame(rows).to_csv(p, index=False)
+        _, combined = build_shadow_analysis(["2026-05-01"], p, tmp_path)
+        assert combined.iloc[0]["market_type"] == "unknown"
+
+    def test_high_blowout_risk_over_side_grouping(self, tmp_path):
+        """by_side must bucket 'over' picks when blowout_risk=HIGH context is present."""
+        p = _write_picks_csv(tmp_path)
+        _write_context_csv(tmp_path, "2026-05-01")
+        result, _ = build_shadow_analysis(["2026-05-01"], p, tmp_path)
+        assert "over" in result["by_side"], f"by_side keys: {list(result['by_side'])}"
+        assert result["by_side"]["over"]["total_picks"] > 0
+
+    def test_high_blowout_risk_player_points_market_grouping(self, tmp_path):
+        """by_market_type must bucket 'player_points' picks."""
+        p = _write_picks_csv(tmp_path)
+        _write_context_csv(tmp_path, "2026-05-01")
+        result, _ = build_shadow_analysis(["2026-05-01"], p, tmp_path)
+        assert "player_points" in result["by_market_type"], f"by_market_type keys: {list(result['by_market_type'])}"
+        assert result["by_market_type"]["player_points"]["total_picks"] > 0
+
+    def test_csv_includes_market_type_and_side_columns(self, tmp_path):
+        p = _write_picks_csv(tmp_path)
+        _write_context_csv(tmp_path, "2026-05-01")
+        result = write_shadow_outputs(["2026-05-01"], p, tmp_path, "2026-05-01")
+        df = pd.read_csv(result["csv_path"])
+        assert "market_type" in df.columns
+        assert "side" in df.columns
+
+    def test_original_market_and_selection_preserved_in_csv(self, tmp_path):
+        p = _write_picks_csv(tmp_path)
+        _write_context_csv(tmp_path, "2026-05-01")
+        result = write_shadow_outputs(["2026-05-01"], p, tmp_path, "2026-05-01")
+        df = pd.read_csv(result["csv_path"])
+        assert "market" in df.columns
+        assert "selection" in df.columns
+
+    def test_scoring_fields_unchanged_after_normalization(self, tmp_path):
+        """market_type/side derivation must not alter edge, confidence, or quality_score."""
+        picks = _make_picks()
+        p = tmp_path / "pick_history.csv"
+        picks.to_csv(p, index=False)
+        _write_context_csv(tmp_path, "2026-05-01")
+        _, combined = build_shadow_analysis(None, p, tmp_path)
+        assert sorted(combined["edge"].tolist()) == sorted(picks["edge"].tolist())
+        assert sorted(combined["quality_score"].tolist()) == sorted(picks["quality_score"].tolist())
+        assert sorted(combined["confidence"].tolist()) == sorted(picks["confidence"].tolist())
+
+    def test_side_is_lowercased(self, tmp_path):
+        rows = [
+            {"prediction_date": "2026-05-01", "run_timestamp": "T",
+             "player_name": "Player A", "team": "OKC", "market": "player_points",
+             "selection": "OVER", "result_status": "hit", "line": 24.5,
+             "edge": 8.0, "confidence": 0.72, "quality_score": 0.81,
+             "odds": -110, "game_id": "G1"},
+        ]
+        p = tmp_path / "pick_history.csv"
+        pd.DataFrame(rows).to_csv(p, index=False)
+        _, combined = build_shadow_analysis(["2026-05-01"], p, tmp_path)
+        assert combined.iloc[0]["side"] == "over"
+
+    def test_market_type_is_lowercased(self, tmp_path):
+        rows = [
+            {"prediction_date": "2026-05-01", "run_timestamp": "T",
+             "player_name": "Player A", "team": "OKC", "market": "Player_Points",
+             "selection": "over", "result_status": "hit", "line": 24.5,
+             "edge": 8.0, "confidence": 0.72, "quality_score": 0.81,
+             "odds": -110, "game_id": "G1"},
+        ]
+        p = tmp_path / "pick_history.csv"
+        pd.DataFrame(rows).to_csv(p, index=False)
+        _, combined = build_shadow_analysis(["2026-05-01"], p, tmp_path)
+        assert combined.iloc[0]["market_type"] == "player_points"
+
+
+# ---------------------------------------------------------------------------
 # Safeguards: no scoring/selection/Kelly changes
 # ---------------------------------------------------------------------------
 

@@ -51,6 +51,24 @@ _NUMERIC_CONTEXT_COLS: frozenset[str] = frozenset({
     "away_win_probability",
 })
 
+# Priority-ordered source columns for the normalized market_type alias.
+# The first column present in the DataFrame whose value is non-empty wins.
+_MARKET_TYPE_SOURCES: tuple[str, ...] = (
+    "market_type",
+    "market",
+    "prop_type",
+    "raw_prop_type",
+)
+
+# Priority-ordered source columns for the normalized side alias.
+_SIDE_SOURCES: tuple[str, ...] = (
+    "side",
+    "selection",
+    "selection_side",
+    "recommended_side",
+    "pick_side",
+)
+
 
 # ---------------------------------------------------------------------------
 # Private utilities
@@ -75,6 +93,26 @@ def _normalize_str_col(s: pd.Series) -> pd.Series:
     FutureWarning about concatenating all-NA object columns.
     """
     return s.fillna("").astype(str).str.strip().replace("", "UNKNOWN")
+
+
+def _derive_col_from_sources(
+    df: pd.DataFrame,
+    sources: tuple[str, ...],
+    fallback: str,
+) -> pd.Series:
+    """Return a Series whose value is the first non-empty (lowercased) source column.
+
+    Iterates sources in *reverse* priority order so that the highest-priority
+    source wins by overwriting lower-priority values last.  Rows for which every
+    source is blank/NaN receive *fallback*.
+    """
+    result = pd.Series([fallback] * len(df), index=df.index, dtype=object)
+    for col in reversed(sources):
+        if col in df.columns:
+            vals = df[col].fillna("").astype(str).str.strip().str.lower()
+            has_value = vals != ""
+            result[has_value] = vals[has_value]
+    return result
 
 
 def _safe_float(val: Any) -> float | None:
@@ -395,6 +433,12 @@ def build_shadow_analysis(
     combined["home_adjusted_diff_bucket"] = combined["home_adjusted_power_rating_diff"].map(_rating_diff_bucket)
     combined["raw_diff_bucket"] = combined["power_rating_diff"].map(_rating_diff_bucket)
 
+    # Normalized aliases: cascade across multiple candidate source columns so that
+    # the CSV and JSON groupings are consistent regardless of which column name the
+    # upstream pipeline used for market or side.
+    combined["market_type"] = _derive_col_from_sources(combined, _MARKET_TYPE_SOURCES, "unknown")
+    combined["side"] = _derive_col_from_sources(combined, _SIDE_SOURCES, "unknown")
+
     context_joined = int(combined["context_available"].sum()) if "context_available" in combined.columns else 0
     context_missing = len(combined) - context_joined
 
@@ -411,8 +455,8 @@ def build_shadow_analysis(
         "by_expected_competitiveness": _metrics_by_group(combined, "expected_competitiveness"),
         "by_home_adjusted_diff_bucket": _metrics_by_group(combined, "home_adjusted_diff_bucket"),
         "by_raw_diff_bucket": _metrics_by_group(combined, "raw_diff_bucket"),
-        "by_market_type": _metrics_by_group(combined, "market"),
-        "by_side": _metrics_by_group(combined, "selection"),
+        "by_market_type": _metrics_by_group(combined, "market_type"),
+        "by_side": _metrics_by_group(combined, "side"),
     }, combined
 
 
