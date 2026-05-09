@@ -103,6 +103,31 @@ MARKET_SHADOW_PRESERVED_GRADED_COLUMNS = [
 ]
 MARKET_SHADOW_PRESERVED_RESULT_STATUSES = {"hit", "miss", "push", "void", "unsupported"}
 
+PICK_HISTORY_PRESERVED_GRADED_COLUMNS = [
+    "result_status",
+    "actual_value",
+    "grading_skip_reason",
+    "fragility_score",
+    "fragility_bucket",
+    "fragility_reasons",
+    "survivability_score",
+    "survivability_bucket",
+    "survivability_reasons",
+    # preserve these if they exist in history
+    "profit_loss",
+    "graded_at",
+    "grading_source",
+]
+_FRAGILITY_COLUMNS = [
+    "fragility_score",
+    "fragility_bucket",
+    "fragility_reasons",
+    "survivability_score",
+    "survivability_bucket",
+    "survivability_reasons",
+]
+PICK_HISTORY_GRADED_STATUSES = {"hit", "miss", "push", "void", "unsupported"}
+
 MARKET_READINESS_COLUMNS = [
     "market_type",
     "selection",
@@ -252,6 +277,56 @@ def _market_shadow_match_key(
     )
 
 
+def _pick_history_match_key(row: pd.Series | dict[str, Any]) -> tuple[str, str, str, str, str]:
+    return (
+        _safe_text(row.get("prediction_date")).strip(),
+        _safe_text(row.get("player_name")).strip().lower(),
+        _safe_text(row.get("market")).strip().lower(),
+        _safe_text(row.get("selection")).strip().lower(),
+        _line_key(row.get("line")),
+    )
+
+
+def _preserve_existing_pick_grades(
+    incoming: pd.DataFrame,
+    existing: pd.DataFrame,
+) -> pd.DataFrame:
+    """Restore graded fields from existing rows so pending re-runs don't overwrite graded results."""
+    if incoming.empty or existing.empty:
+        return incoming
+
+    graded_existing = existing[
+        existing["result_status"].astype(str).str.strip().str.lower().isin(PICK_HISTORY_GRADED_STATUSES)
+    ].copy()
+    if graded_existing.empty:
+        return incoming
+
+    graded_lookup: dict[tuple[str, str, str, str, str], pd.Series] = {}
+    for _, row in graded_existing.iterrows():
+        key = _pick_history_match_key(row)
+        if key[0] and key[1]:
+            graded_lookup[key] = row
+
+    if not graded_lookup:
+        return incoming
+
+    preserved = incoming.copy()
+    for col in PICK_HISTORY_PRESERVED_GRADED_COLUMNS:
+        if col in graded_existing.columns and col not in preserved.columns:
+            preserved[col] = ""
+        if col in preserved.columns:
+            preserved[col] = preserved[col].astype("object")
+
+    for idx, row in preserved.iterrows():
+        existing_row = graded_lookup.get(_pick_history_match_key(row))
+        if existing_row is None:
+            continue
+        for col in PICK_HISTORY_PRESERVED_GRADED_COLUMNS:
+            if col in preserved.columns and col in existing_row.index:
+                preserved.at[idx, col] = existing_row.get(col)
+    return preserved
+
+
 def _preserve_existing_market_shadow_grades(
     incoming: pd.DataFrame,
     existing_same_date: pd.DataFrame,
@@ -294,6 +369,13 @@ def _preserve_existing_market_shadow_grades(
         for column in MARKET_SHADOW_PRESERVED_GRADED_COLUMNS:
             if column in preserved.columns and column in existing_row.index:
                 preserved.at[idx, column] = existing_row.get(column)
+        # Preserve fragility fields only when the incoming row has no diagnostic data.
+        for col in _FRAGILITY_COLUMNS:
+            if col not in preserved.columns or col not in existing_row.index:
+                continue
+            incoming_val = _safe_text(preserved.at[idx, col])
+            if not incoming_val or incoming_val.lower() in {"nan", "none"}:
+                preserved.at[idx, col] = existing_row.get(col)
     return preserved
 
 
@@ -601,6 +683,12 @@ def _normalize_market_shadow_rows(
                 "shadow_roi": shadow_roi,
                 "calibration_eligible": calibration_eligible,
                 "calibration_exclusion_reason": calibration_reason,
+                "fragility_score": row.get("fragility_score") if "fragility_score" in row.index else "",
+                "fragility_bucket": _safe_text(row.get("fragility_bucket")) if "fragility_bucket" in row.index else "",
+                "fragility_reasons": _safe_text(row.get("fragility_reasons")) if "fragility_reasons" in row.index else "",
+                "survivability_score": row.get("survivability_score") if "survivability_score" in row.index else "",
+                "survivability_bucket": _safe_text(row.get("survivability_bucket")) if "survivability_bucket" in row.index else "",
+                "survivability_reasons": _safe_text(row.get("survivability_reasons")) if "survivability_reasons" in row.index else "",
             }
         )
 
@@ -978,6 +1066,8 @@ def persist_daily_picks(
 
     existing = _load_csv(pick_history_path, columns=PICK_HISTORY_COLUMNS)
     incoming = pd.DataFrame(normalized_rows, columns=PICK_HISTORY_COLUMNS)
+    # Restore graded fields from existing history so pending re-runs don't overwrite results.
+    incoming = _preserve_existing_pick_grades(incoming, existing)
     combined = incoming.copy() if existing.empty else pd.concat([existing, incoming], ignore_index=True)
     dedupe_keys = ["prediction_date", "player_name", "market", "selection", "line"]
     combined = combined.drop_duplicates(subset=dedupe_keys, keep="last")

@@ -27,6 +27,11 @@ from courtvision.reporting.fragility_shadow_eval import (
     shadow_eval_path_for_date,
     write_shadow_eval_report,
 )
+from courtvision.reporting.fragility_outcome_validation import (
+    validation_json_path_for_date as _fov_json_path,
+    validation_txt_path_for_date as _fov_txt_path,
+    write_fragility_outcome_validation,
+)
 
 ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER = "elite_reject_context_high_caution_over"
 CONTEXT_CONFLICT_CAUSE_BUCKETS: tuple[str, ...] = (
@@ -2055,6 +2060,19 @@ def _format_quality_summary_text(payload: dict[str, Any]) -> str:
     else:
         lines.append("- not available")
 
+    fov = payload.get("fragility_outcome_validation", {}) if isinstance(payload.get("fragility_outcome_validation"), dict) else {}
+    lines.extend(["", "Fragility Outcome Validation", "-" * 72])
+    if fov:
+        lines.append(f"- total_graded_rows: {fov.get('total_graded_rows', 0)}")
+        lines.append(f"- rows_with_fragility: {fov.get('rows_with_fragility', 0)}")
+        global_hr = fov.get("global_hit_rate")
+        lines.append(f"- global_hit_rate: {global_hr:.1%}" if global_hr is not None else "- global_hit_rate: n/a")
+        lines.append(f"- json_path: {fov.get('json_path', 'unavailable')}")
+        lines.append(f"- txt_path: {fov.get('txt_path', 'unavailable')}")
+        lines.append(f"- note: {fov.get('note', 'diagnostics_only_no_betting_logic_changed')}")
+    else:
+        lines.append("- not available")
+
     lines.extend(["", "Warnings", "-" * 72])
     if warnings:
         for warning in warnings:
@@ -2290,6 +2308,34 @@ def write_quality_summary_outputs(
         "graded_rows_with_diagnostics": _se_cov.get("graded_rows_with_diagnostics", 0),
         "diagnostics_coverage_pct": _se_cov.get("diagnostics_coverage_pct", 0.0),
         "note": "diagnostics_non_operational",
+    }
+
+    # Fragility outcome validation: does fragility predict actual betting results?
+    try:
+        _fov_hist_path = history_root / "market_shadow_history.csv"
+        _fov_history_df = (
+            pd.read_csv(_fov_hist_path, low_memory=False)
+            if _fov_hist_path.exists()
+            else pd.DataFrame()
+        )
+        _fov_json, _fov_txt, _fov_payload = write_fragility_outcome_validation(
+            _fov_history_df, prediction_date, runtime_root
+        )
+    except Exception:
+        _fov_json = _fov_json_path(prediction_date, runtime_root)
+        _fov_txt = _fov_txt_path(prediction_date, runtime_root)
+        _fov_payload = {
+            "total_graded_rows": 0,
+            "rows_with_fragility": 0,
+            "global_hit_rate": None,
+        }
+    payload["fragility_outcome_validation"] = {
+        "json_path": str(_fov_json),
+        "txt_path": str(_fov_txt),
+        "total_graded_rows": _fov_payload.get("total_graded_rows", 0),
+        "rows_with_fragility": _fov_payload.get("rows_with_fragility", 0),
+        "global_hit_rate": _fov_payload.get("global_hit_rate"),
+        "note": "diagnostics_only_no_betting_logic_changed",
     }
 
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
