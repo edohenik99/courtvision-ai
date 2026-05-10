@@ -47,6 +47,11 @@ from courtvision.reporting.projection_bias_attribution import (
     attribution_txt_path_for_date,
     write_projection_bias_attribution,
 )
+from courtvision.reporting.edge_inflation_research import (
+    edge_research_json_path_for_date,
+    edge_research_txt_path_for_date,
+    write_edge_inflation_research,
+)
 
 ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER = "elite_reject_context_high_caution_over"
 CONTEXT_CONFLICT_CAUSE_BUCKETS: tuple[str, ...] = (
@@ -2443,6 +2448,45 @@ def write_quality_summary_outputs(
         "most_inflated_market": (_attr_tf.get("most_inflated_market") or {}).get("label"),
         "most_inflated_directional": (_attr_tf.get("most_inflated_directional") or {}).get("label"),
         "note": "shadow_analytics_only_investigative_bias_attribution",
+    }
+
+    # Phase 12C: edge inflation research (shadow analytics only — no live logic changed)
+    try:
+        _eir_shadow_path = history_root / "market_shadow_history.csv"
+        _eir_pick_path   = history_root / "pick_history.csv"
+        _eir_shadow_df = (
+            pd.read_csv(_eir_shadow_path, low_memory=False)
+            if _eir_shadow_path.exists()
+            else pd.DataFrame()
+        )
+        _eir_pick_df = (
+            pd.read_csv(_eir_pick_path, low_memory=False)
+            if _eir_pick_path.exists()
+            else None
+        )
+        _eir_json, _eir_txt, _eir_payload = write_edge_inflation_research(
+            _eir_shadow_df, prediction_date, runtime_root, pick_history_df=_eir_pick_df
+        )
+    except Exception:
+        _eir_json = edge_research_json_path_for_date(prediction_date, runtime_root)
+        _eir_txt  = edge_research_txt_path_for_date(prediction_date, runtime_root)
+        _eir_payload = {}
+    _eir_overall = _eir_payload.get("overall", {})
+    _eir_sims    = _eir_payload.get("policy_simulations", {})
+    _eir_tf      = _eir_payload.get("top_findings", {})
+    _eir_ranked  = _eir_sims.get("ranked_by_net_saved", []) if isinstance(_eir_sims, dict) else []
+    payload["edge_inflation_research"] = {
+        "json_path": str(_eir_json),
+        "txt_path": str(_eir_txt),
+        "overall_risk_flag": _eir_overall.get("overall_risk_flag"),
+        "avg_edge": _eir_overall.get("avg_edge"),
+        "avg_projection_error": _eir_overall.get("avg_projection_error"),
+        "edge_error_correlation": (_eir_payload.get("edge_error_correlation") or {}).get(
+            "pearson_edge_vs_projection_error"
+        ),
+        "top_policy_verdict": _eir_ranked[0].get("verdict") if _eir_ranked else None,
+        "top_policy_name": _eir_ranked[0].get("policy") if _eir_ranked else None,
+        "note": "shadow_analytics_and_research_only_no_live_logic_changed",
     }
 
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
