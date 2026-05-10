@@ -57,6 +57,10 @@ from courtvision.reporting.edge_containment_shadow_validation import (
     containment_txt_path_for_date,
     write_edge_containment_shadow_validation,
 )
+from courtvision.reporting.edge_containment_review import (
+    review_flags_path_for_date,
+    write_edge_containment_review_flags,
+)
 
 ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER = "elite_reject_context_high_caution_over"
 CONTEXT_CONFLICT_CAUSE_BUCKETS: tuple[str, ...] = (
@@ -2527,6 +2531,65 @@ def write_quality_summary_outputs(
         "total_current_rows_flagged": _ecv_es.get("total_current_slate_rows_flagged", 0),
         "note": "shadow_validation_only_no_live_logic_changed",
     }
+
+    # Phase 12E: edge containment live review overlay (review-only — no rows suppressed)
+    try:
+        _ecr_board_path = operator_dir / f"full_market_board_{prediction_date}.csv"
+        _ecr_board_df = (
+            pd.read_csv(_ecr_board_path, low_memory=False)
+            if _ecr_board_path.exists()
+            else pd.DataFrame()
+        )
+        _ecr_csv, _ecr_payload = write_edge_containment_review_flags(
+            _ecr_board_df, prediction_date, runtime_root
+        )
+    except Exception:
+        _ecr_csv = review_flags_path_for_date(prediction_date, runtime_root)
+        _ecr_payload = {}
+    _ecr_n_flagged  = _ecr_payload.get("review_required_count", 0)
+    _ecr_n_elite    = _ecr_payload.get("elite_review_required_count", 0)
+    _ecr_players    = _ecr_payload.get("flagged_players", [])
+    _ecr_markets    = _ecr_payload.get("flagged_markets", [])
+    payload["edge_containment_review"] = {
+        "csv_path": str(_ecr_csv),
+        "policy_name": _ecr_payload.get("policy_name", "suppress_high_edge_combo_over"),
+        "total_rows_checked": _ecr_payload.get("total_rows_checked", 0),
+        "review_required_count": _ecr_n_flagged,
+        "high_edge_combo_over_review_count": _ecr_payload.get("high_edge_combo_over_review_count", 0),
+        "elite_review_required_count": _ecr_n_elite,
+        "full_market_review_required_count": _ecr_payload.get("full_market_review_required_count", 0),
+        "flagged_players": _ecr_players,
+        "note": "review_only_no_live_suppression_no_rows_removed",
+    }
+    # Append Phase 12E review section to the operator text file
+    _sep78 = "-" * 78
+    _ecr_lines = [
+        "\n\n",
+        _sep78 + "\n",
+        "EDGE CONTAINMENT REVIEW OVERLAY (Phase 12E -- REVIEW ONLY)\n",
+        _sep78 + "\n",
+        f"  policy             : {_ecr_payload.get('policy_name', 'suppress_high_edge_combo_over')}\n",
+        f"  verdict            : {_ecr_payload.get('policy_verdict', 'READY_FOR_FORWARD_SHADOW')}\n",
+        "  edge threshold     : >=4% combo OVERs (player_points_assists/rebounds/etc.)\n",
+        f"  total_rows_checked : {_ecr_payload.get('total_rows_checked', 0)}\n",
+        f"  review_required    : {_ecr_n_flagged}\n",
+        f"  elite_flagged      : {_ecr_n_elite}\n",
+    ]
+    if _ecr_players:
+        _ecr_lines.append(
+            f"  flagged_players    : {', '.join(_ecr_players[:6])}"
+            + (" ..." if len(_ecr_players) > 6 else "") + "\n"
+        )
+    if _ecr_markets:
+        _ecr_lines.append(f"  flagged_markets    : {', '.join(_ecr_markets)}\n")
+    _ecr_lines += [
+        f"  artifact           : {_ecr_csv}\n",
+        "  NOTE: NO ROWS SUPPRESSED -- operator review only before placing bet.\n",
+        _sep78 + "\n",
+    ]
+    _ecr_txt_section = "".join(_ecr_lines)
+    with open(text_path, "a", encoding="utf-8") as _ecr_fh:
+        _ecr_fh.write(_ecr_txt_section)
 
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     update_quality_history_from_summary(
