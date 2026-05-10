@@ -114,6 +114,9 @@ class PredictionConfig:
     elite_market_mode: str = "points_only"
     elite_allowed_markets: tuple[str, ...] = ()
 
+    # Observability: active-game player count from provider lookup (Phase 11A)
+    player_lookup_size: int = 0
+
 
 @dataclass
 class PredictionResult:
@@ -1210,6 +1213,7 @@ class PredictionPipeline:
             score_candidate_fn=score_candidate_fn,
             reject_candidate_fn=reject_candidate,
             allow_partial_fill=self.config.enable_partial_fill,
+            player_lookup_size=self.config.player_lookup_size,
         )
 
         # Team-market candidates (moneyline, team totals) if offered by provider.

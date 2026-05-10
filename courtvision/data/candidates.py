@@ -175,6 +175,7 @@ def score_player_markets(
     score_candidate_fn: Callable[..., dict[str, Any] | None],
     reject_candidate_fn: Callable[..., dict[str, Any]],
     allow_partial_fill: bool = True,
+    player_lookup_size: int = 0,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """
     Build and score player-market candidates.
@@ -317,15 +318,25 @@ def score_player_markets(
 
     # Track match diagnostics
     total_players = 0
-    matched_players = 0
+    matched_player_ids: set[int] = set()   # unique matched player IDs
+    matched_baseline_rows = 0              # count of matched baseline rows (old matched_players)
     baseline_player_ids: list[int] = []
-    
-    # Collect baseline player_ids for intersection analysis
+
+    # Collect baseline player_ids for intersection analysis + Phase 11A diagnostics
+    _baseline_missing_pid = 0
     for _, player_row in players_df.iterrows():
         pid = int(player_row.get("player_id", 0) or 0)
+        has_name = bool(str(player_row.get("player_name", "")).strip())
         if pid > 0:
             baseline_player_ids.append(pid)
-    
+        elif has_name:
+            _baseline_missing_pid += 1
+
+    baseline_valid_player_id_count = len(set(baseline_player_ids))
+    baseline_missing_player_id_count = _baseline_missing_pid
+    _pid_counter: Counter[int] = Counter(baseline_player_ids)
+    duplicate_baseline_player_id_count = sum(1 for count in _pid_counter.values() if count > 1)
+
     # Calculate intersection between odds player_ids and baseline player_ids.
     odds_player_ids = set(player_id_lookup.keys())
     baseline_ids_set = set(baseline_player_ids)
@@ -345,6 +356,14 @@ def score_player_markets(
     print(f"[COUNT] odds_baseline_matched_players={len(intersection)}", flush=True)
     print(f"[COUNT] active_board_match_rate={active_board_match_rate:.1f}%", flush=True)
     print(f"[COUNT] baseline_universe_player_count={len(baseline_ids_set)}", flush=True)
+    print(f"[COUNT] baseline_valid_player_id_count={baseline_valid_player_id_count}", flush=True)
+    print(f"[COUNT] baseline_missing_player_id_count={baseline_missing_player_id_count}", flush=True)
+    print(f"[COUNT] duplicate_baseline_player_id_count={duplicate_baseline_player_id_count}", flush=True)
+    if player_lookup_size > 0:
+        _active_game_rate = len(odds_player_ids) / player_lookup_size * 100.0
+        print(f"[COUNT] active_game_player_match_rate={_active_game_rate:.1f}%", flush=True)
+    else:
+        print(f"[COUNT] active_game_player_match_rate=n/a", flush=True)
 
     for _, player_row in players_df.iterrows():
         player_name = str(player_row.get("player_name", "")).strip()
@@ -382,7 +401,8 @@ def score_player_markets(
                 if bool((odds_team != "").any()):
                     player_market_rows = player_market_rows[odds_team == team].copy()
             if not player_market_rows.empty:
-                matched_players += 1
+                matched_baseline_rows += 1
+                matched_player_ids.add(player_id)
                 matched_by_id = True
         # Fall back to normalized name matching
         elif not working_odds.empty and "_normalized_name" in working_odds.columns:
@@ -395,7 +415,9 @@ def score_player_markets(
                 if bool((odds_team != "").any()):
                     player_market_rows = player_market_rows[odds_team == team].copy()
             if not player_market_rows.empty:
-                matched_players += 1
+                matched_baseline_rows += 1
+                if player_id > 0:
+                    matched_player_ids.add(player_id)
 
         same_team_rows = pd.DataFrame()
         if not working_odds.empty and "_team_abbr" in working_odds.columns and team:
@@ -636,11 +658,13 @@ def score_player_markets(
                     accepted_candidates.append(scored)
 
     # Match rate diagnostics
-    match_rate = (matched_players / total_players * 100) if total_players > 0 else 0
+    _matched_unique = len(matched_player_ids)
+    match_rate = (_matched_unique / total_players * 100) if total_players > 0 else 0
     logger.info(
-            "player_odds_match_rate total_players=%d matched_players=%d match_rate=%.1f%%",
+            "player_odds_match_rate total_players=%d matched_players=%d matched_baseline_rows=%d match_rate=%.1f%%",
             total_players,
-            matched_players,
+            _matched_unique,
+            matched_baseline_rows,
             match_rate,
         )
     logger.info(
@@ -722,29 +746,35 @@ def score_player_markets(
 
     # Diagnostics for low baseline-coverage runs.
     #
-    # Note: a low `match_rate` (baseline players whose props the books posted
-    # tonight) is *not* a data-quality signal. Many baseline players simply do
-    # not play, or no vendor lists props for them. Discarding all already-
-    # accepted candidates in that case is a stale kill-switch from when the
-    # upstream odds normalizer was returning unresolved rows. Keep the
-    # diagnostics so coverage drops are still visible, but do not nuke the
-    # candidates that scored cleanly. Downstream elite admission/qualification
-    # remains the authoritative safety layer.
+    # Note: a low `baseline_universe_match_rate` (what fraction of ALL baseline
+    # players have odds posted tonight) is *not* a data-quality signal.  Many
+    # baseline players simply do not play tonight, or no vendor lists props for
+    # them.  The meaningful signals are active_board_match_rate (odds players
+    # found in baseline — should be ~100%) and active_game_player_match_rate
+    # (what fraction of today's active-game players have odds posted).
     if match_rate < 50 and total_players > 0:
         sample_players = players_df["player_name"].head(5).tolist() if "player_name" in players_df.columns else []
         odds_with_names = working_odds["player_name"].notna().sum() if "player_name" in working_odds.columns else 0
 
         print(f"[COUNT] total_players={total_players}", flush=True)
-        print(f"[COUNT] matched_players={matched_players}", flush=True)
+        print(f"[COUNT] matched_players={_matched_unique}", flush=True)
+        print(f"[COUNT] matched_baseline_rows={matched_baseline_rows}", flush=True)
         print(f"[COUNT] match_rate={match_rate:.1f}%", flush=True)
+        print(f"[COUNT] baseline_universe_match_rate={match_rate:.1f}%", flush=True)
         print(f"[COUNT] odds_rows_with_player_name={odds_with_names}", flush=True)
         print(f"[COUNT] odds_rows_total={len(working_odds)}", flush=True)
         print(f"[COUNT] accepted_candidates_pre_return={len(accepted_candidates)}", flush=True)
         print(f"[COUNT] rejected_candidates_pre_return={len(rejected_candidates)}", flush=True)
-        print(f"[DIAGNOSIS] Low baseline-universe coverage (informational, not fatal)", flush=True)
+        print(
+            f"[DIAGNOSIS] Full baseline universe coverage is low, which may be normal when few "
+            f"teams/games have posted odds. Check active_board_match_rate and "
+            f"active_game_player_match_rate for true coverage signals. (informational, not fatal)",
+            flush=True,
+        )
         print(f"  Sample players from baselines: {sample_players}", flush=True)
         print(
-            f"[DIAGNOSIS] Baseline universe coverage: {matched_players}/{total_players} players matched, "
+            f"[DIAGNOSIS] Baseline universe coverage: {_matched_unique}/{total_players} unique players matched "
+            f"({matched_baseline_rows} baseline rows matched), "
             f"odds rows={len(working_odds)} — keeping {len(accepted_candidates)} accepted candidates",
             flush=True,
         )

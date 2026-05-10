@@ -553,6 +553,12 @@ class BallDontLieClient:
                     print(f"[COUNT] player_prop_rows_returned game_id={game_id} rows={row_count}", flush=True)
                     if row_count == 0:
                         print(f"[WARNING] no_player_props_for_game game_id={game_id}", flush=True)
+                    elif row_count < 50:
+                        print(
+                            f"[WARN] game_odds_sparse game_id={game_id} rows={row_count} threshold=50",
+                            flush=True,
+                        )
+                        all_player_props.extend(data)
                     else:
                         all_player_props.extend(data)
                 except Exception as exc:
@@ -571,6 +577,7 @@ class BallDontLieClient:
             print(f"[DIAGNOSIS] player_lookup_build raised {type(exc).__name__}: {exc}", flush=True)
             player_lookup = {}
         print(f"[COUNT] player_lookup_size={len(player_lookup)}", flush=True)
+        self._last_player_lookup_size = len(player_lookup)
 
         # Convert to DataFrame and run through canonical adapter
         raw_df = pd.json_normalize(all_player_props) if all_player_props else pd.DataFrame()
@@ -969,9 +976,13 @@ class BallDontLieClient:
         data = payload.get("data", [])
         row_count = len(data) if isinstance(data, list) else 0
         print(f"[COUNT] player_prop_rows_returned game_id={game_id} rows={row_count}", flush=True)
-        
         if row_count == 0:
             print(f"[WARNING] no_player_props_for_game game_id={game_id}", flush=True)
+        elif row_count < 50:
+            print(
+                f"[WARN] game_odds_sparse game_id={game_id} rows={row_count} threshold=50",
+                flush=True,
+            )
         if diagnostics is not None:
             diagnostics.clear()
             diagnostics.update(
@@ -3922,6 +3933,7 @@ class CourtVisionAI:
         print(f"[COUNT] games_for_odds={len(game_ids)}", flush=True)
         odds_raw = client.get_odds(prediction_date, game_ids=game_ids)
         print(f"[COUNT] odds_rows_after_fetch={len(odds_raw) if hasattr(odds_raw, '__len__') else 0}", flush=True)
+        _player_lookup_size = getattr(client, "_last_player_lookup_size", 0)
 
         # Diagnostic logging for player_name in odds
         if not odds_raw.empty and "player_name" in odds_raw.columns:
@@ -4101,6 +4113,7 @@ class CourtVisionAI:
             out_dir=str(self.out_dir),
             elite_market_mode=elite_market_mode,
             elite_allowed_markets=elite_allowed_markets,
+            player_lookup_size=_player_lookup_size,
         )
         pipeline = PredictionPipeline(pipeline_config)
         
