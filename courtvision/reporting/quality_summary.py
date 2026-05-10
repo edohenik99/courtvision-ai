@@ -61,6 +61,11 @@ from courtvision.reporting.edge_containment_review import (
     review_flags_path_for_date,
     write_edge_containment_review_flags,
 )
+from courtvision.reporting.edge_containment_forward_tracker import (
+    forward_tracker_json_path_for_date,
+    forward_tracker_txt_path_for_date,
+    write_edge_containment_forward_tracker,
+)
 
 ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER = "elite_reject_context_high_caution_over"
 CONTEXT_CONFLICT_CAUSE_BUCKETS: tuple[str, ...] = (
@@ -2590,6 +2595,50 @@ def write_quality_summary_outputs(
     _ecr_txt_section = "".join(_ecr_lines)
     with open(text_path, "a", encoding="utf-8") as _ecr_fh:
         _ecr_fh.write(_ecr_txt_section)
+
+    # Phase 12F: edge containment forward review outcome tracker (read-only analytics)
+    try:
+        _eft_json, _eft_txt, _eft_payload = write_edge_containment_forward_tracker(
+            prediction_date, runtime_root=runtime_root
+        )
+    except Exception:
+        _eft_json    = forward_tracker_json_path_for_date(prediction_date, runtime_root)
+        _eft_txt     = forward_tracker_txt_path_for_date(prediction_date, runtime_root)
+        _eft_payload = {}
+    payload["edge_containment_forward_tracker"] = {
+        "json_path":             str(_eft_json),
+        "txt_path":              str(_eft_txt),
+        "total_review_flags":    _eft_payload.get("total_review_flags", 0),
+        "graded_review_flags":   _eft_payload.get("graded_review_flags", 0),
+        "pending_review_flags":  _eft_payload.get("pending_review_flags", 0),
+        "flagged_hit_rate":      _eft_payload.get("flagged_hit_rate"),
+        "flagged_avg_roi":       _eft_payload.get("flagged_avg_roi"),
+        "readiness":             _eft_payload.get("readiness", "INSUFFICIENT_FORWARD_SAMPLE"),
+        "recommendation":        _eft_payload.get("recommendation", "accumulate_more_graded_flags_before_drawing_conclusions"),
+        "note":                  "forward_tracking_only_no_live_logic_changed",
+    }
+    # Append Phase 12F tracker section to the operator text file
+    _eft_sep = "-" * 78
+    _eft_lines = [
+        "\n\n",
+        _eft_sep + "\n",
+        "EDGE CONTAINMENT FORWARD TRACKER (Phase 12F -- READ ONLY)\n",
+        _eft_sep + "\n",
+        f"  total_review_flags : {_eft_payload.get('total_review_flags', 0)}\n",
+        f"  graded_flags       : {_eft_payload.get('graded_review_flags', 0)}\n",
+        f"  pending_flags      : {_eft_payload.get('pending_review_flags', 0)}\n",
+        f"  flagged_hit_rate   : {_eft_payload.get('flagged_hit_rate')}\n",
+        f"  flagged_avg_roi    : {_eft_payload.get('flagged_avg_roi')}\n",
+        f"  readiness          : {_eft_payload.get('readiness', 'INSUFFICIENT_FORWARD_SAMPLE')}\n",
+        f"  recommendation     : {_eft_payload.get('recommendation', '')}\n",
+        f"  json_artifact      : {_eft_json}\n",
+        f"  txt_artifact       : {_eft_txt}\n",
+        "  NOTE: forward_tracking_only_no_live_logic_changed\n",
+        _eft_sep + "\n",
+    ]
+    _eft_txt_section = "".join(_eft_lines)
+    with open(text_path, "a", encoding="utf-8") as _eft_fh:
+        _eft_fh.write(_eft_txt_section)
 
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     update_quality_history_from_summary(
