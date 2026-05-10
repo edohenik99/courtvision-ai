@@ -42,6 +42,11 @@ from courtvision.reporting.projection_calibration_shadow import (
     calibration_txt_path_for_date,
     write_projection_calibration_report,
 )
+from courtvision.reporting.projection_bias_attribution import (
+    attribution_json_path_for_date,
+    attribution_txt_path_for_date,
+    write_projection_bias_attribution,
+)
 
 ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER = "elite_reject_context_high_caution_over"
 CONTEXT_CONFLICT_CAUSE_BUCKETS: tuple[str, ...] = (
@@ -2404,6 +2409,40 @@ def write_quality_summary_outputs(
         "calibration_gap": _cal_overall.get("calibration_gap"),
         "directional_bias_verdict": _cal_payload.get("directional_bias", {}).get("directional_bias_verdict"),
         "note": "shadow_analytics_only_no_live_logic_changed",
+    }
+
+    # Phase 12B: projection bias attribution (shadow analytics only — no live logic changed)
+    try:
+        _attr_shadow_path = history_root / "market_shadow_history.csv"
+        _attr_pick_path   = history_root / "pick_history.csv"
+        _attr_shadow_df = (
+            pd.read_csv(_attr_shadow_path, low_memory=False)
+            if _attr_shadow_path.exists()
+            else pd.DataFrame()
+        )
+        _attr_pick_df = (
+            pd.read_csv(_attr_pick_path, low_memory=False)
+            if _attr_pick_path.exists()
+            else None
+        )
+        _attr_json, _attr_txt, _attr_payload = write_projection_bias_attribution(
+            _attr_shadow_df, prediction_date, runtime_root, pick_history_df=_attr_pick_df
+        )
+    except Exception:
+        _attr_json = attribution_json_path_for_date(prediction_date, runtime_root)
+        _attr_txt  = attribution_txt_path_for_date(prediction_date, runtime_root)
+        _attr_payload = {}
+    _attr_overall = _attr_payload.get("overall", {})
+    _attr_tf = _attr_payload.get("top_findings", {})
+    payload["projection_bias_attribution"] = {
+        "json_path": str(_attr_json),
+        "txt_path": str(_attr_txt),
+        "inflation_severity": _attr_overall.get("inflation_severity"),
+        "total_graded_rows": _attr_overall.get("total_graded_rows"),
+        "mean_projection_error": _attr_overall.get("mean_projection_error"),
+        "most_inflated_market": (_attr_tf.get("most_inflated_market") or {}).get("label"),
+        "most_inflated_directional": (_attr_tf.get("most_inflated_directional") or {}).get("label"),
+        "note": "shadow_analytics_only_investigative_bias_attribution",
     }
 
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
