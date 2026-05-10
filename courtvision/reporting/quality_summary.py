@@ -66,6 +66,11 @@ from courtvision.reporting.edge_containment_forward_tracker import (
     forward_tracker_txt_path_for_date,
     write_edge_containment_forward_tracker,
 )
+from courtvision.reporting.edge_containment_hold_control import (
+    hold_control_json_path_for_date,
+    hold_control_review_flags_path_for_date,
+    write_hold_control_artifacts,
+)
 
 ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER = "elite_reject_context_high_caution_over"
 CONTEXT_CONFLICT_CAUSE_BUCKETS: tuple[str, ...] = (
@@ -2639,6 +2644,88 @@ def write_quality_summary_outputs(
     _eft_txt_section = "".join(_eft_lines)
     with open(text_path, "a", encoding="utf-8") as _eft_fh:
         _eft_fh.write(_eft_txt_section)
+
+    # Phase 12G: edge containment HOLD risk control
+    # Reads Kelly stakes CSV to count held rows, then writes hold-control artifacts.
+    try:
+        _kelly_stakes_path = operator_dir / f"kelly_stakes_{prediction_date}.csv"
+        _ech_kelly_hold_count = 0
+        _ech_kelly_blocked_count = 0
+        if _kelly_stakes_path.exists():
+            try:
+                _kelly_stakes_df = pd.read_csv(_kelly_stakes_path, low_memory=False)
+                if not _kelly_stakes_df.empty and "skip_reason" in _kelly_stakes_df.columns:
+                    _ech_kelly_hold_count = int(
+                        (_kelly_stakes_df["skip_reason"].astype(str).str.strip()
+                         == "edge_containment_hold_for_review").sum()
+                    )
+                    _ech_kelly_blocked_count = _ech_kelly_hold_count
+            except Exception:
+                pass  # empty or malformed kelly stakes file — hold count stays 0
+        _ech_board_path = operator_dir / f"full_market_board_{prediction_date}.csv"
+        _ech_board_df = (
+            pd.read_csv(_ech_board_path, low_memory=False)
+            if _ech_board_path.exists()
+            else pd.DataFrame()
+        )
+        _ech_review_csv, _ech_json, _ech_payload = write_hold_control_artifacts(
+            _ech_board_df,
+            prediction_date,
+            runtime_root=runtime_root,
+            kelly_hold_count=_ech_kelly_hold_count,
+            kelly_stake_blocked_count=_ech_kelly_blocked_count,
+        )
+    except Exception:
+        _ech_review_csv = hold_control_review_flags_path_for_date(prediction_date, runtime_root)
+        _ech_json       = hold_control_json_path_for_date(prediction_date, runtime_root)
+        _ech_payload    = {}
+        _ech_kelly_hold_count = 0
+    payload["edge_containment_hold_control"] = {
+        "edge_containment_policy_active":   True,
+        "edge_containment_policy_mode":     "HOLD_FOR_REVIEW",
+        "edge_containment_hold_count":      _ech_payload.get("hold_required_count", 0),
+        "edge_containment_elite_hold_count": _ech_payload.get("elite_hold_count", 0),
+        "edge_containment_kelly_blocked_count": _ech_kelly_hold_count,
+        "edge_containment_hold_artifact":   str(_ech_json),
+        "edge_containment_review_flags_csv": str(_ech_review_csv),
+        "edge_containment_note":            "risk_control_only_no_model_change",
+    }
+    # Append Phase 12G section to operator text file
+    _ech_sep = "-" * 78
+    _ech_n_held   = _ech_payload.get("hold_required_count", 0)
+    _ech_n_elite  = _ech_payload.get("elite_hold_count", 0)
+    _ech_players  = _ech_payload.get("blocked_players", [])
+    _ech_markets  = _ech_payload.get("blocked_markets", [])
+    _ech_lines = [
+        "\n\n",
+        _ech_sep + "\n",
+        "EDGE CONTAINMENT HOLD CONTROL (Phase 12G -- ACTIVE RISK CONTROL)\n",
+        _ech_sep + "\n",
+        "  policy             : suppress_high_edge_combo_over\n",
+        "  mode               : HOLD_FOR_REVIEW\n",
+        "  reason             : high_edge_combo_over_forward_tracking_failure\n",
+        "  evidence           : graded=13 hit_rate=0.0769 roi=-0.8579 "
+        "proj_err=+10.80 (1H/12M/0P)\n",
+        f"  total_rows_checked : {_ech_payload.get('total_rows_checked', 0)}\n",
+        f"  hold_required      : {_ech_n_held}\n",
+        f"  elite_held         : {_ech_n_elite}\n",
+        f"  kelly_stake_blocked: {_ech_kelly_hold_count}\n",
+    ]
+    if _ech_players:
+        _ech_lines.append(
+            f"  blocked_players    : {', '.join(_ech_players[:6])}"
+            + (" ..." if len(_ech_players) > 6 else "") + "\n"
+        )
+    if _ech_markets:
+        _ech_lines.append(f"  blocked_markets    : {', '.join(_ech_markets)}\n")
+    _ech_lines += [
+        f"  hold_artifact      : {_ech_json}\n",
+        "  NOTE: rows VISIBLE, Kelly stake forced to 0, no model/projection change.\n",
+        _ech_sep + "\n",
+    ]
+    _ech_txt_section = "".join(_ech_lines)
+    with open(text_path, "a", encoding="utf-8") as _ech_fh:
+        _ech_fh.write(_ech_txt_section)
 
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     update_quality_history_from_summary(

@@ -60,6 +60,22 @@ MEDIUM_NEUTRAL_OVER_DAMPENER_REASON: str = "medium_neutral_over_dampener"
 REVIEW_BEFORE_BET_ACTION: str = "REVIEW_BEFORE_BET"
 OK_TO_CONSIDER_ACTION: str = "OK_TO_CONSIDER"
 
+# Phase 12G: Edge Containment HOLD risk control constants
+# A row is held when: selection==over, market_type in HOLD_COMBO_MARKETS, edge>=threshold.
+# Applies BEFORE normal eligibility gating so it fires even for currently-ineligible
+# combo markets (protective for future expansion).
+EDGE_CONTAINMENT_HOLD_SKIP_REASON: str = "edge_containment_hold_for_review"
+_HOLD_COMBO_MARKETS: frozenset[str] = frozenset({
+    "player_points_assists",
+    "player_points_rebounds",
+    "player_rebounds_assists",
+    "player_points_rebounds_assists",
+})
+# Threshold for percentage-form columns (side_edge_pct, edge_pct): 0.04 = 4%
+# Threshold for absolute-unit column (edge): 4.0 units
+_HOLD_EDGE_THRESHOLD_PCT: float = 0.04
+_HOLD_EDGE_THRESHOLD_ABS: float = 4.0
+
 
 @dataclass
 class StakeRow:
@@ -172,6 +188,36 @@ def _validate_columns(fieldnames: list[str]) -> str:
     return edge_col
 
 
+def _check_edge_containment_hold(
+    row: dict[str, str],
+    market_type: str,
+    selection: str,
+    edge_pct_raw: float | None,
+    edge_col: str,
+) -> bool:
+    """Return True if Phase 12G HOLD control applies to this row.
+
+    Checks metadata flags first (populated when hold control module has run),
+    then applies policy criteria directly as a defensive fallback.
+    """
+    # Metadata-first check (fast path when Phase 12G has already annotated the board)
+    stake_policy = str(row.get("edge_containment_stake_policy", "") or "").strip()
+    if stake_policy == "HOLD_FOR_REVIEW":
+        return True
+    rec_action = str(row.get("edge_containment_recommended_action", "") or "").strip()
+    if rec_action == "DO_NOT_BET_UNTIL_REVIEWED":
+        return True
+    # Direct policy criteria (defensive — works even without pre-annotation)
+    if market_type not in _HOLD_COMBO_MARKETS or selection != "over" or edge_pct_raw is None:
+        return False
+    threshold = (
+        _HOLD_EDGE_THRESHOLD_PCT
+        if edge_col in ("side_edge_pct", "edge_pct")
+        else _HOLD_EDGE_THRESHOLD_ABS
+    )
+    return edge_pct_raw >= threshold
+
+
 def _medium_neutral_over_dampener(selection: str, context_caution_level: str, context_pick_alignment: str, eligible: bool) -> tuple[str, float]:
     if (
         eligible
@@ -218,14 +264,31 @@ def _build_stake_row(row: dict[str, str], edge_col: str, bankroll: float) -> Sta
     opponent = str(row.get("opponent", "") or "").strip()
     same_opponent_under_warning = _is_truthy(row.get("same_opponent_under_warning"))
     manual_review_required = _is_truthy(row.get("manual_review_required"))
-    recommended_action = REVIEW_BEFORE_BET_ACTION if manual_review_required else OK_TO_CONSIDER_ACTION
     _manual_review_reason_raw = str(row.get("manual_review_reason", "") or "").strip()
     _same_opponent_warning_reason_raw = str(row.get("same_opponent_warning_reason", "") or "").strip()
     if not same_opponent_under_warning and "same_opponent_under_warning" in _manual_review_reason_raw:
         same_opponent_under_warning = True
-    if manual_review_required:
+
+    # Phase 12G: Edge Containment HOLD — evaluated BEFORE market_type lock and all
+    # other eligibility gates so it fires even for currently-ineligible combo markets.
+    _ecr_hold = _check_edge_containment_hold(
+        row, market_type, selection, edge_pct_raw, edge_col
+    )
+
+    if _ecr_hold:
+        # HOLD overrides all other routing
+        skip_reason = EDGE_CONTAINMENT_HOLD_SKIP_REASON
+        eligible = False
+        manual_review_required = True
+        review_status = "HOLD"
+        stake_policy = "HOLD_FOR_REVIEW"
+        recommended_action = "DO_NOT_BET_UNTIL_REVIEWED"
+        operator_action = "DO_NOT_BET_UNTIL_REVIEWED"
+        operator_note = "edge_containment_hold_for_review"
+    elif manual_review_required:
         review_status = "REVIEW_REQUIRED"
         stake_policy = "HOLD"
+        recommended_action = REVIEW_BEFORE_BET_ACTION
         operator_action = "DO_NOT_BET_UNTIL_REVIEWED"
         _note_parts = []
         if _manual_review_reason_raw:
@@ -236,9 +299,11 @@ def _build_stake_row(row: dict[str, str], edge_col: str, bankroll: float) -> Sta
     else:
         review_status = "CLEAR"
         stake_policy = "NORMAL"
+        recommended_action = OK_TO_CONSIDER_ACTION
         operator_action = "OK_TO_CONSIDER"
         operator_note = ""
-    if market_type and market_type != "player_points":
+
+    if not _ecr_hold and market_type and market_type != "player_points":
         skip_reason = "kelly_points_only_market_lock"
         eligible = False
     elif raw_market_type == "milestone" or selection == "milestone":
@@ -472,6 +537,10 @@ def main(argv: list[str] | None = None) -> int:
     hold_policy_count = sum(1 for s in stakes if s.stake_policy == "HOLD")
     clear_policy_count = sum(1 for s in stakes if s.stake_policy == "NORMAL")
     do_not_bet_until_reviewed_count = sum(1 for s in stakes if s.operator_action == "DO_NOT_BET_UNTIL_REVIEWED")
+    # Phase 12G: count rows held by edge containment HOLD control
+    edge_containment_hold_count = sum(
+        1 for s in stakes if s.skip_reason == EDGE_CONTAINMENT_HOLD_SKIP_REASON
+    )
 
     _log(f"eligible_picks={len(eligible)} skipped_picks={len(skipped)}")
     _log(f"manual_review_required_count={manual_review_required_count}")
@@ -492,6 +561,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[COUNT] hold_policy_count={hold_policy_count}", flush=True)
     print(f"[COUNT] clear_policy_count={clear_policy_count}", flush=True)
     print(f"[COUNT] do_not_bet_until_reviewed_count={do_not_bet_until_reviewed_count}", flush=True)
+    print(f"[COUNT] edge_containment_hold_count={edge_containment_hold_count}", flush=True)
+    _log(f"edge_containment_hold_count={edge_containment_hold_count}")
 
     # Aggregate skip reasons
     if skipped:
