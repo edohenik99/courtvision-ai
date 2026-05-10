@@ -32,6 +32,11 @@ from courtvision.reporting.fragility_outcome_validation import (
     validation_txt_path_for_date as _fov_txt_path,
     write_fragility_outcome_validation,
 )
+from courtvision.reporting.fragility_shadow_policy_simulation import (
+    simulation_json_path_for_date,
+    simulation_txt_path_for_date,
+    write_policy_simulation_report,
+)
 
 ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER = "elite_reject_context_high_caution_over"
 CONTEXT_CONFLICT_CAUSE_BUCKETS: tuple[str, ...] = (
@@ -2336,6 +2341,28 @@ def write_quality_summary_outputs(
         "rows_with_fragility": _fov_payload.get("rows_with_fragility", 0),
         "global_hit_rate": _fov_payload.get("global_hit_rate"),
         "note": "diagnostics_only_no_betting_logic_changed",
+    }
+
+    # Phase 10: fragility shadow policy simulation (simulation only — no live logic changed)
+    try:
+        _sim_hist_path = history_root / "market_shadow_history.csv"
+        _sim_history_df = (
+            pd.read_csv(_sim_hist_path, low_memory=False)
+            if _sim_hist_path.exists()
+            else pd.DataFrame()
+        )
+        _sim_json, _sim_txt, _sim_payload = write_policy_simulation_report(
+            _sim_history_df, prediction_date, runtime_root
+        )
+    except Exception:
+        _sim_json = simulation_json_path_for_date(prediction_date, runtime_root)
+        _sim_txt = simulation_txt_path_for_date(prediction_date, runtime_root)
+        _sim_payload = {"policies": {}}
+    payload["fragility_shadow_policy_simulation"] = {
+        "json_path": str(_sim_json),
+        "txt_path": str(_sim_txt),
+        "policies_simulated": list(_sim_payload.get("policies", {}).keys()),
+        "note": "simulation_only_no_live_logic_changed",
     }
 
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
