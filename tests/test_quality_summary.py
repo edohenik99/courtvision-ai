@@ -1409,3 +1409,68 @@ def test_quality_summary_reports_elite_context_safety_gate(tmp_path: Path) -> No
     assert any("Elite context safety gate excluded 1" in warning for warning in payload["warnings"])
     assert "Elite Context Safety Gate" in text
     assert "elite_reject_context_high_caution_over" in text
+
+
+# ── Phase P0: history_root canonicalisation ───────────────────────────────────
+
+def test_write_quality_summary_uses_explicit_history_root(tmp_path: Path) -> None:
+    """history_root parameter is used instead of the old runtime_root.parent/history derivation."""
+    prediction_date = "2026-05-11"
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "my_history"
+    history_root.mkdir(parents=True, exist_ok=True)
+
+    # Write a marker row to the caller-supplied history_root.
+    pd.DataFrame([{
+        "prediction_date": prediction_date,
+        "result_status": "hit",
+        "fragility_bucket": "LOW",
+        "survivability_bucket": "HIGH",
+        "confidence": 0.70,
+        "market_type": "player_points",
+        "selection": "under",
+        "shadow_roi": 0.05,
+    }]).to_csv(history_root / "market_shadow_history.csv", index=False)
+
+    # Minimal operator artifacts so write_quality_summary_outputs doesn't error.
+    operator = runtime_root / "operator"
+    operator.mkdir(parents=True, exist_ok=True)
+    (runtime_root / "diagnostics").mkdir(parents=True, exist_ok=True)
+    (runtime_root / "research").mkdir(parents=True, exist_ok=True)
+    pd.DataFrame([{"prediction_date": prediction_date}]).to_csv(
+        operator / f"elite_board_{prediction_date}.csv", index=False
+    )
+    pd.DataFrame([{"prediction_date": prediction_date}]).to_csv(
+        operator / f"full_market_board_{prediction_date}.csv", index=False
+    )
+    pd.DataFrame([]).to_csv(operator / f"kelly_stakes_{prediction_date}.csv", index=False)
+    (runtime_root / "research" / f"player_predictions_{prediction_date}.csv").write_text("", encoding="utf-8")
+    (runtime_root / "research" / f"model_metrics_{prediction_date}.json").write_text("{}", encoding="utf-8")
+    (operator / f"elite_pipeline_audit_summary_{prediction_date}.json").write_text("{}", encoding="utf-8")
+    (runtime_root / "diagnostics" / f"board_diagnostics_{prediction_date}.json").write_text("{}", encoding="utf-8")
+
+    _txt, _json, payload = write_quality_summary_outputs(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        out_dir=tmp_path,
+        history_root=history_root,
+    )
+
+    # The outcome_validation block read from history_root and saw the 1 row.
+    fov = payload.get("fragility_outcome_validation", {})
+    assert fov.get("total_graded_rows", 0) >= 1, (
+        "fragility_outcome_validation saw 0 rows — history_root parameter not respected"
+    )
+
+
+def test_write_quality_summary_default_history_root_is_data_history(tmp_path: Path) -> None:
+    """When history_root is not supplied the function resolves to data/history, not outputs/history."""
+    import inspect
+    from courtvision.reporting import quality_summary as qs_mod
+
+    src = inspect.getsource(qs_mod.write_quality_summary_outputs)
+    # The canonical path must appear in the source; the old derived path must not.
+    assert "data/history" in src, "default history_root must be data/history"
+    assert 'runtime_root.parent / "history"' not in src, (
+        "old outputs/history derivation must be removed"
+    )

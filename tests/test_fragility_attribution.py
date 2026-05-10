@@ -42,7 +42,7 @@ def test_fragility_attribution_report_generation(tmp_path: Path) -> None:
         {"prediction_date": date, "result_status": "miss", "fragility_bucket": "LOW", "survivability_bucket": "HIGH", "edge": -0.2, "confidence": 0.5, "quality_score": 65},
     ]).to_csv(history / "market_shadow_history.csv", index=False)
 
-    _txt, _json, payload = write_quality_summary_outputs(prediction_date=date, runtime_root=runtime_root, out_dir=tmp_path / "outputs")
+    _txt, _json, payload = write_quality_summary_outputs(prediction_date=date, runtime_root=runtime_root, out_dir=tmp_path / "outputs", history_root=history)
     attr = payload.get("fragility_survivability_attribution", {})
     assert attr.get("status") == "insufficient_sample"
     report_path = Path(attr.get("path", ""))

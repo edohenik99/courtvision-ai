@@ -2234,6 +2234,7 @@ def write_quality_summary_outputs(
     out_dir: str | Path | None = None,
     generated_at: str | None = None,
     extra_prediction_artifact_paths: Sequence[str | Path] | None = None,
+    history_root: str | Path | None = None,
 ) -> tuple[Path, Path, dict[str, Any]]:
     runtime_root = Path(runtime_root)
     annotate_operator_board_files(
@@ -2257,7 +2258,10 @@ def write_quality_summary_outputs(
     json_path = operator_dir / f"quality_summary_{prediction_date}.json"
     text_path.write_text(text, encoding="utf-8")
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    history_root = runtime_root.parent / "history"
+    # Canonical history lives at data/history (written by the daily pipeline).
+    # Callers may override for testing; the old runtime_root.parent/"history"
+    # derivation pointed at outputs/history which contains only a partial copy.
+    history_root = Path(history_root) if history_root is not None else Path("data/history")
     attribution_payload = _build_fragility_attribution_payload(prediction_date, history_root)
     attribution_json = runtime_root / "diagnostics" / f"fragility_survivability_attribution_{prediction_date}.json"
     attribution_txt = runtime_root / "operator" / f"fragility_survivability_attribution_{prediction_date}.txt"

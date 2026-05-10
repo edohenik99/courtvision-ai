@@ -802,6 +802,7 @@ def test_quality_summary_includes_policy_simulation_metadata(tmp_path: Path) -> 
         prediction_date=date,
         runtime_root=runtime_root,
         out_dir=tmp_path / "outputs",
+        history_root=history,
     )
 
     sp = payload.get("fragility_shadow_policy_simulation", {})

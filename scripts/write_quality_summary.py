@@ -20,12 +20,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--prediction-date", required=True)
     parser.add_argument("--runtime-root", default="outputs/runtime")
     parser.add_argument("--out-dir", default="outputs")
+    parser.add_argument("--history-root", default="data/history")
     args = parser.parse_args(argv)
 
     text_path, json_path, payload = write_quality_summary_outputs(
         prediction_date=args.prediction_date,
         runtime_root=args.runtime_root,
         out_dir=args.out_dir,
+        history_root=args.history_root,
     )
     kelly = payload["kelly_safety_summary"]
     funnel = payload["candidate_funnel"]

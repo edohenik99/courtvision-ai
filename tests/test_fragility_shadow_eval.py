@@ -376,6 +376,7 @@ def test_quality_summary_includes_shadow_eval_metadata(tmp_path: Path) -> None:
         prediction_date=date,
         runtime_root=runtime_root,
         out_dir=tmp_path / "outputs",
+        history_root=history,
     )
 
     # verify shadow_eval metadata is present in the payload
