@@ -52,6 +52,11 @@ from courtvision.reporting.edge_inflation_research import (
     edge_research_txt_path_for_date,
     write_edge_inflation_research,
 )
+from courtvision.reporting.edge_containment_shadow_validation import (
+    containment_json_path_for_date,
+    containment_txt_path_for_date,
+    write_edge_containment_shadow_validation,
+)
 
 ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER = "elite_reject_context_high_caution_over"
 CONTEXT_CONFLICT_CAUSE_BUCKETS: tuple[str, ...] = (
@@ -2487,6 +2492,40 @@ def write_quality_summary_outputs(
         "top_policy_verdict": _eir_ranked[0].get("verdict") if _eir_ranked else None,
         "top_policy_name": _eir_ranked[0].get("policy") if _eir_ranked else None,
         "note": "shadow_analytics_and_research_only_no_live_logic_changed",
+    }
+
+    # Phase 12D: edge containment shadow validation (shadow validation only — no live logic changed)
+    try:
+        _ecv_shadow_path = history_root / "market_shadow_history.csv"
+        _ecv_shadow_df = (
+            pd.read_csv(_ecv_shadow_path, low_memory=False)
+            if _ecv_shadow_path.exists()
+            else pd.DataFrame()
+        )
+        _ecv_board_path = operator_dir / f"full_market_board_{prediction_date}.csv"
+        _ecv_board_df = (
+            pd.read_csv(_ecv_board_path, low_memory=False)
+            if _ecv_board_path.exists()
+            else None
+        )
+        _ecv_json, _ecv_txt, _ecv_payload = write_edge_containment_shadow_validation(
+            _ecv_shadow_df, prediction_date, runtime_root,
+            board_df=_ecv_board_df,
+        )
+    except Exception:
+        _ecv_json = containment_json_path_for_date(prediction_date, runtime_root)
+        _ecv_txt  = containment_txt_path_for_date(prediction_date, runtime_root)
+        _ecv_payload = {}
+    _ecv_es       = _ecv_payload.get("executive_summary", {})
+    _ecv_rankings = _ecv_payload.get("policy_rankings", [])
+    payload["edge_containment_shadow_validation"] = {
+        "json_path": str(_ecv_json),
+        "txt_path": str(_ecv_txt),
+        "policy_count": len(_ecv_rankings),
+        "top_policy_name": _ecv_es.get("top_policy"),
+        "top_policy_verdict": _ecv_es.get("top_policy_verdict"),
+        "total_current_rows_flagged": _ecv_es.get("total_current_slate_rows_flagged", 0),
+        "note": "shadow_validation_only_no_live_logic_changed",
     }
 
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
