@@ -37,6 +37,11 @@ from courtvision.reporting.fragility_shadow_policy_simulation import (
     simulation_txt_path_for_date,
     write_policy_simulation_report,
 )
+from courtvision.reporting.projection_calibration_shadow import (
+    calibration_json_path_for_date,
+    calibration_txt_path_for_date,
+    write_projection_calibration_report,
+)
 
 ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER = "elite_reject_context_high_caution_over"
 CONTEXT_CONFLICT_CAUSE_BUCKETS: tuple[str, ...] = (
@@ -2367,6 +2372,38 @@ def write_quality_summary_outputs(
         "txt_path": str(_sim_txt),
         "policies_simulated": list(_sim_payload.get("policies", {}).keys()),
         "note": "simulation_only_no_live_logic_changed",
+    }
+
+    # Phase 12: projection calibration shadow (analytics only — no live logic changed)
+    try:
+        _cal_shadow_path = history_root / "market_shadow_history.csv"
+        _cal_pick_path = history_root / "pick_history.csv"
+        _cal_shadow_df = (
+            pd.read_csv(_cal_shadow_path, low_memory=False)
+            if _cal_shadow_path.exists()
+            else pd.DataFrame()
+        )
+        _cal_pick_df = (
+            pd.read_csv(_cal_pick_path, low_memory=False)
+            if _cal_pick_path.exists()
+            else None
+        )
+        _cal_json, _cal_txt, _cal_payload = write_projection_calibration_report(
+            _cal_shadow_df, prediction_date, runtime_root, pick_history_df=_cal_pick_df
+        )
+    except Exception:
+        _cal_json = calibration_json_path_for_date(prediction_date, runtime_root)
+        _cal_txt = calibration_txt_path_for_date(prediction_date, runtime_root)
+        _cal_payload = {}
+    _cal_overall = _cal_payload.get("overall", {})
+    payload["projection_calibration_shadow"] = {
+        "json_path": str(_cal_json),
+        "txt_path": str(_cal_txt),
+        "readiness": _cal_overall.get("readiness"),
+        "total_graded_rows": _cal_overall.get("total_graded_rows"),
+        "calibration_gap": _cal_overall.get("calibration_gap"),
+        "directional_bias_verdict": _cal_payload.get("directional_bias", {}).get("directional_bias_verdict"),
+        "note": "shadow_analytics_only_no_live_logic_changed",
     }
 
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
