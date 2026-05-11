@@ -71,6 +71,11 @@ from courtvision.reporting.edge_containment_hold_control import (
     hold_control_review_flags_path_for_date,
     write_hold_control_artifacts,
 )
+from courtvision.reporting.combo_projection_math_audit import (
+    combo_audit_json_path_for_date,
+    combo_audit_txt_path_for_date,
+    write_combo_projection_math_audit,
+)
 
 ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER = "elite_reject_context_high_caution_over"
 CONTEXT_CONFLICT_CAUSE_BUCKETS: tuple[str, ...] = (
@@ -2726,6 +2731,51 @@ def write_quality_summary_outputs(
     _ech_txt_section = "".join(_ech_lines)
     with open(text_path, "a", encoding="utf-8") as _ech_fh:
         _ech_fh.write(_ech_txt_section)
+
+    # Phase 13A: combo projection math audit (analytics only — no live logic changed)
+    try:
+        _cpa_json, _cpa_txt, _cpa_payload = write_combo_projection_math_audit(
+            prediction_date=prediction_date,
+            runtime_root=runtime_root,
+        )
+        payload["combo_projection_math_audit"] = {
+            "json_path":                     str(_cpa_json),
+            "txt_path":                      str(_cpa_txt),
+            "total_combo_over_rows":         _cpa_payload.get("total_combo_over_rows", 0),
+            "graded_combo_over_rows":        _cpa_payload.get("graded_combo_over_rows", 0),
+            "held_combo_over_rows":          _cpa_payload.get("held_combo_over_rows", 0),
+            "avg_combo_projection_error":    _cpa_payload.get("avg_combo_projection_error"),
+            "dominant_error_component":      _cpa_payload.get("dominant_error_component"),
+            "root_cause_summary":            _cpa_payload.get("root_cause_summary", {}),
+            "component_projection_status":   _cpa_payload.get("component_projection_status"),
+            "component_actual_status":       _cpa_payload.get("component_actual_status"),
+            "note":                          "audit_only_no_model_change",
+        }
+    except Exception as _cpa_err:
+        payload["combo_projection_math_audit"] = {"error": str(_cpa_err), "note": "audit_only_no_model_change"}
+        _cpa_payload = {}
+        _cpa_json = combo_audit_json_path_for_date(prediction_date, runtime_root)
+        _cpa_txt  = combo_audit_txt_path_for_date(prediction_date, runtime_root)
+
+    # Append Phase 13A section to operator text file
+    _cpa_sep = "-" * 78
+    _cpa_lines = [
+        "\n\n",
+        _cpa_sep + "\n",
+        "COMBO PROJECTION MATH AUDIT (Phase 13A -- AUDIT ONLY)\n",
+        _cpa_sep + "\n",
+        f"  total_combo_over_rows      : {_cpa_payload.get('total_combo_over_rows', 0)}\n",
+        f"  graded_combo_over_rows     : {_cpa_payload.get('graded_combo_over_rows', 0)}\n",
+        f"  avg_combo_projection_error : {_cpa_payload.get('avg_combo_projection_error')}\n",
+        f"  dominant_error_component   : {_cpa_payload.get('dominant_error_component')}\n",
+        f"  component_proj_status      : {_cpa_payload.get('component_projection_status')}\n",
+        f"  component_actual_status    : {_cpa_payload.get('component_actual_status')}\n",
+        f"  audit_artifact             : {_cpa_json}\n",
+        "  NOTE: read-only audit; no model/projection/Kelly/edge changes.\n",
+        _cpa_sep + "\n",
+    ]
+    with open(text_path, "a", encoding="utf-8") as _cpa_fh:
+        _cpa_fh.write("".join(_cpa_lines))
 
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     update_quality_history_from_summary(
