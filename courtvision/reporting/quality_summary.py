@@ -81,6 +81,11 @@ from courtvision.reporting.player_points_inflation_audit import (
     inflation_audit_txt_path_for_date,
     write_player_points_inflation_audit,
 )
+from courtvision.reporting.minutes_availability_audit import (
+    minutes_audit_json_path_for_date,
+    minutes_audit_txt_path_for_date,
+    write_minutes_availability_audit,
+)
 
 ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER = "elite_reject_context_high_caution_over"
 CONTEXT_CONFLICT_CAUSE_BUCKETS: tuple[str, ...] = (
@@ -2834,6 +2839,65 @@ def write_quality_summary_outputs(
     ]
     with open(text_path, "a", encoding="utf-8") as _ppia_fh:
         _ppia_fh.write("".join(_ppia_lines))
+
+    # Phase 15A: minutes availability audit (analytics only - no live logic changed)
+    try:
+        _maa_json, _maa_txt, _maa_payload = write_minutes_availability_audit(
+            prediction_date=prediction_date,
+            runtime_root=runtime_root,
+            history_csv=history_root / "market_shadow_history.csv",
+            pick_history_csv=history_root / "pick_history.csv",
+        )
+        payload["minutes_availability_audit"] = {
+            "json_path":                              str(_maa_json),
+            "txt_path":                               str(_maa_txt),
+            "total_rows_scanned":                     _maa_payload.get("total_rows_scanned", 0),
+            "player_points_rows":                     _maa_payload.get("player_points_rows", 0),
+            "graded_player_points_rows":              _maa_payload.get("graded_player_points_rows", 0),
+            "projected_minutes_available_rate":       _maa_payload.get("projected_minutes_available_rate"),
+            "recent_minutes_available_rate":          _maa_payload.get("recent_minutes_available_rate"),
+            "average_minutes_available_rate":         _maa_payload.get("average_minutes_available_rate"),
+            "actual_minutes_available_rate":          _maa_payload.get("actual_minutes_available_rate"),
+            "minutes_error_available_rate":           _maa_payload.get("minutes_error_available_rate"),
+            "low_line_over_rows":                     _maa_payload.get("low_line_over_rows", 0),
+            "low_line_over_misses":                   _maa_payload.get("low_line_over_misses", 0),
+            "low_line_minutes_summary":               _maa_payload.get("low_line_minutes_summary", {}),
+            "player_points_over_minutes_summary":     _maa_payload.get("player_points_over_minutes_summary", {}),
+            "minutes_field_availability":             _maa_payload.get("minutes_field_availability", {}),
+            "missing_critical_fields":                _maa_payload.get("missing_critical_fields", []),
+            "readiness_verdict":                      _maa_payload.get("readiness_verdict"),
+            "note":                                   "audit_only_no_live_logic_change",
+        }
+    except Exception as _maa_err:
+        payload["minutes_availability_audit"] = {
+            "error": str(_maa_err),
+            "note": "audit_only_no_live_logic_change",
+        }
+        _maa_payload = {}
+        _maa_json = minutes_audit_json_path_for_date(prediction_date, runtime_root)
+        _maa_txt = minutes_audit_txt_path_for_date(prediction_date, runtime_root)
+
+    # Append Phase 15A section to operator text file
+    _maa_sep = "-" * 78
+    _maa_lines = [
+        "\n\n",
+        _maa_sep + "\n",
+        "MINUTES AVAILABILITY AUDIT (Phase 15A -- AUDIT ONLY)\n",
+        _maa_sep + "\n",
+        f"  player_points_rows               : {_maa_payload.get('player_points_rows', 0)}\n",
+        f"  graded_player_points_rows        : {_maa_payload.get('graded_player_points_rows', 0)}\n",
+        f"  projected_minutes_available_rate : {_maa_payload.get('projected_minutes_available_rate')}\n",
+        f"  recent_minutes_available_rate    : {_maa_payload.get('recent_minutes_available_rate')}\n",
+        f"  average_minutes_available_rate   : {_maa_payload.get('average_minutes_available_rate')}\n",
+        f"  actual_minutes_available_rate    : {_maa_payload.get('actual_minutes_available_rate')}\n",
+        f"  low_line_over_misses             : {_maa_payload.get('low_line_over_misses', 0)}\n",
+        f"  readiness_verdict                : {_maa_payload.get('readiness_verdict')}\n",
+        f"  audit_artifact                   : {_maa_json}\n",
+        "  NOTE: read-only audit; no projection/selection/Kelly/grade changes.\n",
+        _maa_sep + "\n",
+    ]
+    with open(text_path, "a", encoding="utf-8") as _maa_fh:
+        _maa_fh.write("".join(_maa_lines))
 
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     update_quality_history_from_summary(
