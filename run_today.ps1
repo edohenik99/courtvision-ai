@@ -1,19 +1,9 @@
 #!/usr/bin/env pwsh
 # Run today's slate with validation
 param(
-    [string]$Date = (Get-Date -Format "yyyy-MM-dd")
+    [string]$Date = (Get-Date -Format "yyyy-MM-dd"),
+    [switch]$VerboseMode
 )
-
-# Ensure logs directory exists
-$LogsDir = "outputs\runtime\logs"
-if (-not (Test-Path $LogsDir)) {
-    New-Item -ItemType Directory -Path $LogsDir -Force | Out-Null
-}
-$RunLog = Join-Path $LogsDir "run_today_$Date.log"
-$GradeLog = Join-Path $LogsDir "grading_$Date.log"
-
-# Start logging
-"=== CourtVision Run $Date - Started at $(Get-Date) ===" | Out-File $RunLog -Append
 
 # Use Continue rather than Stop. PowerShell otherwise turns *any* stderr line
 # from native commands (including normal Python diagnostic output) into a fatal
@@ -21,8 +11,6 @@ $GradeLog = Join-Path $LogsDir "grading_$Date.log"
 # process exits 0. We check $LASTEXITCODE explicitly after every native call.
 $ErrorActionPreference = "Continue"
 
-# Use a private $ScriptRoot variable instead of reassigning the automatic
-# $PSScriptRoot (which PSScriptAnalyzer flags as PSAvoidAssignmentToAutomaticVariable).
 # Prefer the automatic $PSScriptRoot when the script is dot-sourced or run
 # normally; fall back to deriving it from $MyInvocation when it's empty
 # (e.g. when the file is piped or invoked via Invoke-Expression).
@@ -33,6 +21,19 @@ $ScriptRoot = if ($PSScriptRoot) {
 }
 Set-Location $ScriptRoot
 
+# Ensure logs directory exists
+$LogsDir = "outputs\runtime\logs"
+if (-not (Test-Path $LogsDir)) {
+    New-Item -ItemType Directory -Path $LogsDir -Force | Out-Null
+}
+$RunLog = Join-Path $LogsDir "run_today_$Date.log"
+$ValidationLog = Join-Path $LogsDir "validation_$Date.log"
+$GradeLog = Join-Path $LogsDir "grading_$Date.log"
+
+"=== CourtVision Run $Date - Started at $(Get-Date) ===" | Out-File $RunLog -Append
+"=== CourtVision Validation $Date - Started at $(Get-Date) ===" | Out-File $ValidationLog -Append
+"=== CourtVision Grading $Date - Started at $(Get-Date) ===" | Out-File $GradeLog -Append
+
 $ValidateRuntimeScript = Join-Path $ScriptRoot "scripts\validate_runtime_outputs.py"
 $KellyStakesScript = Join-Path $ScriptRoot "scripts\run_kelly_stakes.py"
 $PostRunTrackingScript = Join-Path $ScriptRoot "scripts\post_run_tracking.py"
@@ -40,9 +41,87 @@ $GradeCompletedScript = Join-Path $ScriptRoot "scripts\grade_completed_picks.py"
 $MarketShadowScript = Join-Path $ScriptRoot "scripts\market_shadow_grading.py"
 $DailySummaryScript = Join-Path $ScriptRoot "scripts\write_daily_summary.py"
 $QualitySummaryScript = Join-Path $ScriptRoot "scripts\write_quality_summary.py"
+$OperatorCardScript = Join-Path $ScriptRoot "scripts\write_operator_card.py"
 
 # Bankroll override: read $env:COURTVISION_BANKROLL when set, else default.
 $KellyBankroll = if ($env:COURTVISION_BANKROLL) { $env:COURTVISION_BANKROLL } else { "1000" }
+
+function Write-LogLine {
+    param(
+        [Parameter(Mandatory)] [string] $Path,
+        [Parameter(Mandatory)] [string] $Message,
+        [switch] $AlsoConsole
+    )
+    $Message | Out-File $Path -Append
+    if ($AlsoConsole) {
+        Write-Host $Message
+    }
+}
+
+function Invoke-LoggedCommand {
+    param(
+        [Parameter(Mandatory)] [string] $LogPath,
+        [Parameter(Mandatory)] [string] $Exe,
+        [Parameter(Mandatory)] [object[]] $Arguments,
+        [switch] $StreamToConsole
+    )
+
+    if ($StreamToConsole) {
+        & $Exe @Arguments 2>&1 |
+            Tee-Object -FilePath $LogPath -Append |
+            ForEach-Object { Write-Host $_ }
+        $exitCode = $LASTEXITCODE
+    } else {
+        & $Exe @Arguments 2>&1 | Out-File -FilePath $LogPath -Append
+        $exitCode = $LASTEXITCODE
+    }
+
+    if ($null -eq $exitCode) {
+        return 0
+    }
+    return [int]$exitCode
+}
+
+function Show-LogTail {
+    param(
+        [Parameter(Mandatory)] [string] $Path,
+        [int] $Lines = 50
+    )
+    if (Test-Path $Path) {
+        Write-Host "Last $Lines log lines:" -ForegroundColor Gray
+        Get-Content -Path $Path -Tail $Lines | ForEach-Object { Write-Host $_ }
+    } else {
+        Write-Host "Log file was not created: $Path" -ForegroundColor Yellow
+    }
+}
+
+function Stop-StageFailure {
+    param(
+        [Parameter(Mandatory)] [string] $Stage,
+        [int] $ExitCode = 1,
+        [Parameter(Mandatory)] [string] $LogPath
+    )
+    if ($ExitCode -eq 0) {
+        $ExitCode = 1
+    }
+    Write-Host ""
+    Write-Host "[FAIL] $Stage failed." -ForegroundColor Red
+    Write-Host "Exit code: $ExitCode" -ForegroundColor Red
+    Write-Host "Details: $LogPath" -ForegroundColor Gray
+    Show-LogTail -Path $LogPath -Lines 50
+    "=== Failed stage: $Stage exit_code=$ExitCode at $(Get-Date) ===" | Out-File $RunLog -Append
+    exit $ExitCode
+}
+
+# Robust CSV row counter. Counts non-empty data rows and never counts headers.
+function Get-CsvRowCount {
+    param([Parameter(Mandatory)] [string] $Path)
+    if (-not (Test-Path $Path)) { return -1 }   # -1 sentinel = file missing
+    $lines = @(Get-Content -Path $Path -ErrorAction SilentlyContinue)
+    if ($null -eq $lines -or $lines.Count -le 1) { return 0 }
+    $dataLines = $lines | Select-Object -Skip 1 | Where-Object { $_ -and $_.Trim().Length -gt 0 }
+    return @($dataLines).Count
+}
 
 # Resolve the Python interpreter explicitly to avoid Windows picking up a
 # bare `python` that points at a 3.14 install with missing dependencies.
@@ -53,19 +132,23 @@ $PyArgsPrefix = @()
 
 if (Test-Path $VenvPython) {
     $PyExe = $VenvPython
-    Write-Host "[python] using project venv: $VenvPython" -ForegroundColor Gray
+    Write-LogLine -Path $RunLog -Message "[python] using project venv: $VenvPython" -AlsoConsole:$VerboseMode
 } else {
     $pyLauncher = Get-Command py -ErrorAction SilentlyContinue
     if ($pyLauncher) {
-        # Probe for an installed 3.13 interpreter via the py launcher.
         $py313Probe = & py -3.13 -c "import sys; print(sys.version)" 2>$null
         if ($LASTEXITCODE -eq 0 -and $py313Probe) {
             $PyExe = $pyLauncher.Source
             $PyArgsPrefix = @("-3.13")
-            Write-Host "[python] using py launcher: py -3.13 ($($py313Probe.Trim()))" -ForegroundColor Gray
+            Write-LogLine -Path $RunLog -Message "[python] using py launcher: py -3.13 ($($py313Probe.Trim()))" -AlsoConsole:$VerboseMode
         }
     }
 }
+
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "CourtVision Runner - $Date" -ForegroundColor Cyan
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "Log file: $RunLog" -ForegroundColor Gray
 
 if (-not $PyExe) {
     Write-Host "" -ForegroundColor Red
@@ -95,245 +178,226 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "CourtVision Runner - $Date" -ForegroundColor Cyan
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "Log file: $RunLog" -ForegroundColor Gray
-
 # Check for required baselines
 $playerBaselines = "outputs\model\player_baselines.csv"
 $teamBaselines = "outputs\model\team_baselines.csv"
-
 $baselinesExist = (Test-Path $playerBaselines) -and (Test-Path $teamBaselines)
 
 if (-not $baselinesExist) {
-    Write-Host "`n[WARNING] Model baselines missing. Running fit first..." -ForegroundColor Yellow
-    & $PyExe @PyArgsPrefix courtvision_ai.py --fit-only --verbose-outputs
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "`n[ERROR] FIT FAILED (exit code: $LASTEXITCODE)" -ForegroundColor Red
-        exit 1
+    Write-Host ""
+    Write-Host "[START] Fit Baselines" -ForegroundColor Yellow
+    $fitExitCode = Invoke-LoggedCommand `
+        -LogPath $RunLog `
+        -Exe $PyExe `
+        -Arguments ($PyArgsPrefix + @("courtvision_ai.py", "--fit-only", "--verbose-outputs")) `
+        -StreamToConsole:$VerboseMode
+    if ($fitExitCode -ne 0) {
+        Stop-StageFailure -Stage "Fit Baselines" -ExitCode $fitExitCode -LogPath $RunLog
     }
-    Write-Host "  [OK] Fit completed" -ForegroundColor Green
+    Write-Host "[OK] Fit complete. Full log saved to $RunLog" -ForegroundColor Green
 }
 
-# Run pipeline with tee to both console and log
-Write-Host "`n[1/3] Running pipeline..." -ForegroundColor Yellow
-Write-Host "  (Output also saved to: $RunLog)" -ForegroundColor Gray
-
-# Run pipeline - capture output without treating stderr as fatal
-$pipelineOutput = & $PyExe @PyArgsPrefix courtvision_ai.py --prediction-date $Date --predict-only --verbose-outputs 2>&1
-$pipelineExitCode = $LASTEXITCODE
-
-# Tee output to both console and log
-$pipelineOutput | Tee-Object -FilePath $RunLog -Append
-
+Write-Host ""
+Write-Host "[START] Pipeline" -ForegroundColor Yellow
+$pipelineExitCode = Invoke-LoggedCommand `
+    -LogPath $RunLog `
+    -Exe $PyExe `
+    -Arguments ($PyArgsPrefix + @("courtvision_ai.py", "--prediction-date", $Date, "--predict-only", "--verbose-outputs")) `
+    -StreamToConsole:$VerboseMode
 if ($pipelineExitCode -ne 0) {
-    "`n[ERROR] PIPELINE FAILED (exit code: $pipelineExitCode)" | Out-File $RunLog -Append
-    Write-Host "`n[ERROR] PIPELINE FAILED (exit code: $pipelineExitCode)" -ForegroundColor Red
-    Write-Host "See full log: $RunLog" -ForegroundColor Gray
-    exit 1
+    Stop-StageFailure -Stage "Pipeline" -ExitCode $pipelineExitCode -LogPath $RunLog
 }
-
-# Verify elite board exists
-Write-Host "`n[2/3] Validating outputs..." -ForegroundColor Yellow
-$eliteBoard = "outputs\runtime\operator\elite_board_$Date.csv"
-$auditSummary = "outputs\runtime\operator\elite_pipeline_audit_summary_$Date.json"
-
-if (-not (Test-Path $eliteBoard)) {
-    Write-Host "[ERROR] Elite board not found: $eliteBoard" -ForegroundColor Red
-    exit 1
-}
-Write-Host "  [OK] Elite board exists" -ForegroundColor Green
-
-if (Test-Path $auditSummary) {
-    Write-Host "  [OK] Audit summary exists" -ForegroundColor Green
-} else {
-    Write-Host "  [WARNING] Audit summary not found: $auditSummary" -ForegroundColor Yellow
-}
-
-# Robust CSV row counter.
-# Bug fix: the previous implementation used
-#   (Get-Content <file> | Measure-Object).Line
-# which is *not* populated unless `-Line` is passed. The result was $null,
-# and `$null -le 1` evaluates to $true, so every board was reported as
-# 0 picks even when the CSV contained 10+ rows. We now count non-empty
-# data lines explicitly and never count the header as a pick.
-function Get-CsvRowCount {
-    param([Parameter(Mandatory)] [string] $Path)
-    if (-not (Test-Path $Path)) { return -1 }   # -1 sentinel = file missing
-    $lines = @(Get-Content -Path $Path -ErrorAction SilentlyContinue)
-    if ($null -eq $lines -or $lines.Count -le 1) { return 0 }
-    # Skip the header (line 0) and any trailing blank lines.
-    $dataLines = $lines | Select-Object -Skip 1 | Where-Object { $_ -and $_.Trim().Length -gt 0 }
-    return @($dataLines).Count
-}
+Write-Host "[OK] Pipeline complete. Full log saved to $RunLog" -ForegroundColor Green
 
 # The pipeline always writes to outputs\runtime\operator\<board>_$Date.csv.
-# (The legacy outputs\runtime\boards\$Date\*.csv layout has been removed.)
 $operatorDir = "outputs\runtime\operator"
 $eliteOperatorCsv = Join-Path $operatorDir "elite_board_$Date.csv"
 $fullMarketOperatorCsv = Join-Path $operatorDir "full_market_board_$Date.csv"
 $statOnlyOperatorCsv = Join-Path $operatorDir "stat_only_board_$Date.csv"
+$operatorCardPath = Join-Path $operatorDir "operator_card_$Date.txt"
+$kellyOutputCsv = Join-Path $operatorDir "kelly_stakes_$Date.csv"
 
-Write-Host "`n  Board Summary:" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "[START] Validate Outputs" -ForegroundColor Yellow
+$eliteBoard = "outputs\runtime\operator\elite_board_$Date.csv"
+$auditSummary = "outputs\runtime\operator\elite_pipeline_audit_summary_$Date.json"
+
+if (-not (Test-Path $eliteBoard)) {
+    Write-LogLine -Path $ValidationLog -Message "[ERROR] Elite board not found: $eliteBoard" -AlsoConsole:$VerboseMode
+    Stop-StageFailure -Stage "Validate Outputs" -ExitCode 1 -LogPath $ValidationLog
+}
+Write-LogLine -Path $ValidationLog -Message "[OK] Elite board exists: $eliteBoard" -AlsoConsole:$VerboseMode
+
+if (Test-Path $auditSummary) {
+    Write-LogLine -Path $ValidationLog -Message "[OK] Audit summary exists: $auditSummary" -AlsoConsole:$VerboseMode
+} else {
+    Write-LogLine -Path $ValidationLog -Message "[WARNING] Audit summary not found: $auditSummary" -AlsoConsole:$VerboseMode
+}
 
 $eliteCount = Get-CsvRowCount $eliteOperatorCsv
 if ($eliteCount -lt 0) {
-    Write-Host "    Elite board:      [MISSING] $eliteOperatorCsv" -ForegroundColor Yellow
+    Write-LogLine -Path $ValidationLog -Message "Elite board: [MISSING] $eliteOperatorCsv" -AlsoConsole:$VerboseMode
     $eliteCount = 0
 } else {
-    Write-Host "    Elite board:      $eliteCount picks ($eliteOperatorCsv)" -ForegroundColor $(if ($eliteCount -gt 0) { "Green" } else { "Yellow" })
-    if ($eliteCount -eq 0) {
-        Write-Host "    [WARNING] Elite board is empty (all candidates filtered out)" -ForegroundColor Yellow
-    }
+    Write-LogLine -Path $ValidationLog -Message "Elite board: $eliteCount picks" -AlsoConsole:$VerboseMode
 }
 
 $fullMarketCount = Get-CsvRowCount $fullMarketOperatorCsv
 if ($fullMarketCount -lt 0) {
-    Write-Host "    Full market:      [MISSING] $fullMarketOperatorCsv" -ForegroundColor Yellow
+    Write-LogLine -Path $ValidationLog -Message "Full market: [MISSING] $fullMarketOperatorCsv" -AlsoConsole:$VerboseMode
     $fullMarketCount = 0
 } else {
-    Write-Host "    Full market:      $fullMarketCount picks" -ForegroundColor $(if ($fullMarketCount -gt 0) { "Green" } else { "Yellow" })
+    Write-LogLine -Path $ValidationLog -Message "Full market: $fullMarketCount picks" -AlsoConsole:$VerboseMode
 }
 
 $statOnlyCount = Get-CsvRowCount $statOnlyOperatorCsv
 if ($statOnlyCount -lt 0) {
-    Write-Host "    Stat only:        [MISSING] $statOnlyOperatorCsv" -ForegroundColor Yellow
+    Write-LogLine -Path $ValidationLog -Message "Stat only: [MISSING] $statOnlyOperatorCsv" -AlsoConsole:$VerboseMode
     $statOnlyCount = 0
 } else {
-    Write-Host "    Stat only:        $statOnlyCount picks" -ForegroundColor $(if ($statOnlyCount -gt 0) { "Green" } else { "Yellow" })
+    Write-LogLine -Path $ValidationLog -Message "Stat only: $statOnlyCount picks" -AlsoConsole:$VerboseMode
 }
 
-# Summary line
 $totalPicks = $eliteCount + $fullMarketCount + $statOnlyCount
-Write-Host "`n  Total picks generated: $totalPicks" -ForegroundColor $(if ($totalPicks -gt 0) { "Green" } else { "Red" })
+Write-LogLine -Path $ValidationLog -Message "Total picks generated: $totalPicks" -AlsoConsole:$VerboseMode
 
-$validationPassed = $true
-
-# Caps, directional checks, final summary, and preview (no fragile inline Python)
-& $PyExe @PyArgsPrefix $ValidateRuntimeScript $Date
-if ($LASTEXITCODE -ne 0) {
-    $validationPassed = $false
+$validationExitCode = Invoke-LoggedCommand `
+    -LogPath $ValidationLog `
+    -Exe $PyExe `
+    -Arguments ($PyArgsPrefix + @($ValidateRuntimeScript, $Date)) `
+    -StreamToConsole:$VerboseMode
+if ($validationExitCode -ne 0) {
+    Stop-StageFailure -Stage "Validate Outputs" -ExitCode $validationExitCode -LogPath $ValidationLog
 }
+Write-Host "[OK] Validation passed. Details saved to $ValidationLog" -ForegroundColor Green
 
-# ---------------------------------------------------------------------------
-# Kelly stakes: pipeline -> validation -> KELLY -> grading
-# Reads outputs\runtime\operator\elite_board_<Date>.csv and writes
-# outputs\runtime\operator\kelly_stakes_<Date>.csv. Failure here does not
-# abort grading, but the operator gets a clear console error and a non-zero
-# exit code is preserved at the end of the run.
-# ---------------------------------------------------------------------------
-$kellyOutputCsv = Join-Path $operatorDir "kelly_stakes_$Date.csv"
-$kellyExitCode = 0
-if ($validationPassed -and $eliteCount -gt 0) {
-    Write-Host "`n[2.5/3] Computing Kelly stakes (bankroll=$KellyBankroll)..." -ForegroundColor Yellow
-    & $PyExe @PyArgsPrefix $KellyStakesScript --prediction-date $Date --bankroll $KellyBankroll
-    $kellyExitCode = $LASTEXITCODE
+Write-Host ""
+Write-Host "[START] Kelly" -ForegroundColor Yellow
+"`n--- Kelly ---" | Out-File $GradeLog -Append
+if ($eliteCount -gt 0) {
+    $kellyExitCode = Invoke-LoggedCommand `
+        -LogPath $GradeLog `
+        -Exe $PyExe `
+        -Arguments ($PyArgsPrefix + @($KellyStakesScript, "--prediction-date", $Date, "--bankroll", $KellyBankroll)) `
+        -StreamToConsole:$VerboseMode
     if ($kellyExitCode -ne 0) {
-        Write-Host "  [ERROR] Kelly stakes step failed (exit code: $kellyExitCode)" -ForegroundColor Red
-        "[ERROR] Kelly stakes step failed (exit code: $kellyExitCode) at $(Get-Date)" | Out-File $RunLog -Append
-        $validationPassed = $false
+        Stop-StageFailure -Stage "Kelly" -ExitCode $kellyExitCode -LogPath $GradeLog
     } elseif (-not (Test-Path $kellyOutputCsv)) {
-        Write-Host "  [ERROR] Kelly stakes output not found: $kellyOutputCsv" -ForegroundColor Red
-        $kellyExitCode = 1
-        $validationPassed = $false
+        Write-LogLine -Path $GradeLog -Message "[ERROR] Kelly stakes output not found: $kellyOutputCsv" -AlsoConsole:$VerboseMode
+        Stop-StageFailure -Stage "Kelly" -ExitCode 1 -LogPath $GradeLog
     } else {
         $kellyRows = Get-CsvRowCount $kellyOutputCsv
-        Write-Host "  [OK] Kelly stakes: $kellyRows rows -> $kellyOutputCsv" -ForegroundColor Green
+        Write-LogLine -Path $GradeLog -Message "[OK] Kelly stakes rows: $kellyRows -> $kellyOutputCsv" -AlsoConsole:$VerboseMode
+        Write-Host "[OK] Kelly complete. Stakes written to $kellyOutputCsv" -ForegroundColor Green
     }
-} elseif ($eliteCount -le 0) {
-    Write-Host "`n[2.5/3] Skipping Kelly: elite board is empty." -ForegroundColor Yellow
-}
-
-# Persist picks and grade pending history if validation passed and picks exist
-if ($validationPassed) {
-    if ($totalPicks -eq 0) {
-        Write-Host "`n[WARNING] No picks generated; skipping post-run tracking/grading for today" -ForegroundColor Yellow
-        "No picks generated - skipped grading at $(Get-Date)" | Out-File $GradeLog -Append
-    } else {
-        Write-Host "`n[3/3] Checking for grading..." -ForegroundColor Yellow
-        Write-Host "  (Output saved to: $GradeLog)" -ForegroundColor Gray
-        
-        try {
-            & $PyExe @PyArgsPrefix $PostRunTrackingScript --prediction-date $Date --grade-pending 2>&1 | Tee-Object -FilePath $GradeLog -Append
-            $gradeExitCode = $LASTEXITCODE
-        } catch {
-            $gradeExitCode = 1
-            $errorMsg = "Grading exception: " + $_.Exception.Message
-            $errorMsg | Out-File $GradeLog -Append
-            Write-Error $errorMsg
-        }
-        
-        if ($gradeExitCode -ne 0) {
-            "[ERROR] Post-run tracking failed (exit code: $gradeExitCode) at $(Get-Date)" | Out-File $GradeLog -Append
-            Write-Host "  [ERROR] Post-run tracking failed (exit code: $gradeExitCode)" -ForegroundColor Red
-            Write-Host "  See full log: $GradeLog" -ForegroundColor Gray
-            exit 1
-        }
-        
-        # Optional extra pass for older pending picks if manually invoked later.
-        if (Test-Path $GradeCompletedScript) {
-            "`n--- Additional grading pass ---" | Out-File $GradeLog -Append
-            try {
-                & $PyExe @PyArgsPrefix $GradeCompletedScript 2>&1 | Tee-Object -FilePath $GradeLog -Append
-            } catch {
-                "Grade script exception: " + $_.Exception.Message | Out-File $GradeLog -Append
-            }
-        }
-
-        if (Test-Path $MarketShadowScript) {
-            "`n--- Market shadow grading ---" | Out-File $GradeLog -Append
-            try {
-                & $PyExe @PyArgsPrefix $MarketShadowScript --prediction-date $Date 2>&1 | Tee-Object -FilePath $GradeLog -Append
-                if ($LASTEXITCODE -ne 0) {
-                    Write-Host "  [WARNING] Market shadow grading failed (exit code: $LASTEXITCODE)" -ForegroundColor Yellow
-                }
-            } catch {
-                "Market shadow grading exception: " + $_.Exception.Message | Out-File $GradeLog -Append
-            }
-        }
-
-        if (Test-Path $DailySummaryScript) {
-            "`n--- Daily summary ---" | Out-File $GradeLog -Append
-            try {
-                & $PyExe @PyArgsPrefix $DailySummaryScript --prediction-date $Date 2>&1 | Tee-Object -FilePath $GradeLog -Append
-                if ($LASTEXITCODE -ne 0) {
-                    Write-Host "  [WARNING] Daily summary failed (exit code: $LASTEXITCODE)" -ForegroundColor Yellow
-                }
-            } catch {
-                "Daily summary exception: " + $_.Exception.Message | Out-File $GradeLog -Append
-            }
-        }
-    }
-}
-
-if ($validationPassed -and (Test-Path $QualitySummaryScript)) {
-    "`n--- Quality summary ---" | Out-File $GradeLog -Append
-    try {
-        & $PyExe @PyArgsPrefix $QualitySummaryScript --prediction-date $Date 2>&1 | Tee-Object -FilePath $GradeLog -Append
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "  [WARNING] Quality summary failed (exit code: $LASTEXITCODE)" -ForegroundColor Yellow
-        }
-    } catch {
-        "Quality summary exception: " + $_.Exception.Message | Out-File $GradeLog -Append
-    }
-}
-
-# Final summary
-if ($validationPassed) {
-    Write-Host "`n[SUCCESS] ALL VALIDATIONS PASSED" -ForegroundColor Green
-    Write-Host "  Log files:" -ForegroundColor Gray
-    Write-Host "    - Run log: $RunLog" -ForegroundColor Gray
-    if ($totalPicks -gt 0) {
-        Write-Host "    - Grade log: $GradeLog" -ForegroundColor Gray
-    }
-    Write-Host "========================================" -ForegroundColor Green
-    "=== Completed successfully at $(Get-Date) ===" | Out-File $RunLog -Append
-    exit 0
 } else {
-    Write-Host "`n[FAILED] VALIDATION FAILED" -ForegroundColor Red
-    Write-Host "  See log: $RunLog" -ForegroundColor Gray
-    Write-Host "========================================" -ForegroundColor Red
-    "=== Failed at $(Get-Date) ===" | Out-File $RunLog -Append
-    exit 1
+    Write-LogLine -Path $GradeLog -Message "[SKIP] Elite board is empty. Kelly skipped." -AlsoConsole:$VerboseMode
+    Write-Host "[SKIP] Elite board is empty. Kelly skipped." -ForegroundColor Yellow
 }
+
+Write-Host ""
+Write-Host "[START] Grading" -ForegroundColor Yellow
+$gradingWarnings = 0
+if ($totalPicks -eq 0) {
+    Write-LogLine -Path $GradeLog -Message "[SKIP] No picks generated; skipped post-run tracking/grading for today." -AlsoConsole:$VerboseMode
+    Write-Host "[SKIP] No picks generated. Grading skipped." -ForegroundColor Yellow
+} else {
+    "`n--- Post-run tracking ---" | Out-File $GradeLog -Append
+    $gradeExitCode = Invoke-LoggedCommand `
+        -LogPath $GradeLog `
+        -Exe $PyExe `
+        -Arguments ($PyArgsPrefix + @($PostRunTrackingScript, "--prediction-date", $Date, "--grade-pending")) `
+        -StreamToConsole:$VerboseMode
+    if ($gradeExitCode -ne 0) {
+        Stop-StageFailure -Stage "Grading" -ExitCode $gradeExitCode -LogPath $GradeLog
+    }
+
+    if (Test-Path $GradeCompletedScript) {
+        "`n--- Additional grading pass ---" | Out-File $GradeLog -Append
+        $gradeCompletedExitCode = Invoke-LoggedCommand `
+            -LogPath $GradeLog `
+            -Exe $PyExe `
+            -Arguments ($PyArgsPrefix + @($GradeCompletedScript)) `
+            -StreamToConsole:$VerboseMode
+        if ($gradeCompletedExitCode -ne 0) {
+            $gradingWarnings += 1
+            Write-LogLine -Path $GradeLog -Message "[WARNING] Additional grading pass failed (exit code: $gradeCompletedExitCode)." -AlsoConsole:$VerboseMode
+        }
+    }
+
+    if (Test-Path $MarketShadowScript) {
+        "`n--- Market shadow grading ---" | Out-File $GradeLog -Append
+        $marketShadowExitCode = Invoke-LoggedCommand `
+            -LogPath $GradeLog `
+            -Exe $PyExe `
+            -Arguments ($PyArgsPrefix + @($MarketShadowScript, "--prediction-date", $Date)) `
+            -StreamToConsole:$VerboseMode
+        if ($marketShadowExitCode -ne 0) {
+            $gradingWarnings += 1
+            Write-LogLine -Path $GradeLog -Message "[WARNING] Market shadow grading failed (exit code: $marketShadowExitCode)." -AlsoConsole:$VerboseMode
+        }
+    }
+
+    if ($gradingWarnings -gt 0) {
+        Write-Host "[WARN] Grading completed with warnings. Full log saved to $GradeLog" -ForegroundColor Yellow
+    } else {
+        Write-Host "[OK] Grading complete. Full log saved to $GradeLog" -ForegroundColor Green
+    }
+}
+
+Write-Host ""
+Write-Host "[START] Daily + Quality Summaries" -ForegroundColor Yellow
+if (-not (Test-Path $DailySummaryScript)) {
+    Write-LogLine -Path $GradeLog -Message "[ERROR] Daily summary script not found: $DailySummaryScript" -AlsoConsole:$VerboseMode
+    Stop-StageFailure -Stage "Daily + Quality Summaries" -ExitCode 1 -LogPath $GradeLog
+}
+"`n--- Daily summary ---" | Out-File $GradeLog -Append
+$dailySummaryExitCode = Invoke-LoggedCommand `
+    -LogPath $GradeLog `
+    -Exe $PyExe `
+    -Arguments ($PyArgsPrefix + @($DailySummaryScript, "--prediction-date", $Date)) `
+    -StreamToConsole:$VerboseMode
+if ($dailySummaryExitCode -ne 0) {
+    Stop-StageFailure -Stage "Daily + Quality Summaries" -ExitCode $dailySummaryExitCode -LogPath $GradeLog
+}
+
+if (-not (Test-Path $QualitySummaryScript)) {
+    Write-LogLine -Path $GradeLog -Message "[ERROR] Quality summary script not found: $QualitySummaryScript" -AlsoConsole:$VerboseMode
+    Stop-StageFailure -Stage "Daily + Quality Summaries" -ExitCode 1 -LogPath $GradeLog
+}
+"`n--- Quality summary ---" | Out-File $GradeLog -Append
+$qualitySummaryExitCode = Invoke-LoggedCommand `
+    -LogPath $GradeLog `
+    -Exe $PyExe `
+    -Arguments ($PyArgsPrefix + @($QualitySummaryScript, "--prediction-date", $Date)) `
+    -StreamToConsole:$VerboseMode
+if ($qualitySummaryExitCode -ne 0) {
+    Stop-StageFailure -Stage "Daily + Quality Summaries" -ExitCode $qualitySummaryExitCode -LogPath $GradeLog
+}
+Write-Host "[OK] Summaries written." -ForegroundColor Green
+
+Write-Host ""
+Write-Host "[START] Operator Card" -ForegroundColor Yellow
+if (-not (Test-Path $OperatorCardScript)) {
+    Write-LogLine -Path $GradeLog -Message "[ERROR] Operator card script not found: $OperatorCardScript" -AlsoConsole:$VerboseMode
+    Stop-StageFailure -Stage "Operator Card" -ExitCode 1 -LogPath $GradeLog
+}
+"`n--- Operator card ---" | Out-File $GradeLog -Append
+$operatorCardExitCode = Invoke-LoggedCommand `
+    -LogPath $GradeLog `
+    -Exe $PyExe `
+    -Arguments ($PyArgsPrefix + @($OperatorCardScript, "--prediction-date", $Date)) `
+    -StreamToConsole:$VerboseMode
+if ($operatorCardExitCode -ne 0) {
+    Stop-StageFailure -Stage "Operator Card" -ExitCode $operatorCardExitCode -LogPath $GradeLog
+}
+if (-not (Test-Path $operatorCardPath)) {
+    Write-LogLine -Path $GradeLog -Message "[ERROR] Operator card output not found: $operatorCardPath" -AlsoConsole:$VerboseMode
+    Stop-StageFailure -Stage "Operator Card" -ExitCode 1 -LogPath $GradeLog
+}
+Write-Host "[OK] Operator card written to $operatorCardPath" -ForegroundColor Green
+
+"=== Completed successfully at $(Get-Date) ===" | Out-File $RunLog -Append
+Write-Host ""
+Get-Content -Path $operatorCardPath -Encoding UTF8 | ForEach-Object { Write-Host $_ }
+exit 0
