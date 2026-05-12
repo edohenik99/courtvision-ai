@@ -76,6 +76,11 @@ from courtvision.reporting.combo_projection_math_audit import (
     combo_audit_txt_path_for_date,
     write_combo_projection_math_audit,
 )
+from courtvision.reporting.player_points_inflation_audit import (
+    inflation_audit_json_path_for_date,
+    inflation_audit_txt_path_for_date,
+    write_player_points_inflation_audit,
+)
 
 ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER = "elite_reject_context_high_caution_over"
 CONTEXT_CONFLICT_CAUSE_BUCKETS: tuple[str, ...] = (
@@ -2776,6 +2781,59 @@ def write_quality_summary_outputs(
     ]
     with open(text_path, "a", encoding="utf-8") as _cpa_fh:
         _cpa_fh.write("".join(_cpa_lines))
+
+    # Phase 13B: player points inflation source audit (analytics only - no live logic changed)
+    try:
+        _ppia_json, _ppia_txt, _ppia_payload = write_player_points_inflation_audit(
+            prediction_date=prediction_date,
+            runtime_root=runtime_root,
+        )
+        payload["player_points_inflation_audit"] = {
+            "json_path":                    str(_ppia_json),
+            "txt_path":                     str(_ppia_txt),
+            "total_player_points_rows":     _ppia_payload.get("total_player_points_rows", 0),
+            "graded_player_points_rows":    _ppia_payload.get("graded_player_points_rows", 0),
+            "avg_points_projection_error":  _ppia_payload.get("avg_points_projection_error"),
+            "over_projection_rate":         _ppia_payload.get("over_projection_rate"),
+            "dominant_failure_mode":        _ppia_payload.get("dominant_failure_mode"),
+            "readiness_verdict":            _ppia_payload.get("readiness_verdict"),
+            "root_cause_summary":           _ppia_payload.get("root_cause_summary", {}),
+            "by_selection":                 _ppia_payload.get("by_selection", {}),
+            "by_edge_bucket":               _ppia_payload.get("by_edge_bucket", {}),
+            "by_line_bucket":               _ppia_payload.get("by_line_bucket", {}),
+            "by_confidence_bucket":         _ppia_payload.get("by_confidence_bucket", {}),
+            "by_context_alignment":         _ppia_payload.get("by_context_alignment", {}),
+            "by_context_caution":           _ppia_payload.get("by_context_caution", {}),
+            "by_player_top_failures":       _ppia_payload.get("by_player_top_failures", {}),
+            "combo_linked_points_summary":  _ppia_payload.get("combo_linked_points_summary", {}),
+            "field_availability":           _ppia_payload.get("field_availability", {}),
+            "note":                         "audit_only_no_model_change",
+        }
+    except Exception as _ppia_err:
+        payload["player_points_inflation_audit"] = {"error": str(_ppia_err), "note": "audit_only_no_model_change"}
+        _ppia_payload = {}
+        _ppia_json = inflation_audit_json_path_for_date(prediction_date, runtime_root)
+        _ppia_txt  = inflation_audit_txt_path_for_date(prediction_date, runtime_root)
+
+    # Append Phase 13B section to operator text file
+    _ppia_sep = "-" * 78
+    _ppia_lines = [
+        "\n\n",
+        _ppia_sep + "\n",
+        "PLAYER POINTS INFLATION AUDIT (Phase 13B -- AUDIT ONLY)\n",
+        _ppia_sep + "\n",
+        f"  total_player_points_rows   : {_ppia_payload.get('total_player_points_rows', 0)}\n",
+        f"  graded_player_points_rows  : {_ppia_payload.get('graded_player_points_rows', 0)}\n",
+        f"  avg_projection_error       : {_ppia_payload.get('avg_points_projection_error')}\n",
+        f"  over_projection_rate       : {_ppia_payload.get('over_projection_rate')}\n",
+        f"  dominant_failure_mode      : {_ppia_payload.get('dominant_failure_mode')}\n",
+        f"  readiness_verdict          : {_ppia_payload.get('readiness_verdict')}\n",
+        f"  audit_artifact             : {_ppia_json}\n",
+        "  NOTE: read-only audit; no model/projection/Kelly/edge changes.\n",
+        _ppia_sep + "\n",
+    ]
+    with open(text_path, "a", encoding="utf-8") as _ppia_fh:
+        _ppia_fh.write("".join(_ppia_lines))
 
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     update_quality_history_from_summary(
