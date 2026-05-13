@@ -114,6 +114,12 @@ from courtvision.reporting.low_line_over_minutes_guard_policy_simulation import 
     low_line_over_minutes_guard_policy_simulation_txt_path_for_date,
     write_low_line_over_minutes_guard_policy_simulation,
 )
+from courtvision.reporting.low_line_over_minutes_guard_missed_winner_attribution import (
+    low_line_over_minutes_guard_missed_winner_attribution_csv_path_for_date,
+    low_line_over_minutes_guard_missed_winner_attribution_json_path_for_date,
+    low_line_over_minutes_guard_missed_winner_attribution_txt_path_for_date,
+    write_low_line_over_minutes_guard_missed_winner_attribution,
+)
 
 ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER = "elite_reject_context_high_caution_over"
 CONTEXT_CONFLICT_CAUSE_BUCKETS: tuple[str, ...] = (
@@ -3211,6 +3217,127 @@ def write_quality_summary_outputs(
     ]
     with open(text_path, "a", encoding="utf-8") as _llomp_fh:
         _llomp_fh.write("".join(_llomp_lines))
+
+    # Phase 15G: low-line OVER minutes-basis guard missed-winner attribution (review only)
+    try:
+        _lloma_json, _lloma_txt, _lloma_csv, _lloma_payload = write_low_line_over_minutes_guard_missed_winner_attribution(
+            prediction_date=prediction_date,
+            runtime_root=runtime_root,
+            market_shadow_history=history_root / "market_shadow_history.csv",
+            outcome_csv=_llomo_csv,
+            policy_simulation_csv=_llomp_csv,
+        )
+        _lloma_actionable = _lloma_payload.get("actionable_pre_pick_signals", {})
+        _lloma_winner_signals = (
+            _lloma_actionable.get("strongest_winner_signals", [])
+            if isinstance(_lloma_actionable, dict)
+            else _lloma_payload.get("strongest_winner_signals", [])
+        )
+        _lloma_loser_signals = (
+            _lloma_actionable.get("strongest_loser_signals", [])
+            if isinstance(_lloma_actionable, dict)
+            else _lloma_payload.get("strongest_loser_signals", [])
+        )
+        _lloma_identity = _lloma_payload.get("identity_diagnostics", {})
+        _lloma_identity_winner_signals = (
+            _lloma_identity.get("strongest_winner_signals", [])
+            if isinstance(_lloma_identity, dict)
+            else []
+        )
+        _lloma_identity_loser_signals = (
+            _lloma_identity.get("strongest_loser_signals", [])
+            if isinstance(_lloma_identity, dict)
+            else []
+        )
+        _lloma_top_winner = (
+            _lloma_actionable.get("top_generalized_winner_signal")
+            if isinstance(_lloma_actionable, dict) and _lloma_actionable.get("top_generalized_winner_signal")
+            else _lloma_winner_signals[0].get("signal")
+            if isinstance(_lloma_winner_signals, list)
+            and _lloma_winner_signals
+            and isinstance(_lloma_winner_signals[0], dict)
+            else "no_generalized_pre_pick_signal"
+        )
+        _lloma_top_loser = (
+            _lloma_actionable.get("top_generalized_loser_signal")
+            if isinstance(_lloma_actionable, dict) and _lloma_actionable.get("top_generalized_loser_signal")
+            else _lloma_loser_signals[0].get("signal")
+            if isinstance(_lloma_loser_signals, list)
+            and _lloma_loser_signals
+            and isinstance(_lloma_loser_signals[0], dict)
+            else "no_generalized_pre_pick_signal"
+        )
+        _lloma_top_identity_winner = (
+            _lloma_identity.get("top_identity_winner_signal")
+            if isinstance(_lloma_identity, dict) and _lloma_identity.get("top_identity_winner_signal")
+            else _lloma_identity_winner_signals[0].get("signal")
+            if isinstance(_lloma_identity_winner_signals, list)
+            and _lloma_identity_winner_signals
+            and isinstance(_lloma_identity_winner_signals[0], dict)
+            else "no_identity_signal"
+        )
+        _lloma_top_identity_loser = (
+            _lloma_identity.get("top_identity_loser_signal")
+            if isinstance(_lloma_identity, dict) and _lloma_identity.get("top_identity_loser_signal")
+            else _lloma_identity_loser_signals[0].get("signal")
+            if isinstance(_lloma_identity_loser_signals, list)
+            and _lloma_identity_loser_signals
+            and isinstance(_lloma_identity_loser_signals[0], dict)
+            else "no_identity_signal"
+        )
+        payload["low_line_over_minutes_guard_missed_winner_attribution"] = {
+            "json_path": str(_lloma_json),
+            "txt_path": str(_lloma_txt),
+            "csv_path": str(_lloma_csv),
+            "missed_winner_count": _lloma_payload.get("missed_winner_count", 0),
+            "saved_loser_count": _lloma_payload.get("saved_loser_count", 0),
+            "net_saved_result_count": _lloma_payload.get("net_saved_result_count", 0),
+            "top_generalized_winner_signal": _lloma_top_winner,
+            "top_generalized_loser_signal": _lloma_top_loser,
+            "top_identity_winner_signal": _lloma_top_identity_winner,
+            "top_identity_loser_signal": _lloma_top_identity_loser,
+            "candidate_refinement_rule_count": _lloma_payload.get("candidate_refinement_rule_count", 0),
+            "readiness_verdict": _lloma_payload.get("readiness_verdict"),
+            "note": "review_only_no_prediction_grading_kelly_history_or_suppression_change",
+        }
+    except Exception as _lloma_err:
+        payload["low_line_over_minutes_guard_missed_winner_attribution"] = {
+            "error": str(_lloma_err),
+            "note": "review_only_no_prediction_grading_kelly_history_or_suppression_change",
+        }
+        _lloma_payload = {}
+        _lloma_json = low_line_over_minutes_guard_missed_winner_attribution_json_path_for_date(prediction_date, runtime_root)
+        _lloma_txt = low_line_over_minutes_guard_missed_winner_attribution_txt_path_for_date(prediction_date, runtime_root)
+        _lloma_csv = low_line_over_minutes_guard_missed_winner_attribution_csv_path_for_date(prediction_date, runtime_root)
+        _lloma_top_winner = "no_generalized_pre_pick_signal"
+        _lloma_top_loser = "no_generalized_pre_pick_signal"
+        _lloma_top_identity_winner = "no_identity_signal"
+        _lloma_top_identity_loser = "no_identity_signal"
+
+    # Append Phase 15G section to operator text file
+    _lloma_sep = "-" * 78
+    _lloma_lines = [
+        "\n\n",
+        _lloma_sep + "\n",
+        "LOW-LINE OVER MINUTES GUARD MISSED WINNER ATTRIBUTION (Phase 15G -- REVIEW ONLY)\n",
+        _lloma_sep + "\n",
+        f"  missed_winner_count        : {_lloma_payload.get('missed_winner_count', 0)}\n",
+        f"  saved_loser_count          : {_lloma_payload.get('saved_loser_count', 0)}\n",
+        f"  net_saved_result_count     : {_lloma_payload.get('net_saved_result_count', 0)}\n",
+        f"  top_generalized_winner_signal: {_lloma_top_winner}\n",
+        f"  top_generalized_loser_signal : {_lloma_top_loser}\n",
+        f"  top_identity_winner_signal   : {_lloma_top_identity_winner}\n",
+        f"  top_identity_loser_signal    : {_lloma_top_identity_loser}\n",
+        f"  candidate_refinement_rules : {_lloma_payload.get('candidate_refinement_rule_count', 0)}\n",
+        f"  readiness_verdict          : {_lloma_payload.get('readiness_verdict')}\n",
+        f"  json_artifact              : {_lloma_json}\n",
+        f"  txt_artifact               : {_lloma_txt}\n",
+        f"  csv_artifact               : {_lloma_csv}\n",
+        "  NOTE: REVIEW ONLY; no prediction/grading/Kelly/history changes and no picks suppressed.\n",
+        _lloma_sep + "\n",
+    ]
+    with open(text_path, "a", encoding="utf-8") as _lloma_fh:
+        _lloma_fh.write("".join(_lloma_lines))
 
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     update_quality_history_from_summary(
