@@ -102,6 +102,12 @@ from courtvision.reporting.low_line_over_minutes_guard_review import (
     low_line_over_minutes_guard_review_txt_path_for_date,
     write_low_line_over_minutes_guard_review,
 )
+from courtvision.reporting.low_line_over_minutes_guard_outcome import (
+    low_line_over_minutes_guard_outcome_csv_path_for_date,
+    low_line_over_minutes_guard_outcome_json_path_for_date,
+    low_line_over_minutes_guard_outcome_txt_path_for_date,
+    write_low_line_over_minutes_guard_outcome,
+)
 
 ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER = "elite_reject_context_high_caution_over"
 CONTEXT_CONFLICT_CAUSE_BUCKETS: tuple[str, ...] = (
@@ -3073,6 +3079,71 @@ def write_quality_summary_outputs(
     ]
     with open(text_path, "a", encoding="utf-8") as _llom_fh:
         _llom_fh.write("".join(_llom_lines))
+
+    # Phase 15E: low-line OVER minutes-basis guard outcome validation (review only)
+    try:
+        _llomo_json, _llomo_txt, _llomo_csv, _llomo_payload = write_low_line_over_minutes_guard_outcome(
+            prediction_date=prediction_date,
+            runtime_root=runtime_root,
+            market_shadow_history=history_root / "market_shadow_history.csv",
+            paper_kelly_history=history_root / "paper_kelly_history.csv",
+            guard_review_csv=_llom_csv,
+        )
+        _llomo_buckets = _llomo_payload.get("bucket_performance", {})
+        _llomo_weak = _llomo_buckets.get("weak_minutes_basis", {}) if isinstance(_llomo_buckets, dict) else {}
+        _llomo_stable = _llomo_buckets.get("stable_minutes_basis", {}) if isinstance(_llomo_buckets, dict) else {}
+        _llomo_comparison = _llomo_payload.get("comparison", {})
+        payload["low_line_over_minutes_guard_outcome"] = {
+            "json_path": str(_llomo_json),
+            "txt_path": str(_llomo_txt),
+            "csv_path": str(_llomo_csv),
+            "weak_graded_rows": _llomo_weak.get("graded_rows", 0),
+            "weak_hit_rate": _llomo_weak.get("hit_rate"),
+            "stable_graded_rows": _llomo_stable.get("graded_rows", 0),
+            "stable_hit_rate": _llomo_stable.get("hit_rate"),
+            "weak_hit_rate_minus_stable_hit_rate": _llomo_comparison.get("weak_hit_rate_minus_stable_hit_rate")
+            if isinstance(_llomo_comparison, dict)
+            else None,
+            "weak_underperformance_signal": _llomo_comparison.get("weak_underperformance_signal")
+            if isinstance(_llomo_comparison, dict)
+            else False,
+            "readiness_verdict": _llomo_payload.get("readiness_verdict"),
+            "note": "review_only_no_prediction_grading_kelly_history_or_suppression_change",
+        }
+    except Exception as _llomo_err:
+        payload["low_line_over_minutes_guard_outcome"] = {
+            "error": str(_llomo_err),
+            "note": "review_only_no_prediction_grading_kelly_history_or_suppression_change",
+        }
+        _llomo_payload = {}
+        _llomo_json = low_line_over_minutes_guard_outcome_json_path_for_date(prediction_date, runtime_root)
+        _llomo_txt = low_line_over_minutes_guard_outcome_txt_path_for_date(prediction_date, runtime_root)
+        _llomo_csv = low_line_over_minutes_guard_outcome_csv_path_for_date(prediction_date, runtime_root)
+        _llomo_weak = {}
+        _llomo_stable = {}
+        _llomo_comparison = {}
+
+    # Append Phase 15E section to operator text file
+    _llomo_sep = "-" * 78
+    _llomo_lines = [
+        "\n\n",
+        _llomo_sep + "\n",
+        "LOW-LINE OVER MINUTES GUARD OUTCOME VALIDATION (Phase 15E -- REVIEW ONLY)\n",
+        _llomo_sep + "\n",
+        f"  weak_graded_rows       : {_llomo_weak.get('graded_rows', 0)}\n",
+        f"  weak_hit_rate          : {_llomo_weak.get('hit_rate')}\n",
+        f"  stable_graded_rows     : {_llomo_stable.get('graded_rows', 0)}\n",
+        f"  stable_hit_rate        : {_llomo_stable.get('hit_rate')}\n",
+        f"  weak_vs_stable_delta   : {_llomo_comparison.get('weak_hit_rate_minus_stable_hit_rate') if isinstance(_llomo_comparison, dict) else None}\n",
+        f"  readiness_verdict      : {_llomo_payload.get('readiness_verdict')}\n",
+        f"  json_artifact          : {_llomo_json}\n",
+        f"  txt_artifact           : {_llomo_txt}\n",
+        f"  csv_artifact           : {_llomo_csv}\n",
+        "  NOTE: REVIEW ONLY; no prediction/grading/Kelly/history changes and no picks suppressed.\n",
+        _llomo_sep + "\n",
+    ]
+    with open(text_path, "a", encoding="utf-8") as _llomo_fh:
+        _llomo_fh.write("".join(_llomo_lines))
 
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     update_quality_history_from_summary(
