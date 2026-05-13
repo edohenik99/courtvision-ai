@@ -127,14 +127,6 @@ def render_status_pill(label: str, state: str = "idle") -> None:
     )
 
 
-def status_pill_html(label: str, state: str = "idle") -> str:
-    """Return status pill HTML for composing dashboard cards."""
-    return (
-        f'<span class="cv-pill" data-state="{html.escape(state)}">'
-        f'<span class="cv-dot"></span>{html.escape(label)}</span>'
-    )
-
-
 def render_status_strip(items: Iterable[Mapping[str, Any]]) -> None:
     """Render a responsive top status strip."""
     cards: list[str] = []
@@ -149,13 +141,10 @@ def render_status_strip(items: Iterable[Mapping[str, Any]]) -> None:
             else ""
         )
         cards.append(
-            f"""
-            <div class="cv-status-card" data-state="{state}">
-                <div class="cv-status-label">{label}</div>
-                <div class="cv-status-value">{value}</div>
-                {caption_html}
-            </div>
-            """
+            f'<div class="cv-status-card" data-state="{state}">'
+            f'<div class="cv-status-label">{label}</div>'
+            f'<div class="cv-status-value">{value}</div>'
+            f"{caption_html}</div>"
         )
     st.markdown(
         f'<div class="cv-status-strip">{"".join(cards)}</div>',
@@ -173,13 +162,10 @@ def render_kpi_cards(items: Iterable[Mapping[str, Any]]) -> None:
         state = html.escape(str(item.get("state", "neutral")))
         caption_html = f'<div class="cv-kpi-caption">{caption}</div>' if caption else ""
         cards.append(
-            f"""
-            <div class="cv-kpi-card" data-state="{state}">
-                <div class="cv-kpi-label">{label}</div>
-                <div class="cv-kpi-value">{value}</div>
-                {caption_html}
-            </div>
-            """
+            f'<div class="cv-kpi-card" data-state="{state}">'
+            f'<div class="cv-kpi-label">{label}</div>'
+            f'<div class="cv-kpi-value">{value}</div>'
+            f"{caption_html}</div>"
         )
     st.markdown(
         f'<div class="cv-kpi-grid">{"".join(cards)}</div>',
@@ -190,12 +176,10 @@ def render_kpi_cards(items: Iterable[Mapping[str, Any]]) -> None:
 def render_review_banner(title: str, body: str, state: str = "info") -> None:
     """Render a review/risk banner for diagnostics-only sections."""
     st.markdown(
-        f"""
-        <div class="cv-risk-banner" data-state="{html.escape(state)}">
-            <div class="cv-risk-title">{html.escape(title)}</div>
-            <div class="cv-risk-body">{html.escape(body)}</div>
-        </div>
-        """,
+        f'<div class="cv-risk-banner" data-state="{html.escape(state)}">'
+        f'<div class="cv-risk-title">{html.escape(title)}</div>'
+        f'<div class="cv-risk-body">{html.escape(body)}</div>'
+        "</div>",
         unsafe_allow_html=True,
     )
 
@@ -312,22 +296,25 @@ def render_slate(games: Iterable[Mapping[str, Any]]) -> None:
         sep = html.escape(str(g.get("separator", "vs")))
         tipoff = html.escape(str(g.get("tipoff", "")))
         picks = int(g.get("picks", 0) or 0)
+        market_count = int(g.get("market_count", picks) or 0)
+        elite_count = int(g.get("elite_count", 0) or 0)
+        full_market_count = int(g.get("full_market_count", picks) or 0)
+        status = html.escape(str(g.get("status", "Markets loaded" if picks else "No elite picks")))
         picks_html = (
             f'<span style="color:var(--court-orange)">{picks} picks</span>'
             if picks
             else '<span style="color:var(--ink-5)">— picks</span>'
         )
         cards.append(
-            f"""
-            <div class="cv-game">
-                <div class="cv-game-matchup">
-                    <span class="cv-game-tm">{home}</span>
-                    <span class="cv-game-vs">{sep}</span>
-                    <span class="cv-game-tm">{away}</span>
-                </div>
-                <div class="cv-game-tipoff"><span>{tipoff}</span>{picks_html}</div>
-            </div>
-            """
+            f'<div class="cv-game">'
+            f'<div class="cv-game-matchup"><span class="cv-game-tm">{home}</span>'
+            f'<span class="cv-game-vs">{sep}</span><span class="cv-game-tm">{away}</span></div>'
+            f'<div class="cv-game-tipoff"><span>{tipoff}</span>{picks_html}</div>'
+            f'<div class="cv-game-stats">'
+            f'<span>Markets {market_count}</span><span>Elite {elite_count}</span>'
+            f'<span>Full {full_market_count}</span></div>'
+            f'<div class="cv-game-status">{status}</div>'
+            f'</div>'
         )
 
     if not cards:

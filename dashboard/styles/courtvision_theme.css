@@ -596,6 +596,31 @@ hr {
   justify-content: space-between;
 }
 
+.cv-game-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.cv-game-stats span {
+  padding: 6px 7px;
+  border-radius: 6px;
+  background: rgba(11,15,20,0.44);
+  border: 1px solid rgba(74,86,104,0.28);
+  color: var(--ink-7);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-align: center;
+}
+
+.cv-game-status {
+  margin-top: 8px;
+  color: var(--edge-green);
+  font-family: var(--font-body);
+  font-size: 12px;
+}
+
 /* =====================================================================
  * UI-2 professional dashboard refinements
  * =====================================================================*/
@@ -636,6 +661,24 @@ hr {
   background: rgba(26,34,48,0.42);
   border: 1px solid rgba(74,86,104,0.35);
   border-radius: 8px;
+}
+
+.cv-demo-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  margin: 4px 0 2px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(59,130,246,0.38);
+  background: rgba(59,130,246,0.10);
+  color: var(--confidence-blue);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
 }
 
 [data-testid="stSidebar"] [role="radiogroup"] {

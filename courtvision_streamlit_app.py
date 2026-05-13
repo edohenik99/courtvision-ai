@@ -17,6 +17,8 @@ Key UI changes vs. the previous build:
   warning cards instead of crashing.
 * Demo mode (``COURTVISION_DEMO=1`` env var) seeds illustrative picks so the
   shell is browsable before any real run.
+* View-only demo mode (``COURTVISION_DEMO_MODE=1``) hides mutation controls
+  while still loading existing runtime artifacts.
 """
 
 from __future__ import annotations
@@ -44,6 +46,13 @@ from courtvision.streamlit_review_artifacts import (  # noqa: E402
     PHASE15_READINESS_LABELS,
     extract_quality_review_statuses,
     load_quality_review_artifacts,
+)
+from courtvision.streamlit_ui_helpers import (  # noqa: E402
+    dataframe_height as ui_dataframe_height,
+    env_flag_enabled,
+    mutation_actions_enabled,
+    raw_diagnostics_visible,
+    raw_review_artifacts_visible,
 )
 
 try:
@@ -91,6 +100,7 @@ def numeric_column_or_default(
 APP_TITLE = "CourtVision"
 APP_SUBTITLE = "Player props, team totals, moneyline, history, calibration."
 DEMO_MODE = os.getenv("COURTVISION_DEMO") == "1"
+VIEW_ONLY_DEMO_MODE = env_flag_enabled("COURTVISION_DEMO_MODE", os.environ)
 DISPLAY_BOARD_KEYS = (
     "elite_props",
     "full_market_props",
@@ -1244,6 +1254,11 @@ def render_no_picks_explainer(
     st.dataframe(style_rejection_table(near.head(20)), width="stretch", hide_index=True)
 
 
+def _dataframe_height(row_count: int, max_height: int = 420) -> int:
+    """Return a compact, bounded height for Streamlit dataframe previews."""
+    return ui_dataframe_height(row_count, max_height=max_height)
+
+
 def _unique_filter_values(df: pd.DataFrame, column: str) -> list[str]:
     if column not in df.columns:
         return []
@@ -1320,6 +1335,22 @@ def render_board_filters(df: pd.DataFrame, key_prefix: str) -> pd.DataFrame:
     return df
 
 
+def render_table_card(
+    df: pd.DataFrame,
+    *,
+    helper_text: str,
+    max_height: int = 420,
+) -> None:
+    with st.container(border=True):
+        st.caption(helper_text)
+        st.dataframe(
+            df,
+            width="stretch",
+            hide_index=True,
+            height=_dataframe_height(len(df), max_height=max_height),
+        )
+
+
 def render_board_section(
     title: str,
     df: pd.DataFrame | None,
@@ -1337,7 +1368,11 @@ def render_board_section(
         if view_df.empty:
             render_empty_state("No rows match the current filters")
             return
-    st.dataframe(style_pick_table(view_df), width="stretch", hide_index=True, height=420)
+    table_df = style_pick_table(view_df)
+    render_table_card(
+        table_df,
+        helper_text="Display-only board view. Data is loaded from runtime artifacts and is not changed here.",
+    )
 
     if "market_type" in view_df.columns:
         st.markdown("##### By market type")
@@ -1364,37 +1399,97 @@ def render_board_section(
             for tab, market in zip(tabs, active_markets):
                 with tab:
                     subset = view_df[view_df["market_type"] == market].copy()
-                    st.dataframe(
-                        style_pick_table(subset),
-                        width="stretch",
-                        hide_index=True,
-                        height=360,
+                    subset_table = style_pick_table(subset)
+                    render_table_card(
+                        subset_table,
+                        helper_text=f"{pretty_market_name(market)} rows for the selected runtime date.",
+                        max_height=360,
                     )
 
 
 def render_runtime_file_diagnostics(payload: dict[str, Any]) -> None:
+    diag_df = runtime_file_diagnostics_dataframe(payload)
+    if diag_df.empty:
+        return
+
+    with st.expander("Runtime file load", expanded=False):
+        st.dataframe(diag_df, width="stretch", hide_index=True)
+
+
+def runtime_file_diagnostics_dataframe(payload: dict[str, Any]) -> pd.DataFrame:
     records = payload.get("runtime_load_diagnostics") or (
         (payload.get("summary") or {}).get("ui_load_diagnostics")
     )
     if not isinstance(records, list) or not records:
-        return
+        return pd.DataFrame()
+    diag_df = pd.DataFrame(records)
+    keep = [
+        "label",
+        "kind",
+        "exists",
+        "status",
+        "rows",
+        "columns",
+        "bytes",
+        "modified",
+        "path",
+        "error",
+    ]
+    keep = [col for col in keep if col in diag_df.columns]
+    return diag_df[keep]
 
-    with st.expander("Runtime file load", expanded=False):
-        diag_df = pd.DataFrame(records)
-        keep = [
-            "label",
-            "kind",
-            "exists",
-            "status",
-            "rows",
-            "columns",
-            "bytes",
-            "modified",
-            "path",
-            "error",
+
+def render_diagnostics_overview(
+    payload: dict[str, Any],
+    quality_json: dict[str, Any],
+    elite_df: pd.DataFrame,
+    full_market_df: pd.DataFrame,
+    sgp_df: pd.DataFrame,
+) -> None:
+    records_df = runtime_file_diagnostics_dataframe(payload)
+    loaded_files = 0
+    error_files = 0
+    if not records_df.empty:
+        if "exists" in records_df.columns:
+            loaded_files = int(records_df["exists"].fillna(False).astype(bool).sum())
+        if "status" in records_df.columns:
+            error_files = int((records_df["status"].astype(str) == "error").sum())
+
+    provider_counts = quality_json.get("slate_provider_counts") or {}
+    live_count = _safe_int(provider_counts.get("live_odds_count"))
+    fallback_count = _safe_int(provider_counts.get("synthetic_or_fallback_odds_count"))
+    warnings_count = len(quality_json.get("warnings") or [])
+    errors_count = len(quality_json.get("errors") or []) + error_files
+    rows_loaded = int(len(elite_df) + len(full_market_df) + len(sgp_df))
+    board_status = "Rows loaded" if rows_loaded else "No board rows"
+
+    render_kpi_cards(
+        [
+            {
+                "label": "Board status",
+                "value": board_status,
+                "caption": f"{loaded_files} runtime files found",
+                "state": "success" if rows_loaded else "warning",
+            },
+            {
+                "label": "Rows loaded",
+                "value": rows_loaded,
+                "caption": f"elite {len(elite_df)} / full {len(full_market_df)} / sgp {len(sgp_df)}",
+            },
+            {
+                "label": "Odds status",
+                "value": f"{live_count} live",
+                "caption": f"{fallback_count} fallback/synthetic",
+                "state": "success" if live_count and not fallback_count else "warning",
+            },
+            {
+                "label": "Warnings",
+                "value": warnings_count + errors_count,
+                "caption": f"{warnings_count} warnings / {errors_count} errors",
+                "state": "warning" if warnings_count or errors_count else "success",
+            },
         ]
-        keep = [col for col in keep if col in diag_df.columns]
-        st.dataframe(diag_df[keep], width="stretch", hide_index=True)
+    )
 
 
 def render_today_board(
@@ -1510,33 +1605,49 @@ def render_today_board(
 
     # Diagnostics
     render_section_head("Diagnostics", "Provider, ingestion and model context.")
-    render_runtime_file_diagnostics(payload)
     odds_diag = summary.get("odds_diagnostics", {}) or {}
     model_diag = summary.get("model_diagnostics", {}) or {}
     board_diag = payload.get("board_diagnostics", {}) or summary.get("board_diagnostics", {}) or {}
     market_coverage = payload.get("market_coverage", {}) or summary.get("market_coverage", {}) or {}
+    render_diagnostics_overview(payload, quality_json, elite_df, full_market_df, sgp_df)
     if not odds_diag and not model_diag and not board_diag and not market_coverage and not daily_summary_text:
         render_empty_state("No diagnostics emitted by the latest run")
     else:
-        if odds_diag:
-            with st.expander("Odds ingestion - provider status", expanded=False):
-                st.caption("Provider and odds-source diagnostics emitted by the runtime.")
-                st.json(odds_diag)
-        if model_diag:
-            with st.expander("Model context - scoring inputs", expanded=False):
-                st.caption("Read-only model context payload for the selected run.")
-                st.json(model_diag)
-        if board_diag:
-            with st.expander("Board diagnostics - board build", expanded=False):
-                st.caption("Board counts, filters, gates, and runtime checks.")
-                st.json(board_diag)
-        if market_coverage:
-            with st.expander("Market coverage - live market survival", expanded=False):
-                st.caption("Coverage and candidate survival by market.")
-                st.json(market_coverage)
-        if daily_summary_text:
-            with st.expander("Daily summary - operator text", expanded=False):
-                st.code(daily_summary_text, language="text")
+        if not raw_diagnostics_visible(VIEW_ONLY_DEMO_MODE):
+            with st.expander("Advanced diagnostics", expanded=False):
+                render_review_banner(
+                    "Advanced diagnostics are hidden in demo mode.",
+                    "Operator-only runtime JSON and raw text dumps stay available when demo mode is disabled.",
+                    "info",
+                )
+        else:
+            with st.expander("Advanced diagnostics", expanded=False):
+                st.caption("Raw runtime artifacts and JSON payloads. Collapsed by default for demo-safe viewing.")
+                diag_df = runtime_file_diagnostics_dataframe(payload)
+                if not diag_df.empty:
+                    st.markdown("##### Runtime file load")
+                    render_table_card(
+                        diag_df,
+                        helper_text="File-level load status for the selected runtime date.",
+                        max_height=360,
+                    )
+                if odds_diag:
+                    st.markdown("##### Odds ingestion JSON")
+                    st.json(odds_diag)
+                if model_diag:
+                    st.markdown("##### Model context JSON")
+                    st.json(model_diag)
+                if board_diag:
+                    st.markdown("##### Board diagnostics JSON")
+                    st.json(board_diag)
+                if market_coverage:
+                    st.markdown("##### Market coverage JSON")
+                    st.json(market_coverage)
+                if daily_summary_text:
+                    st.markdown("##### Daily summary text")
+                    st.code(daily_summary_text, language="text")
+                st.markdown("##### Run summary JSON")
+                st.json(summary)
         with st.expander("Full rejection table - filtered candidates", expanded=False):
             if rejected_df is None or rejected_df.empty:
                 render_empty_state("No rejection rows")
@@ -1547,8 +1658,6 @@ def render_today_board(
                     hide_index=True,
                     height=360,
                 )
-        with st.expander("Run summary JSON - UI payload", expanded=False):
-            st.json(summary)
 
 
 # =====================================================================
@@ -1588,16 +1697,12 @@ def _render_phase15_verdict_cards(statuses: dict[str, Any]) -> None:
         mode = phase_modes.get(phase_key, "REVIEW ONLY")
         state = _status_state(verdict)
         cards.append(
-            f"""
-            <div class="cv-review-layer-card" data-state="{html.escape(state)}">
-                <div class="cv-review-layer-top">
-                    <span>{html.escape(label)}</span>
-                    <span class="cv-badge">{html.escape(mode)}</span>
-                    <span class="cv-badge" data-state="muted">NOT ACTIVE GATE</span>
-                </div>
-                <div class="cv-review-layer-verdict">{html.escape(verdict)}</div>
-            </div>
-            """
+            f'<div class="cv-review-layer-card" data-state="{html.escape(state)}">'
+            f'<div class="cv-review-layer-top">'
+            f'<span>{html.escape(label)}</span>'
+            f'<span class="cv-badge">{html.escape(mode)}</span>'
+            f'<span class="cv-badge" data-state="muted">NOT ACTIVE GATE</span>'
+            f'</div><div class="cv-review-layer-verdict">{html.escape(verdict)}</div></div>'
         )
     st.markdown(
         f'<div class="cv-review-grid">{"".join(cards)}</div>',
@@ -1620,12 +1725,10 @@ def _render_artifact_notice(label: str, record: dict[str, Any] | None) -> None:
         else f"{label} is not available for this date."
     )
     st.markdown(
-        f"""
-        <div class="cv-artifact-notice" data-state="{html.escape(state)}">
-            <strong>{html.escape(message)}</strong>
-            <span>{html.escape(detail)}</span>
-        </div>
-        """,
+        f'<div class="cv-artifact-notice" data-state="{html.escape(state)}">'
+        f'<strong>{html.escape(message)}</strong>'
+        f'<span>{html.escape(detail)}</span>'
+        "</div>",
         unsafe_allow_html=True,
     )
 
@@ -1674,12 +1777,13 @@ def _render_phase15_review_panel(phase_key: str, phase: dict[str, Any]) -> None:
             "No picks are suppressed. No prediction, grading, Kelly, suppression, or history changes are made from this UI.",
             "simulation" if mode == "SIMULATION ONLY" else "info",
         )
-        _render_text_artifact(
-            f"{phase.get('short_title', title)} text",
-            str(phase.get("text") or ""),
-            phase.get("text_record"),
-            expanded=False,
-        )
+        if raw_review_artifacts_visible(VIEW_ONLY_DEMO_MODE):
+            _render_text_artifact(
+                f"{phase.get('short_title', title)} text",
+                str(phase.get("text") or ""),
+                phase.get("text_record"),
+                expanded=False,
+            )
         _render_csv_preview(
             f"{phase.get('short_title', title)} CSV preview",
             phase.get("csv", pd.DataFrame()),
@@ -1715,19 +1819,26 @@ def render_quality_review_view(
     _render_phase15_verdict_cards(statuses)
 
     render_section_head("Quality Summary", "Operator-level run health and checks.")
-    _render_text_artifact(
-        "quality_summary text",
-        str(review_payload.get("quality_summary_text") or ""),
-        review_payload.get("quality_summary_text_record"),
-        expanded=True,
-    )
-    if quality_json:
-        with st.expander("quality_summary JSON", expanded=False):
-            st.json(quality_json)
+    if raw_review_artifacts_visible(VIEW_ONLY_DEMO_MODE):
+        _render_text_artifact(
+            "quality_summary text",
+            str(review_payload.get("quality_summary_text") or ""),
+            review_payload.get("quality_summary_text_record"),
+            expanded=True,
+        )
+        if quality_json:
+            with st.expander("quality_summary JSON", expanded=False):
+                st.json(quality_json)
+        else:
+            _render_artifact_notice(
+                "quality_summary JSON",
+                review_payload.get("quality_summary_json_record"),
+            )
     else:
-        _render_artifact_notice(
-            "quality_summary JSON",
-            review_payload.get("quality_summary_json_record"),
+        render_review_banner(
+            "Raw review artifacts are hidden in demo mode.",
+            "Verdict cards and compact CSV previews remain visible.",
+            "info",
         )
 
     render_section_head(
@@ -1741,7 +1852,7 @@ def render_quality_review_view(
         _render_phase15_review_panel(phase_key, phase)
 
     records = review_payload.get("records") or []
-    if records:
+    if records and raw_review_artifacts_visible(VIEW_ONLY_DEMO_MODE):
         with st.expander("Quality Review artifact load", expanded=False):
             diag_df = pd.DataFrame(records)
             keep = [
@@ -1768,38 +1879,56 @@ def games_from_payload(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
     """Derive the slate from whatever picks loaded — falls back to empty."""
     if not payload:
         return []
-    sources = [
-        payload.get("elite_props"),
-        payload.get("full_market_props"),
-        payload.get("all_stats_props"),
-    ]
-    slices: list[pd.DataFrame] = []
-    for df in sources:
-        if isinstance(df, pd.DataFrame) and {"team", "opponent"}.issubset(df.columns):
-            slices.append(df[["team", "opponent"]])
-    if not slices:
-        return []
+    boards = {
+        "elite": payload.get("elite_props"),
+        "full_market": payload.get("full_market_props"),
+        "all_stats": payload.get("all_stats_props"),
+    }
+    games: dict[str, dict[str, Any]] = {}
+    for board_name, df in boards.items():
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            continue
+        if not {"team", "opponent"}.issubset(df.columns):
+            continue
+        for _, row in df.dropna(subset=["team", "opponent"]).iterrows():
+            team = str(row.get("team", "")).strip()
+            opponent = str(row.get("opponent", "")).strip()
+            if not team or not opponent:
+                continue
+            matchup_key = "__".join(sorted([team.upper(), opponent.upper()]))
+            entry = games.setdefault(
+                matchup_key,
+                {
+                    "home": team,
+                    "away": opponent,
+                    "separator": "vs",
+                    "tipoff": "—",
+                    "picks": 0,
+                    "market_count": 0,
+                    "elite_count": 0,
+                    "full_market_count": 0,
+                    "_markets": set(),
+                },
+            )
+            entry["picks"] += 1
+            if board_name == "elite":
+                entry["elite_count"] += 1
+            if board_name == "full_market":
+                entry["full_market_count"] += 1
+            market = str(row.get("market_type", "")).strip()
+            if market:
+                entry["_markets"].add(market)
 
-    merged = pd.concat(slices, ignore_index=True).dropna()
-    merged["matchup_key"] = merged.apply(
-        lambda r: "__".join(
-            sorted([str(r["team"]).upper().strip(), str(r["opponent"]).upper().strip()])
-        ),
-        axis=1,
-    )
-    counts = merged.groupby("matchup_key").size().reset_index(name="picks")
-    first = merged.drop_duplicates(subset=["matchup_key"], keep="first")
-    games_df = first.merge(counts, on="matchup_key", how="left")
-    return [
-        {
-            "home": row["team"],
-            "away": row["opponent"],
-            "separator": "vs",
-            "tipoff": "—",
-            "picks": int(row["picks"]),
-        }
-        for _, row in games_df.iterrows()
-    ]
+    for entry in games.values():
+        entry["market_count"] = len(entry.pop("_markets", set()))
+        entry["status"] = (
+            "Elite picks loaded"
+            if entry["elite_count"]
+            else "Markets loaded"
+            if entry["full_market_count"]
+            else "No elite picks"
+        )
+    return list(games.values())
 
 
 def render_slate_view(payload: dict[str, Any] | None = None) -> None:
@@ -1820,6 +1949,93 @@ def render_slate_view(payload: dict[str, Any] | None = None) -> None:
     render_slate(games)
 
 
+def _hit_rate_from_statuses(df: pd.DataFrame) -> float | None:
+    status_col = next((col for col in ("result_status", "result", "graded_result") if col in df.columns), "")
+    if not status_col:
+        return None
+    statuses = df[status_col].dropna().astype(str).str.strip().str.lower()
+    denominator = statuses[statuses.isin(["hit", "miss", "win", "loss"])]
+    if denominator.empty:
+        return None
+    wins = denominator.isin(["hit", "win"]).sum()
+    return float(wins) / float(len(denominator))
+
+
+def _history_summary_values(history_df: pd.DataFrame, feedback_df: pd.DataFrame) -> dict[str, Any]:
+    source = history_df if isinstance(history_df, pd.DataFrame) and not history_df.empty else feedback_df
+    if source is None or source.empty:
+        return {
+            "total_rows": 0,
+            "graded_rows": 0,
+            "pending_rows": 0,
+            "hit_rate": "n/a",
+            "avg_mae": "n/a",
+        }
+
+    total_rows = int(len(source))
+    pending_rows = 0
+    graded_rows = 0
+    status_col = next((col for col in ("result_status", "result", "graded_result") if col in source.columns), "")
+    if status_col:
+        statuses = source[status_col].fillna("").astype(str).str.strip().str.lower()
+        pending_rows = int(statuses.isin(["", "pending", "open", "open_game"]).sum())
+        graded_rows = int(statuses.isin(["hit", "miss", "push", "win", "loss", "void"]).sum())
+    elif "hit" in source.columns:
+        hits = pd.to_numeric(source["hit"], errors="coerce")
+        graded_rows = int(hits.notna().sum())
+        pending_rows = max(0, total_rows - graded_rows)
+    else:
+        graded_rows = total_rows
+
+    hit_rate: str | float = "n/a"
+    if "hit" in source.columns:
+        hits = pd.to_numeric(source["hit"], errors="coerce").dropna()
+        if not hits.empty:
+            hit_rate = float(hits.mean())
+    else:
+        status_hit_rate = _hit_rate_from_statuses(source)
+        if status_hit_rate is not None:
+            hit_rate = status_hit_rate
+
+    avg_mae: str | float = "n/a"
+    if {"model_projection", "actual_value"}.issubset(source.columns):
+        projection = pd.to_numeric(source["model_projection"], errors="coerce")
+        actual = pd.to_numeric(source["actual_value"], errors="coerce")
+        mae = (projection - actual).abs().dropna()
+        if not mae.empty:
+            avg_mae = float(mae.mean())
+
+    return {
+        "total_rows": total_rows,
+        "graded_rows": graded_rows,
+        "pending_rows": pending_rows,
+        "hit_rate": hit_rate,
+        "avg_mae": avg_mae,
+    }
+
+
+def render_history_cards(history_df: pd.DataFrame, feedback_df: pd.DataFrame) -> None:
+    values = _history_summary_values(history_df, feedback_df)
+    hit_rate = values["hit_rate"]
+    hit_rate_text = f"{hit_rate * 100:.1f}%" if isinstance(hit_rate, float) else str(hit_rate)
+    avg_mae = values["avg_mae"]
+    avg_mae_text = f"{avg_mae:.2f}" if isinstance(avg_mae, float) else str(avg_mae)
+    render_kpi_cards(
+        [
+            {"label": "Total rows", "value": values["total_rows"], "caption": "history source"},
+            {"label": "Graded rows", "value": values["graded_rows"], "caption": "terminal/results"},
+            {
+                "label": "Pending rows",
+                "value": values["pending_rows"],
+                "caption": "awaiting result",
+                "state": "warning" if values["pending_rows"] else "success",
+            },
+            {"label": "Hit rate", "value": hit_rate_text, "caption": "if available"},
+            {"label": "Avg MAE", "value": avg_mae_text, "caption": "projection error"},
+        ]
+    )
+
+
 # =====================================================================
 # Render: History
 # =====================================================================
@@ -1838,6 +2054,9 @@ def render_history_view(out_dir: str) -> None:
                 "Will populate after the next prediction or feedback upload.",
             )
 
+    render_section_head("History snapshot", "Read-only performance and result-memory summary.")
+    render_history_cards(history_df, feedback_df)
+
     tab1, tab2, tab3 = st.tabs(["Prediction History", "Rejection History", "Feedback"])
 
     with tab1:
@@ -1845,12 +2064,12 @@ def render_history_view(out_dir: str) -> None:
         if history_df.empty:
             render_empty_state("No prediction history saved yet")
         else:
-            st.dataframe(
+            render_table_card(
                 style_pick_table(
                     clean_pick_display(history_df.tail(500).sort_index(ascending=False))
                 ),
-                width="stretch",
-                hide_index=True,
+                helper_text="Raw prediction history preview, formatted for display only.",
+                max_height=420,
             )
             render_history_summary(history_df)
 
@@ -1859,12 +2078,12 @@ def render_history_view(out_dir: str) -> None:
         if rejection_history_df.empty:
             render_empty_state("No rejection history saved yet")
         else:
-            st.dataframe(
+            render_table_card(
                 style_rejection_table(
                     rejection_history_df.tail(500).sort_index(ascending=False)
                 ),
-                width="stretch",
-                hide_index=True,
+                helper_text="Rejected candidates and reasons, display-only.",
+                max_height=420,
             )
             if "rejection_reason" in rejection_history_df.columns:
                 counts = (
@@ -1881,10 +2100,10 @@ def render_history_view(out_dir: str) -> None:
         if feedback_df.empty:
             render_empty_state("No feedback rows logged yet")
         else:
-            st.dataframe(
+            render_table_card(
                 feedback_df.tail(500).sort_index(ascending=False),
-                width="stretch",
-                hide_index=True,
+                helper_text="Feedback/result rows loaded from history APIs.",
+                max_height=420,
             )
             if {"market_type", "hit"}.issubset(feedback_df.columns):
                 hit_rate_series = feedback_df.groupby("market_type")["hit"].mean()
@@ -1962,19 +2181,65 @@ def render_calibration_view(out_dir: str) -> None:
 # Render: Run Log
 # =====================================================================
 
+def _first_existing_value(row: pd.Series, columns: tuple[str, ...], default: str = "n/a") -> Any:
+    for col in columns:
+        if col in row.index:
+            value = row.get(col)
+            if pd.notna(value) and str(value).strip():
+                return value
+    return default
+
+
+def render_run_log_cards(run_log_df: pd.DataFrame) -> None:
+    if run_log_df is None or run_log_df.empty:
+        render_kpi_cards(
+            [
+                {"label": "Latest date", "value": "n/a", "caption": "no run log"},
+                {"label": "Selected", "value": "n/a", "caption": "last run"},
+                {"label": "Rejected", "value": "n/a", "caption": "last run"},
+                {"label": "Run type", "value": "n/a", "caption": "last run"},
+            ]
+        )
+        return
+
+    row = run_log_df.tail(1).iloc[0]
+    latest_date = _first_existing_value(
+        row,
+        ("prediction_date", "run_date", "date", "created_at", "timestamp"),
+    )
+    selected_count = _first_existing_value(
+        row,
+        ("selected_count", "elite_count", "elite_board_count", "picks_count"),
+    )
+    rejected_count = _first_existing_value(
+        row,
+        ("rejected_count", "rejected_candidates_count"),
+    )
+    run_type = _first_existing_value(row, ("run_type", "mode", "event", "action"), "prediction")
+    render_kpi_cards(
+        [
+            {"label": "Latest date", "value": latest_date, "caption": "run log"},
+            {"label": "Selected", "value": selected_count, "caption": "last run"},
+            {"label": "Rejected", "value": rejected_count, "caption": "last run"},
+            {"label": "Run type", "value": run_type, "caption": "last event"},
+        ]
+    )
+
+
 def render_run_log_view(out_dir: str) -> None:
     _, _, _, run_log_df, _ = load_history_cached(
         out_dir,
         int(st.session_state.get("history_refresh_token", 0)),
     )
     render_section_head("Run log", "Most recent predictions and fits.")
+    render_run_log_cards(run_log_df)
     if run_log_df is None or run_log_df.empty:
         render_empty_state("No run log yet")
         return
-    st.dataframe(
+    render_table_card(
         run_log_df.tail(300).sort_index(ascending=False),
-        width="stretch",
-        hide_index=True,
+        helper_text="Raw run log preview. This page does not execute runs.",
+        max_height=420,
     )
 
 
@@ -1982,11 +2247,18 @@ def render_run_log_view(out_dir: str) -> None:
 # Feedback uploader
 # =====================================================================
 
-def feedback_upload_block(ai: CourtVisionAI) -> None:
+def feedback_upload_block(ai: CourtVisionAI, view_only_demo: bool = False) -> None:
     render_section_head(
         "Log results",
         "Upload a CSV of finals to update calibration memory.",
     )
+    if view_only_demo:
+        render_review_banner(
+            "Feedback logging is disabled in demo mode.",
+            "Demo mode: actions are disabled. This view is read-only.",
+            "info",
+        )
+        return
     st.caption(
         "Columns: prediction_date, market_type, entity_name, team, opponent, "
         "selection, sportsbook_line, model_projection, actual_value, hit"
@@ -2022,6 +2294,11 @@ def main() -> None:
             render_brand_block(APP_TITLE)
         else:
             st.title(APP_TITLE)
+        if VIEW_ONLY_DEMO_MODE:
+            st.markdown(
+                '<div class="cv-demo-badge">VIEW-ONLY DEMO</div>',
+                unsafe_allow_html=True,
+            )
 
         st.markdown('<div class="cv-sidebar-divider"></div>', unsafe_allow_html=True)
         if _THEME_AVAILABLE:
@@ -2063,11 +2340,21 @@ def main() -> None:
         st.markdown('<div class="cv-sidebar-divider"></div>', unsafe_allow_html=True)
         if _THEME_AVAILABLE:
             render_sidebar_label("Actions")
-        fit_clicked = st.button("Fit / Refresh Model", width="stretch")
-        predict_clicked = st.button(
-            "Run Predictions", type="primary", width="stretch"
-        )
-        reload_history_clicked = st.button("Reload History", width="stretch")
+        if mutation_actions_enabled(VIEW_ONLY_DEMO_MODE):
+            fit_clicked = st.button("Fit / Refresh Model", width="stretch")
+            predict_clicked = st.button(
+                "Run Predictions", type="primary", width="stretch"
+            )
+            reload_history_clicked = st.button("Reload History", width="stretch")
+        else:
+            fit_clicked = False
+            predict_clicked = False
+            reload_history_clicked = False
+            render_review_banner(
+                "Demo mode",
+                "Demo mode: actions are disabled. This view is read-only.",
+                "info",
+            )
 
         st.markdown('<div class="cv-sidebar-divider"></div>', unsafe_allow_html=True)
         if _THEME_AVAILABLE:
@@ -2161,6 +2448,12 @@ def main() -> None:
     else:
         st.title(title)
         st.caption(sub)
+    if VIEW_ONLY_DEMO_MODE:
+        render_review_banner(
+            "VIEW-ONLY DEMO",
+            "Demo mode: actions are disabled. This view is read-only.",
+            "info",
+        )
 
     # ---------------- Views ----------------
     if active_key == "today":
@@ -2180,7 +2473,7 @@ def main() -> None:
     elif active_key == "run_log":
         render_run_log_view(resolved_out_dir_text)
     elif active_key == "feedback":
-        feedback_upload_block(ai)
+        feedback_upload_block(ai, VIEW_ONLY_DEMO_MODE)
 
 
 if __name__ == "__main__":
