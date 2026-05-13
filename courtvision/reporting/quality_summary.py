@@ -86,6 +86,11 @@ from courtvision.reporting.minutes_availability_audit import (
     minutes_audit_txt_path_for_date,
     write_minutes_availability_audit,
 )
+from courtvision.reporting.actual_minutes_source_audit import (
+    actual_minutes_audit_json_path_for_date,
+    actual_minutes_audit_txt_path_for_date,
+    write_actual_minutes_source_audit,
+)
 
 ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER = "elite_reject_context_high_caution_over"
 CONTEXT_CONFLICT_CAUSE_BUCKETS: tuple[str, ...] = (
@@ -2898,6 +2903,59 @@ def write_quality_summary_outputs(
     ]
     with open(text_path, "a", encoding="utf-8") as _maa_fh:
         _maa_fh.write("".join(_maa_lines))
+
+    # Phase 15B: actual minutes source/backfill audit (diagnostics only - no history mutation)
+    try:
+        _amsa_json, _amsa_txt, _amsa_payload = write_actual_minutes_source_audit(
+            prediction_date=prediction_date,
+            runtime_root=runtime_root,
+            market_shadow_history=history_root / "market_shadow_history.csv",
+            pick_history=history_root / "pick_history.csv",
+        )
+        payload["actual_minutes_source_audit"] = {
+            "json_path":                     str(_amsa_json),
+            "txt_path":                      str(_amsa_txt),
+            "local_actual_minutes_found":    _amsa_payload.get("local_actual_minutes_found", False),
+            "candidate_source_files":        _amsa_payload.get("candidate_source_files", []),
+            "provider_client_candidates":    _amsa_payload.get("provider_client_candidates", []),
+            "join_key_availability":         _amsa_payload.get("join_key_availability", {}),
+            "market_shadow_join_coverage":   _amsa_payload.get("market_shadow_join_coverage", {}),
+            "pick_history_join_coverage":    _amsa_payload.get("pick_history_join_coverage", {}),
+            "actual_minutes_rows_found":     _amsa_payload.get("actual_minutes_rows_found", 0),
+            "player_id_coverage":            _amsa_payload.get("player_id_coverage", {}),
+            "game_id_coverage":              _amsa_payload.get("game_id_coverage", {}),
+            "date_coverage":                 _amsa_payload.get("date_coverage", {}),
+            "missing_critical_fields":       _amsa_payload.get("missing_critical_fields", []),
+            "recommended_source":            _amsa_payload.get("recommended_source"),
+            "readiness_verdict":             _amsa_payload.get("readiness_verdict"),
+            "note":                          "audit_only_no_history_mutation",
+        }
+    except Exception as _amsa_err:
+        payload["actual_minutes_source_audit"] = {
+            "error": str(_amsa_err),
+            "note": "audit_only_no_history_mutation",
+        }
+        _amsa_payload = {}
+        _amsa_json = actual_minutes_audit_json_path_for_date(prediction_date, runtime_root)
+        _amsa_txt = actual_minutes_audit_txt_path_for_date(prediction_date, runtime_root)
+
+    # Append Phase 15B section to operator text file
+    _amsa_sep = "-" * 78
+    _amsa_lines = [
+        "\n\n",
+        _amsa_sep + "\n",
+        "ACTUAL MINUTES SOURCE AUDIT (Phase 15B -- AUDIT ONLY)\n",
+        _amsa_sep + "\n",
+        f"  local_actual_minutes_found : {_amsa_payload.get('local_actual_minutes_found')}\n",
+        f"  actual_minutes_rows_found  : {_amsa_payload.get('actual_minutes_rows_found', 0)}\n",
+        f"  recommended_source         : {_amsa_payload.get('recommended_source')}\n",
+        f"  readiness_verdict          : {_amsa_payload.get('readiness_verdict')}\n",
+        f"  audit_artifact             : {_amsa_json}\n",
+        "  NOTE: read-only audit; no history/provider/projection/selection/Kelly changes.\n",
+        _amsa_sep + "\n",
+    ]
+    with open(text_path, "a", encoding="utf-8") as _amsa_fh:
+        _amsa_fh.write("".join(_amsa_lines))
 
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     update_quality_history_from_summary(
