@@ -352,6 +352,7 @@ def build_market_shadow_grading(
         prediction_date=prediction_date,
         runtime_root=runtime_root,
         out_dir=runtime_root.parent if runtime_root.name == "runtime" else runtime_root,
+        history_root=history_root,
     )
 
     return {

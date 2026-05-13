@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -8,7 +9,27 @@ import pandas as pd
 
 
 FINAL_RESULTS = {"win", "loss", "push"}
+RESULT_ALIASES = {
+    "hit": "win",
+    "miss": "loss",
+    "push": "push",
+    "win": "win",
+    "loss": "loss",
+}
 CAUTION_SCORE = {"insufficient_data": 0.0, "low": 1.0, "medium": 2.0, "high": 3.0}
+AMBIGUOUS_RESULT = "__ambiguous__"
+
+
+@dataclass(frozen=True)
+class _ResultRecord:
+    source_index: int
+    prediction_date: str
+    player_id: str
+    player_name: str
+    market_type: str
+    selection_side: str
+    line_key: str
+    result: str
 
 
 def _safe_text(value: Any) -> str:
@@ -46,29 +67,55 @@ def _safe_read_csv(path: Path) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def _line_key(value: Any) -> str:
-    parsed = _safe_float(value)
-    if parsed is None:
-        return _safe_text(value)
-    return f"{parsed:.4f}"
+def _numeric_line_key(row: pd.Series) -> str:
+    for column in ("sportsbook_line", "line", "line_value"):
+        if column in row.index:
+            parsed = _safe_float(row.get(column))
+            if parsed is not None:
+                return f"{parsed:.4f}"
+    return ""
 
 
-def _identity_key(row: pd.Series) -> str:
-    return "|".join(
-        [
-            _safe_text(row.get("prediction_date")).lower(),
-            _safe_text(row.get("market_type") or row.get("market")).lower(),
-            (_safe_text(row.get("entity_name")) or _safe_text(row.get("player_name"))).lower(),
-            _safe_text(row.get("selection") or row.get("side")).lower(),
-            _line_key(row.get("sportsbook_line") if "sportsbook_line" in row.index else row.get("line")),
-        ]
-    )
+def _first_text(row: pd.Series, columns: tuple[str, ...]) -> str:
+    for column in columns:
+        if column in row.index:
+            text = _safe_text(row.get(column))
+            if text:
+                return text
+    return ""
+
+
+def _normalize_text(value: Any) -> str:
+    return " ".join(_safe_text(value).lower().split())
+
+
+def _prediction_date(row: pd.Series) -> str:
+    return _safe_text(row.get("prediction_date"))
+
+
+def _market_type(row: pd.Series) -> str:
+    return _normalize_text(_first_text(row, ("market_type", "market")))
+
+
+def _selection_side(row: pd.Series) -> str:
+    return _normalize_text(_first_text(row, ("selection", "pick_side", "side")))
+
+
+def _player_id(row: pd.Series) -> str:
+    return _normalize_text(row.get("player_id"))
+
+
+def _player_name(row: pd.Series) -> str:
+    return _normalize_text(_first_text(row, ("player_name", "entity_name")))
 
 
 def _normalized_result(row: pd.Series) -> str:
-    text = _safe_text(row.get("result") or row.get("graded_result")).lower()
-    if text in FINAL_RESULTS:
-        return text
+    for column in ("result_status", "result", "graded_result"):
+        if column not in row.index:
+            continue
+        text = _safe_text(row.get(column)).lower()
+        if text in RESULT_ALIASES:
+            return RESULT_ALIASES[text]
     is_win = _safe_float(row.get("is_win"))
     is_push = _safe_float(row.get("is_push"))
     is_loss = _safe_float(row.get("is_loss"))
@@ -101,15 +148,42 @@ def _american_profit_for_unit_stake(value: Any) -> float | None:
     return 100.0 / abs(american)
 
 
-def _result_lookup(out_dir: Path, runtime_root: Path, prediction_date: str, graded_df: pd.DataFrame | None) -> dict[str, str]:
-    frames: list[pd.DataFrame] = []
-    if isinstance(graded_df, pd.DataFrame) and not graded_df.empty:
-        frames.append(graded_df.copy())
-    frames.append(_safe_read_csv(runtime_root / "research" / f"grading_results_{prediction_date}.csv"))
-    frames.append(_safe_read_csv(runtime_root / "history" / "result_feedback.csv"))
+def _pick_history_candidates(out_dir: Path, history_root: Path | None) -> list[Path]:
+    candidates: list[Path] = []
+    if history_root is not None:
+        candidates.append(history_root / "pick_history.csv")
+    candidates.append(out_dir / "history" / "pick_history.csv")
+    if out_dir.name == "outputs":
+        candidates.append(Path("data") / "history" / "pick_history.csv")
 
-    lookup: dict[str, str] = {}
-    for frame in frames:
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for path in candidates:
+        key = str(path.resolve()) if path.exists() else str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(path)
+    return unique
+
+
+def _result_lookup(
+    out_dir: Path,
+    runtime_root: Path,
+    prediction_date: str,
+    graded_df: pd.DataFrame | None,
+    history_root: Path | None = None,
+) -> list[_ResultRecord]:
+    sources: list[tuple[str, pd.DataFrame]] = []
+    if isinstance(graded_df, pd.DataFrame) and not graded_df.empty:
+        sources.append(("graded_df", graded_df.copy()))
+    sources.append(("runtime_grading_results", _safe_read_csv(runtime_root / "research" / f"grading_results_{prediction_date}.csv")))
+    sources.append(("runtime_result_feedback", _safe_read_csv(runtime_root / "history" / "result_feedback.csv")))
+    for pick_history_path in _pick_history_candidates(out_dir, history_root):
+        sources.append((str(pick_history_path), _safe_read_csv(pick_history_path)))
+
+    records: list[_ResultRecord] = []
+    for source_index, (_source_name, frame) in enumerate(sources):
         if frame.empty:
             continue
         scoped = frame.copy()
@@ -119,10 +193,80 @@ def _result_lookup(out_dir: Path, runtime_root: Path, prediction_date: str, grad
             result = _normalized_result(row)
             if result not in FINAL_RESULTS:
                 continue
-            key = _identity_key(row)
-            if key.count("|") == 4:
-                lookup[key] = result
-    return lookup
+            line_key = _numeric_line_key(row)
+            record = _ResultRecord(
+                source_index=source_index,
+                prediction_date=_prediction_date(row),
+                player_id=_player_id(row),
+                player_name=_player_name(row),
+                market_type=_market_type(row),
+                selection_side=_selection_side(row),
+                line_key=line_key,
+                result=result,
+            )
+            if (
+                record.prediction_date
+                and (record.player_id or record.player_name)
+                and record.selection_side
+                and record.line_key
+            ):
+                records.append(record)
+    return records
+
+
+def _player_matches(row: pd.Series, record: _ResultRecord) -> bool:
+    player_id = _player_id(row)
+    if player_id and record.player_id:
+        return player_id == record.player_id
+    player_name = _player_name(row)
+    return bool(player_name and record.player_name == player_name)
+
+
+def _resolve_unique_result(records: list[_ResultRecord]) -> str:
+    if not records:
+        return "pending"
+    if len(records) > 1:
+        return AMBIGUOUS_RESULT
+    return records[0].result
+
+
+def _matched_result(row: pd.Series, records: list[_ResultRecord]) -> str:
+    prediction_date = _prediction_date(row) or ""
+    selection_side = _selection_side(row)
+    line_key = _numeric_line_key(row)
+    if not prediction_date or not selection_side or not line_key:
+        return "pending"
+
+    base_matches = [
+        record
+        for record in records
+        if record.prediction_date == prediction_date
+        and record.selection_side == selection_side
+        and record.line_key == line_key
+        and _player_matches(row, record)
+    ]
+    if not base_matches:
+        return "pending"
+
+    market_type = _market_type(row)
+    for source_index in sorted({record.source_index for record in base_matches}, reverse=True):
+        source_matches = [record for record in base_matches if record.source_index == source_index]
+        if market_type:
+            exact_market = [record for record in source_matches if record.market_type and record.market_type == market_type]
+            exact_result = _resolve_unique_result(exact_market)
+            if exact_result != "pending":
+                return "pending" if exact_result == AMBIGUOUS_RESULT else exact_result
+
+            blank_market = [record for record in source_matches if not record.market_type]
+            blank_result = _resolve_unique_result(blank_market)
+            if blank_result != "pending":
+                return "pending" if blank_result == AMBIGUOUS_RESULT else blank_result
+            continue
+
+        result = _resolve_unique_result(source_matches)
+        if result != "pending":
+            return "pending" if result == AMBIGUOUS_RESULT else result
+    return "pending"
 
 
 def _avg_numeric(group: pd.DataFrame, columns: list[str]) -> float | None:
@@ -219,10 +363,12 @@ def build_kelly_decision_performance(
     prediction_date: str,
     out_dir: str | Path = "outputs",
     runtime_root: str | Path | None = None,
+    history_root: str | Path | None = None,
     graded_df: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     out_dir = Path(out_dir)
     runtime_root = Path(runtime_root) if runtime_root is not None else out_dir / "runtime"
+    history_root_path = Path(history_root) if history_root is not None else None
     kelly_path = runtime_root / "operator" / f"kelly_stakes_{prediction_date}.csv"
     kelly = _safe_read_csv(kelly_path)
     if kelly.empty:
@@ -243,6 +389,8 @@ def build_kelly_decision_performance(
         working["prediction_date"] = prediction_date
     if "eligible" in working.columns:
         working["kelly_eligible"] = working["eligible"].map(_is_truthy)
+    elif "kelly_eligible" in working.columns:
+        working["kelly_eligible"] = working["kelly_eligible"].map(_is_truthy)
     else:
         working["kelly_eligible"] = False
     if "skip_reason" not in working.columns:
@@ -259,8 +407,8 @@ def build_kelly_decision_performance(
         working["context_pick_alignment"] = "insufficient_data"
     working["context_pick_alignment"] = working["context_pick_alignment"].fillna("insufficient_data").astype(str).str.strip().str.lower().replace("", "insufficient_data")
 
-    lookup = _result_lookup(out_dir, runtime_root, prediction_date, graded_df)
-    working["_kelly_perf_result"] = [lookup.get(_identity_key(row), "pending") for _, row in working.iterrows()]
+    lookup = _result_lookup(out_dir, runtime_root, prediction_date, graded_df, history_root_path)
+    working["_kelly_perf_result"] = [_matched_result(row, lookup) for _, row in working.iterrows()]
 
     overall = _performance_for_group(working)
     by_eligible_bool = {

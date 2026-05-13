@@ -757,20 +757,15 @@ def build_daily_summary(
         if isinstance(shadow, dict)
         else {}
     )
-    kelly_decision_performance = (
-        shadow.get("kelly_decision_performance", {})
-        if isinstance(shadow, dict)
-        else {}
-    )
-    if not kelly_decision_performance:
-        if _elite_artifact_has_no_rows(elite_path, elite_df):
-            kelly_decision_performance = _empty_kelly_decision_performance("elite_board_empty")
-        else:
-            kelly_decision_performance = build_kelly_decision_performance(
-                prediction_date=prediction_date,
-                runtime_root=runtime_root,
-                out_dir=runtime_root.parent if runtime_root.name == "runtime" else runtime_root,
-            )
+    if _elite_artifact_has_no_rows(elite_path, elite_df):
+        kelly_decision_performance = _empty_kelly_decision_performance("elite_board_empty")
+    else:
+        kelly_decision_performance = build_kelly_decision_performance(
+            prediction_date=prediction_date,
+            runtime_root=runtime_root,
+            out_dir=runtime_root.parent if runtime_root.name == "runtime" else runtime_root,
+            history_root=history_root,
+        )
     pending_grading = int(shadow_totals.get("pending_picks") or 0)
 
     readiness_markets = readiness.get("markets", []) if isinstance(readiness, dict) else []
