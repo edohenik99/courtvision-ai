@@ -108,6 +108,12 @@ from courtvision.reporting.low_line_over_minutes_guard_outcome import (
     low_line_over_minutes_guard_outcome_txt_path_for_date,
     write_low_line_over_minutes_guard_outcome,
 )
+from courtvision.reporting.low_line_over_minutes_guard_policy_simulation import (
+    low_line_over_minutes_guard_policy_simulation_csv_path_for_date,
+    low_line_over_minutes_guard_policy_simulation_json_path_for_date,
+    low_line_over_minutes_guard_policy_simulation_txt_path_for_date,
+    write_low_line_over_minutes_guard_policy_simulation,
+)
 
 ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER = "elite_reject_context_high_caution_over"
 CONTEXT_CONFLICT_CAUSE_BUCKETS: tuple[str, ...] = (
@@ -3144,6 +3150,67 @@ def write_quality_summary_outputs(
     ]
     with open(text_path, "a", encoding="utf-8") as _llomo_fh:
         _llomo_fh.write("".join(_llomo_lines))
+
+    # Phase 15F: low-line OVER minutes-basis guard policy simulation (simulation only)
+    try:
+        _llomp_json, _llomp_txt, _llomp_csv, _llomp_payload = write_low_line_over_minutes_guard_policy_simulation(
+            prediction_date=prediction_date,
+            runtime_root=runtime_root,
+            market_shadow_history=history_root / "market_shadow_history.csv",
+            paper_kelly_history=history_root / "paper_kelly_history.csv",
+            outcome_csv=_llomo_csv,
+        )
+        _llomp_best = _llomp_payload.get("best_policy", {})
+        _llomp_baseline = _llomp_payload.get("baseline", {})
+        payload["low_line_over_minutes_guard_policy_simulation"] = {
+            "json_path": str(_llomp_json),
+            "txt_path": str(_llomp_txt),
+            "csv_path": str(_llomp_csv),
+            "best_policy_name": _llomp_best.get("policy_name") if isinstance(_llomp_best, dict) else None,
+            "baseline_hit_rate": _llomp_baseline.get("hit_rate") if isinstance(_llomp_baseline, dict) else None,
+            "simulated_kept_hit_rate": _llomp_best.get("kept_hit_rate") if isinstance(_llomp_best, dict) else None,
+            "suppressed_rows": _llomp_best.get("suppressed_rows", 0) if isinstance(_llomp_best, dict) else 0,
+            "saved_losers": _llomp_best.get("saved_losers", 0) if isinstance(_llomp_best, dict) else 0,
+            "missed_winners": _llomp_best.get("missed_winners", 0) if isinstance(_llomp_best, dict) else 0,
+            "net_saved_result_count": _llomp_best.get("net_saved_result_count", 0) if isinstance(_llomp_best, dict) else 0,
+            "readiness_verdict": _llomp_payload.get("readiness_verdict"),
+            "note": "simulation_only_no_prediction_grading_kelly_history_or_suppression_change",
+        }
+    except Exception as _llomp_err:
+        payload["low_line_over_minutes_guard_policy_simulation"] = {
+            "error": str(_llomp_err),
+            "note": "simulation_only_no_prediction_grading_kelly_history_or_suppression_change",
+        }
+        _llomp_payload = {}
+        _llomp_json = low_line_over_minutes_guard_policy_simulation_json_path_for_date(prediction_date, runtime_root)
+        _llomp_txt = low_line_over_minutes_guard_policy_simulation_txt_path_for_date(prediction_date, runtime_root)
+        _llomp_csv = low_line_over_minutes_guard_policy_simulation_csv_path_for_date(prediction_date, runtime_root)
+        _llomp_best = {}
+        _llomp_baseline = {}
+
+    # Append Phase 15F section to operator text file
+    _llomp_sep = "-" * 78
+    _llomp_lines = [
+        "\n\n",
+        _llomp_sep + "\n",
+        "LOW-LINE OVER MINUTES GUARD POLICY SIMULATION (Phase 15F -- SIMULATION ONLY)\n",
+        _llomp_sep + "\n",
+        f"  best_policy_name       : {_llomp_best.get('policy_name') if isinstance(_llomp_best, dict) else None}\n",
+        f"  baseline_hit_rate      : {_llomp_baseline.get('hit_rate') if isinstance(_llomp_baseline, dict) else None}\n",
+        f"  simulated_kept_hit_rate: {_llomp_best.get('kept_hit_rate') if isinstance(_llomp_best, dict) else None}\n",
+        f"  suppressed_rows        : {_llomp_best.get('suppressed_rows', 0) if isinstance(_llomp_best, dict) else 0}\n",
+        f"  saved_losers           : {_llomp_best.get('saved_losers', 0) if isinstance(_llomp_best, dict) else 0}\n",
+        f"  missed_winners         : {_llomp_best.get('missed_winners', 0) if isinstance(_llomp_best, dict) else 0}\n",
+        f"  net_saved_result_count : {_llomp_best.get('net_saved_result_count', 0) if isinstance(_llomp_best, dict) else 0}\n",
+        f"  readiness_verdict      : {_llomp_payload.get('readiness_verdict')}\n",
+        f"  json_artifact          : {_llomp_json}\n",
+        f"  txt_artifact           : {_llomp_txt}\n",
+        f"  csv_artifact           : {_llomp_csv}\n",
+        "  NOTE: SIMULATION ONLY; no prediction/grading/Kelly/history changes and no picks suppressed.\n",
+        _llomp_sep + "\n",
+    ]
+    with open(text_path, "a", encoding="utf-8") as _llomp_fh:
+        _llomp_fh.write("".join(_llomp_lines))
 
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     update_quality_history_from_summary(
