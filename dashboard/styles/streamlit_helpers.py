@@ -127,6 +127,79 @@ def render_status_pill(label: str, state: str = "idle") -> None:
     )
 
 
+def status_pill_html(label: str, state: str = "idle") -> str:
+    """Return status pill HTML for composing dashboard cards."""
+    return (
+        f'<span class="cv-pill" data-state="{html.escape(state)}">'
+        f'<span class="cv-dot"></span>{html.escape(label)}</span>'
+    )
+
+
+def render_status_strip(items: Iterable[Mapping[str, Any]]) -> None:
+    """Render a responsive top status strip."""
+    cards: list[str] = []
+    for item in items:
+        label = html.escape(str(item.get("label", "")))
+        value = html.escape(str(item.get("value", "not_available")))
+        state = html.escape(str(item.get("state", "idle")))
+        caption = str(item.get("caption", "") or "")
+        caption_html = (
+            f'<div class="cv-status-caption">{html.escape(caption)}</div>'
+            if caption
+            else ""
+        )
+        cards.append(
+            f"""
+            <div class="cv-status-card" data-state="{state}">
+                <div class="cv-status-label">{label}</div>
+                <div class="cv-status-value">{value}</div>
+                {caption_html}
+            </div>
+            """
+        )
+    st.markdown(
+        f'<div class="cv-status-strip">{"".join(cards)}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_kpi_cards(items: Iterable[Mapping[str, Any]]) -> None:
+    """Render compact dashboard KPI cards without Streamlit metric truncation."""
+    cards: list[str] = []
+    for item in items:
+        label = html.escape(str(item.get("label", "")))
+        value = html.escape(str(item.get("value", "0")))
+        caption = html.escape(str(item.get("caption", "") or ""))
+        state = html.escape(str(item.get("state", "neutral")))
+        caption_html = f'<div class="cv-kpi-caption">{caption}</div>' if caption else ""
+        cards.append(
+            f"""
+            <div class="cv-kpi-card" data-state="{state}">
+                <div class="cv-kpi-label">{label}</div>
+                <div class="cv-kpi-value">{value}</div>
+                {caption_html}
+            </div>
+            """
+        )
+    st.markdown(
+        f'<div class="cv-kpi-grid">{"".join(cards)}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_review_banner(title: str, body: str, state: str = "info") -> None:
+    """Render a review/risk banner for diagnostics-only sections."""
+    st.markdown(
+        f"""
+        <div class="cv-risk-banner" data-state="{html.escape(state)}">
+            <div class="cv-risk-title">{html.escape(title)}</div>
+            <div class="cv-risk-body">{html.escape(body)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def render_section_head(title: str, caption: str | None = None) -> None:
     """Render a section header (h2 + caption)."""
     cap = f"<p>{html.escape(caption)}</p>" if caption else ""
@@ -152,7 +225,7 @@ def render_featured_pick(pick: Mapping[str, Any] | None) -> None:
         )
         return
 
-    name = html.escape(str(pick.get("entity_name", "—")))
+    name = html.escape(str(pick.get("entity_name") or pick.get("player_name") or "—"))
     team = str(pick.get("team", ""))
     opp = str(pick.get("opponent", ""))
     matchup = (
@@ -162,26 +235,62 @@ def render_featured_pick(pick: Mapping[str, Any] | None) -> None:
     )
     selection = str(pick.get("selection", "")).upper()
     line = pick.get("sportsbook_line")
-    market = str(pick.get("market_type", "")).replace("_", " ").upper()
+    market = str(pick.get("market_type", "")).replace("_", " ").title()
     if line is not None and str(line) != "":
-        prop = f"{selection} {line} {market}".strip()
+        prop = f"{selection} {line}".strip()
     else:
-        prop = f"{selection} {market}".strip()
+        prop = selection.strip()
 
     grade = str(pick.get("letter_grade", "—"))
+    odds = pick.get("odds", "—")
+    confidence = pick.get("confidence", "—")
+    quality = pick.get("quality_score", "—")
+    projection = pick.get("model_projection", pick.get("projection", "—"))
+    edge = pick.get("edge", "—")
+    caution = str(pick.get("context_caution_level", "unknown") or "unknown").title()
+    action = str(
+        pick.get("recommended_action")
+        or pick.get("bet_label")
+        or pick.get("qualification_reason")
+        or "Board qualified"
+    ).replace("_", " ")
+
+    def _fmt_number(value: Any, decimals: int = 1, percent: bool = False) -> str:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return html.escape(str(value if value not in (None, "") else "—"))
+        if percent:
+            number = number * 100 if abs(number) <= 1 else number
+            return f"{number:.0f}%"
+        return f"{number:.{decimals}f}"
 
     st.markdown(
         f"""
         <div class="cv-featured">
-            <div class="cv-featured-body">
-                <div class="cv-featured-eyebrow">Featured pick</div>
+            <div class="cv-featured-main">
+                <div class="cv-featured-topline">
+                    <span class="cv-featured-eyebrow">Featured pick</span>
+                    <span class="cv-pill" data-state="info"><span class="cv-dot"></span>{html.escape(action)}</span>
+                </div>
                 <h2 class="cv-featured-name">{name}</h2>
                 <div class="cv-featured-meta">{matchup}</div>
-                <div class="cv-featured-prop">{html.escape(prop)}</div>
+                <div class="cv-featured-prop-row">
+                    <span class="cv-featured-prop">{html.escape(market)}</span>
+                    <span class="cv-featured-prop cv-featured-side">{html.escape(prop)}</span>
+                    <span class="cv-featured-prop">Odds {html.escape(str(odds))}</span>
+                </div>
+                <div class="cv-featured-stats">
+                    <div><span>Confidence</span><strong>{_fmt_number(confidence, percent=True)}</strong></div>
+                    <div><span>Quality</span><strong>{_fmt_number(quality, decimals=1)}</strong></div>
+                    <div><span>Projection</span><strong>{_fmt_number(projection, decimals=1)}</strong></div>
+                    <div><span>Edge</span><strong>{_fmt_number(edge, decimals=2)}</strong></div>
+                    <div><span>Caution</span><strong>{html.escape(caution)}</strong></div>
+                </div>
             </div>
             <div class="cv-featured-grade">
                 <span class="big">{html.escape(grade)}</span>
-                <span class="lbl">Lock of the day</span>
+                <span class="lbl">Operator grade</span>
             </div>
         </div>
         """,

@@ -22,7 +22,9 @@ Key UI changes vs. the previous build:
 from __future__ import annotations
 
 import json
+import html
 import os
+import re
 import sys
 import traceback
 from datetime import date, datetime, timedelta
@@ -56,7 +58,10 @@ try:
         render_slate,
         render_empty_state,
         render_missing_file_warning,
+        render_kpi_cards,
         safe_pick_featured,
+        render_review_banner,
+        render_status_strip,
     )
     _THEME_AVAILABLE = True
 except Exception as exc:  # pragma: no cover — pure UI fallback
@@ -599,9 +604,185 @@ def pretty_market_name(market_type: str) -> str:
     return PRETTY_MARKETS.get(market_type, market_type)
 
 
+DISPLAY_COLUMN_LABELS = {
+    "letter_grade": "Grade",
+    "recent_form_flag": "Form",
+    "bet_label": "Bet",
+    "recommended_action": "Action",
+    "market_type": "Market",
+    "entity_name": "Player",
+    "player_name": "Player",
+    "team": "Team",
+    "opponent": "Opp",
+    "selection": "Side",
+    "pick_side": "Side",
+    "side": "Side",
+    "selection_side": "Side",
+    "sportsbook_line": "Line",
+    "model_projection": "Projection",
+    "recent_avg": "Recent Avg",
+    "season_avg": "Season Avg",
+    "edge": "Edge",
+    "edge_abs": "Edge Abs",
+    "edge_pct": "Edge %",
+    "confidence": "Confidence",
+    "quality_score": "Quality",
+    "odds": "Odds",
+    "context_caution_level": "Caution",
+    "context_pick_alignment": "Context",
+    "line_source": "Line Source",
+    "source_lane": "Source Lane",
+    "is_live_market": "Live",
+    "kelly_eligible": "Kelly",
+    "manual_review_required": "Manual Review",
+    "rejection_reason": "Rejection Reason",
+    "minutes_bucket": "Minutes Bucket",
+    "minutes_basis": "Minutes Basis",
+    "projected_minutes": "Projected Minutes",
+    "result_status": "Result",
+    "readiness_verdict": "Readiness Verdict",
+    "bucket": "Bucket",
+    "policy_name": "Policy",
+    "risk_verdict": "Risk Verdict",
+    "sample_status": "Sample Status",
+}
+
+PICK_COLUMN_ORDER = [
+    "Grade",
+    "Form",
+    "Bet",
+    "Action",
+    "Player",
+    "Market",
+    "Team",
+    "Opp",
+    "Side",
+    "Line",
+    "Projection",
+    "Recent Avg",
+    "Season Avg",
+    "Edge",
+    "Edge %",
+    "Confidence",
+    "Quality",
+    "Odds",
+    "Caution",
+    "Context",
+    "Line Source",
+    "Live",
+    "Kelly",
+    "Manual Review",
+]
+
+REVIEW_DISPLAY_COLUMN_ORDER = [
+    "Player",
+    "Team",
+    "Opp",
+    "Market",
+    "Side",
+    "Line",
+    "Minutes Bucket",
+    "Minutes Basis",
+    "Result",
+    "Confidence",
+    "Quality",
+    "Edge",
+    "Caution",
+    "Context",
+    "Readiness Verdict",
+]
+
+
 # =====================================================================
 # DataFrame styling helpers (pure presentation)
 # =====================================================================
+
+def _format_number_for_display(value: Any, decimals: int = 1) -> str:
+    if value is None or str(value).strip() == "":
+        return ""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if pd.isna(number):
+        return ""
+    if float(number).is_integer() and decimals == 0:
+        return str(int(number))
+    return f"{number:.{decimals}f}"
+
+
+def _format_percent_for_display(value: Any) -> str:
+    if value is None or str(value).strip() == "":
+        return ""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if pd.isna(number):
+        return ""
+    if abs(number) <= 1:
+        number *= 100
+    return f"{number:.1f}%"
+
+
+def _normalize_text_for_display(value: Any, title: bool = False, upper: bool = False) -> str:
+    text = str(value if value is not None else "").strip()
+    if not text:
+        return ""
+    text = text.replace("_", " ")
+    if upper:
+        return text.upper()
+    if title:
+        return text.title()
+    return text
+
+
+def _format_display_columns(
+    df: pd.DataFrame,
+    preferred_order: list[str] | None = None,
+) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df if df is not None else pd.DataFrame()
+
+    view = df.copy()
+    if "market_type" in view.columns:
+        view["market_type"] = view["market_type"].astype(str).map(pretty_market_name)
+    for col in ("selection", "selection_side", "pick_side", "side"):
+        if col in view.columns:
+            view[col] = view[col].map(lambda x: _normalize_text_for_display(x, upper=True))
+    for col in (
+        "context_caution_level",
+        "context_pick_alignment",
+        "line_source",
+        "source_lane",
+        "recommended_action",
+        "bet_label",
+    ):
+        if col in view.columns:
+            view[col] = view[col].map(lambda x: _normalize_text_for_display(x, title=True))
+    for col in ("sportsbook_line", "line", "model_projection", "projection", "recent_avg", "season_avg"):
+        if col in view.columns:
+            view[col] = view[col].map(lambda x: _format_number_for_display(x, decimals=1))
+    for col in ("edge", "edge_abs", "side_edge", "minutes_basis", "projected_minutes"):
+        if col in view.columns:
+            view[col] = view[col].map(lambda x: _format_number_for_display(x, decimals=2))
+    for col in ("quality_score", "quality"):
+        if col in view.columns:
+            view[col] = view[col].map(lambda x: _format_number_for_display(x, decimals=1))
+    for col in ("odds",):
+        if col in view.columns:
+            view[col] = view[col].map(lambda x: _format_number_for_display(x, decimals=0))
+    for col in ("confidence", "edge_pct", "hit_rate", "roi"):
+        if col in view.columns:
+            view[col] = view[col].map(_format_percent_for_display)
+
+    view = view.rename(columns=DISPLAY_COLUMN_LABELS)
+    if preferred_order:
+        ordered = [col for col in preferred_order if col in view.columns]
+        rest = [col for col in view.columns if col not in ordered]
+        view = view[ordered + rest]
+    return view
+
 
 def clean_pick_display(df: pd.DataFrame | None) -> pd.DataFrame:
     if df is None or df.empty:
@@ -682,6 +863,7 @@ def style_pick_table(df: pd.DataFrame | None) -> pd.DataFrame:
         "letter_grade",
         "recent_form_flag",
         "bet_label",
+        "recommended_action",
         "market_type",
         "entity_name",
         "team",
@@ -696,12 +878,16 @@ def style_pick_table(df: pd.DataFrame | None) -> pd.DataFrame:
         "confidence",
         "quality_score",
         "odds",
+        "context_caution_level",
+        "context_pick_alignment",
+        "line_source",
+        "is_live_market",
+        "kelly_eligible",
+        "manual_review_required",
     ]
     keep = [c for c in cols if c in view.columns]
     view = view[keep]
-    if "market_type" in view.columns:
-        view["market_type"] = view["market_type"].map(pretty_market_name)
-    return view
+    return _format_display_columns(view, PICK_COLUMN_ORDER)
 
 
 def style_rejection_table(df: pd.DataFrame | None) -> pd.DataFrame:
@@ -721,9 +907,20 @@ def style_rejection_table(df: pd.DataFrame | None) -> pd.DataFrame:
     view = df.copy()
     keep = [c for c in cols if c in view.columns]
     view = view[keep]
-    if "market_type" in view.columns:
-        view["market_type"] = view["market_type"].map(pretty_market_name)
-    return view
+    return _format_display_columns(
+        view,
+        [
+            "Market",
+            "Player",
+            "Team",
+            "Opp",
+            "Rejection Reason",
+            "Line",
+            "Projection",
+            "Edge",
+            "Confidence",
+        ],
+    )
 
 
 def build_top_play_view(df: pd.DataFrame | None, limit: int = 12) -> pd.DataFrame:
@@ -766,9 +963,7 @@ def build_top_play_view(df: pd.DataFrame | None, limit: int = 12) -> pd.DataFram
     ]
     keep = [c for c in cols if c in working.columns]
     view = working[keep].head(limit).copy()
-    if "market_type" in view.columns:
-        view["market_type"] = view["market_type"].map(pretty_market_name)
-    return view
+    return _format_display_columns(view, PICK_COLUMN_ORDER)
 
 
 # =====================================================================
@@ -850,13 +1045,169 @@ def demo_payload() -> dict[str, Any]:
 # Render: Today's Board
 # =====================================================================
 
-def render_kpi_row(summary: dict[str, Any]) -> None:
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Games", summary.get("games_analyzed", 0))
-    c2.metric("Players", summary.get("players_evaluated", 0))
-    c3.metric("Markets", summary.get("markets_evaluated", 0))
-    c4.metric("Elite plays", summary.get("elite_count", summary.get("selected_count", 0)))
-    c5.metric("Rejected", summary.get("rejected_count", 0))
+def _nested_get(payload: dict[str, Any], *keys: str) -> Any:
+    current: Any = payload
+    for key in keys:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _status_state(value: Any) -> str:
+    text = str(value or "").lower()
+    if any(token in text for token in ("healthy", "ready", "live", "clean", "success")):
+        return "success"
+    if any(token in text for token in ("degraded", "review", "warning", "fallback", "pending", "caution")):
+        return "warning"
+    if any(token in text for token in ("error", "failed", "blocked", "not_ready", "not ready")):
+        return "danger"
+    if "simulation" in text:
+        return "info"
+    return "neutral"
+
+
+def _extract_pending_grading_count(daily_summary_text: str) -> int | str:
+    if not daily_summary_text:
+        return "not_available"
+    match = re.search(r"Pending grading count:\s*(\d+)", daily_summary_text, re.IGNORECASE)
+    if match:
+        return int(match.group(1))
+    match = re.search(r"pending picks:\s*(\d+)", daily_summary_text, re.IGNORECASE)
+    if match:
+        return int(match.group(1))
+    return "not_available"
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _operator_decision(quality_json: dict[str, Any], summary: dict[str, Any]) -> str:
+    recommendation = str(
+        quality_json.get("run_health_recommendation")
+        or _nested_get(quality_json, "run_health", "recommendation")
+        or ""
+    )
+    status = str(quality_json.get("run_health_status") or _nested_get(quality_json, "run_health", "status") or "")
+    elite_count = _safe_int(summary.get("elite_count", summary.get("selected_count", 0)))
+    if "bet-ready" in recommendation.lower() or "bet ready" in recommendation.lower():
+        return "Bet-ready"
+    if "no bet" in recommendation.lower() or "no_bet" in status.lower():
+        return "No-bet"
+    if elite_count > 0:
+        return "Board qualified"
+    return "No elite pick"
+
+
+def render_operator_status_strip(
+    summary: dict[str, Any],
+    quality_json: dict[str, Any],
+    prediction_date_text: str,
+    daily_summary_text: str,
+) -> None:
+    run_health = (
+        quality_json.get("run_health_status")
+        or _nested_get(quality_json, "run_health", "status")
+        or "runtime_loaded"
+    )
+    provider_counts = quality_json.get("slate_provider_counts") or {}
+    live_count = int(provider_counts.get("live_odds_count", 0) or 0)
+    fallback_count = int(provider_counts.get("synthetic_or_fallback_odds_count", 0) or 0)
+    odds_value = f"Live {live_count} / fallback {fallback_count}"
+    odds_state = "success" if live_count and fallback_count == 0 else ("warning" if fallback_count else "neutral")
+    kelly_eligible = (
+        _nested_get(quality_json, "kelly_safety_summary", "kelly_eligible_count")
+        or _nested_get(quality_json, "candidate_funnel", "kelly_rows_count")
+        or 0
+    )
+    manual_review_count = (
+        _nested_get(quality_json, "manual_review_summary", "manual_review_required_count")
+        or quality_json.get("manual_review_required_count")
+        or 0
+    )
+    pending_grading = _extract_pending_grading_count(daily_summary_text)
+    decision = _operator_decision(quality_json, summary)
+
+    render_status_strip(
+        [
+            {
+                "label": "Prediction date",
+                "value": prediction_date_text,
+                "state": "info",
+                "caption": "Selected runtime date",
+            },
+            {
+                "label": "Run health",
+                "value": run_health,
+                "state": _status_state(run_health),
+                "caption": "Quality Summary",
+            },
+            {
+                "label": "Final decision",
+                "value": decision,
+                "state": _status_state(decision),
+                "caption": "Operator readout",
+            },
+            {
+                "label": "Odds status",
+                "value": odds_value,
+                "state": odds_state,
+                "caption": "Live vs fallback",
+            },
+            {
+                "label": "Kelly eligible",
+                "value": kelly_eligible,
+                "state": "success" if _safe_int(kelly_eligible) > 0 else "neutral",
+                "caption": "Rows",
+            },
+            {
+                "label": "Manual review",
+                "value": manual_review_count,
+                "state": "warning" if _safe_int(manual_review_count) else "success",
+                "caption": "Diagnostic flags",
+            },
+            {
+                "label": "Pending grading",
+                "value": pending_grading,
+                "state": "warning" if str(pending_grading) not in {"0", "not_available"} else "success",
+                "caption": "Daily Summary",
+            },
+        ]
+    )
+
+
+def render_kpi_row(summary: dict[str, Any], quality_json: dict[str, Any] | None = None) -> None:
+    quality_json = quality_json or {}
+    candidate_funnel = quality_json.get("candidate_funnel") or {}
+    kelly_summary = quality_json.get("kelly_safety_summary") or {}
+    render_kpi_cards(
+        [
+            {"label": "Games", "value": summary.get("games_analyzed", 0), "caption": "on slate"},
+            {"label": "Players", "value": summary.get("players_evaluated", 0), "caption": "evaluated"},
+            {"label": "Markets", "value": summary.get("markets_evaluated", 0), "caption": "priced rows"},
+            {
+                "label": "Elite picks",
+                "value": candidate_funnel.get("elite_board_count", summary.get("elite_count", summary.get("selected_count", 0))),
+                "caption": "final board",
+                "state": "success",
+            },
+            {
+                "label": "Full market",
+                "value": candidate_funnel.get("full_market_board_count", summary.get("full_market_count", 0)),
+                "caption": "operator rows",
+            },
+            {
+                "label": "Kelly rows",
+                "value": kelly_summary.get("total_rows", candidate_funnel.get("kelly_rows_count", 0)),
+                "caption": "sizing output",
+            },
+            {"label": "Rejected", "value": summary.get("rejected_count", 0), "caption": "filtered out"},
+        ]
+    )
 
 
 def render_no_picks_explainer(
@@ -893,13 +1244,100 @@ def render_no_picks_explainer(
     st.dataframe(style_rejection_table(near.head(20)), width="stretch", hide_index=True)
 
 
-def render_board_section(title: str, df: pd.DataFrame | None, caption: str | None = None) -> None:
+def _unique_filter_values(df: pd.DataFrame, column: str) -> list[str]:
+    if column not in df.columns:
+        return []
+    values = (
+        df[column]
+        .dropna()
+        .astype(str)
+        .map(str.strip)
+    )
+    values = values[values != ""]
+    return sorted(values.unique().tolist())
+
+
+def _apply_multiselect_filter(
+    df: pd.DataFrame,
+    column: str,
+    label: str,
+    key: str,
+    format_func: Any | None = None,
+) -> pd.DataFrame:
+    options = _unique_filter_values(df, column)
+    if not options:
+        return df
+    selected = st.multiselect(
+        label,
+        options=options,
+        default=[],
+        format_func=format_func or (lambda x: x),
+        key=key,
+        placeholder="All",
+    )
+    if selected:
+        return df[df[column].astype(str).isin(selected)].copy()
+    return df
+
+
+def render_board_filters(df: pd.DataFrame, key_prefix: str) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    with st.container(border=True):
+        st.caption("Compact filters")
+        filter_cols = st.columns(4)
+        with filter_cols[0]:
+            df = _apply_multiselect_filter(
+                df,
+                "market_type",
+                "Market",
+                f"{key_prefix}_market_type",
+                pretty_market_name,
+            )
+        with filter_cols[1]:
+            side_col = next((col for col in ("selection", "selection_side", "side") if col in df.columns), "")
+            if side_col:
+                df = _apply_multiselect_filter(
+                    df,
+                    side_col,
+                    "Side",
+                    f"{key_prefix}_side",
+                    lambda x: str(x).upper(),
+                )
+        with filter_cols[2]:
+            if "team" in df.columns:
+                df = _apply_multiselect_filter(df, "team", "Team", f"{key_prefix}_team")
+        with filter_cols[3]:
+            if "context_caution_level" in df.columns:
+                df = _apply_multiselect_filter(
+                    df,
+                    "context_caution_level",
+                    "Caution",
+                    f"{key_prefix}_caution",
+                    lambda x: str(x).replace("_", " ").title(),
+                )
+        st.caption(f"{len(df)} rows visible")
+    return df
+
+
+def render_board_section(
+    title: str,
+    df: pd.DataFrame | None,
+    caption: str | None = None,
+    enable_filters: bool = False,
+    key_prefix: str | None = None,
+) -> None:
     render_section_head(title, caption)
     if df is None or df.empty:
         render_empty_state("No rows in this board")
         return
     view_df = clean_pick_display(df)
-    st.dataframe(style_pick_table(view_df), width="stretch", hide_index=True)
+    if enable_filters:
+        view_df = render_board_filters(view_df, key_prefix or title.lower().replace(" ", "_"))
+        if view_df.empty:
+            render_empty_state("No rows match the current filters")
+            return
+    st.dataframe(style_pick_table(view_df), width="stretch", hide_index=True, height=420)
 
     if "market_type" in view_df.columns:
         st.markdown("##### By market type")
@@ -926,7 +1364,12 @@ def render_board_section(title: str, df: pd.DataFrame | None, caption: str | Non
             for tab, market in zip(tabs, active_markets):
                 with tab:
                     subset = view_df[view_df["market_type"] == market].copy()
-                    st.dataframe(style_pick_table(subset), width="stretch", hide_index=True)
+                    st.dataframe(
+                        style_pick_table(subset),
+                        width="stretch",
+                        hide_index=True,
+                        height=360,
+                    )
 
 
 def render_runtime_file_diagnostics(payload: dict[str, Any]) -> None:
@@ -954,7 +1397,11 @@ def render_runtime_file_diagnostics(payload: dict[str, Any]) -> None:
         st.dataframe(diag_df[keep], width="stretch", hide_index=True)
 
 
-def render_today_board(payload: dict[str, Any] | None = None) -> None:
+def render_today_board(
+    payload: dict[str, Any] | None = None,
+    out_dir: str | None = None,
+    prediction_date_text: str | None = None,
+) -> None:
     payload = payload or st.session_state.get("display_prediction")
     if not payload and DEMO_MODE:
         payload = demo_payload()
@@ -977,13 +1424,29 @@ def render_today_board(payload: dict[str, Any] | None = None) -> None:
     near_miss_df = payload.get("near_miss_props", pd.DataFrame())
     rejected_df = payload.get("rejected_props", pd.DataFrame())
     summary = payload.get("summary", {}) or {}
+    daily_summary_text = payload.get("daily_summary_text", "")
+    quality_json: dict[str, Any] = {}
+    if out_dir and prediction_date_text:
+        review_payload = load_quality_review_artifacts_cached(
+            out_dir,
+            prediction_date_text,
+            int(st.session_state.get("history_refresh_token", 0)),
+        )
+        quality_json = review_payload.get("quality_summary_json") or {}
+
+    render_operator_status_strip(
+        summary,
+        quality_json,
+        prediction_date_text or str(summary.get("prediction_date") or ""),
+        daily_summary_text,
+    )
 
     # Featured pick
     featured = safe_pick_featured(elite_df)
     render_featured_pick(featured)
 
     # KPI row
-    render_kpi_row(summary)
+    render_kpi_row(summary, quality_json)
 
     data_status = summary.get("data_status")
     if data_status:
@@ -1017,6 +1480,8 @@ def render_today_board(payload: dict[str, Any] | None = None) -> None:
             "Full Market Board",
             full_market_df,
             "Top picks per market with real live lines.",
+            enable_filters=True,
+            key_prefix="full_market_board",
         )
     with sgp_tab:
         render_board_section(
@@ -1050,26 +1515,29 @@ def render_today_board(payload: dict[str, Any] | None = None) -> None:
     model_diag = summary.get("model_diagnostics", {}) or {}
     board_diag = payload.get("board_diagnostics", {}) or summary.get("board_diagnostics", {}) or {}
     market_coverage = payload.get("market_coverage", {}) or summary.get("market_coverage", {}) or {}
-    daily_summary_text = payload.get("daily_summary_text", "")
     if not odds_diag and not model_diag and not board_diag and not market_coverage and not daily_summary_text:
         render_empty_state("No diagnostics emitted by the latest run")
     else:
         if odds_diag:
-            with st.expander("Odds ingestion", expanded=False):
+            with st.expander("Odds ingestion - provider status", expanded=False):
+                st.caption("Provider and odds-source diagnostics emitted by the runtime.")
                 st.json(odds_diag)
         if model_diag:
-            with st.expander("Model context", expanded=False):
+            with st.expander("Model context - scoring inputs", expanded=False):
+                st.caption("Read-only model context payload for the selected run.")
                 st.json(model_diag)
         if board_diag:
-            with st.expander("Board diagnostics", expanded=False):
+            with st.expander("Board diagnostics - board build", expanded=False):
+                st.caption("Board counts, filters, gates, and runtime checks.")
                 st.json(board_diag)
         if market_coverage:
-            with st.expander("Market coverage", expanded=False):
+            with st.expander("Market coverage - live market survival", expanded=False):
+                st.caption("Coverage and candidate survival by market.")
                 st.json(market_coverage)
         if daily_summary_text:
-            with st.expander("Daily summary", expanded=False):
-                st.text(daily_summary_text)
-        with st.expander("Full rejection table", expanded=False):
+            with st.expander("Daily summary - operator text", expanded=False):
+                st.code(daily_summary_text, language="text")
+        with st.expander("Full rejection table - filtered candidates", expanded=False):
             if rejected_df is None or rejected_df.empty:
                 render_empty_state("No rejection rows")
             else:
@@ -1077,8 +1545,9 @@ def render_today_board(payload: dict[str, Any] | None = None) -> None:
                     style_rejection_table(rejected_df),
                     width="stretch",
                     hide_index=True,
+                    height=360,
                 )
-        with st.expander("Run summary JSON", expanded=False):
+        with st.expander("Run summary JSON - UI payload", expanded=False):
             st.json(summary)
 
 
@@ -1096,21 +1565,44 @@ def _format_review_status_value(value: Any) -> str:
 
 
 def _render_review_status_cards(statuses: dict[str, Any]) -> None:
-    items = [
-        ("Run health", statuses.get("run_health")),
-        ("Elite count", statuses.get("elite_count")),
-        ("Full market count", statuses.get("full_market_count")),
-        ("Kelly eligible count", statuses.get("kelly_eligible_count")),
-    ]
-    for phase_key, label in PHASE15_READINESS_LABELS.items():
-        items.append((label, statuses.get(f"{phase_key}_readiness_verdict")))
+    render_kpi_cards(
+        [
+            {"label": "Run health", "value": statuses.get("run_health"), "caption": "Quality Summary", "state": _status_state(statuses.get("run_health"))},
+            {"label": "Elite count", "value": statuses.get("elite_count"), "caption": "final board"},
+            {"label": "Full market", "value": statuses.get("full_market_count"), "caption": "operator rows"},
+            {"label": "Kelly eligible", "value": statuses.get("kelly_eligible_count"), "caption": "rows"},
+        ]
+    )
 
-    for start in range(0, len(items), 4):
-        cols = st.columns(4)
-        for col, (label, value) in zip(cols, items[start : start + 4]):
-            with col.container(border=True):
-                st.caption(label)
-                st.markdown(f"**{_format_review_status_value(value)}**")
+
+def _render_phase15_verdict_cards(statuses: dict[str, Any]) -> None:
+    cards: list[str] = []
+    phase_modes = {
+        "phase15d_review": "REVIEW ONLY",
+        "phase15e_outcome": "REVIEW ONLY",
+        "phase15f_policy_simulation": "SIMULATION ONLY",
+        "phase15g_missed_winner_attribution": "REVIEW ONLY",
+    }
+    for phase_key, label in PHASE15_READINESS_LABELS.items():
+        verdict = _format_review_status_value(statuses.get(f"{phase_key}_readiness_verdict"))
+        mode = phase_modes.get(phase_key, "REVIEW ONLY")
+        state = _status_state(verdict)
+        cards.append(
+            f"""
+            <div class="cv-review-layer-card" data-state="{html.escape(state)}">
+                <div class="cv-review-layer-top">
+                    <span>{html.escape(label)}</span>
+                    <span class="cv-badge">{html.escape(mode)}</span>
+                    <span class="cv-badge" data-state="muted">NOT ACTIVE GATE</span>
+                </div>
+                <div class="cv-review-layer-verdict">{html.escape(verdict)}</div>
+            </div>
+            """
+        )
+    st.markdown(
+        f'<div class="cv-review-grid">{"".join(cards)}</div>',
+        unsafe_allow_html=True,
+    )
 
 
 def _render_artifact_notice(label: str, record: dict[str, Any] | None) -> None:
@@ -1118,14 +1610,24 @@ def _render_artifact_notice(label: str, record: dict[str, Any] | None) -> None:
     status = str(record.get("status") or "missing")
     path = str(record.get("path") or "")
     error = str(record.get("error") or "")
-    if status == "error":
-        st.warning(f"{label} could not be loaded. {error}".strip())
-    elif status == "empty":
-        st.info(f"{label} exists but is empty.")
-    else:
-        st.info(f"{label} is not available for this date.")
-    if path:
-        st.caption(path)
+    state = "warning" if status in {"missing", "error"} else "info"
+    detail = error if status == "error" else path
+    message = (
+        f"{label} could not be loaded."
+        if status == "error"
+        else f"{label} exists but is empty."
+        if status == "empty"
+        else f"{label} is not available for this date."
+    )
+    st.markdown(
+        f"""
+        <div class="cv-artifact-notice" data-state="{html.escape(state)}">
+            <strong>{html.escape(message)}</strong>
+            <span>{html.escape(detail)}</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def _render_text_artifact(
@@ -1136,7 +1638,7 @@ def _render_text_artifact(
 ) -> None:
     if text:
         with st.expander(label, expanded=expanded):
-            st.text(text)
+            st.code(text, language="text")
             path = str((record or {}).get("path") or "")
             if path:
                 st.caption(path)
@@ -1152,7 +1654,8 @@ def _render_csv_preview(
 ) -> None:
     if isinstance(df, pd.DataFrame) and not df.empty:
         st.markdown(f"##### {label}")
-        st.dataframe(df.head(max_rows), width="stretch", hide_index=True)
+        display_df = _format_display_columns(df.head(max_rows), REVIEW_DISPLAY_COLUMN_ORDER)
+        st.dataframe(display_df, width="stretch", hide_index=True, height=360)
         if len(df) > max_rows:
             st.caption(f"Showing first {max_rows} of {len(df)} rows.")
         path = str((record or {}).get("path") or "")
@@ -1166,9 +1669,10 @@ def _render_phase15_review_panel(phase_key: str, phase: dict[str, Any]) -> None:
     title = str(phase.get("title") or phase_key)
     mode = str(phase.get("mode") or "REVIEW ONLY")
     with st.expander(title, expanded=phase_key == "phase15d_review"):
-        st.info(
-            f"{mode} - no picks suppressed. No prediction, grading, Kelly, "
-            "suppression, or history changes are made from this UI."
+        render_review_banner(
+            f"{mode} / NOT ACTIVE GATE",
+            "No picks are suppressed. No prediction, grading, Kelly, suppression, or history changes are made from this UI.",
+            "simulation" if mode == "SIMULATION ONLY" else "info",
         )
         _render_text_artifact(
             f"{phase.get('short_title', title)} text",
@@ -1202,11 +1706,13 @@ def render_quality_review_view(
         "Quality review",
         "Quality Summary plus Phase 15D-G review and simulation artifacts.",
     )
-    st.caption(
-        "Read-only UI surface. Artifacts are loaded from outputs/runtime/operator; "
-        "reports are not regenerated here."
+    render_review_banner(
+        "Review-only layer",
+        "Artifacts are loaded from outputs/runtime/operator. This page does not regenerate reports, suppress picks, or change prediction, grading, Kelly, or history files.",
+        "info",
     )
     _render_review_status_cards(statuses)
+    _render_phase15_verdict_cards(statuses)
 
     render_section_head("Quality Summary", "Operator-level run health and checks.")
     _render_text_artifact(
@@ -1517,7 +2023,9 @@ def main() -> None:
         else:
             st.title(APP_TITLE)
 
-        st.markdown("---")
+        st.markdown('<div class="cv-sidebar-divider"></div>', unsafe_allow_html=True)
+        if _THEME_AVAILABLE:
+            render_sidebar_label("Navigation")
         # Navigation radio styled as nav list
         view = st.radio(
             "Navigation",
@@ -1537,9 +2045,13 @@ def main() -> None:
         active_key = view[0] if isinstance(view, tuple) else "today"
         st.session_state["active_view"] = active_key
 
-        st.markdown("---")
+        st.markdown('<div class="cv-sidebar-divider"></div>', unsafe_allow_html=True)
         if _THEME_AVAILABLE:
-            render_sidebar_label("Run config")
+            render_sidebar_label("Run Config")
+        st.markdown(
+            '<div class="cv-sidebar-helper">Select the runtime folder and prediction date to inspect.</div>',
+            unsafe_allow_html=True,
+        )
         out_dir = st.text_input("Output folder", value=default_out_dir)
         prediction_date = st.date_input("Prediction date", value=today)
         prediction_date_text = normalize_prediction_date_text(prediction_date)
@@ -1548,21 +2060,21 @@ def main() -> None:
             train_start = st.date_input("Training start", value=default_train_start)
             train_end = st.date_input("Training end", value=default_train_end)
 
-        st.markdown("---")
+        st.markdown('<div class="cv-sidebar-divider"></div>', unsafe_allow_html=True)
+        if _THEME_AVAILABLE:
+            render_sidebar_label("Actions")
         fit_clicked = st.button("Fit / Refresh Model", width="stretch")
         predict_clicked = st.button(
             "Run Predictions", type="primary", width="stretch"
         )
         reload_history_clicked = st.button("Reload History", width="stretch")
 
-        st.markdown("---")
+        st.markdown('<div class="cv-sidebar-divider"></div>', unsafe_allow_html=True)
         if _THEME_AVAILABLE:
-            render_sidebar_label("Markets targeted")
+            render_sidebar_label("Markets Targeted")
         st.markdown(
             """
-            <div style="font-family:var(--font-body, sans-serif);
-                        font-size:12px; color:var(--ink-6, #8A95A6);
-                        line-height:1.7;">
+            <div class="cv-sidebar-market-list">
               Player Points · Rebounds · Assists<br/>
               3PT Made · Steals · Blocks<br/>
               Points + Rebounds · Points + Assists<br/>
@@ -1652,7 +2164,7 @@ def main() -> None:
 
     # ---------------- Views ----------------
     if active_key == "today":
-        render_today_board(payload)
+        render_today_board(payload, resolved_out_dir_text, prediction_date_text)
     elif active_key == "slate":
         render_slate_view(payload)
     elif active_key == "review_layers":
