@@ -96,6 +96,12 @@ from courtvision.reporting.minutes_error_shadow_audit import (
     minutes_error_audit_txt_path_for_date,
     write_minutes_error_shadow_audit,
 )
+from courtvision.reporting.low_line_over_minutes_guard_review import (
+    low_line_over_minutes_guard_review_csv_path_for_date,
+    low_line_over_minutes_guard_review_json_path_for_date,
+    low_line_over_minutes_guard_review_txt_path_for_date,
+    write_low_line_over_minutes_guard_review,
+)
 
 ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER = "elite_reject_context_high_caution_over"
 CONTEXT_CONFLICT_CAUSE_BUCKETS: tuple[str, ...] = (
@@ -3013,6 +3019,60 @@ def write_quality_summary_outputs(
     ]
     with open(text_path, "a", encoding="utf-8") as _mesa_fh:
         _mesa_fh.write("".join(_mesa_lines))
+
+    # Phase 15D: low-line OVER minutes-basis guard review (review only - no suppression)
+    try:
+        _llom_json, _llom_txt, _llom_csv, _llom_payload = write_low_line_over_minutes_guard_review(
+            prediction_date=prediction_date,
+            runtime_root=runtime_root,
+            pick_history=history_root / "pick_history.csv",
+            market_shadow_history=history_root / "market_shadow_history.csv",
+        )
+        payload["low_line_over_minutes_guard_review"] = {
+            "json_path": str(_llom_json),
+            "txt_path": str(_llom_txt),
+            "csv_path": str(_llom_csv),
+            "total_low_line_over_rows": _llom_payload.get("total_low_line_over_rows", 0),
+            "weak_minutes_basis_count": _llom_payload.get("weak_minutes_basis_count", 0),
+            "borderline_minutes_basis_count": _llom_payload.get("borderline_minutes_basis_count", 0),
+            "stable_minutes_basis_count": _llom_payload.get("stable_minutes_basis_count", 0),
+            "missing_minutes_basis_count": _llom_payload.get("missing_minutes_basis_count", 0),
+            "review_required_count": _llom_payload.get("review_required_count", 0),
+            "bucket_summary": _llom_payload.get("bucket_summary", {}),
+            "top_flagged_rows": _llom_payload.get("top_flagged_rows", []),
+            "readiness_verdict": _llom_payload.get("readiness_verdict"),
+            "note": "review_only_no_prediction_grading_kelly_or_history_change",
+        }
+    except Exception as _llom_err:
+        payload["low_line_over_minutes_guard_review"] = {
+            "error": str(_llom_err),
+            "note": "review_only_no_prediction_grading_kelly_or_history_change",
+        }
+        _llom_payload = {}
+        _llom_json = low_line_over_minutes_guard_review_json_path_for_date(prediction_date, runtime_root)
+        _llom_txt = low_line_over_minutes_guard_review_txt_path_for_date(prediction_date, runtime_root)
+        _llom_csv = low_line_over_minutes_guard_review_csv_path_for_date(prediction_date, runtime_root)
+
+    # Append Phase 15D section to operator text file
+    _llom_sep = "-" * 78
+    _llom_lines = [
+        "\n\n",
+        _llom_sep + "\n",
+        "LOW-LINE OVER MINUTES GUARD REVIEW (Phase 15D -- REVIEW ONLY)\n",
+        _llom_sep + "\n",
+        f"  total_low_line_over_rows       : {_llom_payload.get('total_low_line_over_rows', 0)}\n",
+        f"  weak_minutes_basis_count       : {_llom_payload.get('weak_minutes_basis_count', 0)}\n",
+        f"  borderline_minutes_basis_count : {_llom_payload.get('borderline_minutes_basis_count', 0)}\n",
+        f"  stable_minutes_basis_count     : {_llom_payload.get('stable_minutes_basis_count', 0)}\n",
+        f"  review_required_count          : {_llom_payload.get('review_required_count', 0)}\n",
+        f"  readiness_verdict              : {_llom_payload.get('readiness_verdict')}\n",
+        f"  audit_artifact                 : {_llom_json}\n",
+        f"  review_csv                     : {_llom_csv}\n",
+        "  NOTE: REVIEW ONLY; no prediction/grading/Kelly/history changes and no picks suppressed.\n",
+        _llom_sep + "\n",
+    ]
+    with open(text_path, "a", encoding="utf-8") as _llom_fh:
+        _llom_fh.write("".join(_llom_lines))
 
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     update_quality_history_from_summary(
