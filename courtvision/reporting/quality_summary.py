@@ -91,6 +91,11 @@ from courtvision.reporting.actual_minutes_source_audit import (
     actual_minutes_audit_txt_path_for_date,
     write_actual_minutes_source_audit,
 )
+from courtvision.reporting.minutes_error_shadow_audit import (
+    minutes_error_audit_json_path_for_date,
+    minutes_error_audit_txt_path_for_date,
+    write_minutes_error_shadow_audit,
+)
 
 ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER = "elite_reject_context_high_caution_over"
 CONTEXT_CONFLICT_CAUSE_BUCKETS: tuple[str, ...] = (
@@ -2956,6 +2961,58 @@ def write_quality_summary_outputs(
     ]
     with open(text_path, "a", encoding="utf-8") as _amsa_fh:
         _amsa_fh.write("".join(_amsa_lines))
+
+    # Phase 15C: minutes-error shadow audit (diagnostics only - no live logic or history mutation)
+    try:
+        _mesa_json, _mesa_txt, _mesa_payload = write_minutes_error_shadow_audit(
+            prediction_date=prediction_date,
+            runtime_root=runtime_root,
+            pick_history=history_root / "pick_history.csv",
+            market_shadow_history=history_root / "market_shadow_history.csv",
+        )
+        payload["minutes_error_shadow_audit"] = {
+            "json_path": str(_mesa_json),
+            "txt_path": str(_mesa_txt),
+            "total_player_points_rows": _mesa_payload.get("total_player_points_rows", 0),
+            "player_points_over_rows": _mesa_payload.get("player_points_over_rows", 0),
+            "low_line_over_rows": _mesa_payload.get("low_line_over_rows", 0),
+            "low_line_over_misses": _mesa_payload.get("low_line_over_misses", 0),
+            "minutes_fields_availability": _mesa_payload.get("minutes_fields_availability", {}),
+            "avg_projected_minutes_by_result": _mesa_payload.get("avg_projected_minutes_by_result", {}),
+            "avg_minutes_basis_by_result": _mesa_payload.get("avg_minutes_basis_by_result", {}),
+            "minutes_shortfall_buckets": _mesa_payload.get("minutes_shortfall_buckets", {}),
+            "rows_without_reliable_minutes_count": _mesa_payload.get("rows_without_reliable_minutes_count", 0),
+            "readiness_verdict": _mesa_payload.get("readiness_verdict"),
+            "note": "audit_only_no_prediction_grading_kelly_or_history_change",
+        }
+    except Exception as _mesa_err:
+        payload["minutes_error_shadow_audit"] = {
+            "error": str(_mesa_err),
+            "note": "audit_only_no_prediction_grading_kelly_or_history_change",
+        }
+        _mesa_payload = {}
+        _mesa_json = minutes_error_audit_json_path_for_date(prediction_date, runtime_root)
+        _mesa_txt = minutes_error_audit_txt_path_for_date(prediction_date, runtime_root)
+
+    # Append Phase 15C section to operator text file
+    _mesa_sep = "-" * 78
+    _mesa_lines = [
+        "\n\n",
+        _mesa_sep + "\n",
+        "MINUTES-ERROR SHADOW AUDIT (Phase 15C -- AUDIT ONLY)\n",
+        _mesa_sep + "\n",
+        f"  total_player_points_rows      : {_mesa_payload.get('total_player_points_rows', 0)}\n",
+        f"  player_points_over_rows       : {_mesa_payload.get('player_points_over_rows', 0)}\n",
+        f"  low_line_over_rows            : {_mesa_payload.get('low_line_over_rows', 0)}\n",
+        f"  low_line_over_misses          : {_mesa_payload.get('low_line_over_misses', 0)}\n",
+        f"  rows_without_reliable_minutes : {_mesa_payload.get('rows_without_reliable_minutes_count', 0)}\n",
+        f"  readiness_verdict             : {_mesa_payload.get('readiness_verdict')}\n",
+        f"  audit_artifact                : {_mesa_json}\n",
+        "  NOTE: read-only audit; no prediction/grading/Kelly/history changes.\n",
+        _mesa_sep + "\n",
+    ]
+    with open(text_path, "a", encoding="utf-8") as _mesa_fh:
+        _mesa_fh.write("".join(_mesa_lines))
 
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     update_quality_history_from_summary(
