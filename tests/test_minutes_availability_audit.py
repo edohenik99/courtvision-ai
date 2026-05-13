@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 from pathlib import Path
 
 import pandas as pd
@@ -159,6 +160,55 @@ def test_actual_minutes_present_minutes_error_calculation(tmp_path: Path) -> Non
     assert actual["player_points_miss_rate_minutes_error_gt_10"] == 1.0
 
 
+def test_sparse_minutes_sources_do_not_emit_future_warnings(tmp_path: Path) -> None:
+    prediction_date = "2026-05-11"
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)
+        payload = build_minutes_availability_audit(
+            prediction_date,
+            runtime_root=tmp_path / "runtime",
+            history_csv=pd.DataFrame(
+                [
+                    {
+                        "prediction_date": prediction_date,
+                        "player_name": "Projected Player",
+                        "market_type": "player_points",
+                        "selection": "over",
+                        "line": 12.5,
+                        "projected_minutes": 30,
+                        "result_status": "miss",
+                    }
+                ]
+            ),
+            pick_history_csv=pd.DataFrame(
+                [
+                    {
+                        "prediction_date": prediction_date,
+                        "player_name": "Sparse Player",
+                        "market": "player_points",
+                        "selection": "under",
+                        "line": 20.5,
+                        "result_status": "hit",
+                    }
+                ]
+            ),
+            full_market_glob=_none_pattern(tmp_path),
+            elite_board_glob=_none_pattern(tmp_path),
+            player_predictions_glob=_none_pattern(tmp_path),
+            grading_glob=_none_pattern(tmp_path),
+            player_baselines_csv=pd.DataFrame([{"player_name": "Baseline Only", "min_avg": 22}]),
+            inflation_audit_glob=_none_pattern(tmp_path, "json"),
+            board_diagnostics_json_glob=_none_pattern(tmp_path, "json"),
+            board_diagnostics_csv_glob=_none_pattern(tmp_path),
+        )
+
+    assert payload["total_rows_scanned"] == 3
+    assert payload["player_points_rows"] == 2
+    assert payload["projected_minutes_available_rate"] == 0.5
+    assert payload["actual_minutes_available_rate"] == 0.0
+    assert payload["readiness_verdict"] == "PROJECTED_MINUTES_AVAILABLE_ACTUAL_MISSING"
+
+
 def test_readiness_verdict_selection() -> None:
     assert (
         _select_readiness_verdict(
@@ -312,12 +362,14 @@ def test_quality_summary_integration(tmp_path: Path) -> None:
     (diagnostics / f"board_diagnostics_{prediction_date}.json").write_text("{}", encoding="utf-8")
     (operator / f"elite_pipeline_audit_summary_{prediction_date}.json").write_text("{}", encoding="utf-8")
 
-    text_path, json_path, payload = write_quality_summary_outputs(
-        prediction_date=prediction_date,
-        runtime_root=runtime_root,
-        out_dir=tmp_path,
-        history_root=history_root,
-    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)
+        text_path, json_path, payload = write_quality_summary_outputs(
+            prediction_date=prediction_date,
+            runtime_root=runtime_root,
+            out_dir=tmp_path,
+            history_root=history_root,
+        )
 
     assert "minutes_availability_audit" in payload
     assert payload["minutes_availability_audit"]["note"] == "audit_only_no_live_logic_change"

@@ -162,14 +162,31 @@ def _numeric_rate(frame: pd.DataFrame, column: str) -> float:
     return round(float(frame[column].map(lambda value: _to_float(value) is not None).mean()), 4)
 
 
+def _series_has_non_na(values: pd.Series) -> bool:
+    return not values.empty and not bool(values.isna().all())
+
+
+def _coalesce_series(series_list: list[pd.Series], index: pd.Index) -> pd.Series:
+    out = pd.Series([pd.NA] * len(index), index=index, dtype="object")
+    for values in series_list:
+        aligned = values.reindex(index)
+        if not _series_has_non_na(aligned):
+            continue
+        fill_mask = out.isna() & aligned.notna()
+        if fill_mask.any():
+            out.loc[fill_mask] = aligned.loc[fill_mask]
+    return out
+
+
 def _coalesce_numeric(df: pd.DataFrame, candidates: tuple[str, ...]) -> pd.Series:
-    out = pd.Series([pd.NA] * len(df), index=df.index, dtype="object")
+    values_by_column: list[pd.Series] = []
     for column in candidates:
         if column not in df.columns:
             continue
         values = df[column].map(_to_float)
-        out = out.combine_first(values)
-    return out
+        if _series_has_non_na(values):
+            values_by_column.append(values)
+    return _coalesce_series(values_by_column, df.index)
 
 
 def _coalesce_text(df: pd.DataFrame, candidates: tuple[str, ...]) -> pd.Series:
@@ -362,7 +379,10 @@ def _normalize_source_frame(
         _normalize_result_status(row)
         for row in source.to_dict("records")
     ]
-    out["minutes_basis"] = out["projected_minutes"].combine_first(out["minutes_recent"]).combine_first(out["minutes_avg"])
+    out["minutes_basis"] = _coalesce_series(
+        [out["projected_minutes"], out["minutes_recent"], out["minutes_avg"]],
+        out.index,
+    )
     out["minutes_basis_source"] = ""
     out.loc[out["projected_minutes"].map(_to_float).notna(), "minutes_basis_source"] = "projected_minutes"
     out.loc[
@@ -456,6 +476,28 @@ def _coalesce_rows(frame: pd.DataFrame) -> pd.DataFrame:
     if "is_low_line_over" in out.columns:
         out["is_low_line_over"] = out.apply(_is_low_line_over, axis=1)
     return out.reset_index(drop=True)
+
+
+def _is_all_na_frame(frame: pd.DataFrame) -> bool:
+    return frame.empty or bool(frame.isna().to_numpy().all())
+
+
+def _concat_normalized_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
+    usable = [frame for frame in frames if not _is_all_na_frame(frame)]
+    if not usable:
+        return pd.DataFrame()
+
+    columns: list[str] = []
+    seen: set[str] = set()
+    trimmed: list[pd.DataFrame] = []
+    for frame in usable:
+        for column in frame.columns:
+            if column not in seen:
+                columns.append(column)
+                seen.add(column)
+        trimmed.append(frame.dropna(axis=1, how="all"))
+
+    return pd.concat(trimmed, ignore_index=True).reindex(columns=columns)
 
 
 def _field_source_columns(frame: pd.DataFrame, field: str) -> list[str]:
@@ -877,7 +919,7 @@ def build_minutes_availability_audit(
         _normalize_source_frame(frame, source_type=label, source_file=source_file)
         for label, source_file, frame in source_frames
     ]
-    combined = pd.concat(normalized_frames, ignore_index=True) if normalized_frames else pd.DataFrame()
+    combined = _concat_normalized_frames(normalized_frames)
     merged = _coalesce_rows(combined)
 
     pp_rows = merged[merged["market_type"].map(_safe_text).str.lower().eq("player_points")].copy() if not merged.empty else pd.DataFrame()
