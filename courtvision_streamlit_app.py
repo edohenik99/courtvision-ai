@@ -9,7 +9,8 @@ threshold engines are NOT touched.
 Key UI changes vs. the previous build:
 * Loads ``dashboard/styles/courtvision_theme.css`` via ``st.markdown`` so the
   dark CourtVision design system is applied to the live Streamlit app.
-* New navigation: Today's Board / Slate / History / Calibration / Run Log.
+* New navigation: Today's Board / Slate / Review Layers / History /
+  Calibration / Run Log.
 * Featured pick hero, KPI cards, slate row, board tabs, diagnostics,
   daily summary panels.
 * Missing-file safety: every disk read is wrapped; missing outputs render
@@ -37,6 +38,11 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from courtvision_ai import CourtVisionAI  # noqa: E402  (engine — untouched)
+from courtvision.streamlit_review_artifacts import (  # noqa: E402
+    PHASE15_READINESS_LABELS,
+    extract_quality_review_statuses,
+    load_quality_review_artifacts,
+)
 
 try:
     from dashboard.styles.streamlit_helpers import (  # noqa: E402
@@ -481,6 +487,21 @@ def load_runtime_prediction_cached(
         "runtime_load_diagnostics": records,
         "summary": summary,
     }
+
+
+@st.cache_data(show_spinner=False)
+def load_quality_review_artifacts_cached(
+    out_dir: str,
+    prediction_date_text: str,
+    refresh_token: int,
+) -> dict[str, Any]:
+    """Load UI-only Quality Summary and Phase 15 review artifacts."""
+    _ = refresh_token
+    return load_quality_review_artifacts(
+        out_dir,
+        prediction_date_text,
+        repo_root=_REPO_ROOT,
+    )
 
 
 def payload_has_board_rows(payload: dict[str, Any] | None) -> bool:
@@ -1062,6 +1083,178 @@ def render_today_board(payload: dict[str, Any] | None = None) -> None:
 
 
 # =====================================================================
+# Render: Review Layers
+# =====================================================================
+
+def _format_review_status_value(value: Any) -> str:
+    if value is None:
+        return "not_available"
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    text = str(value).strip()
+    return text if text else "not_available"
+
+
+def _render_review_status_cards(statuses: dict[str, Any]) -> None:
+    items = [
+        ("Run health", statuses.get("run_health")),
+        ("Elite count", statuses.get("elite_count")),
+        ("Full market count", statuses.get("full_market_count")),
+        ("Kelly eligible count", statuses.get("kelly_eligible_count")),
+    ]
+    for phase_key, label in PHASE15_READINESS_LABELS.items():
+        items.append((label, statuses.get(f"{phase_key}_readiness_verdict")))
+
+    for start in range(0, len(items), 4):
+        cols = st.columns(4)
+        for col, (label, value) in zip(cols, items[start : start + 4]):
+            with col.container(border=True):
+                st.caption(label)
+                st.markdown(f"**{_format_review_status_value(value)}**")
+
+
+def _render_artifact_notice(label: str, record: dict[str, Any] | None) -> None:
+    record = record or {}
+    status = str(record.get("status") or "missing")
+    path = str(record.get("path") or "")
+    error = str(record.get("error") or "")
+    if status == "error":
+        st.warning(f"{label} could not be loaded. {error}".strip())
+    elif status == "empty":
+        st.info(f"{label} exists but is empty.")
+    else:
+        st.info(f"{label} is not available for this date.")
+    if path:
+        st.caption(path)
+
+
+def _render_text_artifact(
+    label: str,
+    text: str,
+    record: dict[str, Any] | None,
+    expanded: bool = False,
+) -> None:
+    if text:
+        with st.expander(label, expanded=expanded):
+            st.text(text)
+            path = str((record or {}).get("path") or "")
+            if path:
+                st.caption(path)
+        return
+    _render_artifact_notice(label, record)
+
+
+def _render_csv_preview(
+    label: str,
+    df: pd.DataFrame,
+    record: dict[str, Any] | None,
+    max_rows: int = 100,
+) -> None:
+    if isinstance(df, pd.DataFrame) and not df.empty:
+        st.markdown(f"##### {label}")
+        st.dataframe(df.head(max_rows), width="stretch", hide_index=True)
+        if len(df) > max_rows:
+            st.caption(f"Showing first {max_rows} of {len(df)} rows.")
+        path = str((record or {}).get("path") or "")
+        if path:
+            st.caption(path)
+        return
+    _render_artifact_notice(label, record)
+
+
+def _render_phase15_review_panel(phase_key: str, phase: dict[str, Any]) -> None:
+    title = str(phase.get("title") or phase_key)
+    mode = str(phase.get("mode") or "REVIEW ONLY")
+    with st.expander(title, expanded=phase_key == "phase15d_review"):
+        st.info(
+            f"{mode} - no picks suppressed. No prediction, grading, Kelly, "
+            "suppression, or history changes are made from this UI."
+        )
+        _render_text_artifact(
+            f"{phase.get('short_title', title)} text",
+            str(phase.get("text") or ""),
+            phase.get("text_record"),
+            expanded=False,
+        )
+        _render_csv_preview(
+            f"{phase.get('short_title', title)} CSV preview",
+            phase.get("csv", pd.DataFrame()),
+            phase.get("csv_record"),
+        )
+
+
+def render_quality_review_view(
+    out_dir: str,
+    prediction_date_text: str,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    payload = payload or st.session_state.get("display_prediction") or {}
+    board_summary = (payload.get("summary") or {}) if isinstance(payload, dict) else {}
+    review_payload = load_quality_review_artifacts_cached(
+        out_dir,
+        prediction_date_text,
+        int(st.session_state.get("history_refresh_token", 0)),
+    )
+    quality_json = review_payload.get("quality_summary_json") or {}
+    statuses = extract_quality_review_statuses(quality_json, board_summary)
+
+    render_section_head(
+        "Quality review",
+        "Quality Summary plus Phase 15D-G review and simulation artifacts.",
+    )
+    st.caption(
+        "Read-only UI surface. Artifacts are loaded from outputs/runtime/operator; "
+        "reports are not regenerated here."
+    )
+    _render_review_status_cards(statuses)
+
+    render_section_head("Quality Summary", "Operator-level run health and checks.")
+    _render_text_artifact(
+        "quality_summary text",
+        str(review_payload.get("quality_summary_text") or ""),
+        review_payload.get("quality_summary_text_record"),
+        expanded=True,
+    )
+    if quality_json:
+        with st.expander("quality_summary JSON", expanded=False):
+            st.json(quality_json)
+    else:
+        _render_artifact_notice(
+            "quality_summary JSON",
+            review_payload.get("quality_summary_json_record"),
+        )
+
+    render_section_head(
+        "Phase 15 review layers",
+        "Guard review, outcome validation, policy simulation and attribution.",
+    )
+    phases = review_payload.get("phases") or {}
+    if not phases:
+        render_empty_state("No Phase 15 review artifacts found for this date")
+    for phase_key, phase in phases.items():
+        _render_phase15_review_panel(phase_key, phase)
+
+    records = review_payload.get("records") or []
+    if records:
+        with st.expander("Quality Review artifact load", expanded=False):
+            diag_df = pd.DataFrame(records)
+            keep = [
+                "label",
+                "kind",
+                "exists",
+                "status",
+                "rows",
+                "columns",
+                "bytes",
+                "modified",
+                "path",
+                "error",
+            ]
+            keep = [col for col in keep if col in diag_df.columns]
+            st.dataframe(diag_df[keep], width="stretch", hide_index=True)
+
+
+# =====================================================================
 # Render: Slate (game schedule cards)
 # =====================================================================
 
@@ -1331,6 +1524,7 @@ def main() -> None:
             options=[
                 ("today", "Today's Board"),
                 ("slate", "Slate"),
+                ("review_layers", "Review Layers"),
                 ("history", "History"),
                 ("calibration", "Calibration"),
                 ("run_log", "Run Log"),
@@ -1440,6 +1634,10 @@ def main() -> None:
     titles = {
         "today": ("Today's Board", APP_SUBTITLE),
         "slate": ("Slate", "Tonight's games on the board."),
+        "review_layers": (
+            "Review Layers",
+            "Quality Summary and Phase 15D-G review-only diagnostics.",
+        ),
         "history": ("History", "Prediction, rejection and feedback history."),
         "calibration": ("Calibration", "Hit-rate memory across markets."),
         "run_log": ("Run Log", "Most recent predictions and fits."),
@@ -1457,6 +1655,12 @@ def main() -> None:
         render_today_board(payload)
     elif active_key == "slate":
         render_slate_view(payload)
+    elif active_key == "review_layers":
+        render_quality_review_view(
+            resolved_out_dir_text,
+            prediction_date_text,
+            payload,
+        )
     elif active_key == "history":
         render_history_view(resolved_out_dir_text)
     elif active_key == "calibration":
