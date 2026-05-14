@@ -438,15 +438,23 @@ def build_completion_state_audit(
         warnings,
         label="quality summary",
     )
+    repair_warnings: list[str] = []
     repair_payload, repair_record = _read_json(
         runtime_root_path / "diagnostics" / f"pending_repair_audit_{prediction_date}.json",
-        warnings,
+        repair_warnings,
         label="pending repair audit",
     )
 
     real_counts = _real_pick_counts(pick_history, prediction_date=prediction_date)
     shadow_counts_direct = _pending_breakdown(shadow_history, prediction_date=prediction_date)
     paper_counts_direct = _pending_breakdown(paper_history, prediction_date=prediction_date)
+    pending_rows_need_repair_context = (
+        int(real_counts["real_pick_pending_count"])
+        + int(shadow_counts_direct["pending_count"])
+        + int(paper_counts_direct["pending_count"])
+    ) > 0
+    if pending_rows_need_repair_context:
+        warnings.extend(repair_warnings)
     shadow_counts = _apply_repair_taxonomy(
         shadow_counts_direct,
         _repair_history_summary(repair_payload, "market_shadow_history"),

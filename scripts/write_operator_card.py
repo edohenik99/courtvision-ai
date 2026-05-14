@@ -121,6 +121,8 @@ def _artifact_paths(runtime_root: Path, prediction_date: str) -> dict[str, Path]
         "quality_summary_json": operator / f"quality_summary_{prediction_date}.json",
         "operator_card": operator / f"operator_card_{prediction_date}.txt",
         "board_diagnostics": diagnostics / f"board_diagnostics_{prediction_date}.json",
+        "completion_state_audit_json": diagnostics / f"completion_state_audit_{prediction_date}.json",
+        "completion_state_audit_text": operator / f"completion_state_audit_{prediction_date}.txt",
         "market_shadow_report": operator / f"market_shadow_report_{prediction_date}.txt",
         "market_shadow_grading": diagnostics / f"market_shadow_grading_{prediction_date}.json",
         "high_caution_over_watchlist": operator / f"high_caution_over_watchlist_{prediction_date}.csv",
@@ -347,6 +349,41 @@ def _plural(count: int, singular: str, plural: str | None = None) -> str:
     return plural or f"{singular}s"
 
 
+def _count_or_none(values: Any) -> str:
+    if isinstance(values, list):
+        return "none" if not values else str(len(values))
+    return "none"
+
+
+def _pending_summary(payload: dict[str, Any], prefix: str) -> str:
+    pending = _safe_int(payload.get(f"{prefix}_pending_count"), 0)
+    open_game = _safe_int(payload.get(f"{prefix}_open_game_pending_count"), 0)
+    stale = _safe_int(payload.get(f"{prefix}_stale_pending_count"), 0)
+    details = payload.get("details", {}) if isinstance(payload.get("details"), dict) else {}
+    taxonomy = _safe_text(details.get(f"{prefix}_pending_taxonomy_source")) or "n/a"
+    return f"pending={pending}, open_game_pending={open_game}, stale_pending={stale}, taxonomy_source={taxonomy}"
+
+
+def _completion_state_lines(payload: dict[str, Any], path: Path, prediction_date: str) -> list[str]:
+    lines = ["Completion State Audit", "-" * 40]
+    if not payload:
+        state = "unreadable" if path.exists() else "missing"
+        lines.append(f"- Completion audit: {state}")
+        lines.append(
+            "- recommended action: run scripts/write_completion_state_audit.py "
+            f"--prediction-date {prediction_date}"
+        )
+        return lines
+
+    lines.append(f"- report_agreement_status: {_safe_text(payload.get('report_agreement_status')) or 'UNKNOWN'}")
+    lines.append(f"- real_pick_pending_count: {_safe_int(payload.get('real_pick_pending_count'), 0)}")
+    lines.append(f"- market_shadow_history: {_pending_summary(payload, 'shadow')}")
+    lines.append(f"- paper_kelly_history: {_pending_summary(payload, 'paper')}")
+    lines.append(f"- agreement issue count: {_count_or_none(payload.get('agreement_issues'))}")
+    lines.append(f"- warning count: {_count_or_none(payload.get('warnings'))}")
+    return lines
+
+
 def _example_lines(df: pd.DataFrame, *, limit: int = 3) -> list[str]:
     if df.empty:
         return []
@@ -551,6 +588,7 @@ def build_operator_card(
     kelly_df = _read_csv(paths["kelly_stakes"], warnings)
     quality_payload = _read_json(paths["quality_summary_json"], warnings, required=True)
     board_diagnostics = _read_json(paths["board_diagnostics"], warnings, required=True)
+    completion_state_payload = _read_json(paths["completion_state_audit_json"], warnings)
     market_shadow_payload = _read_json(paths["market_shadow_grading"], warnings)
     injury_payload = _read_json(runtime_root / "diagnostics" / f"injury_context_diagnostics_{prediction_date}.json", warnings)
     game_payload = _read_json(runtime_root / "diagnostics" / f"game_context_{prediction_date}.json", warnings)
@@ -803,6 +841,9 @@ def build_operator_card(
     lines.append(f"- Kelly performance status: {kelly_performance_status}")
     lines.append("")
 
+    lines.extend(_completion_state_lines(completion_state_payload, paths["completion_state_audit_json"], prediction_date))
+    lines.append("")
+
     lines.append("Final Decision")
     lines.append("-" * 40)
     if final_decision == "REVIEW REQUIRED":
@@ -836,6 +877,7 @@ def build_operator_card(
         "same_opponent_warning_count": same_opponent_warning_count,
         "provider_status": provider_status,
         "missing_required": missing_required,
+        "completion_state_audit_status": _safe_text(completion_state_payload.get("report_agreement_status")) if completion_state_payload else "missing",
         "warnings": warnings,
     }
     return card_text, payload

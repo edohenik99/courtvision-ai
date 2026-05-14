@@ -219,6 +219,51 @@ def test_missing_optional_files_do_not_crash(tmp_path: Path) -> None:
     assert payload["warnings"]
 
 
+def test_no_slate_missing_pending_repair_audit_does_not_warn(tmp_path: Path) -> None:
+    prediction_date = "2026-05-14"
+    previous_date = "2026-05-13"
+    history_root = tmp_path / "data" / "history"
+    runtime_root = tmp_path / "outputs" / "runtime"
+    _write_csv(history_root / "pick_history.csv", [_pick_row("Prior Pick", prediction_date=previous_date)])
+    _write_csv(history_root / "market_shadow_history.csv", [_history_row("Prior Shadow", prediction_date=previous_date)])
+    _write_csv(history_root / "paper_kelly_history.csv", [_history_row("Prior Paper", prediction_date=previous_date)])
+    _write_daily_summary(runtime_root, prediction_date, pending=0)
+    _write_quality_summary(runtime_root, prediction_date, elite=0, kelly=0)
+
+    payload = build_completion_state_audit(
+        prediction_date=prediction_date,
+        history_root=history_root,
+        runtime_root=runtime_root,
+    )
+
+    assert payload["real_pick_pending_count"] == 0
+    assert payload["shadow_pending_count"] == 0
+    assert payload["paper_pending_count"] == 0
+    assert payload["repair_audit"]["available"] is False
+    assert payload["warnings"] == []
+
+
+def test_pending_rows_missing_pending_repair_audit_still_warns(tmp_path: Path) -> None:
+    prediction_date = "2026-05-15"
+    history_root = tmp_path / "data" / "history"
+    runtime_root = tmp_path / "outputs" / "runtime"
+    _write_csv(history_root / "pick_history.csv", [_pick_row("Real Pick", prediction_date=prediction_date)])
+    _write_csv(history_root / "market_shadow_history.csv", [_history_row("Pending Shadow", prediction_date=prediction_date)])
+    _write_csv(history_root / "paper_kelly_history.csv", [])
+    _write_daily_summary(runtime_root, prediction_date, pending=0)
+    _write_quality_summary(runtime_root, prediction_date, elite=1, kelly=1)
+
+    payload = build_completion_state_audit(
+        prediction_date=prediction_date,
+        history_root=history_root,
+        runtime_root=runtime_root,
+    )
+
+    assert payload["shadow_pending_count"] == 1
+    assert payload["repair_audit"]["available"] is False
+    assert any("Missing optional pending repair audit" in warning for warning in payload["warnings"])
+
+
 def test_daily_runner_writes_completion_state_audit_after_summaries() -> None:
     ps1 = Path("run_today.ps1").read_text(encoding="utf-8")
     normalized_ps1 = ps1.replace("\\", "/")

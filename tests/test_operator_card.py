@@ -68,6 +68,7 @@ def _quality_payload(
     same_opponent_count: int = 0,
     high_caution_count: int = 0,
     run_health_status: str = "HEALTHY",
+    games_count: int = 1,
 ) -> dict:
     run_health_reason = "fixture"
     if run_health_status == "NO_BET":
@@ -77,7 +78,7 @@ def _quality_payload(
         "run_health_status": run_health_status,
         "run_health_reason": run_health_reason,
         "slate_provider_counts": {
-            "games_count": 1,
+            "games_count": games_count,
             "raw_odds_rows_count": full_market_count,
             "normalized_odds_rows_count": full_market_count,
             "live_odds_count": full_market_count,
@@ -136,6 +137,160 @@ def _seed_history(history_root: Path) -> None:
             {"prediction_date": "2026-05-03", "result_status": "hit"},
         ],
     )
+
+
+def _write_completion_audit_json(
+    runtime_root: Path,
+    prediction_date: str,
+    *,
+    status: str = "COMPLETE_WITH_SHADOW_OPEN_NOISE",
+    shadow_pending: int = 57,
+    shadow_open: int = 57,
+    shadow_stale: int = 0,
+    paper_pending: int = 25,
+    paper_open: int = 25,
+    paper_stale: int = 0,
+    agreement_issues: list[str] | None = None,
+    warnings: list[str] | None = None,
+) -> None:
+    _write_json(
+        runtime_root / "diagnostics" / f"completion_state_audit_{prediction_date}.json",
+        {
+            "report_agreement_status": status,
+            "real_pick_pending_count": 0,
+            "shadow_pending_count": shadow_pending,
+            "shadow_open_game_pending_count": shadow_open,
+            "shadow_stale_pending_count": shadow_stale,
+            "paper_pending_count": paper_pending,
+            "paper_open_game_pending_count": paper_open,
+            "paper_stale_pending_count": paper_stale,
+            "agreement_issues": agreement_issues or [],
+            "warnings": warnings or [],
+            "details": {
+                "shadow_pending_taxonomy_source": "pending_repair_audit",
+                "paper_pending_taxonomy_source": "pending_repair_audit",
+            },
+        },
+    )
+
+
+def test_operator_card_renders_completion_audit_when_json_exists(tmp_path: Path) -> None:
+    prediction_date = "2026-05-13"
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+    operator = runtime_root / "operator"
+    elite_row = _candidate(prediction_date, player_name="Completed Elite")
+
+    _write_csv(operator / f"elite_board_{prediction_date}.csv", [elite_row])
+    _write_csv(operator / f"full_market_board_{prediction_date}.csv", [elite_row])
+    _write_csv(operator / f"sgp_board_{prediction_date}.csv", [], columns=["prediction_date"])
+    _write_csv(operator / f"kelly_stakes_{prediction_date}.csv", [elite_row | {"kelly_eligible": True}])
+    _write_json(
+        operator / f"quality_summary_{prediction_date}.json",
+        _quality_payload(
+            prediction_date,
+            elite_count=1,
+            full_market_count=1,
+            kelly_rows=1,
+            kelly_eligible=1,
+        ),
+    )
+    _seed_required_json(runtime_root, prediction_date)
+    _write_completion_audit_json(runtime_root, prediction_date)
+    _seed_history(history_root)
+
+    output_path, payload = write_operator_card_outputs(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+
+    text = output_path.read_text(encoding="utf-8")
+    assert payload["completion_state_audit_status"] == "COMPLETE_WITH_SHADOW_OPEN_NOISE"
+    assert "Completion State Audit" in text
+    assert "- report_agreement_status: COMPLETE_WITH_SHADOW_OPEN_NOISE" in text
+    assert "- real_pick_pending_count: 0" in text
+    assert (
+        "- market_shadow_history: pending=57, open_game_pending=57, "
+        "stale_pending=0, taxonomy_source=pending_repair_audit"
+    ) in text
+    assert (
+        "- paper_kelly_history: pending=25, open_game_pending=25, "
+        "stale_pending=0, taxonomy_source=pending_repair_audit"
+    ) in text
+    assert "- agreement issue count: none" in text
+    assert "- warning count: none" in text
+
+
+def test_operator_card_handles_missing_completion_audit_json_gracefully(tmp_path: Path) -> None:
+    prediction_date = "2026-05-15"
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+    operator = runtime_root / "operator"
+    elite_row = _candidate(prediction_date, player_name="Missing Audit Elite")
+
+    _write_csv(operator / f"elite_board_{prediction_date}.csv", [elite_row])
+    _write_csv(operator / f"full_market_board_{prediction_date}.csv", [elite_row])
+    _write_csv(operator / f"sgp_board_{prediction_date}.csv", [], columns=["prediction_date"])
+    _write_json(
+        operator / f"quality_summary_{prediction_date}.json",
+        _quality_payload(prediction_date, elite_count=1, full_market_count=1),
+    )
+    _seed_required_json(runtime_root, prediction_date)
+    _seed_history(history_root)
+
+    output_path, payload = write_operator_card_outputs(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+
+    text = output_path.read_text(encoding="utf-8")
+    assert payload["completion_state_audit_status"] == "missing"
+    assert "Completion State Audit" in text
+    assert "- Completion audit: missing" in text
+    assert (
+        "- recommended action: run scripts/write_completion_state_audit.py "
+        "--prediction-date 2026-05-15"
+    ) in text
+
+
+def test_operator_card_no_slate_still_renders_cleanly(tmp_path: Path) -> None:
+    prediction_date = "2026-05-14"
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+    operator = runtime_root / "operator"
+    columns = list(_candidate(prediction_date).keys())
+
+    _write_csv(operator / f"elite_board_{prediction_date}.csv", [], columns=columns)
+    _write_csv(operator / f"full_market_board_{prediction_date}.csv", [], columns=columns)
+    _write_csv(operator / f"sgp_board_{prediction_date}.csv", [], columns=["prediction_date"])
+    _write_json(
+        operator / f"quality_summary_{prediction_date}.json",
+        _quality_payload(
+            prediction_date,
+            elite_count=0,
+            full_market_count=0,
+            run_health_status="NO_BET",
+            games_count=0,
+        ),
+    )
+    _seed_required_json(runtime_root, prediction_date)
+    _seed_history(history_root)
+
+    output_path, payload = write_operator_card_outputs(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+
+    text = output_path.read_text(encoding="utf-8")
+    assert payload["final_decision"] == "NO BET"
+    assert "COURTVISION DAILY CARD - 2026-05-14" in text
+    assert "final_decision: NO BET" in text
+    assert "- games count: 0" in text
+    assert "Top Candidate Preview\n----------------------------------------\nn/a" in text
+    assert "- Completion audit: missing" in text
 
 
 def test_operator_card_empty_elite_shows_no_bet_and_candidate_preview(tmp_path: Path) -> None:
