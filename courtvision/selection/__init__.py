@@ -8,6 +8,7 @@ This package contains:
 
 from .lanes import BoardLane, classify_candidate_lane, classify_candidates_batch
 from .operator_boards import (
+    ACTIVE_OPERATOR_MARKETS,
     assign_candidate_lanes,
     build_operator_boards,
     compute_board_diversity_metrics,
@@ -16,6 +17,7 @@ from .operator_boards import (
 
 __all__ = [
     "BoardLane",
+    "ACTIVE_OPERATOR_MARKETS",
     "classify_candidate_lane",
     "classify_candidates_batch",
     "assign_candidate_lanes",

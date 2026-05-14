@@ -12,6 +12,17 @@ from typing import Any, Callable
 import pandas as pd
 
 
+ACTIVE_OPERATOR_MARKETS = {
+    "player_points",
+    "player_rebounds",
+    "player_assists",
+    "player_points_rebounds",
+    "player_points_assists",
+    "player_rebounds_assists",
+    "player_points_rebounds_assists",
+}
+
+
 def _display_name(row: pd.Series) -> str:
     return str(
         row.get("entity_name")
@@ -43,6 +54,22 @@ def _non_milestone_mask(df: pd.DataFrame) -> pd.Series:
     raw_market_type = df.get("raw_market_type", pd.Series("", index=df.index)).fillna("").astype(str).str.strip().str.lower()
     selection = df.get("selection", pd.Series("", index=df.index)).fillna("").astype(str).str.strip().str.lower()
     return raw_market_type.ne("milestone") & selection.ne("milestone")
+
+
+def _active_operator_market_mask(df: pd.DataFrame) -> pd.Series:
+    if df.empty:
+        return pd.Series(dtype=bool)
+    if "market_type" not in df.columns:
+        return pd.Series(False, index=df.index)
+    markets = df["market_type"].fillna("").astype(str).str.strip().str.lower()
+    return markets.isin(ACTIVE_OPERATOR_MARKETS)
+
+
+def _market_counts(df: pd.DataFrame) -> dict[str, int]:
+    if df.empty or "market_type" not in df.columns:
+        return {}
+    markets = df["market_type"].fillna("").astype(str).str.strip().str.lower()
+    return {str(key): int(value) for key, value in markets.value_counts().sort_index().items()}
 
 
 def compute_board_diversity_metrics(board_df: pd.DataFrame) -> dict[str, Any]:
@@ -253,8 +280,18 @@ def build_operator_boards(
             "selection_rejection_reason",
         ] = "unsupported_milestone_market"
 
-    live_candidates_df = prepared_df[unified_live_mask & ~milestone_mask].copy()
+    active_market_mask = _active_operator_market_mask(prepared_df)
+    unsupported_active_market_mask = ~active_market_mask
+    if unsupported_active_market_mask.any():
+        prepared_df.loc[
+            prepared_df["selection_rejection_reason"].eq("") & unsupported_active_market_mask,
+            "selection_rejection_reason",
+        ] = "unsupported_active_operator_market"
+
+    live_candidates_df = prepared_df[unified_live_mask & ~milestone_mask & active_market_mask].copy()
     unsupported_milestone_count = int(milestone_mask.sum())
+    unsupported_active_market_count = int(unsupported_active_market_mask.sum())
+    unsupported_active_market_counts = _market_counts(prepared_df[unsupported_active_market_mask].copy())
 
     final_board_construction: dict[str, Any] = {"elite": {}, "full_market": {}}
     final_board_construction["required_selector_columns"] = required_selector_diagnostics
@@ -262,6 +299,8 @@ def build_operator_boards(
     final_board_construction["elite"]["input_count"] = len(prepared_df)
     final_board_construction["elite"]["post_live_market_gate_count"] = len(live_candidates_df)
     final_board_construction["elite"]["unsupported_milestone_count"] = unsupported_milestone_count
+    final_board_construction["elite"]["unsupported_active_operator_market_count"] = unsupported_active_market_count
+    final_board_construction["elite"]["unsupported_active_operator_market_counts"] = unsupported_active_market_counts
     final_board_construction["elite"]["diagnostic_live_flag_count"] = int(diagnostic_live_mask.sum())
     final_board_construction["elite"]["qualification_reason_missing_count"] = int(
         qualification_reason_series.fillna("").astype(str).str.strip().eq("").sum()
@@ -270,6 +309,8 @@ def build_operator_boards(
     final_board_construction["full_market"]["input_count"] = len(prepared_df)
     final_board_construction["full_market"]["post_live_market_gate_count"] = len(live_candidates_df)
     final_board_construction["full_market"]["unsupported_milestone_count"] = unsupported_milestone_count
+    final_board_construction["full_market"]["unsupported_active_operator_market_count"] = unsupported_active_market_count
+    final_board_construction["full_market"]["unsupported_active_operator_market_counts"] = unsupported_active_market_counts
     final_board_construction["full_market"]["diagnostic_live_flag_count"] = int(diagnostic_live_mask.sum())
 
     elite_df = select_elite_board(live_candidates_df)

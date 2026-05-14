@@ -640,6 +640,84 @@ class TestPredictionPipeline:
         assert payload["full_market_by_market_type"]["player_points_rebounds"]["count"] == 1
         assert payload["rejection_count_by_market_type_reason"]["player_rebounds"]["market_gate_minutes_lt_24"] == 1
 
+    def test_active_operator_market_filter_blocks_steals_and_blocks_from_outputs(self, tmp_path):
+        from datetime import datetime, timedelta
+
+        out_dir = tmp_path / "outputs"
+        config = PredictionConfig(prediction_date="2024-01-15", out_dir=str(out_dir))
+        pipeline = PredictionPipeline(config)
+        future_game_datetime = (datetime.now() + timedelta(hours=2)).isoformat()
+        fresh_time = (datetime.now() - timedelta(minutes=5)).isoformat()
+        games = pd.DataFrame([{
+            "game_id": 1,
+            "home_team_abbr": "LAL",
+            "visitor_team_abbr": "BOS",
+            "game_status": "scheduled",
+            "game_date": future_game_datetime,
+            "datetime": future_game_datetime,
+        }])
+        odds = pd.DataFrame([
+            {
+                "game_id": 1,
+                "player_id": 123,
+                "player_name": "Active Filter Player",
+                "market_type": "player_points",
+                "line": 20.5,
+                "odds": -110,
+                "selection": "over",
+                "is_live": True,
+                "updated_at": fresh_time,
+            },
+            {
+                "game_id": 1,
+                "player_id": 123,
+                "player_name": "Active Filter Player",
+                "market_type": "player_blocks",
+                "line": 0.5,
+                "odds": -110,
+                "selection": "over",
+                "is_live": True,
+                "updated_at": fresh_time,
+            },
+            {
+                "game_id": 1,
+                "player_id": 123,
+                "player_name": "Active Filter Player",
+                "market_type": "player_steals",
+                "line": 0.5,
+                "odds": -110,
+                "selection": "over",
+                "is_live": True,
+                "updated_at": fresh_time,
+            },
+        ])
+        baselines = pd.DataFrame([{
+            "player_name": "Active Filter Player",
+            "team_abbr": "LAL",
+            "player_id": 123,
+            "pts_avg": 25.0,
+            "reb_avg": 5.0,
+            "ast_avg": 5.0,
+            "blk_avg": 2.0,
+            "stl_avg": 2.0,
+            "min_avg": 35.0,
+        }])
+
+        result = pipeline.run(games, odds, baselines)
+
+        full_market_types = set(result.full_market_props["market_type"])
+        elite_types = set(result.elite_props["market_type"]) if not result.elite_props.empty else set()
+        assert "player_points" in full_market_types
+        assert "player_blocks" not in full_market_types
+        assert "player_steals" not in full_market_types
+        assert "player_blocks" not in elite_types
+        assert "player_steals" not in elite_types
+        assert result.summary["unsupported_active_operator_market_count"] == 2
+        assert result.summary["unsupported_active_operator_market_counts"] == {
+            "player_blocks": 1,
+            "player_steals": 1,
+        }
+
     def test_market_shadow_grading_summarizes_full_market_by_market(self):
         runtime_root = Path("test_outputs") / "market_shadow_runtime"
         history_root = Path("test_outputs") / "market_shadow_history"

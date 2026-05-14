@@ -28,7 +28,7 @@ from courtvision.runtime_audit import (
 )
 from courtvision.scoring import CandidateScoringPolicy
 from courtvision.config import EliteThresholds, DEFAULT_BANKROLL
-from courtvision.selection import build_operator_boards
+from courtvision.selection import ACTIVE_OPERATOR_MARKETS, build_operator_boards
 from courtvision.betting.kelly import compute_kelly_fraction
 from courtvision.selection.operator_boards import assign_candidate_lanes
 from courtvision.projection.recalibration import (
@@ -679,6 +679,14 @@ class PredictionPipeline:
 
         selection_trace.setdefault("elite", {}).update(selection_stage_trace["elite"])
         selection_trace.setdefault("full_market", {}).update(selection_stage_trace["full_market"])
+        unsupported_active_market_count = int(
+            selection_trace.get("full_market", {}).get("unsupported_active_operator_market_count", 0) or 0
+        )
+        unsupported_active_market_counts = (
+            selection_trace.get("full_market", {}).get("unsupported_active_operator_market_counts", {}) or {}
+        )
+        print(f"[COUNT] unsupported_active_operator_market_count={unsupported_active_market_count}", flush=True)
+        print(f"[COUNT] unsupported_active_operator_market_counts={unsupported_active_market_counts}", flush=True)
         self.logger.info("board_selection_trace %s", selection_trace)
         if selection_trace.get("selection_rejection_reasons"):
             self.logger.info(
@@ -749,6 +757,9 @@ class PredictionPipeline:
             selected_df=elite_df,  # Elite is the selected props
             injury_context=injury_context,
         )
+        result.summary["active_operator_markets"] = sorted(ACTIVE_OPERATOR_MARKETS)
+        result.summary["unsupported_active_operator_market_count"] = unsupported_active_market_count
+        result.summary["unsupported_active_operator_market_counts"] = unsupported_active_market_counts
 
         # Set summary on telemetry BEFORE writing audit files
         elite_telemetry.set_summary(result.summary)

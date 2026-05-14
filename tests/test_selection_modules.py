@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from courtvision.selection import (
+    ACTIVE_OPERATOR_MARKETS,
     assign_candidate_lanes,
     build_operator_boards,
     classify_candidate_lane,
@@ -222,6 +223,78 @@ def test_milestone_market_excluded_from_betting_boards():
     assert full_market_df.iloc[0]["raw_market_type"] == "over_under"
     assert traces["elite"]["unsupported_milestone_count"] == 1
     assert traces["full_market"]["unsupported_milestone_count"] == 1
+
+
+def test_unsupported_active_operator_markets_excluded_from_boards():
+    candidates = pd.DataFrame([
+        {
+            "market_type": "player_points",
+            "entity_name": "Supported Points",
+            "qualification_reason": "live_market_qualified",
+            "is_live_market": True,
+            "synthetic_line": False,
+            "line_source": "live_market",
+            "selection_score": 0.90,
+            "quality_score": 0.85,
+        },
+        {
+            "market_type": "player_points_assists",
+            "entity_name": "Supported Combo",
+            "qualification_reason": "live_market_qualified",
+            "is_live_market": True,
+            "synthetic_line": False,
+            "line_source": "live_market",
+            "selection_score": 0.88,
+            "quality_score": 0.82,
+        },
+        {
+            "market_type": "player_blocks",
+            "entity_name": "Unsupported Blocks",
+            "qualification_reason": "live_market_qualified",
+            "is_live_market": True,
+            "synthetic_line": False,
+            "line_source": "live_market",
+            "selection_score": 0.99,
+            "quality_score": 0.99,
+        },
+        {
+            "market_type": "player_steals",
+            "entity_name": "Unsupported Steals",
+            "qualification_reason": "live_market_qualified",
+            "is_live_market": True,
+            "synthetic_line": False,
+            "line_source": "live_market",
+            "selection_score": 0.98,
+            "quality_score": 0.98,
+        },
+    ])
+
+    def mock_elite_select(df):
+        return df.copy()
+
+    def mock_top_per_market(df, limit):
+        return df.copy()
+
+    elite_df, full_market_df, traces = build_operator_boards(
+        candidates,
+        select_elite_board=mock_elite_select,
+        select_top_per_market=mock_top_per_market,
+    )
+
+    assert set(elite_df["market_type"]) == {"player_points", "player_points_assists"}
+    assert set(full_market_df["market_type"]) == {"player_points", "player_points_assists"}
+    assert set(elite_df["market_type"]).issubset(ACTIVE_OPERATOR_MARKETS)
+    assert set(full_market_df["market_type"]).issubset(ACTIVE_OPERATOR_MARKETS)
+    assert traces["elite"]["unsupported_active_operator_market_count"] == 2
+    assert traces["full_market"]["unsupported_active_operator_market_count"] == 2
+    assert traces["full_market"]["unsupported_active_operator_market_counts"] == {
+        "player_blocks": 1,
+        "player_steals": 1,
+    }
+    assert {
+        row["reason"]: row["count"]
+        for row in traces["selection_rejection_reasons"]
+    }["unsupported_active_operator_market"] == 2
 
 
 def test_assign_candidate_lanes_summary():

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from courtvision.selection import build_operator_boards
 from scripts.audit_full_market_sanity import (
     STATUS_FAIL_DUPLICATES,
     STATUS_FAIL_MISSING_FULL_MARKET,
@@ -189,6 +190,56 @@ def test_unsupported_blocks_and_steals_markets_fail(tmp_path: Path) -> None:
     assert payload["status"] == STATUS_FAIL_UNSUPPORTED_MARKET
     assert "unsupported_market_type" in _issue_codes(payload)
     assert payload["failure_count"] == 1
+
+
+def test_audit_passes_for_board_after_active_operator_market_filter(tmp_path: Path) -> None:
+    prediction_date = "2026-05-14"
+    runtime_root = tmp_path / "runtime"
+    candidates = pd.DataFrame(
+        [
+            _candidate(prediction_date, player_name="Supported Points", market_type="player_points", line=12.5),
+            _candidate(
+                prediction_date,
+                player_name="Supported Combo",
+                market_type="player_points_assists",
+                line=28.5,
+                model_projection=31.0,
+            ),
+            _candidate(prediction_date, player_name="Unsupported Blocks", market_type="player_blocks", line=1.5),
+            _candidate(prediction_date, player_name="Unsupported Steals", market_type="player_steals", line=1.5),
+        ]
+    )
+    candidates["qualification_reason"] = "live_market_qualified"
+    candidates["is_live_market"] = True
+    candidates["synthetic_line"] = False
+    candidates["line_source"] = "live_market"
+    candidates["source_lane"] = "live_market_candidate"
+    candidates["selection_score"] = [0.9, 0.85, 0.99, 0.98]
+
+    elite_df, full_market_df, traces = build_operator_boards(
+        candidates,
+        select_elite_board=lambda df: df.copy(),
+        select_top_per_market=lambda df, _limit: df.copy(),
+    )
+    operator = runtime_root / "operator"
+    diagnostics = runtime_root / "diagnostics"
+    _write_csv(operator / f"full_market_board_{prediction_date}.csv", full_market_df.to_dict("records"))
+    _write_csv(operator / f"elite_board_{prediction_date}.csv", elite_df.to_dict("records"))
+    _write_json(diagnostics / f"board_diagnostics_{prediction_date}.json", {"selection_trace": traces})
+
+    payload = build_full_market_sanity_audit(prediction_date=prediction_date, runtime_root=runtime_root)
+
+    assert payload["status"] == STATUS_PASS
+    assert payload["total_rows"] == 2
+    assert payload["market_breakdown"] == {
+        "player_points": 1,
+        "player_points_assists": 1,
+    }
+    assert "unsupported_market_type" not in _issue_codes(payload)
+    assert traces["full_market"]["unsupported_active_operator_market_counts"] == {
+        "player_blocks": 1,
+        "player_steals": 1,
+    }
 
 
 def test_suspicious_assists_line_warns(tmp_path: Path) -> None:
