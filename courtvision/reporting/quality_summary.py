@@ -120,6 +120,7 @@ from courtvision.reporting.low_line_over_minutes_guard_missed_winner_attribution
     low_line_over_minutes_guard_missed_winner_attribution_txt_path_for_date,
     write_low_line_over_minutes_guard_missed_winner_attribution,
 )
+from courtvision.reporting.completion_state_audit import write_completion_state_audit
 
 ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER = "elite_reject_context_high_caution_over"
 CONTEXT_CONFLICT_CAUSE_BUCKETS: tuple[str, ...] = (
@@ -3338,6 +3339,48 @@ def write_quality_summary_outputs(
     ]
     with open(text_path, "a", encoding="utf-8") as _lloma_fh:
         _lloma_fh.write("".join(_lloma_lines))
+
+    # Phase 16A: completion state audit (read-only)
+    try:
+        _completion_txt, _completion_json, _completion_payload = write_completion_state_audit(
+            prediction_date=prediction_date,
+            runtime_root=runtime_root,
+            history_root=history_root,
+        )
+        payload["completion_state_audit"] = {
+            "json_path": str(_completion_json),
+            "txt_path": str(_completion_txt),
+            "report_agreement_status": _completion_payload.get("report_agreement_status"),
+            "real_pick_pending_count": _completion_payload.get("real_pick_pending_count", 0),
+            "shadow_open_game_pending_count": _completion_payload.get("shadow_open_game_pending_count", 0),
+            "shadow_stale_pending_count": _completion_payload.get("shadow_stale_pending_count", 0),
+            "paper_open_game_pending_count": _completion_payload.get("paper_open_game_pending_count", 0),
+            "paper_stale_pending_count": _completion_payload.get("paper_stale_pending_count", 0),
+            "note": "audit_only_no_prediction_grading_kelly_selection_suppression_or_history_change",
+        }
+        _completion_lines = [
+            "\n\n",
+            "-" * 78 + "\n",
+            "COMPLETION STATE AUDIT (Phase 16A -- READ ONLY)\n",
+            "-" * 78 + "\n",
+            f"  report_agreement_status      : {_completion_payload.get('report_agreement_status')}\n",
+            f"  real_pick_pending_count      : {_completion_payload.get('real_pick_pending_count', 0)}\n",
+            f"  shadow_open_game_pending     : {_completion_payload.get('shadow_open_game_pending_count', 0)}\n",
+            f"  shadow_stale_pending         : {_completion_payload.get('shadow_stale_pending_count', 0)}\n",
+            f"  paper_open_game_pending      : {_completion_payload.get('paper_open_game_pending_count', 0)}\n",
+            f"  paper_stale_pending          : {_completion_payload.get('paper_stale_pending_count', 0)}\n",
+            f"  json_artifact                : {_completion_json}\n",
+            f"  txt_artifact                 : {_completion_txt}\n",
+            "  NOTE: READ ONLY; no prediction/grading/Kelly/selection/suppression/history changes.\n",
+            "-" * 78 + "\n",
+        ]
+        with open(text_path, "a", encoding="utf-8") as _completion_fh:
+            _completion_fh.write("".join(_completion_lines))
+    except Exception as _completion_err:
+        payload["completion_state_audit"] = {
+            "error": str(_completion_err),
+            "note": "audit_only_no_prediction_grading_kelly_selection_suppression_or_history_change",
+        }
 
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     update_quality_history_from_summary(
