@@ -41,6 +41,7 @@ $GradeCompletedScript = Join-Path $ScriptRoot "scripts\grade_completed_picks.py"
 $MarketShadowScript = Join-Path $ScriptRoot "scripts\market_shadow_grading.py"
 $DailySummaryScript = Join-Path $ScriptRoot "scripts\write_daily_summary.py"
 $QualitySummaryScript = Join-Path $ScriptRoot "scripts\write_quality_summary.py"
+$CompletionStateAuditScript = Join-Path $ScriptRoot "scripts\write_completion_state_audit.py"
 $OperatorCardScript = Join-Path $ScriptRoot "scripts\write_operator_card.py"
 
 # Bankroll override: read $env:COURTVISION_BANKROLL when set, else default.
@@ -216,6 +217,8 @@ $fullMarketOperatorCsv = Join-Path $operatorDir "full_market_board_$Date.csv"
 $statOnlyOperatorCsv = Join-Path $operatorDir "stat_only_board_$Date.csv"
 $operatorCardPath = Join-Path $operatorDir "operator_card_$Date.txt"
 $kellyOutputCsv = Join-Path $operatorDir "kelly_stakes_$Date.csv"
+$completionAuditTextPath = Join-Path $operatorDir "completion_state_audit_$Date.txt"
+$completionAuditJsonPath = "outputs\runtime\diagnostics\completion_state_audit_$Date.json"
 
 Write-Host ""
 Write-Host "[START] Validate Outputs" -ForegroundColor Yellow
@@ -373,6 +376,29 @@ $qualitySummaryExitCode = Invoke-LoggedCommand `
     -StreamToConsole:$VerboseMode
 if ($qualitySummaryExitCode -ne 0) {
     Stop-StageFailure -Stage "Daily + Quality Summaries" -ExitCode $qualitySummaryExitCode -LogPath $GradeLog
+}
+
+Write-Host "[STEP] Writing completion state audit" -ForegroundColor Yellow
+if (-not (Test-Path $CompletionStateAuditScript)) {
+    Write-LogLine -Path $GradeLog -Message "[ERROR] Completion state audit script not found: $CompletionStateAuditScript" -AlsoConsole:$VerboseMode
+    Stop-StageFailure -Stage "Completion State Audit" -ExitCode 1 -LogPath $GradeLog
+}
+"`n--- Completion state audit ---" | Out-File $GradeLog -Append
+$completionAuditExitCode = Invoke-LoggedCommand `
+    -LogPath $GradeLog `
+    -Exe $PyExe `
+    -Arguments ($PyArgsPrefix + @($CompletionStateAuditScript, "--prediction-date", $Date)) `
+    -StreamToConsole:$VerboseMode
+if ($completionAuditExitCode -ne 0) {
+    Stop-StageFailure -Stage "Completion State Audit" -ExitCode $completionAuditExitCode -LogPath $GradeLog
+}
+if (-not (Test-Path $completionAuditTextPath)) {
+    Write-LogLine -Path $GradeLog -Message "[ERROR] Completion state audit text output not found: $completionAuditTextPath" -AlsoConsole:$VerboseMode
+    Stop-StageFailure -Stage "Completion State Audit" -ExitCode 1 -LogPath $GradeLog
+}
+if (-not (Test-Path $completionAuditJsonPath)) {
+    Write-LogLine -Path $GradeLog -Message "[ERROR] Completion state audit JSON output not found: $completionAuditJsonPath" -AlsoConsole:$VerboseMode
+    Stop-StageFailure -Stage "Completion State Audit" -ExitCode 1 -LogPath $GradeLog
 }
 Write-Host "[OK] Summaries written." -ForegroundColor Green
 

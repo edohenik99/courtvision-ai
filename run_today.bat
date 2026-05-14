@@ -1,6 +1,7 @@
 @echo off
 REM Run today's slate with validation
 REM Delegates to run_today.ps1 for full validation
+REM run_today.ps1 writes the completion_state_audit artifacts after summaries
 
 cd /d "%~dp0"
 

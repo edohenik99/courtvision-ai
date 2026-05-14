@@ -217,3 +217,22 @@ def test_missing_optional_files_do_not_crash(tmp_path: Path) -> None:
     assert payload["report_agreement_status"] == STATUS_COMPLETE
     assert payload["real_pick_rows"] == 0
     assert payload["warnings"]
+
+
+def test_daily_runner_writes_completion_state_audit_after_summaries() -> None:
+    ps1 = Path("run_today.ps1").read_text(encoding="utf-8")
+    normalized_ps1 = ps1.replace("\\", "/")
+
+    assert "scripts/write_completion_state_audit.py" in normalized_ps1
+    assert "[STEP] Writing completion state audit" in ps1
+    assert "completion_state_audit_$Date.txt" in ps1
+    assert "completion_state_audit_$Date.json" in ps1
+
+    daily_idx = ps1.index("$dailySummaryExitCode = Invoke-LoggedCommand")
+    quality_idx = ps1.index("$qualitySummaryExitCode = Invoke-LoggedCommand")
+    audit_idx = ps1.index("$completionAuditExitCode = Invoke-LoggedCommand")
+    assert daily_idx < quality_idx < audit_idx
+
+    bat = Path("run_today.bat").read_text(encoding="utf-8")
+    assert "run_today.ps1" in bat
+    assert "completion_state_audit" in bat
