@@ -25,6 +25,7 @@ Schema: market_shadow_history.csv (375 graded rows confirmed available):
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -80,6 +81,36 @@ _RISK_THRESHOLDS = [
 def _safe_mean(s: pd.Series) -> float | None:
     v = pd.to_numeric(s, errors="coerce").dropna()
     return round(float(v.mean()), 4) if not v.empty else None
+
+
+def _safe_correlation(left: pd.Series, right: pd.Series) -> float | None:
+    pairs = pd.concat(
+        [
+            pd.to_numeric(left, errors="coerce").rename("left"),
+            pd.to_numeric(right, errors="coerce").rename("right"),
+        ],
+        axis=1,
+    ).dropna()
+    if len(pairs) < 2:
+        return None
+    finite = pairs.apply(lambda col: col.map(math.isfinite))
+    if not bool(finite.all().all()):
+        return None
+    left_values = pairs["left"]
+    right_values = pairs["right"]
+    left_std = float(left_values.std(ddof=0))
+    right_std = float(right_values.std(ddof=0))
+    if not math.isfinite(left_std) or not math.isfinite(right_std):
+        return None
+    if left_std == 0.0 or right_std == 0.0:
+        return None
+    corr = left_values.corr(right_values)
+    if corr is None:
+        return None
+    corr_value = float(corr)
+    if not math.isfinite(corr_value):
+        return None
+    return round(corr_value, 4)
 
 
 def _hit_rate(df: pd.DataFrame) -> float | None:
@@ -308,9 +339,16 @@ def _edge_error_correlation(df: pd.DataFrame) -> dict[str, Any]:
     e_vals  = edge_n[valid]
     er_vals = errors[valid]
 
-    pearson = round(float(e_vals.corr(er_vals)), 4)
+    pearson = _safe_correlation(e_vals, er_vals)
     hit_bin = df.loc[valid, "result_status"].astype(str).str.lower().map({"hit": 1, "miss": 0})
-    edge_hit_corr = round(float(e_vals.corr(hit_bin)), 4) if hit_bin.notna().sum() >= 10 else None
+    edge_hit_corr = _safe_correlation(e_vals, hit_bin) if hit_bin.notna().sum() >= 10 else None
+    if pearson is None:
+        return {
+            "status": "insufficient_data",
+            "n": n_valid,
+            "pearson_edge_vs_projection_error": None,
+            "pearson_edge_vs_hit_rate": edge_hit_corr,
+        }
 
     # Monotonicity: does hit_rate decrease as edge increases?
     buckets = _edge_bucket_analysis(df)

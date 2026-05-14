@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 from pathlib import Path
 
 import pandas as pd
@@ -488,12 +489,17 @@ def test_quality_summary_reports_no_actionable_signal_when_only_actual_value_dif
     (diagnostics / f"board_diagnostics_{prediction_date}.json").write_text("{}", encoding="utf-8")
     (operator / f"elite_pipeline_audit_summary_{prediction_date}.json").write_text("{}", encoding="utf-8")
 
-    text_path, _json_path, payload = write_quality_summary_outputs(
-        prediction_date=prediction_date,
-        runtime_root=runtime_root,
-        out_dir=tmp_path,
-        history_root=history_root,
-    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", RuntimeWarning)
+        text_path, _json_path, payload = write_quality_summary_outputs(
+            prediction_date=prediction_date,
+            runtime_root=runtime_root,
+            out_dir=tmp_path,
+            history_root=history_root,
+        )
+
+    runtime_warnings = [warning for warning in caught if issubclass(warning.category, RuntimeWarning)]
+    assert runtime_warnings == []
 
     attribution = payload["low_line_over_minutes_guard_missed_winner_attribution"]
     assert attribution["top_generalized_winner_signal"] == "no_generalized_pre_pick_signal"
