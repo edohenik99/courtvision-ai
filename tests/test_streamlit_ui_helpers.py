@@ -1,4 +1,6 @@
 from courtvision.streamlit_ui_helpers import (
+    completion_audit_raw_details_visible,
+    completion_status_display,
     dataframe_height,
     env_flag_enabled,
     mutation_actions_enabled,
@@ -31,6 +33,27 @@ def test_raw_diagnostics_hidden_in_demo_mode() -> None:
 def test_raw_review_artifacts_hidden_in_demo_mode() -> None:
     assert not raw_review_artifacts_visible(True)
     assert raw_review_artifacts_visible(False)
+
+
+def test_completion_status_display_maps_operator_states() -> None:
+    assert completion_status_display("COMPLETE") == {
+        "status": "COMPLETE",
+        "label": "Complete",
+        "state": "success",
+    }
+    assert completion_status_display("COMPLETE_WITH_SHADOW_OPEN_NOISE") == {
+        "status": "COMPLETE_WITH_SHADOW_OPEN_NOISE",
+        "label": "Complete with shadow open noise",
+        "state": "info",
+    }
+    assert completion_status_display("PARTIAL")["state"] == "warning"
+    assert completion_status_display("STALE_PENDING_RISK")["state"] == "danger"
+    assert completion_status_display("INCONSISTENT_REPORTING")["state"] == "danger"
+
+
+def test_completion_raw_audit_details_hidden_in_demo_mode() -> None:
+    assert not completion_audit_raw_details_visible(True)
+    assert completion_audit_raw_details_visible(False)
 
 
 def test_dataframe_height_is_compact_and_bounded() -> None:

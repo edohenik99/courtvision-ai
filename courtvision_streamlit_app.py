@@ -48,6 +48,7 @@ from courtvision.streamlit_review_artifacts import (  # noqa: E402
     load_quality_review_artifacts,
 )
 from courtvision.streamlit_ui_helpers import (  # noqa: E402
+    completion_audit_raw_details_visible,
     dataframe_height as ui_dataframe_height,
     env_flag_enabled,
     mutation_actions_enabled,
@@ -1492,6 +1493,99 @@ def render_diagnostics_overview(
     )
 
 
+def _completion_real_pick_message(summary: dict[str, Any]) -> str:
+    real_rows = _safe_int(summary.get("real_pick_rows"))
+    real_pending = _safe_int(summary.get("real_pick_pending_count"))
+    real_graded = _safe_int(summary.get("real_pick_graded_count"))
+    if real_rows > 0 and real_pending == 0 and real_graded >= real_rows:
+        return "Real picks are fully graded."
+    if real_pending > 0:
+        return f"{real_pending} real pick(s) still pending."
+    if real_rows == 0:
+        return "No real pick rows were found for this date."
+    return "No real picks are pending."
+
+
+def _render_completion_state_card(review_payload: dict[str, Any] | None) -> None:
+    review_payload = review_payload or {}
+    summary = review_payload.get("completion_state_summary") or {}
+    available = bool(summary.get("available"))
+    state = str(summary.get("status_state") or ("warning" if not available else "neutral"))
+    status = str(summary.get("status") or "not_available")
+    status_label = str(summary.get("status_label") or status)
+    if not available:
+        notice = str(summary.get("notice") or "Completion audit not found for this date.")
+        st.markdown(
+            f'<div class="cv-completion-card" data-state="warning">'
+            f'<div class="cv-completion-top"><span>Completion State</span>'
+            f'<span class="cv-badge">NOTICE</span></div>'
+            f'<div class="cv-completion-status">{html.escape(notice)}</div>'
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        return
+
+    metrics = [
+        ("Real pick rows", summary.get("real_pick_rows", 0)),
+        ("Real pending", summary.get("real_pick_pending_count", 0)),
+        ("Real graded", summary.get("real_pick_graded_count", 0)),
+        ("Shadow pending", summary.get("shadow_pending_count", 0)),
+        ("Paper pending", summary.get("paper_pending_count", 0)),
+        ("Agreement issues", summary.get("agreement_issues_count", 0)),
+        ("Warnings", summary.get("warnings_count", 0)),
+    ]
+    metric_html = "".join(
+        '<div class="cv-completion-metric">'
+        f'<span>{html.escape(label)}</span>'
+        f'<strong>{html.escape(str(value))}</strong>'
+        "</div>"
+        for label, value in metrics
+    )
+    real_message = _completion_real_pick_message(summary)
+    interpretation = str(summary.get("interpretation") or "")
+    if interpretation.lower().startswith(real_message.lower()):
+        body_text = interpretation
+    else:
+        body_text = real_message if not interpretation else f"{real_message} {interpretation}"
+    st.markdown(
+        f'<div class="cv-completion-card" data-state="{html.escape(state)}">'
+        f'<div class="cv-completion-top"><span>Completion State</span>'
+        f'<span class="cv-badge" data-state="{html.escape(state)}">{html.escape(status_label)}</span></div>'
+        f'<div class="cv-completion-status">{html.escape(status)}</div>'
+        f'<div class="cv-completion-note">{html.escape(body_text)}</div>'
+        f'<div class="cv-completion-metrics">{metric_html}</div>'
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_completion_state_raw(review_payload: dict[str, Any] | None) -> None:
+    if not completion_audit_raw_details_visible(VIEW_ONLY_DEMO_MODE):
+        return
+    review_payload = review_payload or {}
+    completion_json = review_payload.get("completion_state_audit_json") or {}
+    completion_text = str(review_payload.get("completion_state_audit_text") or "")
+    json_record = review_payload.get("completion_state_audit_json_record") or {}
+    text_record = review_payload.get("completion_state_audit_text_record") or {}
+    with st.expander("Completion audit raw JSON/text", expanded=False):
+        if completion_json:
+            st.markdown("##### completion_state_audit JSON")
+            st.json(completion_json)
+            path = str(json_record.get("path") or "")
+            if path:
+                st.caption(path)
+        else:
+            st.caption("Completion audit JSON is not available for this date.")
+        if completion_text:
+            st.markdown("##### completion_state_audit text")
+            st.code(completion_text, language="text")
+            path = str(text_record.get("path") or "")
+            if path:
+                st.caption(path)
+        else:
+            st.caption("Completion audit text is not available for this date.")
+
+
 def render_today_board(
     payload: dict[str, Any] | None = None,
     out_dir: str | None = None,
@@ -1521,6 +1615,7 @@ def render_today_board(
     summary = payload.get("summary", {}) or {}
     daily_summary_text = payload.get("daily_summary_text", "")
     quality_json: dict[str, Any] = {}
+    review_payload: dict[str, Any] = {}
     if out_dir and prediction_date_text:
         review_payload = load_quality_review_artifacts_cached(
             out_dir,
@@ -1535,6 +1630,8 @@ def render_today_board(
         prediction_date_text or str(summary.get("prediction_date") or ""),
         daily_summary_text,
     )
+    _render_completion_state_card(review_payload)
+    _render_completion_state_raw(review_payload)
 
     # Featured pick
     featured = safe_pick_featured(elite_df)
@@ -1817,6 +1914,13 @@ def render_quality_review_view(
     )
     _render_review_status_cards(statuses)
     _render_phase15_verdict_cards(statuses)
+
+    render_section_head(
+        "Completion State",
+        "Read-only completion audit across real picks, shadow history, paper Kelly, and summaries.",
+    )
+    _render_completion_state_card(review_payload)
+    _render_completion_state_raw(review_payload)
 
     render_section_head("Quality Summary", "Operator-level run health and checks.")
     if raw_review_artifacts_visible(VIEW_ONLY_DEMO_MODE):

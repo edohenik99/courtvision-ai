@@ -1063,6 +1063,99 @@ pre {
   background: rgba(138,149,166,0.06);
 }
 
+.cv-badge[data-state="success"] {
+  border-color: rgba(45,190,124,0.34);
+  color: var(--edge-green);
+  background: rgba(45,190,124,0.08);
+}
+
+.cv-badge[data-state="warning"] {
+  border-color: rgba(230,184,80,0.34);
+  color: var(--tier-gold);
+  background: rgba(230,184,80,0.08);
+}
+
+.cv-badge[data-state="danger"] {
+  border-color: rgba(229,72,77,0.34);
+  color: var(--edge-red);
+  background: rgba(229,72,77,0.08);
+}
+
+.cv-completion-card {
+  padding: 15px;
+  margin: 12px 0 18px;
+  border: 1px solid rgba(74,86,104,0.38);
+  border-radius: 8px;
+  background: rgba(17,22,29,0.92);
+}
+
+.cv-completion-card[data-state="success"] { border-color: rgba(45,190,124,0.34); }
+.cv-completion-card[data-state="info"] { border-color: rgba(59,130,246,0.36); }
+.cv-completion-card[data-state="warning"] { border-color: rgba(230,184,80,0.36); }
+.cv-completion-card[data-state="danger"] { border-color: rgba(229,72,77,0.36); }
+
+.cv-completion-top {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-6);
+}
+
+.cv-completion-status {
+  margin-top: 10px;
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.2;
+  color: var(--ink-7);
+  overflow-wrap: anywhere;
+}
+
+.cv-completion-note {
+  margin-top: 6px;
+  max-width: 980px;
+  font-family: var(--font-body);
+  color: var(--ink-6);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.cv-completion-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  gap: 8px;
+  margin-top: 13px;
+}
+
+.cv-completion-metric {
+  padding: 10px 11px;
+  border-radius: 8px;
+  border: 1px solid rgba(74,86,104,0.26);
+  background: rgba(11,15,20,0.34);
+}
+
+.cv-completion-metric span {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-6);
+}
+
+.cv-completion-metric strong {
+  display: block;
+  margin-top: 5px;
+  font-family: var(--font-display);
+  font-size: 20px;
+  color: var(--ink-7);
+}
+
 .cv-artifact-notice {
   padding: 13px 14px;
   border-radius: 8px;

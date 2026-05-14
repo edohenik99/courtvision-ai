@@ -14,6 +14,8 @@ from typing import Any
 
 import pandas as pd
 
+from courtvision.streamlit_ui_helpers import completion_status_display
+
 
 QUALITY_SUMMARY_ARTIFACTS: dict[str, dict[str, str]] = {
     "quality_summary_text": {
@@ -27,6 +29,21 @@ QUALITY_SUMMARY_ARTIFACTS: dict[str, dict[str, str]] = {
         "template": "quality_summary_{date}.json",
         "label": "Quality summary JSON",
         "kind": "json",
+    },
+}
+
+COMPLETION_STATE_ARTIFACTS: dict[str, dict[str, str]] = {
+    "completion_state_audit_json": {
+        "folder": "diagnostics",
+        "template": "completion_state_audit_{date}.json",
+        "label": "Completion state audit JSON",
+        "kind": "json",
+    },
+    "completion_state_audit_text": {
+        "folder": "operator",
+        "template": "completion_state_audit_{date}.txt",
+        "label": "Completion state audit",
+        "kind": "text",
     },
 }
 
@@ -121,6 +138,14 @@ def quality_review_artifact_paths(
     """Return all Quality Review artifact paths for the selected date."""
     paths: dict[str, Path] = {}
     for key, spec in QUALITY_SUMMARY_ARTIFACTS.items():
+        paths[key] = runtime_artifact_path(
+            out_dir,
+            prediction_date_text,
+            spec["folder"],
+            spec["template"],
+            repo_root=repo_root,
+        )
+    for key, spec in COMPLETION_STATE_ARTIFACTS.items():
         paths[key] = runtime_artifact_path(
             out_dir,
             prediction_date_text,
@@ -271,6 +296,60 @@ def extract_quality_review_statuses(
     return statuses
 
 
+def _list_count(value: Any) -> int:
+    return len(value) if isinstance(value, list) else 0
+
+
+def _int_value(value: Any) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def extract_completion_state_summary(
+    completion_audit: dict[str, Any],
+    completion_record: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Extract compact completion audit values for Streamlit display."""
+    record = completion_record or {}
+    if not completion_audit:
+        return {
+            "available": False,
+            "notice": "Completion audit not found for this date.",
+            "status": "not_available",
+            "status_label": "Not available",
+            "status_state": "neutral",
+            "real_pick_rows": 0,
+            "real_pick_pending_count": 0,
+            "real_pick_graded_count": 0,
+            "shadow_pending_count": 0,
+            "paper_pending_count": 0,
+            "agreement_issues_count": 0,
+            "warnings_count": 0,
+            "interpretation": "",
+            "path": str(record.get("path") or ""),
+        }
+
+    display = completion_status_display(completion_audit.get("report_agreement_status"))
+    return {
+        "available": True,
+        "notice": "",
+        "status": completion_audit.get("report_agreement_status") or display["status"],
+        "status_label": display["label"],
+        "status_state": display["state"],
+        "real_pick_rows": _int_value(completion_audit.get("real_pick_rows")),
+        "real_pick_pending_count": _int_value(completion_audit.get("real_pick_pending_count")),
+        "real_pick_graded_count": _int_value(completion_audit.get("real_pick_graded_count")),
+        "shadow_pending_count": _int_value(completion_audit.get("shadow_pending_count")),
+        "paper_pending_count": _int_value(completion_audit.get("paper_pending_count")),
+        "agreement_issues_count": _list_count(completion_audit.get("agreement_issues")),
+        "warnings_count": _list_count(completion_audit.get("warnings")),
+        "interpretation": str(completion_audit.get("interpretation") or ""),
+        "path": str(record.get("path") or ""),
+    }
+
+
 def load_quality_review_artifacts(
     out_dir: str | Path,
     prediction_date_text: Any,
@@ -295,6 +374,20 @@ def load_quality_review_artifacts(
     )
     records.append(quality_json_record)
 
+    completion_json, completion_json_record = read_runtime_json(
+        COMPLETION_STATE_ARTIFACTS["completion_state_audit_json"]["label"],
+        paths["completion_state_audit_json"],
+    )
+    completion_text, completion_text_record = read_runtime_text(
+        COMPLETION_STATE_ARTIFACTS["completion_state_audit_text"]["label"],
+        paths["completion_state_audit_text"],
+    )
+    records.extend([completion_json_record, completion_text_record])
+    completion_summary = extract_completion_state_summary(
+        completion_json,
+        completion_json_record,
+    )
+
     phases: dict[str, dict[str, Any]] = {}
     for phase_key, spec in PHASE15_REVIEW_ARTIFACTS.items():
         text_path = paths[f"{phase_key}_text"]
@@ -318,6 +411,11 @@ def load_quality_review_artifacts(
         "quality_summary_json": quality_json,
         "quality_summary_text_record": quality_text_record,
         "quality_summary_json_record": quality_json_record,
+        "completion_state_audit_json": completion_json,
+        "completion_state_audit_text": completion_text,
+        "completion_state_audit_json_record": completion_json_record,
+        "completion_state_audit_text_record": completion_text_record,
+        "completion_state_summary": completion_summary,
         "phases": phases,
         "records": records,
     }
@@ -326,7 +424,9 @@ def load_quality_review_artifacts(
 __all__ = [
     "PHASE15_READINESS_LABELS",
     "PHASE15_REVIEW_ARTIFACTS",
+    "COMPLETION_STATE_ARTIFACTS",
     "QUALITY_SUMMARY_ARTIFACTS",
+    "extract_completion_state_summary",
     "extract_quality_review_statuses",
     "load_quality_review_artifacts",
     "normalize_prediction_date_text",
