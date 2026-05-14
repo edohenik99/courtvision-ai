@@ -144,6 +144,7 @@ def _write_completion_audit_json(
     prediction_date: str,
     *,
     status: str = "COMPLETE_WITH_SHADOW_OPEN_NOISE",
+    real_pending: int = 0,
     shadow_pending: int = 57,
     shadow_open: int = 57,
     shadow_stale: int = 0,
@@ -157,7 +158,7 @@ def _write_completion_audit_json(
         runtime_root / "diagnostics" / f"completion_state_audit_{prediction_date}.json",
         {
             "report_agreement_status": status,
-            "real_pick_pending_count": 0,
+            "real_pick_pending_count": real_pending,
             "shadow_pending_count": shadow_pending,
             "shadow_open_game_pending_count": shadow_open,
             "shadow_stale_pending_count": shadow_stale,
@@ -172,6 +173,51 @@ def _write_completion_audit_json(
             },
         },
     )
+
+
+def _seed_basic_operator_card_artifacts(
+    runtime_root: Path,
+    history_root: Path,
+    prediction_date: str,
+) -> None:
+    operator = runtime_root / "operator"
+    row = _candidate(prediction_date)
+
+    _write_csv(operator / f"elite_board_{prediction_date}.csv", [row])
+    _write_csv(operator / f"full_market_board_{prediction_date}.csv", [row])
+    _write_csv(operator / f"sgp_board_{prediction_date}.csv", [], columns=["prediction_date"])
+    _write_json(
+        operator / f"quality_summary_{prediction_date}.json",
+        _quality_payload(prediction_date, elite_count=1, full_market_count=1),
+    )
+    _seed_required_json(runtime_root, prediction_date)
+    _seed_history(history_root)
+
+
+def test_operator_card_completion_recommendation_complete_clean(tmp_path: Path) -> None:
+    prediction_date = "2026-05-10"
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+    _seed_basic_operator_card_artifacts(runtime_root, history_root, prediction_date)
+    _write_completion_audit_json(
+        runtime_root,
+        prediction_date,
+        status="COMPLETE",
+        shadow_pending=0,
+        shadow_open=0,
+        paper_pending=0,
+        paper_open=0,
+    )
+
+    output_path, _payload = write_operator_card_outputs(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+
+    text = output_path.read_text(encoding="utf-8")
+    assert "- report_agreement_status: COMPLETE" in text
+    assert "- recommended action: slate closed / no action required" in text
 
 
 def test_operator_card_renders_completion_audit_when_json_exists(tmp_path: Path) -> None:
@@ -220,6 +266,63 @@ def test_operator_card_renders_completion_audit_when_json_exists(tmp_path: Path)
     ) in text
     assert "- agreement issue count: none" in text
     assert "- warning count: none" in text
+    assert "- recommended action: real picks closed / ignore shadow-paper open-game noise" in text
+
+
+def test_operator_card_completion_recommendation_real_pending(tmp_path: Path) -> None:
+    prediction_date = "2026-05-16"
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+    _seed_basic_operator_card_artifacts(runtime_root, history_root, prediction_date)
+    _write_completion_audit_json(
+        runtime_root,
+        prediction_date,
+        status="PARTIAL",
+        real_pending=1,
+        shadow_pending=0,
+        shadow_open=0,
+        paper_pending=0,
+        paper_open=0,
+    )
+
+    output_path, _payload = write_operator_card_outputs(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+
+    text = output_path.read_text(encoding="utf-8")
+    assert "- real_pick_pending_count: 1" in text
+    assert "- recommended action: inspect grading before trusting results" in text
+
+
+def test_operator_card_completion_recommendation_warnings_or_issues(tmp_path: Path) -> None:
+    prediction_date = "2026-05-17"
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+    _seed_basic_operator_card_artifacts(runtime_root, history_root, prediction_date)
+    _write_completion_audit_json(
+        runtime_root,
+        prediction_date,
+        status="COMPLETE",
+        shadow_pending=0,
+        shadow_open=0,
+        paper_pending=0,
+        paper_open=0,
+        agreement_issues=["daily_summary_pending_grading_mismatch"],
+        warnings=["source quality warning"],
+    )
+
+    output_path, _payload = write_operator_card_outputs(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+
+    text = output_path.read_text(encoding="utf-8")
+    assert "- agreement issue count: 1" in text
+    assert "- warning count: 1" in text
+    assert "- recommended action: inspect completion audit before trusting results" in text
 
 
 def test_operator_card_handles_missing_completion_audit_json_gracefully(tmp_path: Path) -> None:
@@ -276,6 +379,15 @@ def test_operator_card_no_slate_still_renders_cleanly(tmp_path: Path) -> None:
         ),
     )
     _seed_required_json(runtime_root, prediction_date)
+    _write_completion_audit_json(
+        runtime_root,
+        prediction_date,
+        status="COMPLETE",
+        shadow_pending=0,
+        shadow_open=0,
+        paper_pending=0,
+        paper_open=0,
+    )
     _seed_history(history_root)
 
     output_path, payload = write_operator_card_outputs(
@@ -290,7 +402,8 @@ def test_operator_card_no_slate_still_renders_cleanly(tmp_path: Path) -> None:
     assert "final_decision: NO BET" in text
     assert "- games count: 0" in text
     assert "Top Candidate Preview\n----------------------------------------\nn/a" in text
-    assert "- Completion audit: missing" in text
+    assert "- report_agreement_status: COMPLETE" in text
+    assert "- recommended action: slate closed / no action required" in text
 
 
 def test_operator_card_empty_elite_shows_no_bet_and_candidate_preview(tmp_path: Path) -> None:

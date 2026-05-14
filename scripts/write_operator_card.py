@@ -364,15 +364,34 @@ def _pending_summary(payload: dict[str, Any], prefix: str) -> str:
     return f"pending={pending}, open_game_pending={open_game}, stale_pending={stale}, taxonomy_source={taxonomy}"
 
 
+def _has_items(value: Any) -> bool:
+    return isinstance(value, list) and len(value) > 0
+
+
+def _completion_recommended_action(payload: dict[str, Any], prediction_date: str) -> str:
+    if not payload:
+        return f"run scripts/write_completion_state_audit.py --prediction-date {prediction_date}"
+
+    real_pending = _safe_int(payload.get("real_pick_pending_count"), 0)
+    if real_pending > 0:
+        return "inspect grading before trusting results"
+    if _has_items(payload.get("agreement_issues")) or _has_items(payload.get("warnings")):
+        return "inspect completion audit before trusting results"
+
+    status = _safe_text(payload.get("report_agreement_status")).upper()
+    if status == "COMPLETE":
+        return "slate closed / no action required"
+    if status == "COMPLETE_WITH_SHADOW_OPEN_NOISE" and real_pending == 0:
+        return "real picks closed / ignore shadow-paper open-game noise"
+    return "inspect completion audit before trusting results"
+
+
 def _completion_state_lines(payload: dict[str, Any], path: Path, prediction_date: str) -> list[str]:
     lines = ["Completion State Audit", "-" * 40]
     if not payload:
         state = "unreadable" if path.exists() else "missing"
         lines.append(f"- Completion audit: {state}")
-        lines.append(
-            "- recommended action: run scripts/write_completion_state_audit.py "
-            f"--prediction-date {prediction_date}"
-        )
+        lines.append(f"- recommended action: {_completion_recommended_action(payload, prediction_date)}")
         return lines
 
     lines.append(f"- report_agreement_status: {_safe_text(payload.get('report_agreement_status')) or 'UNKNOWN'}")
@@ -381,6 +400,7 @@ def _completion_state_lines(payload: dict[str, Any], path: Path, prediction_date
     lines.append(f"- paper_kelly_history: {_pending_summary(payload, 'paper')}")
     lines.append(f"- agreement issue count: {_count_or_none(payload.get('agreement_issues'))}")
     lines.append(f"- warning count: {_count_or_none(payload.get('warnings'))}")
+    lines.append(f"- recommended action: {_completion_recommended_action(payload, prediction_date)}")
     return lines
 
 
