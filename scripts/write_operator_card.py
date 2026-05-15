@@ -533,7 +533,7 @@ def _completion_state_lines(payload: dict[str, Any], path: Path, prediction_date
     lines.append(f"- paper_kelly_history: {_pending_summary(payload, 'paper')}")
     lines.append(f"- agreement issue count: {_count_or_none(payload.get('agreement_issues'))}")
     lines.append(f"- warning count: {_count_or_none(payload.get('warnings'))}")
-    lines.append(f"- recommended action: {_completion_recommended_action(payload, prediction_date)}")
+    lines.append(f"- recommended action: {_completion_audit_recommended_action(payload)}")
     return lines
 
 
@@ -674,6 +674,51 @@ def _history_hit_rates(path: Path, prediction_date: str) -> dict[str, Any]:
         "graded_count": int(len(graded)),
         "source": str(path),
     }
+
+
+def _completion_audit_recommended_action(payload: dict[str, Any]) -> str:
+    status = _safe_text(payload.get("report_agreement_status")).upper()
+    agreement_issues = payload.get("agreement_issues", [])
+    real_pick_pending_count = _safe_int(payload.get("real_pick_pending_count"), 0)
+
+    shadow_pending_count = _safe_int(payload.get("shadow_pending_count"), 0)
+    shadow_open_game_pending_count = _safe_int(payload.get("shadow_open_game_pending_count"), 0)
+    shadow_stale_pending_count = _safe_int(payload.get("shadow_stale_pending_count"), 0)
+
+    paper_pending_count = _safe_int(payload.get("paper_pending_count"), 0)
+    paper_open_game_pending_count = _safe_int(payload.get("paper_open_game_pending_count"), 0)
+    paper_stale_pending_count = _safe_int(payload.get("paper_stale_pending_count"), 0)
+
+    has_agreement_issues = _has_items(agreement_issues)
+    shadow_is_open_game_only = (
+        shadow_pending_count > 0
+        and shadow_pending_count == shadow_open_game_pending_count
+        and shadow_stale_pending_count == 0
+    )
+    paper_is_open_game_only = (
+        paper_pending_count <= 0
+        or (
+            paper_pending_count == paper_open_game_pending_count
+            and paper_stale_pending_count == 0
+        )
+    )
+
+    if status == "COMPLETE" and real_pick_pending_count == 0 and not has_agreement_issues:
+        return "slate closed / no action required"
+
+    if (
+        status == "COMPLETE_WITH_SHADOW_OPEN_NOISE"
+        and real_pick_pending_count == 0
+        and not has_agreement_issues
+        and shadow_is_open_game_only
+        and paper_is_open_game_only
+    ):
+        return "real picks closed / ignore shadow-paper open-game noise"
+
+    if real_pick_pending_count > 0:
+        return "inspect grading before trusting results"
+
+    return _safe_text(payload.get("recommended_action")) or "inspect completion audit before trusting results"
 
 
 def _final_decision(
