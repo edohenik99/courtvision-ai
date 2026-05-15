@@ -22,6 +22,9 @@ from courtvision.runtime_selection import (
     elite_points_risk_guard_reason,
     player_points_strong_over_calibration_reason,
 )
+from courtvision.selection.operator_boards import (
+    unsupported_active_operator_market_drop_summary,
+)
 
 
 class BoardAuditPolicy:
@@ -161,6 +164,9 @@ class BoardAuditPolicy:
                 player_points_admission_df
             ),
             "final_board_construction": self._final_board_construction_payload(final_board_construction),
+            "unsupported_active_operator_markets": unsupported_active_operator_market_drop_summary(
+                final_board_construction
+            ),
         }
         return diagnostics
 
@@ -210,6 +216,30 @@ class BoardAuditPolicy:
                         "value": None,
                     }
                 )
+
+        unsupported_active = diagnostics.get("unsupported_active_operator_markets", {})
+        if isinstance(unsupported_active, Mapping):
+            rows.append(
+                {
+                    "scope": "overview",
+                    "section": "unsupported_active_operator_markets",
+                    "key": str(unsupported_active.get("rejection_reason", "unsupported_active_operator_market")),
+                    "count": int(unsupported_active.get("total_rows_dropped", 0) or 0),
+                    "value": None,
+                }
+            )
+            counts_by_market = unsupported_active.get("counts_by_market_type", {})
+            if isinstance(counts_by_market, Mapping):
+                for market, count in counts_by_market.items():
+                    rows.append(
+                        {
+                            "scope": "overview",
+                            "section": "unsupported_active_operator_markets.counts_by_market_type",
+                            "key": str(market),
+                            "count": int(count or 0),
+                            "value": None,
+                        }
+                    )
 
         for scope in ["qualified_pool", "elite_board", "full_market_board"]:
             payload = diagnostics.get(scope, {})
@@ -335,6 +365,7 @@ class BoardAuditPolicy:
                     "live_quality_rescue_candidate_count",
                     "final_selected_count",
                     "backfill_added_count",
+                    "unsupported_active_operator_market_count",
                 ]:
                     rows.append(
                         {
@@ -345,6 +376,19 @@ class BoardAuditPolicy:
                             "value": None,
                         }
                     )
+
+                unsupported_market_counts = payload.get("unsupported_active_operator_market_counts", {})
+                if isinstance(unsupported_market_counts, Mapping):
+                    for market, count in unsupported_market_counts.items():
+                        rows.append(
+                            {
+                                "scope": str(scope),
+                                "section": "final_board_construction.unsupported_active_operator_market_counts",
+                                "key": str(market),
+                                "count": int(count or 0),
+                                "value": None,
+                            }
+                        )
 
                 final_source_items = payload.get("final_selected_by_source_lane", [])
                 if isinstance(final_source_items, list):
@@ -825,6 +869,16 @@ class BoardAuditPolicy:
         normalized["backfill_added_count"] = int(payload.get("backfill_added_count", 0) or 0)
         normalized["backfill_added_by_qualification_gate_mode"] = self._normalize_count_items(
             payload.get("backfill_added_by_qualification_gate_mode", [])
+        )
+        unsupported_summary = unsupported_active_operator_market_drop_summary(payload)
+        normalized["unsupported_active_operator_market_count"] = int(
+            unsupported_summary.get("total_rows_dropped", 0) or 0
+        )
+        normalized["unsupported_active_operator_market_counts"] = dict(
+            unsupported_summary.get("counts_by_market_type", {}) or {}
+        )
+        normalized["unsupported_active_operator_market_rejection_reason"] = str(
+            unsupported_summary.get("rejection_reason", "unsupported_active_operator_market")
         )
         return normalized
 

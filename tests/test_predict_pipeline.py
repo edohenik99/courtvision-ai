@@ -717,6 +717,14 @@ class TestPredictionPipeline:
             "player_blocks": 1,
             "player_steals": 1,
         }
+        assert result.summary["unsupported_active_operator_markets"] == {
+            "rejection_reason": "unsupported_active_operator_market",
+            "total_rows_dropped": 2,
+            "counts_by_market_type": {
+                "player_blocks": 1,
+                "player_steals": 1,
+            },
+        }
 
     def test_market_shadow_grading_summarizes_full_market_by_market(self):
         runtime_root = Path("test_outputs") / "market_shadow_runtime"

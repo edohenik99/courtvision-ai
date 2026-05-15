@@ -220,6 +220,54 @@ def test_operator_card_completion_recommendation_complete_clean(tmp_path: Path) 
     assert "- recommended action: slate closed / no action required" in text
 
 
+def test_operator_card_renders_unsupported_active_market_drops(tmp_path: Path) -> None:
+    prediction_date = "2026-05-10"
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+    _seed_basic_operator_card_artifacts(runtime_root, history_root, prediction_date)
+    _write_json(
+        runtime_root / "operator" / f"quality_summary_{prediction_date}.json",
+        {
+            **_quality_payload(prediction_date, elite_count=1, full_market_count=1),
+            "unsupported_active_operator_markets": {
+                "rejection_reason": "unsupported_active_operator_market",
+                "total_rows_dropped": 6,
+                "counts_by_market_type": {
+                    "player_blocks": 3,
+                    "player_steals": 3,
+                },
+            },
+        },
+    )
+
+    output_path, payload = write_operator_card_outputs(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+
+    text = output_path.read_text(encoding="utf-8")
+    assert "- unsupported active markets dropped: 6 (player_blocks=3, player_steals=3)" in text
+    assert payload["unsupported_active_operator_markets"]["total_rows_dropped"] == 6
+
+
+def test_operator_card_zero_unsupported_active_market_drops_stays_quiet(tmp_path: Path) -> None:
+    prediction_date = "2026-05-10"
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+    _seed_basic_operator_card_artifacts(runtime_root, history_root, prediction_date)
+
+    output_path, payload = write_operator_card_outputs(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+
+    text = output_path.read_text(encoding="utf-8")
+    assert "unsupported active markets dropped" not in text
+    assert payload["unsupported_active_operator_markets"]["total_rows_dropped"] == 0
+
+
 def test_operator_card_renders_completion_audit_when_json_exists(tmp_path: Path) -> None:
     prediction_date = "2026-05-13"
     runtime_root = tmp_path / "runtime"

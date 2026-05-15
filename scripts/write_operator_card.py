@@ -14,6 +14,11 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from courtvision.selection import (  # noqa: E402
+    format_unsupported_active_operator_market_drop_line,
+    unsupported_active_operator_market_drop_summary,
+)
+
 
 TRUE_STRINGS = {"true", "1", "yes", "y"}
 GRADED_STATUSES = {"hit", "miss"}
@@ -725,6 +730,10 @@ def build_operator_card(
             f"diagnostics qualified_pool={_safe_int(board_counts.get('qualified_pool'), 0)}, "
             f"rejected={_safe_int(board_counts.get('rejected'), 0)}"
         )
+    unsupported_active_summary = unsupported_active_operator_market_drop_summary(quality_payload)
+    if int(unsupported_active_summary.get("total_rows_dropped", 0) or 0) <= 0:
+        unsupported_active_summary = unsupported_active_operator_market_drop_summary(board_diagnostics)
+    unsupported_active_line = format_unsupported_active_operator_market_drop_line(unsupported_active_summary)
 
     full_manual_df = _filter_truthy(full_market_display_df, "manual_review_required")
     full_same_opponent_df = _filter_truthy(full_market_display_df, "same_opponent_under_warning")
@@ -761,6 +770,8 @@ def build_operator_card(
     lines.append("-" * 40)
     lines.append(f"- elite picks count: {elite_count}")
     lines.append(f"- full market candidates count: {full_market_count}")
+    if unsupported_active_line:
+        lines.append(f"- {unsupported_active_line}")
     lines.append(f"- SGP candidates count: {sgp_count}")
     lines.append(f"- Kelly rows count: {kelly_rows_count}")
     lines.append(f"- Kelly eligible count: {kelly_eligible_count}")
@@ -895,6 +906,7 @@ def build_operator_card(
         "high_caution_over_count": high_caution_count,
         "combo_under_watchlist_count": combo_under_count,
         "same_opponent_warning_count": same_opponent_warning_count,
+        "unsupported_active_operator_markets": unsupported_active_summary,
         "provider_status": provider_status,
         "missing_required": missing_required,
         "completion_state_audit_status": _safe_text(completion_state_payload.get("report_agreement_status")) if completion_state_payload else "missing",

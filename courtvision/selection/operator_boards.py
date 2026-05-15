@@ -7,10 +7,13 @@ lanes: elite (strong conviction), full_market (live market), stat_only (projecti
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Callable
 
 import pandas as pd
 
+
+UNSUPPORTED_ACTIVE_OPERATOR_MARKET_REASON = "unsupported_active_operator_market"
 
 ACTIVE_OPERATOR_MARKETS = {
     "player_points",
@@ -21,6 +24,155 @@ ACTIVE_OPERATOR_MARKETS = {
     "player_rebounds_assists",
     "player_points_rebounds_assists",
 }
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        if pd.isna(value):
+            return default
+    except (TypeError, ValueError):
+        pass
+    try:
+        return int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_market_count_mapping(value: Any) -> dict[str, int]:
+    if isinstance(value, Mapping):
+        counts: dict[str, int] = {}
+        for key, count in value.items():
+            market = str(key).strip().lower()
+            if not market:
+                continue
+            safe_count = _safe_int(count)
+            if safe_count > 0:
+                counts[market] = safe_count
+        return dict(sorted(counts.items()))
+    if isinstance(value, list):
+        counts = {}
+        for item in value:
+            if not isinstance(item, Mapping):
+                continue
+            market = str(
+                item.get("market_type")
+                or item.get("market")
+                or item.get("key")
+                or ""
+            ).strip().lower()
+            if not market:
+                continue
+            safe_count = _safe_int(item.get("count"))
+            if safe_count > 0:
+                counts[market] = counts.get(market, 0) + safe_count
+        return dict(sorted(counts.items()))
+    return {}
+
+
+def unsupported_active_operator_market_drop_summary(payload: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Normalize unsupported active-market drop diagnostics from a trace payload."""
+    empty = {
+        "rejection_reason": UNSUPPORTED_ACTIVE_OPERATOR_MARKET_REASON,
+        "total_rows_dropped": 0,
+        "counts_by_market_type": {},
+    }
+    if not isinstance(payload, Mapping):
+        return empty
+
+    existing = payload.get("unsupported_active_operator_markets")
+    if isinstance(existing, Mapping):
+        counts = _coerce_market_count_mapping(
+            existing.get("counts_by_market_type")
+            or existing.get("unsupported_active_operator_market_counts")
+        )
+        total = _safe_int(
+            existing.get("total_rows_dropped")
+            or existing.get("unsupported_active_operator_market_count")
+            or existing.get("count")
+            or existing.get("total")
+        )
+        if total <= 0:
+            total = sum(counts.values())
+        return {
+            "rejection_reason": str(
+                existing.get("rejection_reason")
+                or UNSUPPORTED_ACTIVE_OPERATOR_MARKET_REASON
+            ),
+            "total_rows_dropped": int(total),
+            "counts_by_market_type": counts,
+        }
+
+    for nested_key in ("selection_trace", "final_board_construction", "candidate_funnel"):
+        nested = payload.get(nested_key)
+        if not isinstance(nested, Mapping):
+            continue
+        nested_summary = unsupported_active_operator_market_drop_summary(nested)
+        if nested_summary["total_rows_dropped"] > 0 or nested_summary["counts_by_market_type"]:
+            return nested_summary
+
+    for scope in ("full_market", "elite"):
+        scope_payload = payload.get(scope)
+        if not isinstance(scope_payload, Mapping):
+            continue
+        counts = _coerce_market_count_mapping(
+            scope_payload.get("unsupported_active_operator_market_counts")
+            or scope_payload.get("unsupported_active_operator_market_drop_counts_by_market_type")
+        )
+        total = _safe_int(
+            scope_payload.get("unsupported_active_operator_market_count")
+            or scope_payload.get("unsupported_active_operator_market_drop_count")
+        )
+        if total <= 0:
+            total = sum(counts.values())
+        if total > 0 or counts:
+            return {
+                "rejection_reason": UNSUPPORTED_ACTIVE_OPERATOR_MARKET_REASON,
+                "total_rows_dropped": int(total),
+                "counts_by_market_type": counts,
+            }
+
+    counts = _coerce_market_count_mapping(
+        payload.get("unsupported_active_operator_market_counts")
+        or payload.get("unsupported_active_operator_market_drop_counts_by_market_type")
+        or payload.get("counts_by_market_type")
+    )
+    total = _safe_int(
+        payload.get("unsupported_active_operator_market_count")
+        or payload.get("unsupported_active_operator_market_drop_count")
+        or payload.get("total_rows_dropped")
+        or payload.get("count")
+        or payload.get("total")
+    )
+    if total <= 0:
+        total = sum(counts.values())
+
+    if total <= 0:
+        rejection_rows = payload.get("selection_rejection_reasons")
+        if isinstance(rejection_rows, list):
+            for row in rejection_rows:
+                if not isinstance(row, Mapping):
+                    continue
+                if str(row.get("reason", "")).strip() == UNSUPPORTED_ACTIVE_OPERATOR_MARKET_REASON:
+                    total = _safe_int(row.get("count"))
+                    break
+
+    return {
+        "rejection_reason": UNSUPPORTED_ACTIVE_OPERATOR_MARKET_REASON,
+        "total_rows_dropped": int(total),
+        "counts_by_market_type": counts,
+    }
+
+
+def format_unsupported_active_operator_market_drop_line(payload: Mapping[str, Any] | None) -> str:
+    summary = unsupported_active_operator_market_drop_summary(payload)
+    total = int(summary.get("total_rows_dropped", 0) or 0)
+    if total <= 0:
+        return ""
+    counts = summary.get("counts_by_market_type", {})
+    if isinstance(counts, Mapping) and counts:
+        count_text = ", ".join(f"{market}={count}" for market, count in sorted(counts.items()))
+        return f"unsupported active markets dropped: {total} ({count_text})"
+    return f"unsupported active markets dropped: {total}"
 
 
 def _display_name(row: pd.Series) -> str:
@@ -281,12 +433,12 @@ def build_operator_boards(
         ] = "unsupported_milestone_market"
 
     active_market_mask = _active_operator_market_mask(prepared_df)
-    unsupported_active_market_mask = ~active_market_mask
+    unsupported_active_market_mask = unified_live_mask & ~milestone_mask & ~active_market_mask
     if unsupported_active_market_mask.any():
         prepared_df.loc[
             prepared_df["selection_rejection_reason"].eq("") & unsupported_active_market_mask,
             "selection_rejection_reason",
-        ] = "unsupported_active_operator_market"
+        ] = UNSUPPORTED_ACTIVE_OPERATOR_MARKET_REASON
 
     live_candidates_df = prepared_df[unified_live_mask & ~milestone_mask & active_market_mask].copy()
     unsupported_milestone_count = int(milestone_mask.sum())

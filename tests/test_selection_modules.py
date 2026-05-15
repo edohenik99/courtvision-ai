@@ -13,7 +13,7 @@ from courtvision.selection import (
     classify_candidate_lane,
     classify_candidates_batch,
 )
-from courtvision.runtime_audit import get_elite_rejection_reason
+from courtvision.runtime_audit import BoardAuditPolicy, get_elite_rejection_reason
 
 
 def test_classify_candidate_lane_live_market():
@@ -295,6 +295,28 @@ def test_unsupported_active_operator_markets_excluded_from_boards():
         row["reason"]: row["count"]
         for row in traces["selection_rejection_reasons"]
     }["unsupported_active_operator_market"] == 2
+
+    diagnostics = BoardAuditPolicy().build_diagnostics(
+        prediction_date="2026-05-15",
+        qualified_pool_df=candidates,
+        elite_df=elite_df,
+        full_market_df=full_market_df,
+        rejected_df=pd.DataFrame(),
+        final_board_construction=traces,
+    )
+    assert diagnostics["unsupported_active_operator_markets"] == {
+        "rejection_reason": "unsupported_active_operator_market",
+        "total_rows_dropped": 2,
+        "counts_by_market_type": {
+            "player_blocks": 1,
+            "player_steals": 1,
+        },
+    }
+    assert diagnostics["final_board_construction"]["full_market"]["unsupported_active_operator_market_count"] == 2
+    assert diagnostics["final_board_construction"]["full_market"]["unsupported_active_operator_market_counts"] == {
+        "player_blocks": 1,
+        "player_steals": 1,
+    }
 
 
 def test_assign_candidate_lanes_summary():

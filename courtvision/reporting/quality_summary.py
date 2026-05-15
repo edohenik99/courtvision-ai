@@ -121,6 +121,10 @@ from courtvision.reporting.low_line_over_minutes_guard_missed_winner_attribution
     write_low_line_over_minutes_guard_missed_winner_attribution,
 )
 from courtvision.reporting.completion_state_audit import write_completion_state_audit
+from courtvision.selection import (
+    format_unsupported_active_operator_market_drop_line,
+    unsupported_active_operator_market_drop_summary,
+)
 
 ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER = "elite_reject_context_high_caution_over"
 CONTEXT_CONFLICT_CAUSE_BUCKETS: tuple[str, ...] = (
@@ -1659,6 +1663,15 @@ def build_quality_summary(
     if elite_count is None:
         elite_count = _safe_int(board_counts.get("elite")) or _count_rows(elite_df)
     kelly_count = _count_rows(kelly_df)
+    unsupported_active_operator_markets = unsupported_active_operator_market_drop_summary(board_diagnostics)
+    if int(unsupported_active_operator_markets.get("total_rows_dropped", 0) or 0) <= 0:
+        unsupported_active_operator_markets = unsupported_active_operator_market_drop_summary(prediction_summary)
+    unsupported_active_drop_count = int(
+        unsupported_active_operator_markets.get("total_rows_dropped", 0) or 0
+    )
+    unsupported_active_drop_counts_by_market_type = dict(
+        unsupported_active_operator_markets.get("counts_by_market_type", {}) or {}
+    )
     fallback_rejected = max(raw_candidates - elite_count, 0)
     rejection_reasons, rejected_count = _rejection_reasons(
         audit_summary=audit_summary,
@@ -1705,6 +1718,9 @@ def build_quality_summary(
         "elite_board_count": elite_count,
         "sgp_board_count": _count_rows(sgp_df),
         "kelly_rows_count": kelly_count,
+        "unsupported_active_operator_market_drop_count": unsupported_active_drop_count,
+        "unsupported_active_operator_market_drop_counts_by_market_type": unsupported_active_drop_counts_by_market_type,
+        "unsupported_active_operator_market_rejection_reason": unsupported_active_operator_markets["rejection_reason"],
     }
     kelly_safety = _kelly_safety_summary(kelly_df)
     fragility_summary = _fragility_survivability_summary(full_market_df)
@@ -1800,6 +1816,7 @@ def build_quality_summary(
         "slate_provider_counts": slate_provider_counts,
         "player_baseline_coverage": player_baseline_coverage,
         "candidate_funnel": candidate_funnel,
+        "unsupported_active_operator_markets": unsupported_active_operator_markets,
         "same_opponent_under_warning_count": manual_review["same_opponent_under_warning_count"],
         "manual_review_required_count": manual_review["manual_review_required_count"],
         "manual_review_summary": manual_review,
@@ -1865,6 +1882,7 @@ def _format_quality_summary_text(payload: dict[str, Any]) -> str:
     movement = payload["board_movement_summary"]
     isolation = payload["date_isolation_check"]
     warnings = payload.get("warnings", [])
+    unsupported_active_drop_line = format_unsupported_active_operator_market_drop_line(payload)
 
     lines = [
         f"Quality Summary - {run['prediction_date']}",
@@ -1949,6 +1967,18 @@ def _format_quality_summary_text(payload: dict[str, Any]) -> str:
             f"- elite_board_count: {funnel['elite_board_count']}",
             f"- sgp_board_count: {funnel['sgp_board_count']}",
             f"- kelly_rows_count: {funnel['kelly_rows_count']}",
+        ]
+    )
+    if unsupported_active_drop_line:
+        unsupported_active = payload.get("unsupported_active_operator_markets", {})
+        reason = (
+            unsupported_active.get("rejection_reason", "unsupported_active_operator_market")
+            if isinstance(unsupported_active, dict)
+            else "unsupported_active_operator_market"
+        )
+        lines.append(f"- {unsupported_active_drop_line}; reason={reason}")
+    lines.extend(
+        [
             "",
             "Top Rejection Reasons",
             "-" * 72,

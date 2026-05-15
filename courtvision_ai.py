@@ -100,6 +100,9 @@ from courtvision.runtime_audit import (
     player_points_strong_over_calibration_reason,
 )
 from courtvision.runtime_scoring import BoardScoringConfig, BoardScoringPolicy
+from courtvision.selection.operator_boards import (
+    unsupported_active_operator_market_drop_summary,
+)
 
 
 def get_elite_rejection_reason(row: dict[str, Any]) -> str | None:
@@ -3023,6 +3026,31 @@ class CourtVisionAI:
             trace["player_points_elite_admission_rows"] = []
         return trace
 
+    def _attach_unsupported_active_market_trace(
+        self,
+        final_board_construction: dict[str, Any],
+        summary: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        unsupported_summary = unsupported_active_operator_market_drop_summary(summary)
+        total = int(unsupported_summary.get("total_rows_dropped", 0) or 0)
+        counts = dict(unsupported_summary.get("counts_by_market_type", {}) or {})
+        reason = str(unsupported_summary.get("rejection_reason", "unsupported_active_operator_market"))
+        for scope in ("elite", "full_market"):
+            scope_payload = final_board_construction.get(scope)
+            if not isinstance(scope_payload, dict):
+                continue
+            scope_payload["unsupported_active_operator_market_count"] = total
+            scope_payload["unsupported_active_operator_market_counts"] = counts
+            scope_payload["unsupported_active_operator_market_rejection_reason"] = reason
+        if total > 0:
+            final_board_construction["selection_rejection_reasons"] = [
+                {
+                    "reason": reason,
+                    "count": total,
+                }
+            ]
+        return final_board_construction
+
     def _backfill_board_min_size(
         self,
         current_df: pd.DataFrame,
@@ -4206,6 +4234,10 @@ class CourtVisionAI:
                 ),
             }
             final_board_construction["elite"]["elite_context_safety_gate"] = elite_context_safety_summary
+            final_board_construction = self._attach_unsupported_active_market_trace(
+                final_board_construction,
+                result.summary,
+            )
             rejected_df = pd.DataFrame()
             grading_df, grading_summary = self._grade_history(prediction_date=prediction_date)
             grading_bucket_summary = summarize_graded_props(grading_df.to_dict("records")) if not grading_df.empty else summarize_graded_props([])
@@ -4414,6 +4446,10 @@ class CourtVisionAI:
                 post_primary_selection=full_market_df.copy(),
             ),
         }
+        final_board_construction = self._attach_unsupported_active_market_trace(
+            final_board_construction,
+            result.summary,
+        )
 
         if not rejected_df.empty:
             rejected_df = self._apply_board_audit_frame(rejected_df)
