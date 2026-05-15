@@ -365,6 +365,79 @@ def _review_match_key(row: pd.Series) -> tuple[str, str, str, str, str]:
     )
 
 
+def _preview_watchlist_key(row: pd.Series) -> tuple[str, str, str, str]:
+    return (
+        (_safe_text(row.get("player_name")) or _safe_text(row.get("entity_name"))).lower(),
+        _safe_text(row.get("market_type")).lower(),
+        _safe_text(row.get("selection")).lower(),
+        _format_num(_line_value(row), 3, trim=True),
+    )
+
+
+def _watchlist_action_lookup(
+    *,
+    high_caution_df: pd.DataFrame,
+    combo_under_df: pd.DataFrame,
+    same_opponent_df: pd.DataFrame,
+) -> dict[tuple[str, str, str, str], str]:
+    lookup: dict[tuple[str, str, str, str], str] = {}
+
+    # Lowest priority: generic combo-under watchlist.
+    if not combo_under_df.empty:
+        for _idx, row in combo_under_df.iterrows():
+            key = _preview_watchlist_key(row)
+            if key[0] and key[1]:
+                lookup[key] = "COMBO_WATCHLIST_ONLY"
+
+    # Higher priority: high-caution OVER rejection.
+    if not high_caution_df.empty:
+        for _idx, row in high_caution_df.iterrows():
+            key = _preview_watchlist_key(row)
+            if key[0] and key[1]:
+                lookup[key] = "WATCHLIST_ONLY"
+
+    # Highest priority: same-opponent warning requires review semantics.
+    if not same_opponent_df.empty:
+        for _idx, row in same_opponent_df.iterrows():
+            key = _preview_watchlist_key(row)
+            if key[0] and key[1]:
+                lookup[key] = "REVIEW_SAME_OPPONENT_WARNING"
+
+    return lookup
+
+
+def _with_preview_actions(
+    preview_df: pd.DataFrame,
+    *,
+    final_decision: str,
+    elite_count: int,
+    high_caution_df: pd.DataFrame,
+    combo_under_df: pd.DataFrame,
+    same_opponent_df: pd.DataFrame,
+) -> pd.DataFrame:
+    if preview_df.empty:
+        return preview_df
+
+    watchlist_actions = _watchlist_action_lookup(
+        high_caution_df=high_caution_df,
+        combo_under_df=combo_under_df,
+        same_opponent_df=same_opponent_df,
+    )
+
+    rows: list[dict[str, Any]] = []
+    for _idx, row in preview_df.iterrows():
+        item = row.to_dict()
+        watchlist_action = watchlist_actions.get(_preview_watchlist_key(row))
+        item["recommended_action"] = watchlist_action or _preview_action_value(
+            row,
+            final_decision=final_decision,
+            elite_count=elite_count,
+        )
+        rows.append(item)
+
+    return pd.DataFrame(rows, columns=list(dict.fromkeys([*preview_df.columns, "recommended_action"])))
+
+
 def _with_kelly_review_fields(board_df: pd.DataFrame, kelly_df: pd.DataFrame) -> pd.DataFrame:
     if board_df.empty or kelly_df.empty:
         return board_df
@@ -866,16 +939,14 @@ def build_operator_card(
             lines.append(
                 "Preview rows are diagnostic only and are not betting recommendations unless they appear in Elite Picks/Kelly."
             )
-            preview_df = full_market_display_df.copy()
-            if not preview_df.empty:
-                preview_df["recommended_action"] = preview_df.apply(
-                    lambda row: _preview_action_value(
-                        row,
-                        final_decision=final_decision,
-                        elite_count=elite_count,
-                    ),
-                    axis=1,
-                )
+            preview_df = _with_preview_actions(
+                full_market_display_df.copy(),
+                final_decision=final_decision,
+                elite_count=elite_count,
+                high_caution_df=high_caution_df,
+                combo_under_df=combo_under_df,
+                same_opponent_df=same_opponent_file_df,
+            )
             lines.extend(_render_pick_table(preview_df, limit=10, include_bucket=True))
         lines.append("")
 
