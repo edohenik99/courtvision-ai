@@ -101,6 +101,7 @@ from courtvision.runtime_audit import (
 )
 from courtvision.runtime_scoring import BoardScoringConfig, BoardScoringPolicy
 from courtvision.selection.operator_boards import (
+    duplicate_betting_identity_drop_summary,
     unsupported_active_operator_market_drop_summary,
 )
 
@@ -3042,14 +3043,48 @@ class CourtVisionAI:
             scope_payload["unsupported_active_operator_market_count"] = total
             scope_payload["unsupported_active_operator_market_counts"] = counts
             scope_payload["unsupported_active_operator_market_rejection_reason"] = reason
-        if total > 0:
-            final_board_construction["selection_rejection_reasons"] = [
-                {
-                    "reason": reason,
-                    "count": total,
-                }
-            ]
+        self._merge_selection_rejection_reason(final_board_construction, reason=reason, count=total)
         return final_board_construction
+
+    def _attach_duplicate_betting_identity_trace(
+        self,
+        final_board_construction: dict[str, Any],
+        summary: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        duplicate_summary = duplicate_betting_identity_drop_summary(summary)
+        total = int(duplicate_summary.get("total_rows_dropped", 0) or 0)
+        counts = dict(duplicate_summary.get("counts_by_market_type", {}) or {})
+        groups = list(duplicate_summary.get("groups", []) or [])
+        reason = str(duplicate_summary.get("rejection_reason", "duplicate_betting_identity"))
+        for scope in ("elite", "full_market"):
+            scope_payload = final_board_construction.get(scope)
+            if not isinstance(scope_payload, dict):
+                continue
+            scope_payload["duplicate_betting_identity_drop_count"] = total
+            scope_payload["duplicate_betting_identity_drop_counts_by_market_type"] = counts
+            scope_payload["duplicate_betting_identity_drop_groups"] = groups
+            scope_payload["duplicate_betting_identity_rejection_reason"] = reason
+        self._merge_selection_rejection_reason(final_board_construction, reason=reason, count=total)
+        return final_board_construction
+
+    def _merge_selection_rejection_reason(
+        self,
+        final_board_construction: dict[str, Any],
+        *,
+        reason: str,
+        count: int,
+    ) -> None:
+        if count <= 0:
+            return
+        existing = final_board_construction.get("selection_rejection_reasons")
+        rows = list(existing) if isinstance(existing, list) else []
+        for row in rows:
+            if isinstance(row, dict) and str(row.get("reason", "")) == reason:
+                row["count"] = int(count)
+                break
+        else:
+            rows.append({"reason": reason, "count": int(count)})
+        final_board_construction["selection_rejection_reasons"] = rows
 
     def _backfill_board_min_size(
         self,
@@ -4238,6 +4273,10 @@ class CourtVisionAI:
                 final_board_construction,
                 result.summary,
             )
+            final_board_construction = self._attach_duplicate_betting_identity_trace(
+                final_board_construction,
+                result.summary,
+            )
             rejected_df = pd.DataFrame()
             grading_df, grading_summary = self._grade_history(prediction_date=prediction_date)
             grading_bucket_summary = summarize_graded_props(grading_df.to_dict("records")) if not grading_df.empty else summarize_graded_props([])
@@ -4447,6 +4486,10 @@ class CourtVisionAI:
             ),
         }
         final_board_construction = self._attach_unsupported_active_market_trace(
+            final_board_construction,
+            result.summary,
+        )
+        final_board_construction = self._attach_duplicate_betting_identity_trace(
             final_board_construction,
             result.summary,
         )

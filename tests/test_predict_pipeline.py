@@ -726,6 +726,72 @@ class TestPredictionPipeline:
             },
         }
 
+    def test_duplicate_baseline_player_id_collapses_before_operator_outputs(self, tmp_path):
+        from datetime import datetime, timedelta
+
+        out_dir = tmp_path / "outputs"
+        config = PredictionConfig(prediction_date="2024-01-15", out_dir=str(out_dir))
+        pipeline = PredictionPipeline(config)
+        future_game_datetime = (datetime.now() + timedelta(hours=2)).isoformat()
+        fresh_time = (datetime.now() - timedelta(minutes=5)).isoformat()
+        games = pd.DataFrame([{
+            "game_id": 21709238,
+            "home_team_abbr": "CLE",
+            "visitor_team_abbr": "DET",
+            "game_status": "scheduled",
+            "game_date": future_game_datetime,
+            "datetime": future_game_datetime,
+        }])
+        odds = pd.DataFrame([{
+            "game_id": 21709238,
+            "player_id": 192,
+            "player_name": "James Harden",
+            "market_type": "player_points",
+            "line": 19.5,
+            "odds": -125,
+            "selection": "over",
+            "is_live": True,
+            "updated_at": fresh_time,
+        }])
+        baselines = pd.DataFrame([
+            {
+                "player_name": "James Harden",
+                "team_abbr": "LAC",
+                "player_id": 192,
+                "pts_avg": 27.0,
+                "pts_recent": 27.0,
+                "reb_avg": 5.0,
+                "ast_avg": 7.0,
+                "min_avg": 35.0,
+            },
+            {
+                "player_name": "James Harden",
+                "team_abbr": "CLE",
+                "player_id": 192,
+                "pts_avg": 23.0,
+                "pts_recent": 23.0,
+                "reb_avg": 4.0,
+                "ast_avg": 6.0,
+                "min_avg": 35.0,
+            },
+        ])
+
+        result = pipeline.run(games, odds, baselines)
+
+        full_market = result.full_market_props
+        elite = result.elite_props
+        assert len(full_market) == 1
+        assert full_market.iloc[0]["team"] == "CLE"
+        identity_cols = ["player_id", "market_type", "selection", "line"]
+        assert not full_market.duplicated(subset=identity_cols).any()
+        if not elite.empty:
+            assert not elite.duplicated(subset=identity_cols).any()
+        assert result.summary["duplicate_betting_identity_drop_count"] == 1
+        assert result.summary["duplicate_betting_identity_drop_counts_by_market_type"] == {
+            "player_points": 1,
+        }
+        assert result.summary["duplicate_betting_identity"]["rejection_reason"] == "duplicate_betting_identity"
+
     def test_market_shadow_grading_summarizes_full_market_by_market(self):
         runtime_root = Path("test_outputs") / "market_shadow_runtime"
         history_root = Path("test_outputs") / "market_shadow_history"

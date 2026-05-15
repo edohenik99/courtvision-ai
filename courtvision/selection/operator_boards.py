@@ -14,6 +14,7 @@ import pandas as pd
 
 
 UNSUPPORTED_ACTIVE_OPERATOR_MARKET_REASON = "unsupported_active_operator_market"
+DUPLICATE_BETTING_IDENTITY_REASON = "duplicate_betting_identity"
 
 ACTIVE_OPERATOR_MARKETS = {
     "player_points",
@@ -67,6 +68,340 @@ def _coerce_market_count_mapping(value: Any) -> dict[str, int]:
                 counts[market] = counts.get(market, 0) + safe_count
         return dict(sorted(counts.items()))
     return {}
+
+
+def _safe_text(value: Any) -> str:
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()
+    if text.lower() in {"nan", "none", "null"}:
+        return ""
+    return text
+
+
+def _truthy(value: Any) -> bool:
+    text = _safe_text(value).lower()
+    return text in {"1", "true", "yes", "y", "on"}
+
+
+def _normalize_identity_value(value: Any) -> str:
+    text = _safe_text(value)
+    if not text:
+        return ""
+    try:
+        number = float(text)
+    except (TypeError, ValueError):
+        return text
+    if not pd.isna(number) and number.is_integer():
+        return str(int(number))
+    return text
+
+
+def _normalize_name(value: Any) -> str:
+    return " ".join(_safe_text(value).lower().split())
+
+
+def _normalize_line_value(value: Any) -> str:
+    text = _safe_text(value)
+    if not text:
+        return ""
+    try:
+        number = float(text)
+    except (TypeError, ValueError):
+        return text.lower()
+    return f"{number:.4f}".rstrip("0").rstrip(".")
+
+
+def _player_identity_key(row: pd.Series) -> str:
+    player_id = _normalize_identity_value(row.get("player_id"))
+    if player_id and player_id not in {"0", "0.0"}:
+        return f"id:{player_id}"
+    name = _normalize_name(row.get("player_name") or row.get("entity_name") or row.get("player"))
+    return f"name:{name}" if name else ""
+
+
+def _betting_identity_key(row: pd.Series) -> tuple[str, str, str, str, str] | None:
+    player_key = _player_identity_key(row)
+    market = _safe_text(row.get("market_type") or row.get("prop_type")).lower()
+    selection = _safe_text(row.get("selection") or row.get("selection_side") or row.get("side")).lower()
+    line = _normalize_line_value(row.get("line") if _safe_text(row.get("line")) else row.get("sportsbook_line"))
+    game_id = _normalize_identity_value(row.get("game_id"))
+    if not player_key or not market or not selection or not line:
+        return None
+    return (player_key, game_id, market, selection, line)
+
+
+def _is_team_not_in_game_context(row: pd.Series) -> bool:
+    suppression_reason = _safe_text(row.get("game_context_suppression_reason")).lower()
+    return (
+        _truthy(row.get("candidate_team_not_in_game"))
+        or suppression_reason == "team_not_in_game_context"
+        or _safe_text(row.get("context_conflict_cause")).lower() == "stale_team_not_in_game"
+    )
+
+
+def _context_validity_score(row: pd.Series) -> int:
+    context_columns = {
+        "candidate_team_not_in_game",
+        "game_context_suppressed",
+        "game_context_suppression_reason",
+        "context_conflict_cause",
+        "opponent",
+        "home_away",
+        "game_status",
+        "game_date",
+        "game_datetime",
+    }
+    if not any(column in row.index for column in context_columns):
+        return 0
+    if _is_team_not_in_game_context(row) or _truthy(row.get("game_context_suppressed")):
+        return 0
+    if _safe_text(row.get("opponent")) or _safe_text(row.get("home_away")):
+        return 2
+    if _safe_text(row.get("game_status")) or _safe_text(row.get("game_date")) or _safe_text(row.get("game_datetime")):
+        return 1
+    return 0
+
+
+def _context_warning_count(row: pd.Series) -> int:
+    count = 0
+    if _truthy(row.get("candidate_team_not_in_game")):
+        count += 1
+    if _truthy(row.get("game_context_suppressed")):
+        count += 1
+    if _safe_text(row.get("game_context_suppression_reason")):
+        count += 1
+    if _safe_text(row.get("context_conflict_cause")):
+        count += 1
+    if _safe_text(row.get("context_caution_level")).lower() in {"high", "insufficient_data"}:
+        count += 1
+    if _safe_text(row.get("context_pick_alignment")).lower() in {"conflicted", "insufficient_data"}:
+        count += 1
+    return count
+
+
+def _live_source_score(row: pd.Series) -> int:
+    score = 0
+    if _truthy(row.get("is_live_market")) and not _truthy(row.get("synthetic_line")):
+        score += 2
+    if "live_market" in _safe_text(row.get("line_source")).lower():
+        score += 1
+    if "live" in _safe_text(row.get("source_lane")).lower():
+        score += 1
+    qualification_reason = _safe_text(row.get("qualification_reason")).lower()
+    if qualification_reason and "stat_only" not in qualification_reason:
+        score += 1
+    return score
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if pd.isna(value):
+            return default
+    except (TypeError, ValueError):
+        pass
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _dedupe_rank(row: pd.Series, position: int) -> tuple[int, int, int, int, float, float, int]:
+    return (
+        _context_validity_score(row),
+        0 if _is_team_not_in_game_context(row) else 1,
+        -_context_warning_count(row),
+        _live_source_score(row),
+        _safe_float(row.get("selection_score")),
+        _safe_float(row.get("quality_score")),
+        -position,
+    )
+
+
+def _row_summary(row: pd.Series, index: Any) -> dict[str, Any]:
+    return {
+        "row_index": str(index),
+        "player_name": _safe_text(row.get("player_name") or row.get("entity_name")),
+        "player_id": _safe_text(row.get("player_id")),
+        "team": _safe_text(row.get("team") or row.get("team_abbr")),
+        "market_type": _safe_text(row.get("market_type")),
+        "selection": _safe_text(row.get("selection") or row.get("selection_side") or row.get("side")),
+        "line": _safe_text(row.get("line") if _safe_text(row.get("line")) else row.get("sportsbook_line")),
+        "game_id": _safe_text(row.get("game_id")),
+        "selection_score": _safe_text(row.get("selection_score")),
+        "quality_score": _safe_text(row.get("quality_score")),
+        "context_validity_score": _context_validity_score(row),
+        "context_warning_count": _context_warning_count(row),
+        "team_not_in_game_context": _is_team_not_in_game_context(row),
+    }
+
+
+def _dedupe_betting_identities(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
+    empty_summary = {
+        "rejection_reason": DUPLICATE_BETTING_IDENTITY_REASON,
+        "total_rows_dropped": 0,
+        "counts_by_market_type": {},
+        "groups": [],
+        "dropped_indices": [],
+    }
+    if df.empty:
+        return df.copy(), empty_summary
+
+    groups: dict[tuple[str, str, str, str, str], list[tuple[int, Any, pd.Series]]] = {}
+    for position, (idx, row) in enumerate(df.iterrows()):
+        key = _betting_identity_key(row)
+        if key is None:
+            continue
+        groups.setdefault(key, []).append((position, idx, row))
+
+    keep_indices: set[Any] = set(df.index)
+    dropped_indices: list[Any] = []
+    drop_groups: list[dict[str, Any]] = []
+    drop_counts_by_market_type: dict[str, int] = {}
+
+    for key, members in groups.items():
+        if len(members) <= 1:
+            continue
+        ranked = sorted(
+            members,
+            key=lambda item: _dedupe_rank(item[2], item[0]),
+            reverse=True,
+        )
+        kept_position, kept_index, kept_row = ranked[0]
+        dropped_members = ranked[1:]
+        for _, dropped_index, dropped_row in dropped_members:
+            keep_indices.discard(dropped_index)
+            dropped_indices.append(dropped_index)
+            market = _safe_text(dropped_row.get("market_type")).lower()
+            if market:
+                drop_counts_by_market_type[market] = drop_counts_by_market_type.get(market, 0) + 1
+
+        player_key, game_id, market_type, selection, line = key
+        drop_groups.append(
+            {
+                "rejection_reason": DUPLICATE_BETTING_IDENTITY_REASON,
+                "identity": "|".join(key),
+                "player_key": player_key,
+                "game_id": game_id,
+                "market_type": market_type,
+                "selection": selection,
+                "line": line,
+                "row_count": len(members),
+                "drop_count": len(dropped_members),
+                "kept": _row_summary(kept_row, kept_index),
+                "dropped": [_row_summary(row, idx) for _, idx, row in dropped_members],
+                "tie_breaker": (
+                    "context_validity,not_team_not_in_game_context,"
+                    "fewest_context_warnings,live_source,selection_score,quality_score,input_order"
+                ),
+            }
+        )
+
+    if not dropped_indices:
+        return df.copy(), empty_summary
+
+    deduped = df.loc[[idx for idx in df.index if idx in keep_indices]].copy()
+    summary = {
+        "rejection_reason": DUPLICATE_BETTING_IDENTITY_REASON,
+        "total_rows_dropped": int(len(dropped_indices)),
+        "counts_by_market_type": dict(sorted(drop_counts_by_market_type.items())),
+        "groups": drop_groups,
+        "dropped_indices": dropped_indices,
+    }
+    return deduped, summary
+
+
+def duplicate_betting_identity_drop_summary(payload: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Normalize duplicate betting-identity drop diagnostics from a trace payload."""
+    empty = {
+        "rejection_reason": DUPLICATE_BETTING_IDENTITY_REASON,
+        "total_rows_dropped": 0,
+        "counts_by_market_type": {},
+        "groups": [],
+    }
+    if not isinstance(payload, Mapping):
+        return empty
+
+    existing = payload.get("duplicate_betting_identity")
+    if isinstance(existing, Mapping):
+        counts = _coerce_market_count_mapping(
+            existing.get("counts_by_market_type")
+            or existing.get("duplicate_betting_identity_drop_counts_by_market_type")
+        )
+        total = _safe_int(
+            existing.get("total_rows_dropped")
+            or existing.get("duplicate_betting_identity_drop_count")
+            or existing.get("count")
+            or existing.get("total")
+        )
+        groups = existing.get("groups") or existing.get("duplicate_betting_identity_drop_groups") or []
+        if not isinstance(groups, list):
+            groups = []
+        if total <= 0:
+            total = sum(counts.values())
+        return {
+            "rejection_reason": str(existing.get("rejection_reason") or DUPLICATE_BETTING_IDENTITY_REASON),
+            "total_rows_dropped": int(total),
+            "counts_by_market_type": counts,
+            "groups": groups,
+        }
+
+    for nested_key in ("selection_trace", "final_board_construction", "candidate_funnel"):
+        nested = payload.get(nested_key)
+        if not isinstance(nested, Mapping):
+            continue
+        nested_summary = duplicate_betting_identity_drop_summary(nested)
+        if nested_summary["total_rows_dropped"] > 0 or nested_summary["counts_by_market_type"]:
+            return nested_summary
+
+    for scope in ("full_market", "elite"):
+        scope_payload = payload.get(scope)
+        if not isinstance(scope_payload, Mapping):
+            continue
+        counts = _coerce_market_count_mapping(
+            scope_payload.get("duplicate_betting_identity_drop_counts_by_market_type")
+        )
+        total = _safe_int(scope_payload.get("duplicate_betting_identity_drop_count"))
+        groups = scope_payload.get("duplicate_betting_identity_drop_groups") or []
+        if not isinstance(groups, list):
+            groups = []
+        if total <= 0:
+            total = sum(counts.values())
+        if total > 0 or counts:
+            return {
+                "rejection_reason": str(
+                    scope_payload.get("duplicate_betting_identity_rejection_reason")
+                    or DUPLICATE_BETTING_IDENTITY_REASON
+                ),
+                "total_rows_dropped": int(total),
+                "counts_by_market_type": counts,
+                "groups": groups,
+            }
+
+    counts = _coerce_market_count_mapping(
+        payload.get("duplicate_betting_identity_drop_counts_by_market_type")
+        or payload.get("counts_by_market_type")
+    )
+    total = _safe_int(
+        payload.get("duplicate_betting_identity_drop_count")
+        or payload.get("total_rows_dropped")
+        or payload.get("count")
+        or payload.get("total")
+    )
+    groups = payload.get("duplicate_betting_identity_drop_groups") or payload.get("groups") or []
+    if not isinstance(groups, list):
+        groups = []
+    if total <= 0:
+        total = sum(counts.values())
+    return {
+        "rejection_reason": DUPLICATE_BETTING_IDENTITY_REASON,
+        "total_rows_dropped": int(total),
+        "counts_by_market_type": counts,
+        "groups": groups,
+    }
 
 
 def unsupported_active_operator_market_drop_summary(payload: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -440,7 +775,28 @@ def build_operator_boards(
             "selection_rejection_reason",
         ] = UNSUPPORTED_ACTIVE_OPERATOR_MARKET_REASON
 
-    live_candidates_df = prepared_df[unified_live_mask & ~milestone_mask & active_market_mask].copy()
+    live_candidates_before_dedupe_df = prepared_df[unified_live_mask & ~milestone_mask & active_market_mask].copy()
+    live_candidates_df, duplicate_betting_identity_summary = _dedupe_betting_identities(
+        live_candidates_before_dedupe_df
+    )
+    duplicate_betting_identity_drop_count = int(
+        duplicate_betting_identity_summary.get("total_rows_dropped", 0) or 0
+    )
+    duplicate_betting_identity_drop_groups = (
+        duplicate_betting_identity_summary.get("groups", [])
+        if isinstance(duplicate_betting_identity_summary.get("groups", []), list)
+        else []
+    )
+    duplicate_betting_identity_drop_counts_by_market_type = dict(
+        duplicate_betting_identity_summary.get("counts_by_market_type", {}) or {}
+    )
+    if duplicate_betting_identity_drop_count > 0:
+        dropped_indices = duplicate_betting_identity_summary.get("dropped_indices", [])
+        if not isinstance(dropped_indices, list):
+            dropped_indices = []
+        for dropped_index in dropped_indices:
+            if dropped_index in prepared_df.index and not str(prepared_df.at[dropped_index, "selection_rejection_reason"]).strip():
+                prepared_df.at[dropped_index, "selection_rejection_reason"] = DUPLICATE_BETTING_IDENTITY_REASON
     unsupported_milestone_count = int(milestone_mask.sum())
     unsupported_active_market_count = int(unsupported_active_market_mask.sum())
     unsupported_active_market_counts = _market_counts(prepared_df[unsupported_active_market_mask].copy())
@@ -449,20 +805,42 @@ def build_operator_boards(
     final_board_construction["required_selector_columns"] = required_selector_diagnostics
 
     final_board_construction["elite"]["input_count"] = len(prepared_df)
-    final_board_construction["elite"]["post_live_market_gate_count"] = len(live_candidates_df)
+    final_board_construction["elite"]["post_live_market_gate_count"] = len(live_candidates_before_dedupe_df)
+    final_board_construction["elite"]["post_duplicate_betting_identity_dedupe_count"] = len(live_candidates_df)
     final_board_construction["elite"]["unsupported_milestone_count"] = unsupported_milestone_count
     final_board_construction["elite"]["unsupported_active_operator_market_count"] = unsupported_active_market_count
     final_board_construction["elite"]["unsupported_active_operator_market_counts"] = unsupported_active_market_counts
+    final_board_construction["elite"]["duplicate_betting_identity_drop_count"] = duplicate_betting_identity_drop_count
+    final_board_construction["elite"]["duplicate_betting_identity_drop_groups"] = duplicate_betting_identity_drop_groups
+    final_board_construction["elite"]["duplicate_betting_identity_drop_counts_by_market_type"] = (
+        duplicate_betting_identity_drop_counts_by_market_type
+    )
+    final_board_construction["elite"]["duplicate_betting_identity_rejection_reason"] = (
+        DUPLICATE_BETTING_IDENTITY_REASON
+    )
     final_board_construction["elite"]["diagnostic_live_flag_count"] = int(diagnostic_live_mask.sum())
     final_board_construction["elite"]["qualification_reason_missing_count"] = int(
         qualification_reason_series.fillna("").astype(str).str.strip().eq("").sum()
     )
 
     final_board_construction["full_market"]["input_count"] = len(prepared_df)
-    final_board_construction["full_market"]["post_live_market_gate_count"] = len(live_candidates_df)
+    final_board_construction["full_market"]["post_live_market_gate_count"] = len(live_candidates_before_dedupe_df)
+    final_board_construction["full_market"]["post_duplicate_betting_identity_dedupe_count"] = len(live_candidates_df)
     final_board_construction["full_market"]["unsupported_milestone_count"] = unsupported_milestone_count
     final_board_construction["full_market"]["unsupported_active_operator_market_count"] = unsupported_active_market_count
     final_board_construction["full_market"]["unsupported_active_operator_market_counts"] = unsupported_active_market_counts
+    final_board_construction["full_market"]["duplicate_betting_identity_drop_count"] = (
+        duplicate_betting_identity_drop_count
+    )
+    final_board_construction["full_market"]["duplicate_betting_identity_drop_groups"] = (
+        duplicate_betting_identity_drop_groups
+    )
+    final_board_construction["full_market"]["duplicate_betting_identity_drop_counts_by_market_type"] = (
+        duplicate_betting_identity_drop_counts_by_market_type
+    )
+    final_board_construction["full_market"]["duplicate_betting_identity_rejection_reason"] = (
+        DUPLICATE_BETTING_IDENTITY_REASON
+    )
     final_board_construction["full_market"]["diagnostic_live_flag_count"] = int(diagnostic_live_mask.sum())
 
     elite_df = select_elite_board(live_candidates_df)

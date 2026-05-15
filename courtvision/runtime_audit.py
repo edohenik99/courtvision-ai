@@ -23,6 +23,7 @@ from courtvision.runtime_selection import (
     player_points_strong_over_calibration_reason,
 )
 from courtvision.selection.operator_boards import (
+    duplicate_betting_identity_drop_summary,
     unsupported_active_operator_market_drop_summary,
 )
 
@@ -164,6 +165,9 @@ class BoardAuditPolicy:
                 player_points_admission_df
             ),
             "final_board_construction": self._final_board_construction_payload(final_board_construction),
+            "duplicate_betting_identity": duplicate_betting_identity_drop_summary(
+                final_board_construction
+            ),
             "unsupported_active_operator_markets": unsupported_active_operator_market_drop_summary(
                 final_board_construction
             ),
@@ -365,6 +369,7 @@ class BoardAuditPolicy:
                     "live_quality_rescue_candidate_count",
                     "final_selected_count",
                     "backfill_added_count",
+                    "duplicate_betting_identity_drop_count",
                     "unsupported_active_operator_market_count",
                 ]:
                     rows.append(
@@ -376,6 +381,19 @@ class BoardAuditPolicy:
                             "value": None,
                         }
                     )
+
+                duplicate_counts = payload.get("duplicate_betting_identity_drop_counts_by_market_type", {})
+                if isinstance(duplicate_counts, Mapping):
+                    for market, count in duplicate_counts.items():
+                        rows.append(
+                            {
+                                "scope": str(scope),
+                                "section": "final_board_construction.duplicate_betting_identity_drop_counts_by_market_type",
+                                "key": str(market),
+                                "count": int(count or 0),
+                                "value": None,
+                            }
+                        )
 
                 unsupported_market_counts = payload.get("unsupported_active_operator_market_counts", {})
                 if isinstance(unsupported_market_counts, Mapping):
@@ -869,6 +887,19 @@ class BoardAuditPolicy:
         normalized["backfill_added_count"] = int(payload.get("backfill_added_count", 0) or 0)
         normalized["backfill_added_by_qualification_gate_mode"] = self._normalize_count_items(
             payload.get("backfill_added_by_qualification_gate_mode", [])
+        )
+        duplicate_summary = duplicate_betting_identity_drop_summary(payload)
+        normalized["duplicate_betting_identity_drop_count"] = int(
+            duplicate_summary.get("total_rows_dropped", 0) or 0
+        )
+        normalized["duplicate_betting_identity_drop_groups"] = list(
+            duplicate_summary.get("groups", []) or []
+        )
+        normalized["duplicate_betting_identity_drop_counts_by_market_type"] = dict(
+            duplicate_summary.get("counts_by_market_type", {}) or {}
+        )
+        normalized["duplicate_betting_identity_rejection_reason"] = str(
+            duplicate_summary.get("rejection_reason", "duplicate_betting_identity")
         )
         unsupported_summary = unsupported_active_operator_market_drop_summary(payload)
         normalized["unsupported_active_operator_market_count"] = int(

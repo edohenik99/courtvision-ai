@@ -31,6 +31,7 @@ from courtvision.config import EliteThresholds, DEFAULT_BANKROLL
 from courtvision.selection import (
     ACTIVE_OPERATOR_MARKETS,
     build_operator_boards,
+    duplicate_betting_identity_drop_summary,
     unsupported_active_operator_market_drop_summary,
 )
 from courtvision.betting.kelly import compute_kelly_fraction
@@ -690,8 +691,17 @@ class PredictionPipeline:
             selection_trace.get("full_market", {}).get("unsupported_active_operator_market_counts", {}) or {}
         )
         unsupported_active_market_summary = unsupported_active_operator_market_drop_summary(selection_trace)
+        duplicate_betting_identity_summary = duplicate_betting_identity_drop_summary(selection_trace)
+        duplicate_betting_identity_drop_count = int(
+            duplicate_betting_identity_summary.get("total_rows_dropped", 0) or 0
+        )
+        duplicate_betting_identity_drop_counts = (
+            duplicate_betting_identity_summary.get("counts_by_market_type", {}) or {}
+        )
         print(f"[COUNT] unsupported_active_operator_market_count={unsupported_active_market_count}", flush=True)
         print(f"[COUNT] unsupported_active_operator_market_counts={unsupported_active_market_counts}", flush=True)
+        print(f"[COUNT] duplicate_betting_identity_drop_count={duplicate_betting_identity_drop_count}", flush=True)
+        print(f"[COUNT] duplicate_betting_identity_drop_counts={duplicate_betting_identity_drop_counts}", flush=True)
         self.logger.info("board_selection_trace %s", selection_trace)
         if selection_trace.get("selection_rejection_reasons"):
             self.logger.info(
@@ -766,6 +776,14 @@ class PredictionPipeline:
         result.summary["unsupported_active_operator_market_count"] = unsupported_active_market_count
         result.summary["unsupported_active_operator_market_counts"] = unsupported_active_market_counts
         result.summary["unsupported_active_operator_markets"] = unsupported_active_market_summary
+        result.summary["duplicate_betting_identity_drop_count"] = duplicate_betting_identity_drop_count
+        result.summary["duplicate_betting_identity_drop_counts_by_market_type"] = (
+            dict(duplicate_betting_identity_drop_counts)
+        )
+        result.summary["duplicate_betting_identity_drop_groups"] = (
+            duplicate_betting_identity_summary.get("groups", []) or []
+        )
+        result.summary["duplicate_betting_identity"] = duplicate_betting_identity_summary
 
         # Set summary on telemetry BEFORE writing audit files
         elite_telemetry.set_summary(result.summary)
