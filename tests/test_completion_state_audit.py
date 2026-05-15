@@ -309,3 +309,32 @@ def test_daily_runner_runs_full_market_sanity_audit_non_blocking() -> None:
     assert "[WARN] Full-market sanity audit status:" in audit_block
     assert "continuing daily run" in audit_block
     assert "Full-market sanity audit crashed or exited nonzero" in audit_block
+
+
+def test_daily_runner_runs_candidate_quality_drift_audit_non_blocking() -> None:
+    ps1 = Path("run_today.ps1").read_text(encoding="utf-8")
+    normalized_ps1 = ps1.replace("\\", "/")
+
+    assert "scripts/audit_candidate_quality_drift.py" in normalized_ps1
+    assert "[START] Candidate Quality Drift Audit" in ps1
+    assert "candidate_quality_drift_audit_$Date.json" in ps1
+    assert '"PASS", "PASS_NO_SLATE"' in ps1
+    assert "PASS_WITH_WARNINGS" in ps1
+
+    full_market_audit_idx = ps1.index("$fullMarketSanityExitCode = Invoke-LoggedCommand")
+    candidate_audit_idx = ps1.index("$candidateQualityDriftExitCode = Invoke-LoggedCommand")
+    kelly_idx = ps1.index("$kellyExitCode = Invoke-LoggedCommand")
+    daily_idx = ps1.index("$dailySummaryExitCode = Invoke-LoggedCommand")
+    completion_idx = ps1.index("$completionAuditExitCode = Invoke-LoggedCommand")
+    operator_idx = ps1.index("$operatorCardExitCode = Invoke-LoggedCommand")
+    assert full_market_audit_idx < candidate_audit_idx < kelly_idx < daily_idx < completion_idx < operator_idx
+
+    audit_block = ps1[
+        ps1.index('Write-Host "[START] Candidate Quality Drift Audit"') :
+        ps1.index('Write-Host "[START] Kelly"')
+    ]
+    assert "Stop-StageFailure" not in audit_block
+    assert "[WARNING] Candidate quality drift audit status:" in audit_block
+    assert "[WARN] Candidate quality drift audit status:" in audit_block
+    assert "continuing daily run" in audit_block
+    assert "Candidate quality drift audit crashed or exited nonzero" in audit_block

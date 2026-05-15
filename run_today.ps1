@@ -40,6 +40,7 @@ $PostRunTrackingScript = Join-Path $ScriptRoot "scripts\post_run_tracking.py"
 $GradeCompletedScript = Join-Path $ScriptRoot "scripts\grade_completed_picks.py"
 $MarketShadowScript = Join-Path $ScriptRoot "scripts\market_shadow_grading.py"
 $FullMarketSanityAuditScript = Join-Path $ScriptRoot "scripts\audit_full_market_sanity.py"
+$CandidateQualityDriftAuditScript = Join-Path $ScriptRoot "scripts\audit_candidate_quality_drift.py"
 $DailySummaryScript = Join-Path $ScriptRoot "scripts\write_daily_summary.py"
 $QualitySummaryScript = Join-Path $ScriptRoot "scripts\write_quality_summary.py"
 $CompletionStateAuditScript = Join-Path $ScriptRoot "scripts\write_completion_state_audit.py"
@@ -221,6 +222,7 @@ $kellyOutputCsv = Join-Path $operatorDir "kelly_stakes_$Date.csv"
 $completionAuditTextPath = Join-Path $operatorDir "completion_state_audit_$Date.txt"
 $completionAuditJsonPath = "outputs\runtime\diagnostics\completion_state_audit_$Date.json"
 $fullMarketSanityAuditJsonPath = "outputs\runtime\diagnostics\full_market_sanity_audit_$Date.json"
+$candidateQualityDriftAuditJsonPath = "outputs\runtime\diagnostics\candidate_quality_drift_audit_$Date.json"
 
 Write-Host ""
 Write-Host "[START] Validate Outputs" -ForegroundColor Yellow
@@ -312,6 +314,49 @@ if (-not (Test-Path $FullMarketSanityAuditScript)) {
         } catch {
             Write-LogLine -Path $ValidationLog -Message "[WARNING] Could not read full-market sanity audit JSON: $fullMarketSanityAuditJsonPath error=$($_.Exception.Message)" -AlsoConsole:$VerboseMode
             Write-Host "[WARN] Could not read full-market sanity audit JSON; continuing daily run." -ForegroundColor Yellow
+        }
+    }
+}
+
+Write-Host ""
+Write-Host "[START] Candidate Quality Drift Audit" -ForegroundColor Yellow
+if (-not (Test-Path $CandidateQualityDriftAuditScript)) {
+    Write-LogLine -Path $ValidationLog -Message "[WARNING] Candidate quality drift audit script not found: $CandidateQualityDriftAuditScript" -AlsoConsole:$VerboseMode
+    Write-Host "[WARN] Candidate quality drift audit skipped; script not found: $CandidateQualityDriftAuditScript" -ForegroundColor Yellow
+} else {
+    "`n--- Candidate quality drift audit ---" | Out-File $ValidationLog -Append
+    $candidateQualityDriftExitCode = Invoke-LoggedCommand `
+        -LogPath $ValidationLog `
+        -Exe $PyExe `
+        -Arguments ($PyArgsPrefix + @($CandidateQualityDriftAuditScript, "--prediction-date", $Date)) `
+        -StreamToConsole:$VerboseMode
+
+    if ($candidateQualityDriftExitCode -ne 0) {
+        Write-LogLine -Path $ValidationLog -Message "[WARNING] Candidate quality drift audit crashed or exited nonzero (exit code: $candidateQualityDriftExitCode)." -AlsoConsole:$VerboseMode
+        Write-Host "[WARN] Candidate quality drift audit crashed or exited nonzero; continuing daily run." -ForegroundColor Yellow
+    } elseif (-not (Test-Path $candidateQualityDriftAuditJsonPath)) {
+        Write-LogLine -Path $ValidationLog -Message "[WARNING] Candidate quality drift audit JSON output not found: $candidateQualityDriftAuditJsonPath" -AlsoConsole:$VerboseMode
+        Write-Host "[WARN] Candidate quality drift audit did not write JSON output; continuing daily run." -ForegroundColor Yellow
+    } else {
+        try {
+            $candidateQualityDriftPayload = Get-Content -Path $candidateQualityDriftAuditJsonPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            $candidateQualityDriftStatus = [string]$candidateQualityDriftPayload.status
+            $candidateQualityDriftFailures = [int]$candidateQualityDriftPayload.failure_count
+            $candidateQualityDriftWarnings = [int]$candidateQualityDriftPayload.warning_count
+            $cleanCandidateQualityDriftStatuses = @("PASS", "PASS_NO_SLATE")
+            if ($cleanCandidateQualityDriftStatuses -contains $candidateQualityDriftStatus) {
+                Write-LogLine -Path $ValidationLog -Message "[OK] Candidate quality drift audit status: $candidateQualityDriftStatus warnings=$candidateQualityDriftWarnings failures=$candidateQualityDriftFailures" -AlsoConsole:$VerboseMode
+                Write-Host "[OK] Candidate quality drift audit status: $candidateQualityDriftStatus" -ForegroundColor Green
+            } elseif ($candidateQualityDriftStatus -eq "PASS_WITH_WARNINGS") {
+                Write-LogLine -Path $ValidationLog -Message "[WARNING] Candidate quality drift audit status: $candidateQualityDriftStatus warnings=$candidateQualityDriftWarnings failures=$candidateQualityDriftFailures" -AlsoConsole:$VerboseMode
+                Write-Host "[WARN] Candidate quality drift audit status: $candidateQualityDriftStatus; continuing daily run." -ForegroundColor Yellow
+            } else {
+                Write-LogLine -Path $ValidationLog -Message "[WARNING] Candidate quality drift audit status: $candidateQualityDriftStatus warnings=$candidateQualityDriftWarnings failures=$candidateQualityDriftFailures" -AlsoConsole:$VerboseMode
+                Write-Host "[WARN] Candidate quality drift audit status: $candidateQualityDriftStatus; continuing daily run." -ForegroundColor Yellow
+            }
+        } catch {
+            Write-LogLine -Path $ValidationLog -Message "[WARNING] Could not read candidate quality drift audit JSON: $candidateQualityDriftAuditJsonPath error=$($_.Exception.Message)" -AlsoConsole:$VerboseMode
+            Write-Host "[WARN] Could not read candidate quality drift audit JSON; continuing daily run." -ForegroundColor Yellow
         }
     }
 }
