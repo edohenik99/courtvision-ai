@@ -211,6 +211,61 @@ def _action_value(row: pd.Series) -> str:
     return "CLEAR"
 
 
+def _row_text_contains(row: pd.Series, needles: tuple[str, ...], columns: tuple[str, ...]) -> bool:
+    haystack = " ".join(
+        _safe_text(row.get(column)).lower()
+        for column in columns
+        if column in row.index
+    )
+    return any(needle in haystack for needle in needles)
+
+
+def _preview_action_value(row: pd.Series, *, final_decision: str, elite_count: int) -> str:
+    """Return an operator-safe display action for full-market preview rows.
+
+    Full-market preview rows are diagnostic only. They must not inherit CLEAR in a
+    NO_BET card because CLEAR reads like betting permission.
+    """
+    if _row_has_any(row, "review_before_bet"):
+        return "REVIEW_REQUIRED"
+    if _row_has_any(row, "manual_review_required"):
+        return "MANUAL_REVIEW_REQUIRED"
+    if _row_has_any(row, "same_opponent_under_warning"):
+        return "REVIEW_SAME_OPPONENT_WARNING"
+    if _row_has_any(
+        row,
+        "kelly_manual_review_required",
+        "kelly_review_required",
+        "review_policy_hold",
+    ):
+        return "KELLY_REVIEW_REQUIRED"
+
+    reason_columns = (
+        "qualification_reason",
+        "rejection_reason",
+        "elite_rejection_reason",
+        "recommended_action_reason",
+        "reason",
+        "context_warning_flags",
+        "warning_flags",
+    )
+    if _row_text_contains(
+        row,
+        (
+            "elite_reject_context_high_caution_over",
+            "context_high_caution_over",
+            "high_caution_over",
+        ),
+        reason_columns,
+    ):
+        return "WATCHLIST_ONLY"
+
+    if _safe_text(final_decision).upper() == "NO BET" or elite_count <= 0:
+        return "SHADOW_ONLY"
+
+    return _action_value(row)
+
+
 def _bucket_value(row: pd.Series) -> str:
     for column in ("bucket", "watchlist_bucket", "context_caution_level", "fragility_bucket", "quality_band"):
         if column in row.index:
@@ -808,7 +863,20 @@ def build_operator_card(
         if full_market_df.empty:
             lines.append("n/a")
         else:
-            lines.extend(_render_pick_table(full_market_display_df, limit=10, include_bucket=True))
+            lines.append(
+                "Preview rows are diagnostic only and are not betting recommendations unless they appear in Elite Picks/Kelly."
+            )
+            preview_df = full_market_display_df.copy()
+            if not preview_df.empty:
+                preview_df["recommended_action"] = preview_df.apply(
+                    lambda row: _preview_action_value(
+                        row,
+                        final_decision=final_decision,
+                        elite_count=elite_count,
+                    ),
+                    axis=1,
+                )
+            lines.extend(_render_pick_table(preview_df, limit=10, include_bucket=True))
         lines.append("")
 
     lines.append("Watchlists")
