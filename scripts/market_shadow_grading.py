@@ -99,16 +99,44 @@ def _normalize_result(value: Any) -> str:
     return RESULT_PENDING
 
 
+def _has_grading_evidence(row: pd.Series) -> bool:
+    """Return True only when a row has enough outcome context to trust hit/miss fields."""
+    for col in ("actual_value", "actual", "final_value", "stat_value"):
+        if col in row.index and _safe_text(row.get(col)) != "":
+            return True
+
+    for col in ("grading_skip_reason", "skip_reason"):
+        if col in row.index:
+            reason = _safe_text(row.get(col)).lower()
+            if reason and reason != "game_not_final":
+                return True
+
+    for col in ("game_status", "status"):
+        if col in row.index:
+            status = _safe_text(row.get(col)).lower()
+            if status in {"final", "final_status", "completed", "complete", "closed", "post_game"}:
+                return True
+
+    return False
+
+
 def _direct_result(row: pd.Series) -> str:
     for col in ("result_status", "graded_result", "result"):
         if col in row.index:
+            raw = _safe_text(row.get(col)).lower()
             result = _normalize_result(row.get(col))
             if result != RESULT_PENDING:
                 return result
-    if "hit" in row.index:
+            if raw == RESULT_PENDING:
+                return RESULT_PENDING
+
+    # A bare hit=False/0 on an ungraded/open-game board row is not a real miss.
+    # Only trust hit when final grading evidence exists.
+    if "hit" in row.index and _has_grading_evidence(row):
         hit_value = row.get("hit")
         if _safe_text(hit_value) != "":
             return _normalize_result(hit_value)
+
     return RESULT_PENDING
 
 

@@ -317,12 +317,31 @@ def _agreement_issues(
     daily_summary_pending_grading: int | None,
     quality_summary_kelly_rows: int | None,
     quality_summary_kelly_pending_count: int | None,
+    shadow_pending_count: int,
+    shadow_open_game_pending_count: int,
+    shadow_stale_pending_count: int,
 ) -> list[str]:
     issues: list[str] = []
-    if daily_summary_pending_grading is not None and daily_summary_pending_grading != real_pick_pending_count:
+
+    daily_pending_is_real_pick_count = daily_summary_pending_grading == real_pick_pending_count
+    daily_pending_is_open_shadow_noise = (
+        daily_summary_pending_grading is not None
+        and real_pick_pending_count == 0
+        and daily_summary_pending_grading == shadow_pending_count
+        and shadow_pending_count > 0
+        and shadow_pending_count == shadow_open_game_pending_count
+        and shadow_stale_pending_count == 0
+    )
+
+    if daily_summary_pending_grading is not None and not (
+        daily_pending_is_real_pick_count or daily_pending_is_open_shadow_noise
+    ):
         issues.append(
             "daily_summary_pending_grading_mismatch:"
-            f"daily={daily_summary_pending_grading},real_pick_pending={real_pick_pending_count}"
+            f"daily={daily_summary_pending_grading},real_pick_pending={real_pick_pending_count},"
+            f"shadow_pending={shadow_pending_count},"
+            f"shadow_open_game_pending={shadow_open_game_pending_count},"
+            f"shadow_stale_pending={shadow_stale_pending_count}"
         )
     if pick_history_exists and quality_summary_kelly_rows is not None and quality_summary_kelly_rows != real_pick_rows:
         issues.append(
@@ -473,6 +492,9 @@ def build_completion_state_audit(
         daily_summary_pending_grading=daily_summary_pending_grading,
         quality_summary_kelly_rows=quality["quality_summary_kelly_rows"],
         quality_summary_kelly_pending_count=quality["quality_summary_kelly_pending_count"],
+        shadow_pending_count=int(shadow_counts["pending_count"]),
+        shadow_open_game_pending_count=int(shadow_counts["open_game_pending_count"]),
+        shadow_stale_pending_count=int(shadow_counts["stale_pending_count"]),
     )
 
     status = _classify(
