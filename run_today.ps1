@@ -39,6 +39,7 @@ $KellyStakesScript = Join-Path $ScriptRoot "scripts\run_kelly_stakes.py"
 $PostRunTrackingScript = Join-Path $ScriptRoot "scripts\post_run_tracking.py"
 $GradeCompletedScript = Join-Path $ScriptRoot "scripts\grade_completed_picks.py"
 $MarketShadowScript = Join-Path $ScriptRoot "scripts\market_shadow_grading.py"
+$FullMarketSanityAuditScript = Join-Path $ScriptRoot "scripts\audit_full_market_sanity.py"
 $DailySummaryScript = Join-Path $ScriptRoot "scripts\write_daily_summary.py"
 $QualitySummaryScript = Join-Path $ScriptRoot "scripts\write_quality_summary.py"
 $CompletionStateAuditScript = Join-Path $ScriptRoot "scripts\write_completion_state_audit.py"
@@ -219,6 +220,7 @@ $operatorCardPath = Join-Path $operatorDir "operator_card_$Date.txt"
 $kellyOutputCsv = Join-Path $operatorDir "kelly_stakes_$Date.csv"
 $completionAuditTextPath = Join-Path $operatorDir "completion_state_audit_$Date.txt"
 $completionAuditJsonPath = "outputs\runtime\diagnostics\completion_state_audit_$Date.json"
+$fullMarketSanityAuditJsonPath = "outputs\runtime\diagnostics\full_market_sanity_audit_$Date.json"
 
 Write-Host ""
 Write-Host "[START] Validate Outputs" -ForegroundColor Yellow
@@ -273,6 +275,46 @@ if ($validationExitCode -ne 0) {
     Stop-StageFailure -Stage "Validate Outputs" -ExitCode $validationExitCode -LogPath $ValidationLog
 }
 Write-Host "[OK] Validation passed. Details saved to $ValidationLog" -ForegroundColor Green
+
+Write-Host ""
+Write-Host "[START] Full-Market Sanity Audit" -ForegroundColor Yellow
+if (-not (Test-Path $FullMarketSanityAuditScript)) {
+    Write-LogLine -Path $ValidationLog -Message "[WARNING] Full-market sanity audit script not found: $FullMarketSanityAuditScript" -AlsoConsole:$VerboseMode
+    Write-Host "[WARN] Full-market sanity audit skipped; script not found: $FullMarketSanityAuditScript" -ForegroundColor Yellow
+} else {
+    "`n--- Full-market sanity audit ---" | Out-File $ValidationLog -Append
+    $fullMarketSanityExitCode = Invoke-LoggedCommand `
+        -LogPath $ValidationLog `
+        -Exe $PyExe `
+        -Arguments ($PyArgsPrefix + @($FullMarketSanityAuditScript, "--prediction-date", $Date)) `
+        -StreamToConsole:$VerboseMode
+
+    if ($fullMarketSanityExitCode -ne 0) {
+        Write-LogLine -Path $ValidationLog -Message "[WARNING] Full-market sanity audit crashed or exited nonzero (exit code: $fullMarketSanityExitCode)." -AlsoConsole:$VerboseMode
+        Write-Host "[WARN] Full-market sanity audit crashed or exited nonzero; continuing daily run." -ForegroundColor Yellow
+    } elseif (-not (Test-Path $fullMarketSanityAuditJsonPath)) {
+        Write-LogLine -Path $ValidationLog -Message "[WARNING] Full-market sanity audit JSON output not found: $fullMarketSanityAuditJsonPath" -AlsoConsole:$VerboseMode
+        Write-Host "[WARN] Full-market sanity audit did not write JSON output; continuing daily run." -ForegroundColor Yellow
+    } else {
+        try {
+            $fullMarketSanityPayload = Get-Content -Path $fullMarketSanityAuditJsonPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            $fullMarketSanityStatus = [string]$fullMarketSanityPayload.status
+            $fullMarketSanityFailures = [int]$fullMarketSanityPayload.failure_count
+            $fullMarketSanityWarnings = [int]$fullMarketSanityPayload.warning_count
+            $passingFullMarketSanityStatuses = @("PASS", "PASS_NO_SLATE", "PASS_WITH_WARNINGS")
+            if ($passingFullMarketSanityStatuses -contains $fullMarketSanityStatus) {
+                Write-LogLine -Path $ValidationLog -Message "[OK] Full-market sanity audit status: $fullMarketSanityStatus warnings=$fullMarketSanityWarnings failures=$fullMarketSanityFailures" -AlsoConsole:$VerboseMode
+                Write-Host "[OK] Full-market sanity audit status: $fullMarketSanityStatus" -ForegroundColor Green
+            } else {
+                Write-LogLine -Path $ValidationLog -Message "[WARNING] Full-market sanity audit status: $fullMarketSanityStatus warnings=$fullMarketSanityWarnings failures=$fullMarketSanityFailures" -AlsoConsole:$VerboseMode
+                Write-Host "[WARN] Full-market sanity audit status: $fullMarketSanityStatus; continuing daily run." -ForegroundColor Yellow
+            }
+        } catch {
+            Write-LogLine -Path $ValidationLog -Message "[WARNING] Could not read full-market sanity audit JSON: $fullMarketSanityAuditJsonPath error=$($_.Exception.Message)" -AlsoConsole:$VerboseMode
+            Write-Host "[WARN] Could not read full-market sanity audit JSON; continuing daily run." -ForegroundColor Yellow
+        }
+    }
+}
 
 Write-Host ""
 Write-Host "[START] Kelly" -ForegroundColor Yellow
