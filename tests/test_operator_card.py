@@ -615,3 +615,104 @@ def test_operator_card_degraded_when_required_artifact_is_missing(tmp_path: Path
     assert payload["final_decision"] == "DEGRADED"
     assert "Missing Required Artifacts" in text
     assert f"full_market_board_{prediction_date}.csv" in text
+
+def test_operator_card_no_bet_preview_rows_are_shadow_only_not_clear(tmp_path: Path) -> None:
+    prediction_date = "2026-05-15"
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+    operator = runtime_root / "operator"
+
+    candidate = _candidate(prediction_date)
+    candidate["recommended_action"] = "CLEAR"
+    candidate["qualification_reason"] = ""
+    columns = list(candidate.keys())
+
+    _write_csv(operator / f"elite_board_{prediction_date}.csv", [], columns=columns)
+    _write_csv(operator / f"full_market_board_{prediction_date}.csv", [candidate], columns=columns)
+    _write_csv(operator / f"sgp_board_{prediction_date}.csv", [], columns=["prediction_date"])
+    _write_json(
+        operator / f"quality_summary_{prediction_date}.json",
+        _quality_payload(
+            prediction_date,
+            elite_count=0,
+            full_market_count=1,
+            run_health_status="NO_BET",
+            games_count=1,
+        ),
+    )
+    _seed_required_json(runtime_root, prediction_date)
+    _write_completion_audit_json(
+        runtime_root,
+        prediction_date,
+        status="COMPLETE_WITH_SHADOW_OPEN_NOISE",
+        shadow_pending=1,
+        shadow_open=1,
+        paper_pending=0,
+        paper_open=0,
+    )
+    _seed_history(history_root)
+
+    output_path, payload = write_operator_card_outputs(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+
+    text = output_path.read_text(encoding="utf-8")
+    preview = text.split("Top Candidate Preview", 1)[1].split("Watchlists", 1)[0]
+
+    assert payload["final_decision"] == "NO BET"
+    assert "Preview rows are diagnostic only and are not betting recommendations unless they appear in Elite Picks/Kelly." in preview
+    assert "SHADOW_ONLY" in preview
+    assert "CLEAR" not in preview
+
+
+def test_operator_card_no_bet_high_caution_preview_rows_are_watchlist_only(tmp_path: Path) -> None:
+    prediction_date = "2026-05-15"
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+    operator = runtime_root / "operator"
+
+    candidate = _candidate(prediction_date)
+    candidate["recommended_action"] = "CLEAR"
+    candidate["qualification_reason"] = "elite_reject_context_high_caution_over"
+    columns = list(candidate.keys())
+
+    _write_csv(operator / f"elite_board_{prediction_date}.csv", [], columns=columns)
+    _write_csv(operator / f"full_market_board_{prediction_date}.csv", [candidate], columns=columns)
+    _write_csv(operator / f"sgp_board_{prediction_date}.csv", [], columns=["prediction_date"])
+    _write_json(
+        operator / f"quality_summary_{prediction_date}.json",
+        _quality_payload(
+            prediction_date,
+            elite_count=0,
+            full_market_count=1,
+            run_health_status="NO_BET",
+            games_count=1,
+        ),
+    )
+    _seed_required_json(runtime_root, prediction_date)
+    _write_completion_audit_json(
+        runtime_root,
+        prediction_date,
+        status="COMPLETE_WITH_SHADOW_OPEN_NOISE",
+        shadow_pending=1,
+        shadow_open=1,
+        paper_pending=0,
+        paper_open=0,
+    )
+    _seed_history(history_root)
+
+    output_path, payload = write_operator_card_outputs(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+
+    text = output_path.read_text(encoding="utf-8")
+    preview = text.split("Top Candidate Preview", 1)[1].split("Watchlists", 1)[0]
+
+    assert payload["final_decision"] == "NO BET"
+    assert "WATCHLIST_ONLY" in preview
+    assert "CLEAR" not in preview
+
