@@ -1276,10 +1276,13 @@ def _build_no_slate_daily_summary(
         "manual_review_required_count": 0,
         "kelly_manual_review_required_count": 0,
         "review_before_bet_count": 0,
+        "kelly_review_before_bet_count": 0,
         "promotion_readiness_report_count": 0,
         "paper_kelly_simulation_count": 0,
         "paper_kelly_simulation_exposure": 0.0,
         "paper_kelly_simulation_expected_ev": 0.0,
+        "total_exposure": 0.0,
+        "expected_ev": 0.0,
         "paper_kelly_performance_report_count": 0,
         "paper_kelly_performance_current_date_rows": 0,
         "paper_kelly_performance_pending_rows": 0,
@@ -1288,6 +1291,7 @@ def _build_no_slate_daily_summary(
         "market_shadow_rows": 0,
         "market_shadow_non_points_rows": 0,
         "pending_grading": 0,
+        "pending_grading_count": 0,
         "board_annotation_write_enabled": bool(write_board_annotations),
         "market_shadow_history_persistence_enabled": bool(persist_shadow_history),
         "closed_slate_safe": bool(not write_board_annotations and not persist_shadow_history),
@@ -1478,22 +1482,22 @@ def main(argv: list[str] | None = None) -> int:
     print(f"daily_summary_txt={output_path}")
     print(
         "daily_summary_totals "
-        f"elite={metadata['elite_count']} "
-        f"kelly_eligible={metadata['kelly_eligible_count']} "
-        f"run_health={metadata['run_health_status']} "
-        f"high_caution_over_watchlist={metadata['high_caution_over_watchlist_count']} "
-        f"combo_under_watchlist={metadata['combo_under_watchlist_count']} "
-        f"same_opponent_under_warnings={metadata['same_opponent_under_warning_count']} "
-        f"manual_review_required={metadata['manual_review_required_count']} "
-        f"kelly_manual_review_required={metadata['kelly_manual_review_required_count']} "
-        f"review_before_bet={metadata['kelly_review_before_bet_count']} "
-        f"promotion_readiness={metadata['promotion_readiness_report_count']} "
-        f"paper_kelly_simulation={metadata['paper_kelly_simulation_count']} "
-        f"market_shadow_rows={metadata['market_shadow_rows']} "
-        f"market_shadow_non_points={metadata['market_shadow_non_points_rows']} "
-        f"exposure={metadata['total_exposure']:.2f} "
-        f"expected_ev={metadata['expected_ev']:.2f} "
-        f"pending_grading={metadata['pending_grading_count']}"
+        f"elite={metadata.get('elite_count', 0)} "
+        f"kelly_eligible={metadata.get('kelly_eligible_count', 0)} "
+        f"run_health={metadata.get('run_health_status', 'UNKNOWN')} "
+        f"high_caution_over_watchlist={metadata.get('high_caution_over_watchlist_count', 0)} "
+        f"combo_under_watchlist={metadata.get('combo_under_watchlist_count', 0)} "
+        f"same_opponent_under_warnings={metadata.get('same_opponent_under_warning_count', 0)} "
+        f"manual_review_required={metadata.get('manual_review_required_count', 0)} "
+        f"kelly_manual_review_required={metadata.get('kelly_manual_review_required_count', 0)} "
+        f"review_before_bet={metadata.get('kelly_review_before_bet_count', 0)} "
+        f"promotion_readiness={metadata.get('promotion_readiness_report_count', 0)} "
+        f"paper_kelly_simulation={metadata.get('paper_kelly_simulation_count', 0)} "
+        f"market_shadow_rows={metadata.get('market_shadow_rows', 0)} "
+        f"market_shadow_non_points={metadata.get('market_shadow_non_points_rows', 0)} "
+        f"exposure={float(metadata.get('total_exposure', 0.0)):.2f} "
+        f"expected_ev={float(metadata.get('expected_ev', 0.0)):.2f} "
+        f"pending_grading={metadata.get('pending_grading_count', 0)}"
     )
     return 0
 

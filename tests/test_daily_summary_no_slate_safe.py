@@ -44,6 +44,10 @@ def test_write_daily_summary_no_slate_safe_skips_auxiliary_writers(monkeypatch, 
     assert metadata["elite_count"] == 0
     assert metadata["full_market_count"] == 0
     assert metadata["market_shadow_rows"] == 0
+    assert metadata["kelly_review_before_bet_count"] == 0
+    assert metadata["total_exposure"] == 0.0
+    assert metadata["expected_ev"] == 0.0
+    assert metadata["pending_grading_count"] == 0
 
     written_files = list((runtime_root / "operator").glob(f"*{prediction_date}*"))
     assert written_files == [output_path]
