@@ -541,6 +541,108 @@ def _completion_recommended_action(payload: dict[str, Any], prediction_date: str
     return "inspect completion audit before trusting results"
 
 
+def _unsupported_active_market_drop_count(
+    quality_payload: dict[str, Any],
+    board_diagnostics: dict[str, Any],
+) -> int:
+    payloads = (quality_payload, board_diagnostics)
+    section_names = (
+        "unsupported_active_operator_markets",
+        "unsupported_active_operator_market",
+        "candidate_funnel",
+    )
+    count_keys = (
+        "total_rows_dropped",
+        "unsupported_active_operator_market_drop_count",
+        "unsupported_active_operator_market_count",
+    )
+
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+
+        for key in count_keys:
+            count = _safe_int(payload.get(key), 0)
+            if count > 0:
+                return count
+
+        for section_name in section_names:
+            section = payload.get(section_name, {})
+            if not isinstance(section, dict):
+                continue
+            for key in count_keys:
+                count = _safe_int(section.get(key), 0)
+                if count > 0:
+                    return count
+
+    return 0
+
+
+def _top_rejection_reason_line(board_diagnostics: dict[str, Any]) -> str:
+    candidates: list[tuple[int, str]] = []
+
+    top_reasons = board_diagnostics.get("top_rejection_reasons", {})
+    if isinstance(top_reasons, list):
+        for item in top_reasons:
+            if not isinstance(item, dict):
+                continue
+            reason = _safe_text(
+                item.get("reason")
+                or item.get("rejection_reason")
+                or item.get("key")
+            )
+            count = _safe_int(item.get("count"), 0)
+            if reason and count > 0:
+                candidates.append((count, reason))
+
+    elite_context = board_diagnostics.get("elite_context_safety_gate", {})
+    if isinstance(elite_context, dict):
+        reason_counts = elite_context.get("candidate_rejection_reason_counts", {})
+        if isinstance(reason_counts, dict):
+            for reason, count_value in reason_counts.items():
+                reason_text = _safe_text(reason)
+                count = _safe_int(count_value, 0)
+                if reason_text and count > 0:
+                    candidates.append((count, reason_text))
+
+    if not candidates:
+        return ""
+
+    count, reason = max(candidates, key=lambda item: item[0])
+    return f"- top rejection reason: {reason} ({count})"
+
+
+def _elite_rejection_summary_lines(
+    *,
+    quality_payload: dict[str, Any],
+    board_diagnostics: dict[str, Any],
+    high_caution_count: int,
+    combo_under_count: int,
+    same_opponent_warning_count: int,
+) -> list[str]:
+    lines: list[str] = []
+
+    if high_caution_count > 0:
+        lines.append(f"- high-caution OVER context gate: {high_caution_count}")
+    if combo_under_count > 0:
+        lines.append(f"- combo UNDER watchlist: {combo_under_count}")
+
+    unsupported_count = _unsupported_active_market_drop_count(quality_payload, board_diagnostics)
+    if unsupported_count > 0:
+        lines.append(f"- unsupported active markets dropped: {unsupported_count}")
+
+    lines.append(f"- same-opponent UNDER warnings: {same_opponent_warning_count}")
+
+    top_reason_line = _top_rejection_reason_line(board_diagnostics)
+    if top_reason_line:
+        lines.append(top_reason_line)
+
+    if not lines:
+        lines.append("- No elite rejection details available.")
+
+    return lines
+
+
 def _completion_open_noise_is_clean(payload: dict[str, Any]) -> bool:
     if not payload:
         return False
@@ -1143,6 +1245,19 @@ def build_operator_card(
                 high_caution_count=high_caution_count,
                 combo_under_count=combo_under_count,
                 completion_state_payload=completion_state_payload,
+            )
+        )
+        lines.append("")
+
+        lines.append("Elite Rejection Summary")
+        lines.append("-" * 40)
+        lines.extend(
+            _elite_rejection_summary_lines(
+                quality_payload=quality_payload,
+                board_diagnostics=board_diagnostics,
+                high_caution_count=high_caution_count,
+                combo_under_count=combo_under_count,
+                same_opponent_warning_count=same_opponent_warning_count,
             )
         )
         lines.append("")

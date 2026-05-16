@@ -926,3 +926,87 @@ def test_operator_card_no_bet_reason_summary_explains_empty_elite_state(tmp_path
     assert "- 1 combo UNDER candidates were watchlist-only." in text
     assert "- Completion audit is clean; shadow/paper pending rows are open-game only." in text
 
+def test_operator_card_no_bet_elite_rejection_summary_uses_existing_payloads(tmp_path: Path) -> None:
+    prediction_date = "2026-05-15"
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+    operator = runtime_root / "operator"
+    diagnostics = runtime_root / "diagnostics"
+    columns = list(_candidate(prediction_date).keys())
+
+    high_caution_row = _candidate(prediction_date, player_name="High Caution Over")
+    combo_under_row = _candidate(
+        prediction_date,
+        player_name="Combo Under",
+        market_type="player_points_rebounds",
+        selection="under",
+        edge=-2.5,
+    )
+
+    _write_csv(operator / f"elite_board_{prediction_date}.csv", [], columns=columns)
+    _write_csv(operator / f"full_market_board_{prediction_date}.csv", [high_caution_row, combo_under_row], columns=columns)
+    _write_csv(operator / f"high_caution_over_watchlist_{prediction_date}.csv", [high_caution_row])
+    _write_csv(operator / f"combo_under_watchlist_{prediction_date}.csv", [combo_under_row])
+    _write_csv(operator / f"sgp_board_{prediction_date}.csv", [], columns=["prediction_date"])
+    _write_json(
+        operator / f"quality_summary_{prediction_date}.json",
+        {
+            **_quality_payload(
+                prediction_date,
+                elite_count=0,
+                full_market_count=2,
+                high_caution_count=2,
+                same_opponent_count=1,
+                run_health_status="NO_BET",
+                games_count=1,
+            ),
+            "unsupported_active_operator_markets": {
+                "rejection_reason": "unsupported_active_operator_market",
+                "total_rows_dropped": 3,
+                "counts_by_market_type": {"player_blocks": 1, "player_steals": 2},
+            },
+        },
+    )
+    _seed_required_json(runtime_root, prediction_date)
+    _write_json(
+        diagnostics / f"board_diagnostics_{prediction_date}.json",
+        {
+            "board_counts": {"qualified_pool": 2, "rejected": 2},
+            "top_rejection_reasons": [
+                {"reason": "market_filtered_by_elite_policy", "count": 7},
+                {"reason": "reject_quality_confidence_threshold", "count": 4},
+            ],
+            "elite_context_safety_gate": {
+                "candidate_rejection_reason_counts": {
+                    "elite_reject_context_high_caution_over": 2
+                }
+            },
+        },
+    )
+    _write_completion_audit_json(
+        runtime_root,
+        prediction_date,
+        status="COMPLETE_WITH_SHADOW_OPEN_NOISE",
+        shadow_pending=2,
+        shadow_open=2,
+        paper_pending=1,
+        paper_open=1,
+    )
+    _seed_history(history_root)
+
+    output_path, payload = write_operator_card_outputs(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+
+    text = output_path.read_text(encoding="utf-8")
+
+    assert payload["final_decision"] == "NO BET"
+    assert "Elite Rejection Summary" in text
+    assert "- high-caution OVER context gate: 2" in text
+    assert "- combo UNDER watchlist: 1" in text
+    assert "- unsupported active markets dropped: 3" in text
+    assert "- same-opponent UNDER warnings: 1" in text
+    assert "- top rejection reason: market_filtered_by_elite_policy (7)" in text
+
