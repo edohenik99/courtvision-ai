@@ -1010,3 +1010,72 @@ def test_operator_card_no_bet_elite_rejection_summary_uses_existing_payloads(tmp
     assert "- same-opponent UNDER warnings: 1" in text
     assert "- top rejection reason: market_filtered_by_elite_policy (7)" in text
 
+def test_operator_card_audit_warning_summary_classifies_pass_with_warnings_as_non_blocking(tmp_path: Path) -> None:
+    prediction_date = "2026-05-15"
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+    operator = runtime_root / "operator"
+    diagnostics = runtime_root / "diagnostics"
+    columns = list(_candidate(prediction_date).keys())
+
+    _write_csv(operator / f"elite_board_{prediction_date}.csv", [], columns=columns)
+    _write_csv(operator / f"full_market_board_{prediction_date}.csv", [_candidate(prediction_date)], columns=columns)
+    _write_csv(operator / f"sgp_board_{prediction_date}.csv", [], columns=["prediction_date"])
+    _write_json(
+        operator / f"quality_summary_{prediction_date}.json",
+        _quality_payload(
+            prediction_date,
+            elite_count=0,
+            full_market_count=1,
+            run_health_status="NO_BET",
+            games_count=1,
+        ),
+    )
+    _seed_required_json(runtime_root, prediction_date)
+    _write_json(
+        diagnostics / f"full_market_sanity_audit_{prediction_date}.json",
+        {
+            "status": "PASS_WITH_WARNINGS",
+            "failure_count": 0,
+            "issues": [],
+            "warning_count": 0,
+            "recommended_action": "continue",
+        },
+    )
+    _write_json(
+        diagnostics / f"candidate_quality_drift_audit_{prediction_date}.json",
+        {
+            "status": "PASS_WITH_WARNINGS",
+            "failure_count": 0,
+            "issues": [],
+            "warning_count": 0,
+            "recommended_action": "continue",
+        },
+    )
+    _write_completion_audit_json(
+        runtime_root,
+        prediction_date,
+        status="COMPLETE_WITH_SHADOW_OPEN_NOISE",
+        shadow_pending=1,
+        shadow_open=1,
+        paper_pending=0,
+        paper_open=0,
+    )
+    _seed_history(history_root)
+
+    output_path, payload = write_operator_card_outputs(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+
+    text = output_path.read_text(encoding="utf-8")
+
+    assert payload["final_decision"] == "NO BET"
+    assert "Audit Warning Summary" in text
+    assert "- full-market sanity audit: PASS_WITH_WARNINGS, non-blocking (blocking=none, warnings=none)" in text
+    assert "- candidate quality drift audit: PASS_WITH_WARNINGS, non-blocking (blocking=none, warnings=none)" in text
+    assert "- blocking audit warnings: none" in text
+    assert "- operator action: continue only if final_decision rules remain clean." in text
+    assert "- operator action: inspect audit before trusting results." not in text
+

@@ -541,6 +541,87 @@ def _completion_recommended_action(payload: dict[str, Any], prediction_date: str
     return "inspect completion audit before trusting results"
 
 
+def _audit_issue_counts(payload: dict[str, Any]) -> tuple[int, int]:
+    """Return blocking/failure and warning issue counts from an audit payload."""
+    if not isinstance(payload, dict) or not payload:
+        return 0, 0
+
+    issues = payload.get("issues", [])
+    blocking_count = _safe_int(payload.get("failure_count"), 0)
+    warning_count = _safe_int(payload.get("warning_count"), 0)
+
+    if isinstance(issues, list):
+        issue_blocking = 0
+        issue_warnings = 0
+        for issue in issues:
+            if not isinstance(issue, dict):
+                continue
+            severity = _safe_text(issue.get("severity")).lower()
+            if severity in {"failure", "error", "blocking"}:
+                issue_blocking += 1
+            elif severity in {"warning", "warn"}:
+                issue_warnings += 1
+        blocking_count = max(blocking_count, issue_blocking)
+        warning_count = max(warning_count, issue_warnings)
+
+    return blocking_count, warning_count
+
+
+def _audit_status_classification(payload: dict[str, Any]) -> tuple[str, int, int, str]:
+    """Classify audit status as blocking/non-blocking/clean/review for card display."""
+    if not isinstance(payload, dict) or not payload:
+        return "missing", 0, 0, "missing"
+
+    status = _safe_text(payload.get("status")) or "UNKNOWN"
+    normalized_status = status.upper()
+    blocking_count, warning_count = _audit_issue_counts(payload)
+
+    if normalized_status.startswith("FAIL") or blocking_count > 0:
+        classification = "blocking"
+    elif normalized_status == "PASS_WITH_WARNINGS":
+        classification = "non-blocking"
+    elif normalized_status.startswith("PASS"):
+        classification = "clean"
+    else:
+        classification = "review"
+
+    return status, blocking_count, warning_count, classification
+
+
+def _audit_summary_line(label: str, payload: dict[str, Any]) -> str:
+    status, blocking_count, warning_count, classification = _audit_status_classification(payload)
+    return (
+        f"- {label}: {status}, {classification} "
+        f"(blocking={_count_label(blocking_count)}, warnings={_count_label(warning_count)})"
+    )
+
+
+def _audit_warning_summary_lines(
+    *,
+    full_market_sanity_payload: dict[str, Any],
+    candidate_quality_drift_payload: dict[str, Any],
+) -> list[str]:
+    lines = [
+        _audit_summary_line("full-market sanity audit", full_market_sanity_payload),
+        _audit_summary_line("candidate quality drift audit", candidate_quality_drift_payload),
+    ]
+
+    classifications = [
+        _audit_status_classification(full_market_sanity_payload),
+        _audit_status_classification(candidate_quality_drift_payload),
+    ]
+    total_blocking = sum(item[1] for item in classifications)
+    has_blocking_status = any(item[3] == "blocking" for item in classifications)
+
+    lines.append(f"- blocking audit warnings: {_count_label(total_blocking)}")
+    if has_blocking_status or total_blocking > 0:
+        lines.append("- operator action: inspect audit before trusting results.")
+    else:
+        lines.append("- operator action: continue only if final_decision rules remain clean.")
+
+    return lines
+
+
 def _unsupported_active_market_drop_count(
     quality_payload: dict[str, Any],
     board_diagnostics: dict[str, Any],
@@ -963,6 +1044,14 @@ def build_operator_card(
     kelly_df = _read_csv(paths["kelly_stakes"], warnings)
     quality_payload = _read_json(paths["quality_summary_json"], warnings, required=True)
     board_diagnostics = _read_json(paths["board_diagnostics"], warnings, required=True)
+    full_market_sanity_payload = _read_json(
+        runtime_root / "diagnostics" / f"full_market_sanity_audit_{prediction_date}.json",
+        warnings,
+    )
+    candidate_quality_drift_payload = _read_json(
+        runtime_root / "diagnostics" / f"candidate_quality_drift_audit_{prediction_date}.json",
+        warnings,
+    )
     completion_state_payload = _read_json(paths["completion_state_audit_json"], warnings)
     market_shadow_payload = _read_json(paths["market_shadow_grading"], warnings)
     injury_payload = _read_json(runtime_root / "diagnostics" / f"injury_context_diagnostics_{prediction_date}.json", warnings)
@@ -1234,6 +1323,16 @@ def build_operator_card(
     lines.append("")
 
     lines.extend(_completion_state_lines(completion_state_payload, paths["completion_state_audit_json"], prediction_date))
+    lines.append("")
+
+    lines.append("Audit Warning Summary")
+    lines.append("-" * 40)
+    lines.extend(
+        _audit_warning_summary_lines(
+            full_market_sanity_payload=full_market_sanity_payload,
+            candidate_quality_drift_payload=candidate_quality_drift_payload,
+        )
+    )
     lines.append("")
 
     if final_decision == "NO BET":
