@@ -1561,14 +1561,23 @@ def grade_completed_picks(
     history_root: str | Path = "data/history",
     runtime_root: str | Path = "outputs/runtime",
     prediction_date: str | None = None,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     history_root_path = Path(history_root)
     runtime_root_path = Path(runtime_root)
     pick_history_path = history_root_path / "pick_history.csv"
     pick_history_df = _load_csv(pick_history_path, columns=PICK_HISTORY_COLUMNS)
     if pick_history_df.empty:
-        update_performance_summaries(history_root=history_root_path, runtime_root=runtime_root_path)
-        return {"updated_rows": 0, "pending_rows": 0, "unsupported_rows": 0, "void_rows": 0, "skip_reasons": {}}
+        if not dry_run:
+            update_performance_summaries(history_root=history_root_path, runtime_root=runtime_root_path)
+        return {
+            "updated_rows": 0,
+            "pending_rows": 0,
+            "unsupported_rows": 0,
+            "void_rows": 0,
+            "skip_reasons": {},
+            "dry_run": bool(dry_run),
+        }
 
     pick_history_df = pick_history_df.reindex(columns=PICK_HISTORY_COLUMNS)
     for column in ("actual_value", "grading_skip_reason"):
@@ -1618,10 +1627,12 @@ def grade_completed_picks(
         pick_history_df.loc[date_rows.index, "grading_skip_reason"] = date_rows["grading_skip_reason"]
 
         runtime_graded_path = runtime_root_path / "history" / f"graded_picks_{prediction_date}.csv"
-        _write_csv(runtime_graded_path, date_rows)
+        if not dry_run:
+            _write_csv(runtime_graded_path, date_rows)
 
-    _write_csv(pick_history_path, pick_history_df[PICK_HISTORY_COLUMNS])
-    update_performance_summaries(history_root=history_root_path, runtime_root=runtime_root_path)
+    if not dry_run:
+        _write_csv(pick_history_path, pick_history_df[PICK_HISTORY_COLUMNS])
+        update_performance_summaries(history_root=history_root_path, runtime_root=runtime_root_path)
     pending_rows = int((pick_history_df["result_status"].astype(str).str.lower() == "pending").sum())
     unsupported_rows = int((pick_history_df["result_status"].astype(str).str.lower() == UNSUPPORTED_RESULT_STATUS).sum())
     void_rows = int((pick_history_df["result_status"].astype(str).str.lower() == VOID_RESULT_STATUS).sum())
@@ -1631,4 +1642,5 @@ def grade_completed_picks(
         "unsupported_rows": unsupported_rows,
         "void_rows": void_rows,
         "skip_reasons": dict(sorted(skip_reasons.items())),
+        "dry_run": bool(dry_run),
     }
