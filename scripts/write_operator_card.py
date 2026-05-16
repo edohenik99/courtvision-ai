@@ -501,6 +501,28 @@ def _has_items(value: Any) -> bool:
     return isinstance(value, list) and len(value) > 0
 
 
+def _count_label(count: int) -> str:
+    return "none" if count <= 0 else str(count)
+
+
+def _completion_warning_counts(payload: dict[str, Any]) -> tuple[int, int]:
+    """Return blocking and optional warning counts for completion audit display."""
+    warnings = payload.get("warnings", [])
+    if not isinstance(warnings, list):
+        return 0, 0
+
+    blocking = 0
+    optional = 0
+    for warning in warnings:
+        warning_text = _safe_text(warning).lower()
+        if "missing optional pending repair audit" in warning_text:
+            optional += 1
+        else:
+            blocking += 1
+
+    return blocking, optional
+
+
 def _completion_recommended_action(payload: dict[str, Any], prediction_date: str) -> str:
     if not payload:
         return f"run scripts/write_completion_state_audit.py --prediction-date {prediction_date}"
@@ -532,7 +554,10 @@ def _completion_state_lines(payload: dict[str, Any], path: Path, prediction_date
     lines.append(f"- market_shadow_history: {_pending_summary(payload, 'shadow')}")
     lines.append(f"- paper_kelly_history: {_pending_summary(payload, 'paper')}")
     lines.append(f"- agreement issue count: {_count_or_none(payload.get('agreement_issues'))}")
+    warning_blocking_count, warning_optional_count = _completion_warning_counts(payload)
     lines.append(f"- warning count: {_count_or_none(payload.get('warnings'))}")
+    lines.append(f"- blocking warning count: {_count_label(warning_blocking_count)}")
+    lines.append(f"- optional warning count: {_count_label(warning_optional_count)}")
     lines.append(f"- recommended action: {_completion_audit_recommended_action(payload)}")
     return lines
 

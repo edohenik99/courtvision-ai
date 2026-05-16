@@ -819,3 +819,50 @@ def test_operator_card_shadow_open_noise_completion_audit_is_not_scary(tmp_path:
     assert "- recommended action: inspect completion audit before trusting results" not in text
     assert "- recommended action: no action needed; shadow/paper pending rows are open-game only" not in text
 
+def test_operator_card_splits_optional_completion_warnings(tmp_path: Path) -> None:
+    prediction_date = "2026-05-15"
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+    operator = runtime_root / "operator"
+    columns = list(_candidate(prediction_date).keys())
+
+    _write_csv(operator / f"elite_board_{prediction_date}.csv", [], columns=columns)
+    _write_csv(operator / f"full_market_board_{prediction_date}.csv", [], columns=columns)
+    _write_csv(operator / f"sgp_board_{prediction_date}.csv", [], columns=["prediction_date"])
+    _write_json(
+        operator / f"quality_summary_{prediction_date}.json",
+        _quality_payload(
+            prediction_date,
+            elite_count=0,
+            full_market_count=0,
+            run_health_status="NO_BET",
+            games_count=0,
+        ),
+    )
+    _seed_required_json(runtime_root, prediction_date)
+    _write_completion_audit_json(
+        runtime_root,
+        prediction_date,
+        status="COMPLETE_WITH_SHADOW_OPEN_NOISE",
+        shadow_pending=3,
+        shadow_open=3,
+        paper_pending=2,
+        paper_open=2,
+        warnings=["Missing optional pending repair audit: fixture"],
+    )
+    _seed_history(history_root)
+
+    output_path, payload = write_operator_card_outputs(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+
+    text = output_path.read_text(encoding="utf-8")
+
+    assert payload["final_decision"] == "NO BET"
+    assert "- warning count: 1" in text
+    assert "- blocking warning count: none" in text
+    assert "- optional warning count: 1" in text
+    assert "- recommended action: real picks closed / ignore shadow-paper open-game noise" in text
+
