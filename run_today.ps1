@@ -2,7 +2,8 @@
 # Run today's slate with validation
 param(
     [string]$Date = (Get-Date -Format "yyyy-MM-dd"),
-    [switch]$VerboseMode
+    [switch]$VerboseMode,
+    [switch]$ForcePastDate
 )
 
 # Use Continue rather than Stop. PowerShell otherwise turns *any* stderr line
@@ -20,6 +21,67 @@ $ScriptRoot = if ($PSScriptRoot) {
     Split-Path -Parent $MyInvocation.MyCommand.Path
 }
 Set-Location $ScriptRoot
+
+# ---------------------------------------------------------------------------
+# Closed-slate lifecycle guard
+# Validate Date format and reject past-date full-pipeline reruns unless the
+# caller has explicitly opted in with -ForcePastDate.
+# This block runs before any log file, output directory, or pipeline stage is
+# touched so that no mutation can occur for a closed slate.
+# ---------------------------------------------------------------------------
+if ($Date -notmatch '^\d{4}-\d{2}-\d{2}$') {
+    Write-Host ""
+    Write-Host "[ERROR] Date '$Date' does not match required format YYYY-MM-DD." -ForegroundColor Red
+    Write-Host "        Example: .\run_today.ps1 -Date 2026-05-16" -ForegroundColor Red
+    exit 1
+}
+
+try {
+    $slateDate = [datetime]::ParseExact($Date, 'yyyy-MM-dd', $null).Date
+} catch {
+    Write-Host ""
+    Write-Host "[ERROR] '$Date' is not a valid calendar date." -ForegroundColor Red
+    exit 1
+}
+
+$todayDate = (Get-Date).Date
+
+if ($slateDate -lt $todayDate -and -not $ForcePastDate) {
+    Write-Host ""
+    Write-Host "========================================" -ForegroundColor Red
+    Write-Host "[BLOCKED] Past-date full generation prevented" -ForegroundColor Red
+    Write-Host "========================================" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "  Slate date : $Date" -ForegroundColor Yellow
+    Write-Host "  Today      : $($todayDate.ToString('yyyy-MM-dd'))" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  run_today.ps1 is for the CURRENT day's slate only." -ForegroundColor White
+    Write-Host "  Running the full pipeline on a closed slate can overwrite dated" -ForegroundColor White
+    Write-Host "  boards, recompute settled stakes, and mutate historical" -ForegroundColor White
+    Write-Host "  operator artifacts." -ForegroundColor White
+    Write-Host ""
+    Write-Host "  For closed slates, use dedicated grading/repair-only workflows." -ForegroundColor Cyan
+    Write-Host "  Do not refresh summaries or operator artifacts unless that is intentional." -ForegroundColor Cyan
+    Write-Host "  Start with:" -ForegroundColor Cyan
+    Write-Host "    python scripts\grade_completed_picks.py" -ForegroundColor Cyan
+    Write-Host "    python scripts\repair_pending_grades.py" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  To intentionally regenerate a historical slate (expert use only):" -ForegroundColor Yellow
+    Write-Host "    .\run_today.ps1 -Date $Date -ForcePastDate" -ForegroundColor Yellow
+    Write-Host "  WARNING: -ForcePastDate overwrites all existing outputs for that date." -ForegroundColor Yellow
+    Write-Host ""
+    exit 2
+}
+
+if ($ForcePastDate -and $slateDate -lt $todayDate) {
+    Write-Host ""
+    Write-Host "[WARNING] -ForcePastDate active: regenerating closed slate $Date." -ForegroundColor Yellow
+    Write-Host "          All existing outputs for $Date will be overwritten." -ForegroundColor Yellow
+    Write-Host ""
+}
+# ---------------------------------------------------------------------------
+# End closed-slate lifecycle guard
+# ---------------------------------------------------------------------------
 
 # Ensure logs directory exists
 $LogsDir = "outputs\runtime\logs"
