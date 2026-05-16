@@ -21,6 +21,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--runtime-root", default="outputs/runtime")
     parser.add_argument("--out-dir", default="outputs")
     parser.add_argument("--history-root", default="data/history")
+    parser.add_argument(
+        "--closed-slate-safe",
+        action="store_true",
+        help="Write quality summary outputs without mutating operator board CSV annotations.",
+    )
+    parser.add_argument(
+        "--no-board-annotation-write",
+        action="store_true",
+        help="Do not write same-opponent/rematch annotation columns back to operator board CSVs.",
+    )
     args = parser.parse_args(argv)
 
     text_path, json_path, payload = write_quality_summary_outputs(
@@ -28,6 +38,9 @@ def main(argv: list[str] | None = None) -> int:
         runtime_root=args.runtime_root,
         out_dir=args.out_dir,
         history_root=args.history_root,
+        write_board_annotations=not (
+            args.closed_slate_safe or args.no_board_annotation_write
+        ),
     )
     kelly = payload["kelly_safety_summary"]
     funnel = payload["candidate_funnel"]

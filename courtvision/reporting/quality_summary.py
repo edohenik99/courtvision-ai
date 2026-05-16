@@ -2349,11 +2349,13 @@ def write_quality_summary_outputs(
     generated_at: str | None = None,
     extra_prediction_artifact_paths: Sequence[str | Path] | None = None,
     history_root: str | Path | None = None,
+    write_board_annotations: bool = True,
 ) -> tuple[Path, Path, dict[str, Any]]:
     runtime_root = Path(runtime_root)
-    annotate_operator_board_files(
+    same_opponent_board_result = annotate_operator_board_files(
         prediction_date=prediction_date,
         runtime_root=runtime_root,
+        write=write_board_annotations,
     )
     write_high_caution_over_watchlist(
         prediction_date=prediction_date,
@@ -2366,6 +2368,8 @@ def write_quality_summary_outputs(
         generated_at=generated_at,
         extra_prediction_artifact_paths=extra_prediction_artifact_paths,
     )
+    payload["board_annotation_write_enabled"] = bool(write_board_annotations)
+    payload["same_opponent_board_annotation"] = same_opponent_board_result
     operator_dir = runtime_root / "operator"
     operator_dir.mkdir(parents=True, exist_ok=True)
     text_path = operator_dir / f"quality_summary_{prediction_date}.txt"
