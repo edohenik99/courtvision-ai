@@ -37,6 +37,26 @@ def guard_prediction_artifact_date(
     return artifact_date or str(requested_prediction_date)
 
 
+def guard_no_existing_artifact(
+    *,
+    output_path: Path,
+    force: bool = False,
+    caller: str,
+    artifact_label: str,
+) -> None:
+    output_path = Path(output_path)
+    if force:
+        return
+    if output_path.exists():
+        raise RuntimeError(
+            "[ARTIFACT_OVERWRITE_GUARD] "
+            f"output_path={output_path} already exists "
+            f"artifact={artifact_label} "
+            f"caller={caller}. "
+            "Pass the explicit force overwrite flag only when intentional."
+        )
+
+
 def log_prediction_artifact_write(
     *,
     requested_prediction_date: str,

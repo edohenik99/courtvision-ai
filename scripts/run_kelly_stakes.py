@@ -43,6 +43,10 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from courtvision.artifact_guard import (
+    guard_no_existing_artifact,
+    guard_prediction_artifact_date,
+)
 from courtvision.betting.kelly import (  # noqa: E402  (path-bootstrapped above)
     MAX_STAKE_FRACTION,
     MIN_CONFIDENCE_THRESHOLD,
@@ -390,7 +394,26 @@ def _build_stake_row(row: dict[str, str], edge_col: str, bankroll: float) -> Sta
     )
 
 
-def _write_stakes(output_path: Path, stakes: list[StakeRow], bankroll: float, prediction_date: str) -> None:
+def _write_stakes(
+    output_path: Path,
+    stakes: list[StakeRow],
+    bankroll: float,
+    prediction_date: str,
+    *,
+    force: bool = False,
+) -> None:
+    caller = "scripts/run_kelly_stakes.py:_write_stakes"
+    guard_prediction_artifact_date(
+        requested_prediction_date=prediction_date,
+        output_path=output_path,
+        caller=caller,
+    )
+    guard_no_existing_artifact(
+        output_path=output_path,
+        force=force,
+        caller=caller,
+        artifact_label="kelly_stakes",
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
         "prediction_date",
@@ -487,6 +510,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--bankroll", type=float, default=1000.0, help="Bankroll in dollars (default: 1000).")
     parser.add_argument("--input-csv", default=None, help="Override path to the elite board CSV.")
     parser.add_argument("--output-csv", default=None, help="Override path to the stakes output CSV.")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Allow an existing Kelly stakes CSV to be overwritten intentionally.",
+    )
     parser.add_argument(
         "--max-daily-exposure",
         type=float,
@@ -620,7 +648,7 @@ def main(argv: list[str] | None = None) -> int:
     _log(f"avg_stake=${avg_stake:.2f}")
     _log(f"expected_value_total=${total_ev:.2f}")
 
-    _write_stakes(output_path, stakes, bankroll, prediction_date)
+    _write_stakes(output_path, stakes, bankroll, prediction_date, force=args.force)
     _log(f"output={output_path}")
     _log("done")
     return 0

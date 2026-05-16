@@ -26,6 +26,7 @@ from typing import Any, Mapping, Optional, Sequence
 import pandas as pd
 import requests
 from courtvision.artifact_guard import (
+    guard_no_existing_artifact as _guard_no_existing_artifact,
     guard_prediction_artifact_date as _guard_prediction_artifact_date,
     log_prediction_artifact_write as _log_prediction_artifact_write,
 )
@@ -8056,6 +8057,8 @@ def _write_prediction_dataframe(
     requested_prediction_date: str,
     caller: str,
     artifact_label: str,
+    protect_existing: bool = False,
+    force_overwrite: bool = False,
 ) -> None:
     _log_prediction_artifact_write(
         requested_prediction_date=requested_prediction_date,
@@ -8063,6 +8066,13 @@ def _write_prediction_dataframe(
         caller=caller,
         artifact_label=artifact_label,
     )
+    if protect_existing:
+        _guard_no_existing_artifact(
+            output_path=path,
+            force=force_overwrite,
+            caller=caller,
+            artifact_label=artifact_label,
+        )
     _write_dataframe(path, df)
 
 
@@ -8691,6 +8701,7 @@ def _write_cli_outputs(
     fit_metrics: Optional[dict[str, Any]],
     prediction_outputs: dict[str, Any],
     verbose_outputs: bool = False,
+    force_output_overwrite: bool = False,
 ) -> dict[str, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -8785,6 +8796,27 @@ def _write_cli_outputs(
     paths = output_layout.prediction_paths(prediction_date)
     prediction_artifact_caller = "courtvision_ai.py:_write_cli_outputs"
 
+    protected_board_artifacts = [
+        "elite_board",
+        "full_market_board",
+        "sgp_board",
+        "stat_only_board",
+        "strike_board",
+        "predictive_lines_board",
+        "team_board",
+        "near_miss_board",
+    ]
+    for artifact_label in protected_board_artifacts:
+        protected_path = paths.get(artifact_label)
+        if protected_path is None:
+            continue
+        _guard_no_existing_artifact(
+            output_path=protected_path,
+            force=force_output_overwrite,
+            caller=prediction_artifact_caller,
+            artifact_label=artifact_label,
+        )
+
     _write_prediction_dataframe(paths["player_predictions"], player_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="player_predictions")
     _write_prediction_dataframe(paths["game_predictions"], game_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="game_predictions")
     _write_prediction_dataframe(paths["player_edges"], player_edges_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="player_edges")
@@ -8835,9 +8867,9 @@ def _write_cli_outputs(
     )
     print(f"[MARKET_COVERAGE] persisted to {coverage_path}")
     
-    _write_prediction_dataframe(paths["elite_board"], elite_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="elite_board")
-    _write_prediction_dataframe(paths["full_market_board"], full_market_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="full_market_board")
-    _write_prediction_dataframe(paths["sgp_board"], sgp_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="sgp_board")
+    _write_prediction_dataframe(paths["elite_board"], elite_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="elite_board", protect_existing=True, force_overwrite=force_output_overwrite)
+    _write_prediction_dataframe(paths["full_market_board"], full_market_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="full_market_board", protect_existing=True, force_overwrite=force_output_overwrite)
+    _write_prediction_dataframe(paths["sgp_board"], sgp_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="sgp_board", protect_existing=True, force_overwrite=force_output_overwrite)
     _write_prediction_dataframe(paths["player_points_elite_admission_csv"], player_points_elite_admission_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="player_points_elite_admission_csv")
     _write_prediction_json(
         paths["player_points_elite_admission_json"],
@@ -8854,15 +8886,15 @@ def _write_cli_outputs(
     if "top_game_edges" in paths:
         _write_prediction_dataframe(paths["top_game_edges"], _top_rows(game_edges_df), requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="top_game_edges")
     if "stat_only_board" in paths:
-        _write_prediction_dataframe(paths["stat_only_board"], all_stats_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="stat_only_board")
+        _write_prediction_dataframe(paths["stat_only_board"], all_stats_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="stat_only_board", protect_existing=True, force_overwrite=force_output_overwrite)
     if "strike_board" in paths:
-        _write_prediction_dataframe(paths["strike_board"], strike_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="strike_board")
+        _write_prediction_dataframe(paths["strike_board"], strike_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="strike_board", protect_existing=True, force_overwrite=force_output_overwrite)
     if "predictive_lines_board" in paths:
-        _write_prediction_dataframe(paths["predictive_lines_board"], predictive_lines_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="predictive_lines_board")
+        _write_prediction_dataframe(paths["predictive_lines_board"], predictive_lines_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="predictive_lines_board", protect_existing=True, force_overwrite=force_output_overwrite)
     if "team_board" in paths:
-        _write_prediction_dataframe(paths["team_board"], team_board_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="team_board")
+        _write_prediction_dataframe(paths["team_board"], team_board_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="team_board", protect_existing=True, force_overwrite=force_output_overwrite)
     if "near_miss_board" in paths:
-        _write_prediction_dataframe(paths["near_miss_board"], near_miss_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="near_miss_board")
+        _write_prediction_dataframe(paths["near_miss_board"], near_miss_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="near_miss_board", protect_existing=True, force_overwrite=force_output_overwrite)
     if "board_diagnostics_csv" in paths:
         _write_prediction_dataframe(paths["board_diagnostics_csv"], diagnostics_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="board_diagnostics_csv")
     paths.update(
@@ -8949,6 +8981,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--grade-date", help="Auto-grade predictions for a completed date in YYYY-MM-DD format.")
     parser.add_argument("--send-telegram", action="store_true", help="Send Telegram alert for top qualified plays after prediction.")
     parser.add_argument("--verbose-outputs", action="store_true", help="Write optional/debug boards and CSV mirrors in addition to the default daily package.")
+    parser.add_argument(
+        "--force-output-overwrite",
+        action="store_true",
+        help="Allow protected operator board CSVs to be overwritten intentionally.",
+    )
     return parser
 
 
@@ -9028,6 +9065,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 fit_metrics=fit_metrics,
                 prediction_outputs=prediction_outputs,
                 verbose_outputs=args.verbose_outputs,
+                force_output_overwrite=args.force_output_overwrite,
             )
             print("[STAGE] artifact_write_complete")
 
