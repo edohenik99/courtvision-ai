@@ -1218,6 +1218,91 @@ def build_daily_summary(
     return "\n".join(lines) + "\n", metadata
 
 
+def _missing_primary_operator_boards(*, runtime_root: Path, prediction_date: str) -> bool:
+    operator_dir = runtime_root / "operator"
+    elite_path = operator_dir / f"elite_board_{prediction_date}.csv"
+    full_market_path = operator_dir / f"full_market_board_{prediction_date}.csv"
+    return not elite_path.exists() and not full_market_path.exists()
+
+
+def _build_no_slate_daily_summary(
+    *,
+    prediction_date: str,
+    runtime_root: Path,
+    history_root: Path,
+    write_board_annotations: bool,
+    persist_shadow_history: bool,
+) -> tuple[str, dict[str, Any]]:
+    operator_dir = runtime_root / "operator"
+    elite_path = operator_dir / f"elite_board_{prediction_date}.csv"
+    full_market_path = operator_dir / f"full_market_board_{prediction_date}.csv"
+    kelly_path = operator_dir / f"kelly_stakes_{prediction_date}.csv"
+
+    reason = "No elite/full-market operator board artifacts exist for this date."
+    lines = [
+        f"Daily Summary - {prediction_date}",
+        "=" * 72,
+        "Run Health: NO_SLATE",
+        f"Reason: {reason}",
+        "",
+        "Primary artifacts",
+        "-" * 72,
+        f"- elite_board: missing ({elite_path})",
+        f"- full_market_board: missing ({full_market_path})",
+        f"- kelly_stakes: {'present' if kelly_path.exists() else 'missing'} ({kelly_path})",
+        "",
+        "Action",
+        "-" * 72,
+        "- No operator action required for this no-game/no-slate date.",
+        "- Full slate generation was not run.",
+        "- Auxiliary report generation was skipped.",
+    ]
+
+    metadata: dict[str, Any] = {
+        "prediction_date": prediction_date,
+        "runtime_root": str(runtime_root),
+        "history_root": str(history_root),
+        "run_health_status": "NO_SLATE",
+        "run_health_reason": reason,
+        "run_health_flags": ["no_primary_operator_board_artifacts"],
+        "run_health_recommendation": "No operator action required for this no-game/no-slate date.",
+        "elite_count": 0,
+        "full_market_count": 0,
+        "kelly_rows": 0,
+        "kelly_eligible_count": 0,
+        "high_caution_over_watchlist_count": 0,
+        "combo_under_watchlist_count": 0,
+        "same_opponent_under_warning_count": 0,
+        "manual_review_required_count": 0,
+        "kelly_manual_review_required_count": 0,
+        "review_before_bet_count": 0,
+        "promotion_readiness_report_count": 0,
+        "paper_kelly_simulation_count": 0,
+        "paper_kelly_simulation_exposure": 0.0,
+        "paper_kelly_simulation_expected_ev": 0.0,
+        "paper_kelly_performance_report_count": 0,
+        "paper_kelly_performance_current_date_rows": 0,
+        "paper_kelly_performance_pending_rows": 0,
+        "correlation_exposure_report_count": 0,
+        "team_distribution_report_count": 0,
+        "market_shadow_rows": 0,
+        "market_shadow_non_points_rows": 0,
+        "pending_grading": 0,
+        "board_annotation_write_enabled": bool(write_board_annotations),
+        "market_shadow_history_persistence_enabled": bool(persist_shadow_history),
+        "closed_slate_safe": bool(not write_board_annotations and not persist_shadow_history),
+        "no_slate_safe": True,
+        "auxiliary_reports_skipped": True,
+        "same_opponent_board_annotation": {
+            "prediction_date": prediction_date,
+            "skipped": True,
+            "reason": "no_primary_operator_board_artifacts",
+            "boards": {},
+        },
+    }
+    return "\n".join(lines) + "\n", metadata
+
+
 def write_daily_summary_outputs(
     *,
     prediction_date: str,
@@ -1225,9 +1310,26 @@ def write_daily_summary_outputs(
     history_root: str | Path = "data/history",
     write_board_annotations: bool = True,
     persist_shadow_history: bool = True,
+    skip_auxiliary_on_no_slate: bool = False,
 ) -> tuple[Path, dict[str, Any]]:
     runtime_root = Path(runtime_root)
     history_root = Path(history_root)
+    if skip_auxiliary_on_no_slate and _missing_primary_operator_boards(
+        runtime_root=runtime_root,
+        prediction_date=prediction_date,
+    ):
+        summary, metadata = _build_no_slate_daily_summary(
+            prediction_date=prediction_date,
+            runtime_root=runtime_root,
+            history_root=history_root,
+            write_board_annotations=write_board_annotations,
+            persist_shadow_history=persist_shadow_history,
+        )
+        output_path = runtime_root / "operator" / f"daily_summary_{prediction_date}.txt"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(summary, encoding="utf-8")
+        return output_path, metadata
+
     shadow_result: dict[str, Any] | None = None
     same_opponent_board_result = annotate_operator_board_files(
         prediction_date=prediction_date,
@@ -1359,6 +1461,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Do not refresh market_shadow_history.csv from the full-market board.",
     )
+    parser.add_argument(
+        "--no-slate-safe",
+        action="store_true",
+        help="If primary board artifacts are absent, write a small NO_SLATE summary and skip auxiliary reports.",
+    )
     args = parser.parse_args(argv)
     output_path, metadata = write_daily_summary_outputs(
         prediction_date=args.prediction_date,
@@ -1366,6 +1473,7 @@ def main(argv: list[str] | None = None) -> int:
         history_root=args.history_root,
         write_board_annotations=not (args.closed_slate_safe or args.no_board_annotation_write),
         persist_shadow_history=not (args.closed_slate_safe or args.skip_market_shadow_history),
+        skip_auxiliary_on_no_slate=bool(args.closed_slate_safe or args.no_slate_safe),
     )
     print(f"daily_summary_txt={output_path}")
     print(
