@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -46,20 +47,46 @@ def _hit_rates(summary_path: Path) -> tuple[float, float]:
     return all_time, last_7
 
 
-def main() -> int:
-    history_root = ROOT_DIR / "data" / "history"
-    runtime_root = ROOT_DIR / "outputs" / "runtime"
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Grade completed picks and refresh performance summaries.")
+    parser.add_argument(
+        "--history-root",
+        default=str(ROOT_DIR / "data" / "history"),
+        help="Long-lived history directory.",
+    )
+    parser.add_argument(
+        "--runtime-root",
+        default=str(ROOT_DIR / "outputs" / "runtime"),
+        help="Runtime outputs root.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Compute grading updates without writing pick_history, graded runtime CSVs, or performance summaries.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    history_root = Path(args.history_root)
+    runtime_root = Path(args.runtime_root)
     pick_history_path = history_root / "pick_history.csv"
     performance_summary_path = history_root / "performance_summary.csv"
 
     pending_before = _pending_count(pick_history_path)
-    grade_result = grade_completed_picks(history_root=history_root, runtime_root=runtime_root)
+    grade_result = grade_completed_picks(
+        history_root=history_root,
+        runtime_root=runtime_root,
+        dry_run=args.dry_run,
+    )
     newly_graded = int(grade_result.get("updated_rows", 0))
     still_pending = int(grade_result.get("pending_rows", 0))
     all_time_hit_rate, last_7_hit_rate = _hit_rates(performance_summary_path)
 
     print("CourtVision Nightly Grade + Refresh")
     print("====================================")
+    print(f"dry_run={str(bool(grade_result.get('dry_run', args.dry_run))).lower()}")
     print(f"pending_before={pending_before}")
     print(f"newly_graded={newly_graded}")
     print(f"still_pending={still_pending}")
