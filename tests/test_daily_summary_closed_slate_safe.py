@@ -93,6 +93,7 @@ def test_write_daily_summary_main_closed_slate_safe_passes_read_only_flags(monke
     assert rc == 0
     assert captured["write_board_annotations"] is False
     assert captured["persist_shadow_history"] is False
+    assert captured["persist_paper_kelly_history"] is False
 
 
 def test_write_daily_summary_main_explicit_skip_flags(monkeypatch, tmp_path: Path) -> None:
@@ -112,6 +113,7 @@ def test_write_daily_summary_main_explicit_skip_flags(monkeypatch, tmp_path: Pat
             "2026-05-16",
             "--no-board-annotation-write",
             "--skip-market-shadow-history",
+            "--skip-paper-kelly-history",
         ]
     )
 

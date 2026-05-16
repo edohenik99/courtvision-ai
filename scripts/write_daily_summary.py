@@ -1314,6 +1314,7 @@ def write_daily_summary_outputs(
     history_root: str | Path = "data/history",
     write_board_annotations: bool = True,
     persist_shadow_history: bool = True,
+    persist_paper_kelly_history: bool = True,
     skip_auxiliary_on_no_slate: bool = False,
 ) -> tuple[Path, dict[str, Any]]:
     runtime_root = Path(runtime_root)
@@ -1381,6 +1382,7 @@ def write_daily_summary_outputs(
             prediction_date=prediction_date,
             runtime_root=runtime_root,
             history_root=history_root,
+            persist_history=persist_paper_kelly_history,
         )
     )
     correlation_text_path, correlation_csv_path, correlation_df, correlation_summary = (
@@ -1406,7 +1408,12 @@ def write_daily_summary_outputs(
     metadata["combo_under_watchlist_count"] = int(len(combo_under_df))
     metadata["board_annotation_write_enabled"] = bool(write_board_annotations)
     metadata["market_shadow_history_persistence_enabled"] = bool(persist_shadow_history)
-    metadata["closed_slate_safe"] = bool(not write_board_annotations and not persist_shadow_history)
+    metadata["paper_kelly_history_persistence_enabled"] = bool(persist_paper_kelly_history)
+    metadata["closed_slate_safe"] = bool(
+        not write_board_annotations
+        and not persist_shadow_history
+        and not persist_paper_kelly_history
+    )
     metadata["promotion_readiness_report_path"] = str(promotion_text_path)
     metadata["promotion_readiness_report_csv_path"] = str(promotion_csv_path)
     metadata["promotion_readiness_report_count"] = int(len(promotion_df))
@@ -1466,6 +1473,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Do not refresh market_shadow_history.csv from the full-market board.",
     )
     parser.add_argument(
+        "--skip-paper-kelly-history",
+        action="store_true",
+        help="Do not persist data/history/paper_kelly_history.csv while writing the daily summary.",
+    )
+    parser.add_argument(
         "--no-slate-safe",
         action="store_true",
         help="If primary board artifacts are absent, write a small NO_SLATE summary and skip auxiliary reports.",
@@ -1477,6 +1489,9 @@ def main(argv: list[str] | None = None) -> int:
         history_root=args.history_root,
         write_board_annotations=not (args.closed_slate_safe or args.no_board_annotation_write),
         persist_shadow_history=not (args.closed_slate_safe or args.skip_market_shadow_history),
+        persist_paper_kelly_history=not (
+            args.closed_slate_safe or args.skip_paper_kelly_history
+        ),
         skip_auxiliary_on_no_slate=bool(args.closed_slate_safe or args.no_slate_safe),
     )
     print(f"daily_summary_txt={output_path}")

@@ -354,3 +354,35 @@ def test_report_groups_by_cap_adjustment_reason(tmp_path: Path) -> None:
     assert int(report["total"].sum()) == 3
     for _, row in report.iterrows():
         assert float(row["pre_cap_exposure"]) >= float(row["post_cap_exposure"]) - 1e-9
+
+
+def test_write_paper_kelly_performance_report_can_skip_history_persistence(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "outputs" / "runtime"
+    history_root = tmp_path / "data" / "history"
+    date = "2026-05-06"
+    old_date = "2026-05-05"
+
+    history_csv = history_root / "paper_kelly_history.csv"
+    history_csv.parent.mkdir(parents=True, exist_ok=True)
+    old_row = _paper_row("Existing Player", prediction_date=old_date)
+    pd.DataFrame([old_row], columns=list(HISTORY_COLUMNS)).to_csv(history_csv, index=False)
+    before = history_csv.read_bytes()
+
+    _write_paper_source(runtime_root, date, [_paper_row("New Player", prediction_date=date)])
+
+    text_path, csv_path, report, persist_result = write_paper_kelly_performance_report(
+        prediction_date=date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+        persist_history=False,
+    )
+
+    assert history_csv.read_bytes() == before
+    assert persist_result["paper_kelly_history_path"] == history_csv
+    assert persist_result["skipped"] is True
+    assert persist_result["reason"] == "paper_kelly_history_persistence_disabled"
+    assert persist_result["current_date_rows"] == 0
+    assert text_path.exists()
+    assert csv_path.exists()
+    assert list(pd.read_csv(csv_path, keep_default_na=False).columns) == list(REPORT_COLUMNS)
+    assert isinstance(report, pd.DataFrame)

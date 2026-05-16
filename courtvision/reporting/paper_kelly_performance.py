@@ -771,15 +771,45 @@ def write_paper_kelly_performance_report(
     prediction_date: str,
     runtime_root: str | Path = "outputs/runtime",
     history_root: str | Path = "data/history",
+    persist_history: bool = True,
 ) -> tuple[Path, Path, pd.DataFrame, dict[str, Any]]:
     runtime_root_path = Path(runtime_root)
     history_root_path = Path(history_root)
-    persist_result = persist_paper_kelly_history(
-        prediction_date=prediction_date,
-        runtime_root=runtime_root_path,
-        history_root=history_root_path,
-    )
     history_csv_path = history_path(history_root_path)
+    if persist_history:
+        persist_result = persist_paper_kelly_history(
+            prediction_date=prediction_date,
+            runtime_root=runtime_root_path,
+            history_root=history_root_path,
+        )
+    else:
+        history_df_before = read_paper_kelly_history(history_csv_path)
+        current_date_rows = (
+            history_df_before[
+                history_df_before["prediction_date"].astype(str).eq(str(prediction_date))
+            ].copy()
+            if "prediction_date" in history_df_before.columns
+            else pd.DataFrame(columns=list(HISTORY_COLUMNS))
+        )
+        pending_rows = (
+            int(current_date_rows["result_status"].astype(str).eq(PENDING_STATUS).sum())
+            if not current_date_rows.empty and "result_status" in current_date_rows.columns
+            else 0
+        )
+        persist_result = {
+            "paper_kelly_history_path": history_csv_path,
+            "source_path": source_path_for_date(
+                prediction_date=prediction_date,
+                runtime_root=runtime_root_path,
+            ),
+            "incoming_rows": 0,
+            "replaced_rows": 0,
+            "total_rows": int(len(history_df_before)),
+            "current_date_rows": int(len(current_date_rows)),
+            "pending_rows": pending_rows,
+            "skipped": True,
+            "reason": "paper_kelly_history_persistence_disabled",
+        }
     history_df = read_paper_kelly_history(history_csv_path)
     report_df = build_paper_kelly_performance_report(history_df, through_date=prediction_date)
     text_path, csv_path = report_paths_for_date(prediction_date=prediction_date, runtime_root=runtime_root_path)
