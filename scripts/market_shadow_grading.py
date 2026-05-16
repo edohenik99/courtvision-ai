@@ -531,6 +531,7 @@ def write_market_shadow_outputs(
     prediction_date: str,
     runtime_root: str | Path = "outputs/runtime",
     history_root: str | Path = "data/history",
+    update_grading_summary: bool = True,
 ) -> tuple[Path, Path, dict[str, Any]]:
     runtime_root = Path(runtime_root)
     payload = build_market_shadow_grading(
@@ -540,12 +541,15 @@ def write_market_shadow_outputs(
     )
     diagnostics_path = runtime_root / "diagnostics" / f"market_shadow_grading_{prediction_date}.json"
     report_path = runtime_root / "operator" / f"market_shadow_report_{prediction_date}.txt"
+    grading_summary_path = runtime_root / "diagnostics" / f"grading_summary_{prediction_date}.json"
+    payload["grading_summary_path"] = str(grading_summary_path)
+    payload["grading_summary_update_enabled"] = bool(update_grading_summary)
+    payload["grading_summary_update_skipped"] = not bool(update_grading_summary)
     diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     diagnostics_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
     report_path.write_text(render_market_shadow_report(payload), encoding="utf-8")
-    grading_summary_path = runtime_root / "diagnostics" / f"grading_summary_{prediction_date}.json"
-    if grading_summary_path.exists():
+    if update_grading_summary and grading_summary_path.exists():
         try:
             grading_summary = json.loads(grading_summary_path.read_text(encoding="utf-8"))
         except Exception:
@@ -561,11 +565,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--prediction-date", required=True)
     parser.add_argument("--runtime-root", default="outputs/runtime")
     parser.add_argument("--history-root", default="data/history")
+    parser.add_argument(
+        "--closed-slate-safe",
+        action="store_true",
+        help="Write shadow outputs without mutating grading_summary_DATE.json.",
+    )
+    parser.add_argument(
+        "--skip-grading-summary-update",
+        action="store_true",
+        help="Do not inject Kelly decision performance into grading_summary_DATE.json.",
+    )
     args = parser.parse_args(argv)
     diagnostics_path, report_path, payload = write_market_shadow_outputs(
         prediction_date=args.prediction_date,
         runtime_root=args.runtime_root,
         history_root=args.history_root,
+        update_grading_summary=not (args.closed_slate_safe or args.skip_grading_summary_update),
     )
     totals = payload.get("totals", {})
     print(f"market_shadow_grading_json={diagnostics_path}")
