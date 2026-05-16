@@ -866,3 +866,63 @@ def test_operator_card_splits_optional_completion_warnings(tmp_path: Path) -> No
     assert "- optional warning count: 1" in text
     assert "- recommended action: real picks closed / ignore shadow-paper open-game noise" in text
 
+def test_operator_card_no_bet_reason_summary_explains_empty_elite_state(tmp_path: Path) -> None:
+    prediction_date = "2026-05-15"
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+    operator = runtime_root / "operator"
+    columns = list(_candidate(prediction_date).keys())
+
+    high_caution_row = _candidate(prediction_date, player_name="High Caution Over")
+    combo_under_row = _candidate(
+        prediction_date,
+        player_name="Combo Under",
+        market_type="player_points_rebounds",
+        selection="under",
+        edge=-2.5,
+    )
+
+    _write_csv(operator / f"elite_board_{prediction_date}.csv", [], columns=columns)
+    _write_csv(operator / f"full_market_board_{prediction_date}.csv", [high_caution_row, combo_under_row], columns=columns)
+    _write_csv(operator / f"high_caution_over_watchlist_{prediction_date}.csv", [high_caution_row])
+    _write_csv(operator / f"combo_under_watchlist_{prediction_date}.csv", [combo_under_row])
+    _write_csv(operator / f"sgp_board_{prediction_date}.csv", [], columns=["prediction_date"])
+    _write_json(
+        operator / f"quality_summary_{prediction_date}.json",
+        _quality_payload(
+            prediction_date,
+            elite_count=0,
+            full_market_count=2,
+            high_caution_count=1,
+            run_health_status="NO_BET",
+            games_count=1,
+        ),
+    )
+    _seed_required_json(runtime_root, prediction_date)
+    _write_completion_audit_json(
+        runtime_root,
+        prediction_date,
+        status="COMPLETE_WITH_SHADOW_OPEN_NOISE",
+        shadow_pending=2,
+        shadow_open=2,
+        paper_pending=1,
+        paper_open=1,
+        warnings=["Missing optional pending repair audit: fixture"],
+    )
+    _seed_history(history_root)
+
+    output_path, payload = write_operator_card_outputs(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+
+    text = output_path.read_text(encoding="utf-8")
+
+    assert payload["final_decision"] == "NO BET"
+    assert "NO BET Reason Summary" in text
+    assert "- No elite picks survived safety/context gates." in text
+    assert "- 1 high-caution OVER candidates were watchlist-only." in text
+    assert "- 1 combo UNDER candidates were watchlist-only." in text
+    assert "- Completion audit is clean; shadow/paper pending rows are open-game only." in text
+

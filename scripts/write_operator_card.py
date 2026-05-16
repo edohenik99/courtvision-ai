@@ -541,6 +541,56 @@ def _completion_recommended_action(payload: dict[str, Any], prediction_date: str
     return "inspect completion audit before trusting results"
 
 
+def _completion_open_noise_is_clean(payload: dict[str, Any]) -> bool:
+    if not payload:
+        return False
+
+    status = _safe_text(payload.get("report_agreement_status")).upper()
+    if status != "COMPLETE_WITH_SHADOW_OPEN_NOISE":
+        return False
+
+    if _safe_int(payload.get("real_pick_pending_count"), 0) != 0:
+        return False
+    if _has_items(payload.get("agreement_issues")):
+        return False
+
+    shadow_pending = _safe_int(payload.get("shadow_pending_count"), 0)
+    shadow_open = _safe_int(payload.get("shadow_open_game_pending_count"), 0)
+    shadow_stale = _safe_int(payload.get("shadow_stale_pending_count"), 0)
+
+    paper_pending = _safe_int(payload.get("paper_pending_count"), 0)
+    paper_open = _safe_int(payload.get("paper_open_game_pending_count"), 0)
+    paper_stale = _safe_int(payload.get("paper_stale_pending_count"), 0)
+
+    shadow_clean = shadow_pending <= 0 or (shadow_pending == shadow_open and shadow_stale == 0)
+    paper_clean = paper_pending <= 0 or (paper_pending == paper_open and paper_stale == 0)
+    return shadow_clean and paper_clean
+
+
+def _no_bet_reason_lines(
+    *,
+    elite_count: int,
+    high_caution_count: int,
+    combo_under_count: int,
+    completion_state_payload: dict[str, Any],
+) -> list[str]:
+    reasons: list[str] = []
+
+    if elite_count <= 0:
+        reasons.append("- No elite picks survived safety/context gates.")
+    if high_caution_count > 0:
+        reasons.append(f"- {high_caution_count} high-caution OVER candidates were watchlist-only.")
+    if combo_under_count > 0:
+        reasons.append(f"- {combo_under_count} combo UNDER candidates were watchlist-only.")
+    if _completion_open_noise_is_clean(completion_state_payload):
+        reasons.append("- Completion audit is clean; shadow/paper pending rows are open-game only.")
+
+    if not reasons:
+        reasons.append("- No stakeable picks are available under the current operator gates.")
+
+    return reasons
+
+
 def _completion_state_lines(payload: dict[str, Any], path: Path, prediction_date: str) -> list[str]:
     lines = ["Completion State Audit", "-" * 40]
     if not payload:
@@ -1083,6 +1133,19 @@ def build_operator_card(
 
     lines.extend(_completion_state_lines(completion_state_payload, paths["completion_state_audit_json"], prediction_date))
     lines.append("")
+
+    if final_decision == "NO BET":
+        lines.append("NO BET Reason Summary")
+        lines.append("-" * 40)
+        lines.extend(
+            _no_bet_reason_lines(
+                elite_count=elite_count,
+                high_caution_count=high_caution_count,
+                combo_under_count=combo_under_count,
+                completion_state_payload=completion_state_payload,
+            )
+        )
+        lines.append("")
 
     lines.append("Final Decision")
     lines.append("-" * 40)
