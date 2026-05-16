@@ -1223,6 +1223,8 @@ def write_daily_summary_outputs(
     prediction_date: str,
     runtime_root: str | Path = "outputs/runtime",
     history_root: str | Path = "data/history",
+    write_board_annotations: bool = True,
+    persist_shadow_history: bool = True,
 ) -> tuple[Path, dict[str, Any]]:
     runtime_root = Path(runtime_root)
     history_root = Path(history_root)
@@ -1231,14 +1233,24 @@ def write_daily_summary_outputs(
         prediction_date=prediction_date,
         runtime_root=runtime_root,
         history_root=history_root,
+        write=write_board_annotations,
     )
     full_market_path = runtime_root / "operator" / f"full_market_board_{prediction_date}.csv"
-    if full_market_path.exists():
+    if full_market_path.exists() and persist_shadow_history:
         shadow_result = persist_market_shadow_history(
             prediction_date=prediction_date,
             runtime_root=runtime_root,
             history_root=history_root,
         )
+    elif full_market_path.exists():
+        shadow_result = {
+            "skipped": True,
+            "reason": "market_shadow_history_persistence_disabled",
+            "market_shadow_history_path": history_root / "market_shadow_history.csv",
+            "market_readiness_summary_path": history_root / "market_readiness_summary.csv",
+            "current_date_rows": 0,
+            "current_date_non_points_rows": 0,
+        }
     watchlist_path, watchlist_df = write_high_caution_over_watchlist(
         prediction_date=prediction_date,
         runtime_root=runtime_root,
@@ -1286,6 +1298,9 @@ def write_daily_summary_outputs(
     metadata["high_caution_over_watchlist_count"] = int(len(watchlist_df))
     metadata["combo_under_watchlist_path"] = str(combo_under_path)
     metadata["combo_under_watchlist_count"] = int(len(combo_under_df))
+    metadata["board_annotation_write_enabled"] = bool(write_board_annotations)
+    metadata["market_shadow_history_persistence_enabled"] = bool(persist_shadow_history)
+    metadata["closed_slate_safe"] = bool(not write_board_annotations and not persist_shadow_history)
     metadata["promotion_readiness_report_path"] = str(promotion_text_path)
     metadata["promotion_readiness_report_csv_path"] = str(promotion_csv_path)
     metadata["promotion_readiness_report_count"] = int(len(promotion_df))
@@ -1329,11 +1344,28 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--prediction-date", required=True)
     parser.add_argument("--runtime-root", default="outputs/runtime")
     parser.add_argument("--history-root", default="data/history")
+    parser.add_argument(
+        "--closed-slate-safe",
+        action="store_true",
+        help="Rewrite the daily summary without mutating board CSVs or market shadow history.",
+    )
+    parser.add_argument(
+        "--no-board-annotation-write",
+        action="store_true",
+        help="Compute same-opponent board annotation metadata without writing back to board CSVs.",
+    )
+    parser.add_argument(
+        "--skip-market-shadow-history",
+        action="store_true",
+        help="Do not refresh market_shadow_history.csv from the full-market board.",
+    )
     args = parser.parse_args(argv)
     output_path, metadata = write_daily_summary_outputs(
         prediction_date=args.prediction_date,
         runtime_root=args.runtime_root,
         history_root=args.history_root,
+        write_board_annotations=not (args.closed_slate_safe or args.no_board_annotation_write),
+        persist_shadow_history=not (args.closed_slate_safe or args.skip_market_shadow_history),
     )
     print(f"daily_summary_txt={output_path}")
     print(

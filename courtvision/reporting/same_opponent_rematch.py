@@ -315,6 +315,7 @@ def annotate_operator_board_files(
     prediction_date: str,
     runtime_root: str | Path = "outputs/runtime",
     history_root: str | Path = "data/history",
+    write: bool = True,
 ) -> dict[str, Any]:
     runtime_root_path = Path(runtime_root)
     operator_dir = runtime_root_path / "operator"
@@ -323,22 +324,37 @@ def annotate_operator_board_files(
     for board_name in ("full_market_board", "elite_board"):
         path = operator_dir / f"{board_name}_{prediction_date}.csv"
         if not path.exists() or path.stat().st_size == 0:
-            results["boards"][board_name] = {"path": str(path), "exists": False, **manual_review_summary(pd.DataFrame())}
+            results["boards"][board_name] = {
+                "path": str(path),
+                "exists": False,
+                "write_enabled": bool(write),
+                "skipped_write": not bool(write),
+                **manual_review_summary(pd.DataFrame()),
+            }
             continue
         try:
             df = pd.read_csv(path, keep_default_na=False, low_memory=False)
         except pd.errors.EmptyDataError:
-            results["boards"][board_name] = {"path": str(path), "exists": False, **manual_review_summary(pd.DataFrame())}
+            results["boards"][board_name] = {
+                "path": str(path),
+                "exists": False,
+                "write_enabled": bool(write),
+                "skipped_write": not bool(write),
+                **manual_review_summary(pd.DataFrame()),
+            }
             continue
         annotated = annotate_same_opponent_rematches(
             df,
             prediction_date=prediction_date,
             lookup=lookup,
         )
-        annotated.to_csv(path, index=False)
+        if write:
+            annotated.to_csv(path, index=False)
         results["boards"][board_name] = {
             "path": str(path),
             "exists": True,
+            "write_enabled": bool(write),
+            "skipped_write": not bool(write),
             "rows": int(len(annotated)),
             **manual_review_summary(annotated),
         }
