@@ -14,6 +14,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from courtvision.artifact_guard import guard_no_existing_artifact  # noqa: E402
 from courtvision.selection import (  # noqa: E402
     format_unsupported_active_operator_market_drop_line,
     unsupported_active_operator_market_drop_summary,
@@ -1406,9 +1407,16 @@ def write_operator_card_outputs(
     prediction_date: str,
     runtime_root: str | Path = "outputs/runtime",
     history_root: str | Path = "data/history",
+    force: bool = False,
 ) -> tuple[Path, dict[str, Any]]:
     runtime_root = Path(runtime_root)
     paths = _artifact_paths(runtime_root, prediction_date)
+    guard_no_existing_artifact(
+        output_path=paths["operator_card"],
+        force=force,
+        caller="write_operator_card_outputs",
+        artifact_label="operator_card",
+    )
     paths["operator_card"].parent.mkdir(parents=True, exist_ok=True)
     text, payload = build_operator_card(
         prediction_date=prediction_date,
@@ -1424,12 +1432,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--prediction-date", required=True)
     parser.add_argument("--runtime-root", default="outputs/runtime")
     parser.add_argument("--history-root", default="data/history")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Allow an existing operator_card_DATE.txt artifact to be overwritten intentionally.",
+    )
     args = parser.parse_args(argv)
 
     output_path, payload = write_operator_card_outputs(
         prediction_date=args.prediction_date,
         runtime_root=args.runtime_root,
         history_root=args.history_root,
+        force=args.force,
     )
     print(f"operator_card_txt={output_path}")
     print(f"operator_card_decision={payload['final_decision']}")
