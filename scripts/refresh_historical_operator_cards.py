@@ -134,6 +134,7 @@ def refresh_historical_operator_cards(
                 prediction_date=prediction_date,
                 runtime_root=runtime_root,
                 history_root=history_root,
+                force=True,
             )
         except Exception as exc:
             row["action"] = FAILED
