@@ -846,9 +846,12 @@ def repair_pending_grades(
     else:
         results["paper_kelly_summary"] = _paper_summary_rows(repaired_frames["paper_kelly_history"])
     results["summary"] = _aggregate_summary(results["histories"])
-    audit_json_path, report_text_path = _write_audit_reports(results, runtime_root_path)
-    results["audit_json_path"] = str(audit_json_path)
-    results["report_text_path"] = str(report_text_path)
+    results["audit_report_write_enabled"] = not dry_run
+    results["audit_report_write_skipped"] = bool(dry_run)
+    if not dry_run:
+        audit_json_path, report_text_path = _write_audit_reports(results, runtime_root_path)
+        results["audit_json_path"] = str(audit_json_path)
+        results["report_text_path"] = str(report_text_path)
     return results
 
 
