@@ -782,6 +782,7 @@ def persist_market_shadow_history(
     runtime_root: str | Path = "outputs/runtime",
     history_root: str | Path = "data/history",
     result_status: str = "pending",
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     runtime_root_path = Path(runtime_root)
     history_root_path = Path(history_root)
@@ -828,9 +829,12 @@ def persist_market_shadow_history(
         ["prediction_date", "market_type", "player_name", "selection", "line"],
         kind="mergesort",
     ).reset_index(drop=True)
-    _write_csv(shadow_history_path, combined)
-
-    readiness_path, readiness = update_market_readiness_summary(history_root=history_root_path)
+    if not dry_run:
+        _write_csv(shadow_history_path, combined)
+        readiness_path, readiness = update_market_readiness_summary(history_root=history_root_path)
+    else:
+        readiness_path = history_root_path / "market_readiness_summary.csv"
+        readiness = build_market_readiness_summary(combined)
     current_date_rows = combined[combined["prediction_date"].astype(str) == str(prediction_date)].copy()
     current_market_counts = (
         current_date_rows["market_type"].fillna("unknown").astype(str).str.strip().replace("", "unknown").value_counts()
@@ -853,6 +857,7 @@ def persist_market_shadow_history(
         "current_date_non_points_rows": non_points_rows,
         "current_date_market_counts": {str(k): int(v) for k, v in current_market_counts.items()},
         "readiness_rows": int(len(readiness)),
+        "dry_run": bool(dry_run),
     }
 
 
@@ -993,6 +998,7 @@ def persist_daily_picks(
     runtime_root: str | Path = "outputs/runtime",
     history_root: str | Path = "data/history",
     result_status: str = "pending",
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     runtime_root_path = Path(runtime_root)
     history_root_path = Path(history_root)
@@ -1005,8 +1011,9 @@ def persist_daily_picks(
         raise FileNotFoundError(f"Missing elite board CSV: {operator_path}")
 
     elite_df = pd.read_csv(operator_path)
-    picks_output_path.parent.mkdir(parents=True, exist_ok=True)
-    elite_df.to_csv(picks_output_path, index=False)
+    if not dry_run:
+        picks_output_path.parent.mkdir(parents=True, exist_ok=True)
+        elite_df.to_csv(picks_output_path, index=False)
 
     # Load kelly_stakes for context / eligibility columns — best-effort, no hard failure.
     kelly_stakes_path = runtime_root_path / "operator" / f"kelly_stakes_{prediction_date}.csv"
@@ -1072,12 +1079,14 @@ def persist_daily_picks(
     dedupe_keys = ["prediction_date", "player_name", "market", "selection", "line"]
     combined = combined.drop_duplicates(subset=dedupe_keys, keep="last")
     combined = combined[PICK_HISTORY_COLUMNS].sort_values(["prediction_date", "player_name", "market"]).reset_index(drop=True)
-    _write_csv(pick_history_path, combined)
+    if not dry_run:
+        _write_csv(pick_history_path, combined)
     return {
         "picks_output_path": picks_output_path,
         "pick_history_path": pick_history_path,
         "appended_rows": len(incoming),
         "total_rows": len(combined),
+        "dry_run": bool(dry_run),
     }
 
 

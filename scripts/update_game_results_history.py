@@ -29,7 +29,7 @@ from courtvision.ratings.power_ratings_store import (
 from courtvision_ai import CourtVisionAI
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Append completed NBA game results to data/history/game_results.csv."
     )
@@ -52,7 +52,12 @@ def parse_args() -> argparse.Namespace:
         default="outputs/runtime",
         help="Runtime outputs root for CourtVisionAI (default: outputs/runtime)",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Fetch and summarize completed games without writing game_results.csv.",
+    )
+    return parser.parse_args(argv)
 
 
 def _date_range(from_date: str, to_date: str) -> list[str]:
@@ -66,8 +71,8 @@ def _date_range(from_date: str, to_date: str) -> list[str]:
     return out
 
 
-def main() -> int:
-    args = parse_args()
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
 
     if args.date:
         dates = [args.date]
@@ -111,9 +116,10 @@ def main() -> int:
     else:
         combined_new = pd.DataFrame(columns=list(GAME_RESULTS_COLUMNS))
 
-    summary = append_game_results(combined_new, path=results_path)
+    summary = append_game_results(combined_new, path=results_path, dry_run=args.dry_run)
 
     print()
+    print(f"dry_run:                 {str(bool(args.dry_run)).lower()}")
     print(f"games fetched (raw):     {total_fetched_raw}")
     print(f"completed accepted:      {summary['accepted']}")
     print(f"rows appended:           {summary['appended']}")

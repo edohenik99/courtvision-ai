@@ -234,12 +234,13 @@ def games_df_to_results(
 def append_game_results(
     new_df: pd.DataFrame,
     path: str | Path | None = None,
-) -> dict[str, int]:
+    dry_run: bool = False,
+) -> dict[str, Any]:
     """Append new game results to the game results CSV, deduplicating in place.
 
     Loads the existing CSV (creating it if absent), concatenates new_df,
     deduplicates (by game_id when non-empty, else by date+home+away), sorts
-    chronologically, and writes back.  Never raises.
+    chronologically, and writes back unless dry_run=True.  Never raises.
 
     Args:
         new_df: DataFrame in GAME_RESULTS_COLUMNS format (from games_df_to_results).
@@ -264,6 +265,7 @@ def append_game_results(
                 "skipped_duplicates": 0,
                 "total_rows": existing_rows,
                 "output_path": str(p),
+                "dry_run": bool(dry_run),
             }
 
         combined = pd.concat([existing, new_df], ignore_index=True)
@@ -295,8 +297,9 @@ def append_game_results(
         appended = total_rows - existing_rows
         skipped = fetched - max(appended, 0)
 
-        p.parent.mkdir(parents=True, exist_ok=True)
-        deduped.to_csv(p, index=False)
+        if not dry_run:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            deduped.to_csv(p, index=False)
 
         return {
             "fetched": fetched,
@@ -305,6 +308,7 @@ def append_game_results(
             "skipped_duplicates": max(skipped, 0),
             "total_rows": total_rows,
             "output_path": str(p),
+            "dry_run": bool(dry_run),
         }
     except Exception:
         return {
@@ -314,6 +318,7 @@ def append_game_results(
             "skipped_duplicates": fetched,
             "total_rows": 0,
             "output_path": str(p),
+            "dry_run": bool(dry_run),
         }
 
 

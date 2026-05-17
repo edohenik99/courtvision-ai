@@ -52,24 +52,31 @@ def _recent_metrics(history_root: Path) -> dict[str, float | int]:
     }
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Persist picks and refresh performance tracking.")
     parser.add_argument("--prediction-date", required=True)
     parser.add_argument("--runtime-root", default="outputs/runtime")
     parser.add_argument("--history-root", default="data/history")
     parser.add_argument("--grade-pending", action="store_true")
     parser.add_argument("--result-status", default="pending")
-    return parser.parse_args()
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Calculate post-run tracking updates without writing history or performance artifacts.",
+    )
+    return parser.parse_args(argv)
 
 
-def main() -> int:
-    args = parse_args()
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
     history_root = Path(args.history_root)
+    print(f"dry_run={str(bool(args.dry_run)).lower()}")
     persist_result = persist_daily_picks(
         prediction_date=args.prediction_date,
         runtime_root=args.runtime_root,
         history_root=args.history_root,
         result_status=args.result_status,
+        dry_run=args.dry_run,
     )
     print(f"persisted_today_rows={persist_result['appended_rows']}")
     print(f"today_elite_count={persist_result['appended_rows']}")
@@ -79,6 +86,7 @@ def main() -> int:
         runtime_root=args.runtime_root,
         history_root=args.history_root,
         result_status=args.result_status,
+        dry_run=args.dry_run,
     )
     print(f"market_shadow_rows_today={shadow_result['current_date_rows']}")
     print(f"market_shadow_non_points_today={shadow_result['current_date_non_points_rows']}")
@@ -86,10 +94,17 @@ def main() -> int:
     print(f"market_readiness_summary_csv={shadow_result['market_readiness_summary_path']}")
 
     if args.grade_pending:
-        grade_result = grade_completed_picks(history_root=args.history_root, runtime_root=args.runtime_root)
+        grade_result = grade_completed_picks(
+            history_root=args.history_root,
+            runtime_root=args.runtime_root,
+            dry_run=args.dry_run,
+        )
         print(f"graded_updates={grade_result['updated_rows']}")
     else:
-        update_performance_summaries(history_root=args.history_root, runtime_root=args.runtime_root)
+        if args.dry_run:
+            print("performance_summary_update_skipped=true")
+        else:
+            update_performance_summaries(history_root=args.history_root, runtime_root=args.runtime_root)
 
     metrics = _recent_metrics(history_root)
     print(f"all_time_graded_hit_rate={metrics['all_time_graded_hit_rate']:.4f}")
