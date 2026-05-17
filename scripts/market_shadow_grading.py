@@ -13,6 +13,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from courtvision.artifact_guard import guard_no_existing_artifact
 from courtvision.reporting.kelly_performance import build_kelly_decision_performance, kelly_perf_log_lines
 
 
@@ -532,16 +533,31 @@ def write_market_shadow_outputs(
     runtime_root: str | Path = "outputs/runtime",
     history_root: str | Path = "data/history",
     update_grading_summary: bool = True,
+    force: bool = False,
 ) -> tuple[Path, Path, dict[str, Any]]:
     runtime_root = Path(runtime_root)
+    diagnostics_path = runtime_root / "diagnostics" / f"market_shadow_grading_{prediction_date}.json"
+    report_path = runtime_root / "operator" / f"market_shadow_report_{prediction_date}.txt"
+    grading_summary_path = runtime_root / "diagnostics" / f"grading_summary_{prediction_date}.json"
+
+    guard_no_existing_artifact(
+        output_path=diagnostics_path,
+        force=force,
+        caller="write_market_shadow_outputs",
+        artifact_label="market_shadow_grading",
+    )
+    guard_no_existing_artifact(
+        output_path=report_path,
+        force=force,
+        caller="write_market_shadow_outputs",
+        artifact_label="market_shadow_report",
+    )
+
     payload = build_market_shadow_grading(
         prediction_date=prediction_date,
         runtime_root=runtime_root,
         history_root=history_root,
     )
-    diagnostics_path = runtime_root / "diagnostics" / f"market_shadow_grading_{prediction_date}.json"
-    report_path = runtime_root / "operator" / f"market_shadow_report_{prediction_date}.txt"
-    grading_summary_path = runtime_root / "diagnostics" / f"grading_summary_{prediction_date}.json"
     payload["grading_summary_path"] = str(grading_summary_path)
     payload["grading_summary_update_enabled"] = bool(update_grading_summary)
     payload["grading_summary_update_skipped"] = not bool(update_grading_summary)
@@ -575,13 +591,21 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Do not inject Kelly decision performance into grading_summary_DATE.json.",
     )
-    args = parser.parse_args(argv)
-    diagnostics_path, report_path, payload = write_market_shadow_outputs(
-        prediction_date=args.prediction_date,
-        runtime_root=args.runtime_root,
-        history_root=args.history_root,
-        update_grading_summary=not (args.closed_slate_safe or args.skip_grading_summary_update),
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Allow existing market_shadow_grading_DATE.json and market_shadow_report_DATE.txt artifacts to be overwritten intentionally.",
     )
+    args = parser.parse_args(argv)
+    output_kwargs: dict[str, Any] = {
+        "prediction_date": args.prediction_date,
+        "runtime_root": args.runtime_root,
+        "history_root": args.history_root,
+        "update_grading_summary": not (args.closed_slate_safe or args.skip_grading_summary_update),
+    }
+    if args.force:
+        output_kwargs["force"] = True
+    diagnostics_path, report_path, payload = write_market_shadow_outputs(**output_kwargs)
     totals = payload.get("totals", {})
     print(f"market_shadow_grading_json={diagnostics_path}")
     print(f"market_shadow_report_txt={report_path}")
