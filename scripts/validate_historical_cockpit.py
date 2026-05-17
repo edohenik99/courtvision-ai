@@ -8,6 +8,8 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
+from courtvision.artifact_guard import guard_no_existing_artifact
+
 
 PASS = "PASS"
 PASS_NO_SLATE = "PASS_NO_SLATE"
@@ -313,6 +315,7 @@ def write_historical_cockpit_validation(
     start_date: str,
     end_date: str,
     runtime_root: str | Path = "outputs/runtime",
+    force: bool = False,
 ) -> tuple[Path, Path, Path, dict[str, Any]]:
     runtime_root = Path(runtime_root)
     payload = build_historical_cockpit_validation(
@@ -321,6 +324,13 @@ def write_historical_cockpit_validation(
         runtime_root=runtime_root,
     )
     paths = _output_paths(runtime_root, start_date, end_date)
+    for artifact_key, path in paths.items():
+        guard_no_existing_artifact(
+            output_path=path,
+            force=force,
+            caller="write_historical_cockpit_validation",
+            artifact_label=f"historical_cockpit_validation_{artifact_key}",
+        )
     for path in paths.values():
         path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -339,12 +349,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--start-date", required=True)
     parser.add_argument("--end-date", required=True)
     parser.add_argument("--runtime-root", default="outputs/runtime")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Allow existing historical cockpit validation artifacts to be overwritten intentionally.",
+    )
     args = parser.parse_args(argv)
 
     text_path, json_path, csv_path, payload = write_historical_cockpit_validation(
         start_date=args.start_date,
         end_date=args.end_date,
         runtime_root=args.runtime_root,
+        force=args.force,
     )
     summary = payload["summary"]
     print(f"historical_cockpit_validation_txt={text_path}")

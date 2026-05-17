@@ -11,6 +11,8 @@ from typing import Any
 
 import pandas as pd
 
+from courtvision.artifact_guard import guard_no_existing_artifact
+
 
 STATUS_PASS = "PASS"
 STATUS_PASS_NO_SLATE = "PASS_NO_SLATE"
@@ -630,9 +632,17 @@ def write_full_market_sanity_audit(
     *,
     prediction_date: str,
     runtime_root: str | Path = "outputs/runtime",
+    force: bool = False,
 ) -> tuple[Path, Path, Path, dict[str, Any]]:
     payload = build_full_market_sanity_audit(prediction_date=prediction_date, runtime_root=runtime_root)
     paths = {key: Path(value) for key, value in payload["artifact_paths"].items()}
+    for artifact_key, path in paths.items():
+        guard_no_existing_artifact(
+            output_path=path,
+            force=force,
+            caller="write_full_market_sanity_audit",
+            artifact_label=f"full_market_sanity_{artifact_key}",
+        )
     for path in paths.values():
         path.parent.mkdir(parents=True, exist_ok=True)
     paths["text"].write_text(render_full_market_sanity_text(payload), encoding="utf-8")
@@ -650,11 +660,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Audit full-market candidate board sanity.")
     parser.add_argument("--prediction-date", required=True)
     parser.add_argument("--runtime-root", default="outputs/runtime")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Allow existing full-market sanity audit artifacts to be overwritten intentionally.",
+    )
     args = parser.parse_args(argv)
 
     text_path, json_path, csv_path, payload = write_full_market_sanity_audit(
         prediction_date=args.prediction_date,
         runtime_root=args.runtime_root,
+        force=args.force,
     )
     print(f"full_market_sanity_audit_txt={text_path}")
     print(f"full_market_sanity_audit_json={json_path}")
