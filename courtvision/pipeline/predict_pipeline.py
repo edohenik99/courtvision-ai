@@ -23,6 +23,10 @@ from courtvision.context.game_context import (
     identity_quarantine_reason_counts,
     mark_identity_quarantine_fields,
 )
+from courtvision.context.player_identity import (
+    build_canonical_player_identity_resolver,
+    player_identity_reason_counts,
+)
 from courtvision.data.candidates import score_player_markets
 from courtvision.injuries import InjuryEngine
 from courtvision.market import MarketEvaluator, normalize_market_alias
@@ -319,7 +323,7 @@ class PredictionPipeline:
         )
 
         # Build candidate universe using normalized games
-        candidates, rejected = self._build_candidate_universe(
+        candidates, rejected, player_identity_summary = self._build_candidate_universe(
             games=games_normalized,
             odds=odds,
             player_baselines=player_baselines,
@@ -331,6 +335,16 @@ class PredictionPipeline:
         # [COUNT] Raw candidates from universe build
         print(f"[COUNT] raw_candidates={len(candidates)}")
         print(f"[COUNT] raw_rejected={len(rejected)}")
+        print(
+            f"[COUNT] player_identity_conflict_count="
+            f"{int(player_identity_summary.get('conflict_count', 0) or 0)}",
+            flush=True,
+        )
+        print(
+            f"[COUNT] player_identity_conflict_reason_counts="
+            f"{player_identity_summary.get('counts_by_reason', {})}",
+            flush=True,
+        )
         
         self.logger.info("candidates_built accepted=%d rejected=%d", len(candidates), len(rejected))
 
@@ -367,11 +381,18 @@ class PredictionPipeline:
             print("[COUNT] pipeline_exit=no_candidates")
             print("[DIAGNOSIS] Zero candidates after universe build - check data sources and filters")
             result.injury_context = injury_context
+            result.rejected_candidate_diagnostics = pd.DataFrame(rejected) if rejected else pd.DataFrame()
             result.summary = self._build_empty_summary(games, odds)
+            self._attach_player_identity_summary(
+                result.summary,
+                player_identity_summary,
+                pd.DataFrame(),
+            )
             return result
 
         # Convert candidates to DataFrame and mark identity-invalid rows before any board ranking.
         candidates_df = mark_identity_quarantine_fields(pd.DataFrame(candidates))
+        candidate_identity_counts = player_identity_reason_counts(candidates_df)
         identity_quarantine_counts = identity_quarantine_reason_counts(candidates_df)
         identity_quarantine_count = int(sum(identity_quarantine_counts.values()))
         identity_rejected_df = (
@@ -823,6 +844,12 @@ class PredictionPipeline:
             "total_rows_dropped": identity_quarantine_count,
             "counts_by_reason": identity_quarantine_counts,
         }
+        self._attach_player_identity_summary(
+            result.summary,
+            player_identity_summary,
+            candidates_df,
+            candidate_identity_counts=candidate_identity_counts,
+        )
 
         # Set summary on telemetry BEFORE writing audit files
         elite_telemetry.set_summary(result.summary)
@@ -864,7 +891,7 @@ class PredictionPipeline:
         team_baselines: pd.DataFrame | None,
         injury_context: dict[str, Any],
         is_player_inactive_fn: Callable[[str], bool],
-    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
         """Build the universe of betting candidates."""
         # Input size diagnostics
         self.logger.info(
@@ -943,6 +970,12 @@ class PredictionPipeline:
             _games_with_status_count,
             _games_with_datetime_count,
             len(_game_info_by_team),
+        )
+        player_identity_resolver = build_canonical_player_identity_resolver(
+            prediction_date=self.config.prediction_date,
+            player_baselines=player_baselines,
+            odds=odds,
+            games=games,
         )
 
         # Fully modeled markets (real projections)
@@ -1511,6 +1544,12 @@ class PredictionPipeline:
                 sample_conf = rejection_details["low_confidence"][:5]
                 self.logger.info("sample_low_confidence_values %s (threshold=%s)", sample_conf, self.config.min_confidence)
 
+        accepted = player_identity_resolver.annotate_records(accepted)
+        identity_diagnostic_rows = player_identity_resolver.diagnostic_rows()
+        if identity_diagnostic_rows:
+            rejected.extend(identity_diagnostic_rows)
+        player_identity_summary = player_identity_resolver.summary()
+
         # ---- Game status / slate-lock gate diagnostics ----
         # Count how many candidates would be blocked by game status alone.
         from courtvision.runtime_selection import game_status_ineligibility_reason
@@ -1604,7 +1643,7 @@ class PredictionPipeline:
 
         self.logger.info("candidate_universe_output accepted=%d rejected=%d", len(accepted), len(rejected))
 
-        return accepted, rejected
+        return accepted, rejected, player_identity_summary
 
     def _compute_projection(
         self,
@@ -2035,6 +2074,32 @@ class PredictionPipeline:
         })
 
         return summary
+
+    def _attach_player_identity_summary(
+        self,
+        summary: dict[str, Any],
+        player_identity_summary: dict[str, Any],
+        candidates_df: pd.DataFrame,
+        *,
+        candidate_identity_counts: dict[str, int] | None = None,
+    ) -> None:
+        """Attach P12 identity diagnostics without changing selection thresholds."""
+        source_counts = dict(player_identity_summary.get("counts_by_reason", {}) or {})
+        candidate_counts = (
+            dict(candidate_identity_counts)
+            if candidate_identity_counts is not None
+            else player_identity_reason_counts(candidates_df)
+        )
+        payload = {
+            **player_identity_summary,
+            "invalid_candidate_count": int(sum(candidate_counts.values())),
+            "invalid_candidate_counts_by_reason": candidate_counts,
+        }
+        summary["player_identity"] = payload
+        summary["player_identity_conflict_count"] = int(player_identity_summary.get("conflict_count", 0) or 0)
+        summary["player_identity_conflict_reason_counts"] = source_counts
+        summary["player_identity_invalid_candidate_count"] = int(sum(candidate_counts.values()))
+        summary["player_identity_invalid_candidate_counts_by_reason"] = candidate_counts
 
     def _build_empty_summary(
         self,
