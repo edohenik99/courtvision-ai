@@ -274,11 +274,13 @@ if ($pipelineExitCode -ne 0) {
 }
 Write-Host "[OK] Pipeline complete. Full log saved to $RunLog" -ForegroundColor Green
 
-# The pipeline always writes to outputs\runtime\operator\<board>_$Date.csv.
+# Primary operator boards live under outputs\runtime\operator.
+# Verbose/debug boards, including stat_only_board, live under outputs\runtime\optional.
 $operatorDir = "outputs\runtime\operator"
+$optionalDir = "outputs\runtime\optional"
 $eliteOperatorCsv = Join-Path $operatorDir "elite_board_$Date.csv"
 $fullMarketOperatorCsv = Join-Path $operatorDir "full_market_board_$Date.csv"
-$statOnlyOperatorCsv = Join-Path $operatorDir "stat_only_board_$Date.csv"
+$statOnlyOptionalCsv = Join-Path $optionalDir "stat_only_board_$Date.csv"
 $operatorCardPath = Join-Path $operatorDir "operator_card_$Date.txt"
 $kellyOutputCsv = Join-Path $operatorDir "kelly_stakes_$Date.csv"
 $completionAuditTextPath = Join-Path $operatorDir "completion_state_audit_$Date.txt"
@@ -319,16 +321,16 @@ if ($fullMarketCount -lt 0) {
     Write-LogLine -Path $ValidationLog -Message "Full market: $fullMarketCount picks" -AlsoConsole:$VerboseMode
 }
 
-$statOnlyCount = Get-CsvRowCount $statOnlyOperatorCsv
+$statOnlyCount = Get-CsvRowCount $statOnlyOptionalCsv
 if ($statOnlyCount -lt 0) {
-    Write-LogLine -Path $ValidationLog -Message "Stat only: [MISSING] $statOnlyOperatorCsv" -AlsoConsole:$VerboseMode
+    Write-LogLine -Path $ValidationLog -Message "Stat only (optional): [MISSING] $statOnlyOptionalCsv" -AlsoConsole:$VerboseMode
     $statOnlyCount = 0
 } else {
-    Write-LogLine -Path $ValidationLog -Message "Stat only: $statOnlyCount picks" -AlsoConsole:$VerboseMode
+    Write-LogLine -Path $ValidationLog -Message "Stat only (optional): $statOnlyCount rows" -AlsoConsole:$VerboseMode
 }
 
 $totalPicks = $eliteCount + $fullMarketCount + $statOnlyCount
-Write-LogLine -Path $ValidationLog -Message "Total picks generated: $totalPicks" -AlsoConsole:$VerboseMode
+Write-LogLine -Path $ValidationLog -Message "Total board rows generated: $totalPicks" -AlsoConsole:$VerboseMode
 
 $validationExitCode = Invoke-LoggedCommand `
     -LogPath $ValidationLog `

@@ -446,17 +446,13 @@ It feeds:
 
 ### Stat-Only Board
 
-The stat-only board is optional/debug output. There is a documentation mismatch:
+The stat-only board is optional/debug output, not a primary operator board. Its canonical path comes from `courtvision/runtime_outputs.py:54-61`, where `stat_only_board_<date>.csv` is mapped to the `optional` lane when `verbose_outputs=True`. `courtvision_ai.py:8956-8957` writes `stat_only_board` only through that layout.
 
-- `run_today.ps1:277-281` comments and variables imply `outputs/runtime/operator/stat_only_board_<date>.csv`.
-- `courtvision/runtime_outputs.py:54-61` maps `stat_only_board_<date>.csv` to the `optional` lane when `verbose_outputs=True`.
-- `courtvision_ai.py:8956-8957` writes `stat_only_board` only if that optional path exists.
-
-Actual current layout:
+Canonical layout:
 
 - `outputs/runtime/optional/stat_only_board_<date>.csv`
 
-This is a concrete technical-debt item because operator comments and output layout disagree.
+`run_today.ps1` should treat this as an optional/debug artifact when logging row counts. The primary operator board lane remains reserved for elite, full-market, SGP, Kelly, summary, and card artifacts.
 
 ### Kelly Stakes
 
@@ -890,10 +886,9 @@ These are written only when `--verbose-outputs` enables the optional lane.
    - Some summary/report writers intentionally rewrite or mutate board annotations/history.
    - `-ForcePastDate` plus force flags can alter closed-slate operator history.
 
-7. Stat-only board path mismatch.
-   - `run_today.ps1` comments imply `outputs/runtime/operator/stat_only_board_<date>.csv`.
-   - `OutputLayoutPolicy` writes it to `outputs/runtime/optional/stat_only_board_<date>.csv`.
-   - This is a live documentation/configuration mismatch.
+7. Optional board lane drift.
+   - `OutputLayoutPolicy` intentionally writes verbose/debug boards such as `stat_only_board_<date>.csv` to `outputs/runtime/optional/`.
+   - Operator scripts and docs should keep treating stat-only output as optional/debug, not as a primary operator board.
 
 8. `COURTVISION_MODE=research` changes safety behavior.
    - `runtime_selection.py` game/odds gating behaves differently in research mode.
@@ -953,7 +948,7 @@ These are written only when `--verbose-outputs` enables the optional lane.
    - Warning
    - Informational
    - Shadow only
-4. Fix the `stat_only_board` path mismatch in docs/comments or output layout.
+4. Keep the `stat_only_board` optional-lane contract covered by tests and reflected in operator comments.
 5. Add a "runtime mode" banner to operator logs/card showing `COURTVISION_MODE`, provider, and force flags.
 
 ### Phase B: Provider Abstraction Cleanup
