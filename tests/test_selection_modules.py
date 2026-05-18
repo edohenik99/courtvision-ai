@@ -6,6 +6,13 @@ This test file validates the migrated board construction logic.
 import pandas as pd
 import pytest
 
+from courtvision.context.game_context import (
+    IDENTITY_QUARANTINE_ACTION,
+    IDENTITY_QUARANTINE_REJECTION_REASON,
+    is_identity_quarantined,
+)
+from courtvision.reporting.paper_kelly_performance import _normalize_paper_rows
+from courtvision.reporting.paper_kelly_simulation import build_paper_kelly_simulation
 from courtvision.selection import (
     ACTIVE_OPERATOR_MARKETS,
     DUPLICATE_BETTING_IDENTITY_REASON,
@@ -15,6 +22,8 @@ from courtvision.selection import (
     classify_candidates_batch,
 )
 from courtvision.runtime_audit import BoardAuditPolicy, get_elite_rejection_reason
+from scripts.history_tracking import _normalize_market_shadow_rows
+from scripts.run_kelly_stakes import _build_stake_row
 
 
 def _base_live_candidate(**overrides):
@@ -55,6 +64,44 @@ def _betting_identity_tuples(df: pd.DataFrame) -> list[tuple[str, str, str, str,
         line = str(float(row.get("line")) if str(row.get("line") or "").strip() else "").rstrip("0").rstrip(".")
         identities.append((player_key, game_id, market, selection, line))
     return identities
+
+
+def test_generic_context_suppression_is_not_identity_quarantine():
+    row = _base_live_candidate(
+        game_context_suppressed=True,
+        high_caution_over=True,
+        same_opponent_warning=True,
+        context_warning="rematch warning only",
+        context_caution_level="high",
+        context_pick_alignment="conflicted",
+    )
+
+    assert is_identity_quarantined(row) is None
+
+
+def test_identity_quarantine_helper_detects_outside_and_stale_teams():
+    dennis_style = _base_live_candidate(
+        player_name="Dennis Schroder",
+        entity_name="Dennis Schroder",
+        team="SAC",
+        team_abbr="SAC",
+        game_home_team_abbr="CLE",
+        game_away_team_abbr="DET",
+    )
+    harden_style = _base_live_candidate(
+        player_name="James Harden",
+        entity_name="James Harden",
+        team="CLE",
+        team_abbr="CLE",
+        game_home_team_abbr="CLE",
+        game_away_team_abbr="DET",
+        provider_team_abbr="LAC",
+        baseline_team_abbr="CLE",
+        identity_source_team_abbr="LAC",
+    )
+
+    assert is_identity_quarantined(dennis_style) == "outside_team_identity"
+    assert is_identity_quarantined(harden_style) == "stale_team_identity"
 
 
 def test_classify_candidate_lane_live_market():
@@ -360,7 +407,7 @@ def test_unsupported_active_operator_markets_excluded_from_boards():
     }
 
 
-def test_duplicate_betting_identity_prefers_valid_game_context_team():
+def test_identity_quarantine_precedes_duplicate_identity_for_team_not_in_game_context():
     stale = _base_live_candidate(
         player_name="James Harden",
         entity_name="James Harden",
@@ -428,17 +475,97 @@ def test_duplicate_betting_identity_prefers_valid_game_context_team():
     assert harden_elite["team"] == "CLE"
     assert len(_betting_identity_tuples(full_market_df)) == len(set(_betting_identity_tuples(full_market_df)))
     assert len(_betting_identity_tuples(elite_df)) == len(set(_betting_identity_tuples(elite_df)))
-    assert traces["full_market"]["post_live_market_gate_count"] == 3
+    assert traces["full_market"]["post_live_market_gate_count"] == 2
     assert traces["full_market"]["post_duplicate_betting_identity_dedupe_count"] == 2
-    assert traces["full_market"]["duplicate_betting_identity_drop_count"] == 1
-    assert traces["full_market"]["duplicate_betting_identity_drop_counts_by_market_type"] == {"player_points": 1}
-    assert traces["full_market"]["duplicate_betting_identity_drop_groups"][0]["rejection_reason"] == (
-        DUPLICATE_BETTING_IDENTITY_REASON
-    )
+    assert traces["full_market"]["duplicate_betting_identity_drop_count"] == 0
+    assert traces["full_market"]["duplicate_betting_identity_drop_counts_by_market_type"] == {}
+    assert traces["full_market"]["identity_quarantine_count"] == 1
+    assert traces["full_market"]["identity_quarantine_reason_counts"] == {"outside_team_identity": 1}
     assert {
         row["reason"]: row["count"]
         for row in traces["selection_rejection_reasons"]
-    }[DUPLICATE_BETTING_IDENTITY_REASON] == 1
+    }[IDENTITY_QUARANTINE_REJECTION_REASON] == 1
+    quarantined = [
+        row for row in traces["qualified_but_not_selected_rows"]
+        if row.get("player_name") == "James Harden" and row.get("team") == "LAC"
+    ][0]
+    assert quarantined["recommended_action"] == IDENTITY_QUARANTINE_ACTION
+    assert quarantined["identity_quarantine_reason"] == "outside_team_identity"
+
+
+def test_outside_team_identity_is_excluded_from_boards_and_retained_in_rejections():
+    valid = _base_live_candidate(
+        player_name="Valid Cavalier",
+        entity_name="Valid Cavalier",
+        team="CLE",
+        team_abbr="CLE",
+        game_home_team_abbr="CLE",
+        game_away_team_abbr="DET",
+    )
+    outside = _base_live_candidate(
+        player_name="Dennis Schroder",
+        entity_name="Dennis Schroder",
+        player_id=17,
+        team="SAC",
+        team_abbr="SAC",
+        game_home_team_abbr="CLE",
+        game_away_team_abbr="DET",
+        selection_score=999.0,
+        quality_score=999.0,
+    )
+
+    elite_df, full_market_df, traces = build_operator_boards(
+        pd.DataFrame([valid, outside]),
+        select_elite_board=lambda df: df.copy(),
+        select_top_per_market=lambda df, limit: df.copy(),
+    )
+
+    assert list(full_market_df["player_name"]) == ["Valid Cavalier"]
+    assert list(elite_df["player_name"]) == ["Valid Cavalier"]
+    assert traces["identity_quarantine"]["total_rows_dropped"] == 1
+    assert traces["identity_quarantine"]["counts_by_reason"] == {"outside_team_identity": 1}
+    retained = traces["qualified_but_not_selected_rows"][0]
+    assert retained["player_name"] == "Dennis Schroder"
+    assert retained["selection_rejection_reason"] == IDENTITY_QUARANTINE_REJECTION_REASON
+    assert retained["recommended_action"] == IDENTITY_QUARANTINE_ACTION
+
+
+def test_stale_team_identity_is_excluded_from_boards_and_retained_in_rejections():
+    stale = _base_live_candidate(
+        player_name="James Harden",
+        entity_name="James Harden",
+        player_id=192,
+        team="CLE",
+        team_abbr="CLE",
+        game_home_team_abbr="CLE",
+        game_away_team_abbr="DET",
+        provider_team_abbr="LAC",
+        identity_source_team_abbr="LAC",
+        selection_score=999.0,
+        quality_score=999.0,
+    )
+    valid = _base_live_candidate(
+        player_name="Valid Piston",
+        entity_name="Valid Piston",
+        player_id=22,
+        team="DET",
+        team_abbr="DET",
+        game_home_team_abbr="CLE",
+        game_away_team_abbr="DET",
+    )
+
+    elite_df, full_market_df, traces = build_operator_boards(
+        pd.DataFrame([stale, valid]),
+        select_elite_board=lambda df: df.copy(),
+        select_top_per_market=lambda df, limit: df.copy(),
+    )
+
+    assert list(full_market_df["player_name"]) == ["Valid Piston"]
+    assert list(elite_df["player_name"]) == ["Valid Piston"]
+    assert traces["identity_quarantine"]["counts_by_reason"] == {"stale_team_identity": 1}
+    retained = traces["qualified_but_not_selected_rows"][0]
+    assert retained["player_name"] == "James Harden"
+    assert retained["identity_quarantine_reason"] == "stale_team_identity"
 
 
 def test_duplicate_betting_identity_uses_score_then_quality_without_context():
@@ -540,6 +667,150 @@ def test_duplicate_betting_identity_diagnostics_flow_into_board_audit_policy():
     }
     assert diagnostics["final_board_construction"]["full_market"]["duplicate_betting_identity_drop_count"] == 1
     assert diagnostics["final_board_construction"]["elite"]["duplicate_betting_identity_drop_count"] == 1
+
+
+def test_identity_quarantine_diagnostics_flow_into_board_audit_policy():
+    valid = _base_live_candidate(player_name="Valid", entity_name="Valid", team="CLE", team_abbr="CLE")
+    quarantined = _base_live_candidate(
+        player_name="Dennis Schroder",
+        entity_name="Dennis Schroder",
+        team="SAC",
+        team_abbr="SAC",
+        game_home_team_abbr="CLE",
+        game_away_team_abbr="DET",
+    )
+    candidates = pd.DataFrame([valid, quarantined])
+
+    elite_df, full_market_df, traces = build_operator_boards(
+        candidates,
+        select_elite_board=lambda df: df.copy(),
+        select_top_per_market=lambda df, limit: df.copy(),
+    )
+    diagnostics = BoardAuditPolicy().build_diagnostics(
+        prediction_date="2026-05-15",
+        qualified_pool_df=candidates,
+        elite_df=elite_df,
+        full_market_df=full_market_df,
+        rejected_df=pd.DataFrame(),
+        final_board_construction=traces,
+    )
+
+    assert diagnostics["identity_quarantine"] == {
+        "rejection_reason": IDENTITY_QUARANTINE_REJECTION_REASON,
+        "total_rows_dropped": 1,
+        "counts_by_reason": {"outside_team_identity": 1},
+    }
+    assert diagnostics["final_board_construction"]["full_market"]["identity_quarantine_count"] == 1
+    assert diagnostics["final_board_construction"]["elite"]["identity_quarantine_reason_counts"] == {
+        "outside_team_identity": 1,
+    }
+
+
+def test_kelly_quarantined_row_gets_no_stake_and_data_invalid_action():
+    stake = _build_stake_row(
+        {
+            "player_name": "James Harden",
+            "team_abbr": "CLE",
+            "opponent": "DET",
+            "market_type": "player_points",
+            "selection": "over",
+            "line": "19.5",
+            "odds": "-110",
+            "edge_pct": "0.25",
+            "confidence": "0.95",
+            "game_home_team_abbr": "CLE",
+            "game_away_team_abbr": "DET",
+            "provider_team_abbr": "LAC",
+            "identity_source_team_abbr": "LAC",
+        },
+        "edge_pct",
+        1000.0,
+    )
+
+    assert stake.eligible is False
+    assert stake.stake_amount == 0.0
+    assert stake.expected_value == 0.0
+    assert stake.skip_reason == IDENTITY_QUARANTINE_REJECTION_REASON
+    assert stake.recommended_action == IDENTITY_QUARANTINE_ACTION
+    assert stake.identity_quarantine_reason == "stale_team_identity"
+
+
+def test_paper_kelly_excludes_identity_quarantine_rows_from_normal_simulation_and_history():
+    valid = _base_live_candidate(
+        player_name="Valid Paper",
+        entity_name="Valid Paper",
+        team="CLE",
+        team_abbr="CLE",
+        game_home_team_abbr="CLE",
+        game_away_team_abbr="DET",
+        edge=4.0,
+        confidence=0.90,
+    )
+    quarantined = _base_live_candidate(
+        player_name="Dennis Schroder",
+        entity_name="Dennis Schroder",
+        team="SAC",
+        team_abbr="SAC",
+        game_home_team_abbr="CLE",
+        game_away_team_abbr="DET",
+        edge=10.0,
+        confidence=0.99,
+    )
+
+    simulation = build_paper_kelly_simulation(
+        prediction_date="2026-05-15",
+        combo_under_watchlist=pd.DataFrame([valid, quarantined]),
+    )
+
+    assert list(simulation["player_name"]) == ["Valid Paper"]
+
+    persisted = _normalize_paper_rows(
+        pd.concat(
+            [
+                simulation,
+                pd.DataFrame([
+                    {
+                        **quarantined,
+                        "paper_bucket": "combo_under_watchlist",
+                        "simulated_stake": 0.0025,
+                        "pre_cap_simulated_stake": 0.0025,
+                    }
+                ]),
+            ],
+            ignore_index=True,
+            sort=False,
+        ),
+        prediction_date="2026-05-15",
+        result_lookup={},
+    )
+
+    assert list(persisted["player_name"]) == ["Valid Paper"]
+
+
+def test_market_shadow_history_normalization_excludes_identity_quarantine_rows():
+    valid = _base_live_candidate(
+        player_name="Valid Shadow",
+        entity_name="Valid Shadow",
+        team="CLE",
+        team_abbr="CLE",
+        game_home_team_abbr="CLE",
+        game_away_team_abbr="DET",
+    )
+    quarantined = _base_live_candidate(
+        player_name="Dennis Schroder",
+        entity_name="Dennis Schroder",
+        team="SAC",
+        team_abbr="SAC",
+        game_home_team_abbr="CLE",
+        game_away_team_abbr="DET",
+    )
+
+    normalized = _normalize_market_shadow_rows(
+        pd.DataFrame([valid, quarantined]),
+        prediction_date="2026-05-15",
+    )
+
+    assert list(normalized["player_name"]) == ["Valid Shadow"]
 
 
 def test_assign_candidate_lanes_summary():

@@ -251,6 +251,40 @@ def test_operator_card_renders_unsupported_active_market_drops(tmp_path: Path) -
     assert payload["unsupported_active_operator_markets"]["total_rows_dropped"] == 6
 
 
+def test_operator_card_renders_identity_quarantine_summary_with_elite_picks(tmp_path: Path) -> None:
+    prediction_date = "2026-05-10"
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+    _seed_basic_operator_card_artifacts(runtime_root, history_root, prediction_date)
+    _write_json(
+        runtime_root / "operator" / f"quality_summary_{prediction_date}.json",
+        {
+            **_quality_payload(
+                prediction_date,
+                elite_count=1,
+                full_market_count=1,
+                run_health_status="HEALTHY",
+            ),
+            "identity_quarantine": {
+                "rejection_reason": "identity_quarantine",
+                "total_rows_dropped": 1,
+                "counts_by_reason": {"outside_team_identity": 1},
+            },
+        },
+    )
+
+    output_path, payload = write_operator_card_outputs(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+
+    text = output_path.read_text(encoding="utf-8")
+    assert "Final Decision: NO BET" not in text
+    assert text.count("- identity quarantined: 1 (outside_team_identity=1)") == 1
+    assert payload["identity_quarantine"]["total_rows_dropped"] == 1
+
+
 def test_operator_card_zero_unsupported_active_market_drops_stays_quiet(tmp_path: Path) -> None:
     prediction_date = "2026-05-10"
     runtime_root = tmp_path / "runtime"

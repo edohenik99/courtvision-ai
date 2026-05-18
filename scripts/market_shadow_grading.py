@@ -14,6 +14,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from courtvision.artifact_guard import guard_no_existing_artifact
+from courtvision.context.game_context import is_identity_quarantined
 from courtvision.reporting.kelly_performance import build_kelly_decision_performance, kelly_perf_log_lines
 
 
@@ -326,9 +327,14 @@ def build_market_shadow_grading(
     working = pd.DataFrame()
     if full_market_df.empty:
         rows: list[dict[str, Any]] = []
+        identity_quarantine_excluded_count = 0
     else:
         lookup = _graded_lookup(runtime_root, history_root, prediction_date)
         working = full_market_df.copy()
+        identity_quarantine_mask = working.apply(lambda row: is_identity_quarantined(row) is not None, axis=1)
+        identity_quarantine_excluded_count = int(identity_quarantine_mask.sum())
+        if identity_quarantine_excluded_count:
+            working = working[~identity_quarantine_mask].copy()
         results: list[str] = []
         for _, row in working.iterrows():
             direct = _direct_result(row)
@@ -390,6 +396,7 @@ def build_market_shadow_grading(
         "scope": "full_market_shadow_grading",
         "elite_locked_to": ["player_points"],
         "kelly_locked_to": ["player_points"],
+        "identity_quarantine_excluded_count": identity_quarantine_excluded_count,
         "totals": totals,
         "markets": rows,
         "context_alignment_performance": context_alignment_performance,

@@ -10,6 +10,7 @@ from typing import Any
 import pandas as pd
 from courtvision_ai import CourtVisionAI
 from courtvision.calibration.buckets import abs_edge_bucket as _abs_edge_bucket
+from courtvision.context.game_context import is_identity_quarantined
 
 
 PICK_HISTORY_COLUMNS = [
@@ -634,6 +635,8 @@ def _normalize_market_shadow_rows(
         return pd.DataFrame(columns=MARKET_SHADOW_HISTORY_COLUMNS)
 
     for _, row in full_market_df.iterrows():
+        if is_identity_quarantined(row) is not None:
+            continue
         status = _safe_text(row.get("result_status"), default=result_status).lower()
         if status not in {"pending", "hit", "miss", "push"}:
             status = result_status
@@ -1029,6 +1032,8 @@ def persist_daily_picks(
 
     normalized_rows: list[dict[str, Any]] = []
     for _, row in elite_df.iterrows():
+        if is_identity_quarantined(row) is not None:
+            continue
         edge = _safe_float(row.get("edge"))
         player = _safe_text(row.get("player_name")) or _safe_text(row.get("entity_name"), default="unknown")
         market = _safe_text(row.get("market_type")) or _safe_text(row.get("market"))

@@ -52,6 +52,11 @@ from courtvision.betting.kelly import (  # noqa: E402  (path-bootstrapped above)
     MIN_CONFIDENCE_THRESHOLD,
     compute_kelly_fraction,
 )
+from courtvision.context.game_context import (  # noqa: E402
+    IDENTITY_QUARANTINE_ACTION,
+    IDENTITY_QUARANTINE_REJECTION_REASON,
+    is_identity_quarantined,
+)
 
 REQUIRED_COLUMNS: tuple[str, ...] = ("odds", "confidence")
 EDGE_COLUMN_PREFERENCE: tuple[str, ...] = ("side_edge_pct", "edge_pct", "edge")
@@ -112,6 +117,7 @@ class StakeRow:
     stake_policy: str
     operator_action: str
     operator_note: str
+    identity_quarantine_reason: str
 
 
 def _log(msg: str) -> None:
@@ -268,6 +274,7 @@ def _build_stake_row(row: dict[str, str], edge_col: str, bankroll: float) -> Sta
     opponent = str(row.get("opponent", "") or "").strip()
     same_opponent_under_warning = _is_truthy(row.get("same_opponent_under_warning"))
     manual_review_required = _is_truthy(row.get("manual_review_required"))
+    identity_quarantine_reason = is_identity_quarantined(row) or ""
     _manual_review_reason_raw = str(row.get("manual_review_reason", "") or "").strip()
     _same_opponent_warning_reason_raw = str(row.get("same_opponent_warning_reason", "") or "").strip()
     if not same_opponent_under_warning and "same_opponent_under_warning" in _manual_review_reason_raw:
@@ -279,7 +286,16 @@ def _build_stake_row(row: dict[str, str], edge_col: str, bankroll: float) -> Sta
         row, market_type, selection, edge_pct_raw, edge_col
     )
 
-    if _ecr_hold:
+    if identity_quarantine_reason:
+        skip_reason = IDENTITY_QUARANTINE_REJECTION_REASON
+        eligible = False
+        manual_review_required = True
+        review_status = IDENTITY_QUARANTINE_ACTION
+        stake_policy = "DATA_INVALID"
+        recommended_action = IDENTITY_QUARANTINE_ACTION
+        operator_action = IDENTITY_QUARANTINE_ACTION
+        operator_note = f"identity_quarantine_reason={identity_quarantine_reason}"
+    elif _ecr_hold:
         # HOLD overrides all other routing
         skip_reason = EDGE_CONTAINMENT_HOLD_SKIP_REASON
         eligible = False
@@ -307,33 +323,34 @@ def _build_stake_row(row: dict[str, str], edge_col: str, bankroll: float) -> Sta
         operator_action = "OK_TO_CONSIDER"
         operator_note = ""
 
-    if not _ecr_hold and market_type and market_type != "player_points":
-        skip_reason = "kelly_points_only_market_lock"
-        eligible = False
-    elif raw_market_type == "milestone" or selection == "milestone":
-        skip_reason = "unsupported_milestone_market"
-        eligible = False
-    elif context_caution_level == "high" and selection == "over":
-        skip_reason = "context_high_caution_over"
-        eligible = False
-    elif raw_american is None:
-        skip_reason = "missing_or_invalid_odds"
-        eligible = False
-    elif decimal_odds is None or decimal_odds <= 1.0:
-        skip_reason = "non_positive_decimal_odds"
-        eligible = False
-    elif confidence is None:
-        skip_reason = "missing_confidence"
-        eligible = False
-    elif edge_pct_raw is None:
-        skip_reason = f"missing_{edge_col}"
-        eligible = False
-    elif confidence < MIN_CONFIDENCE_THRESHOLD:
-        skip_reason = f"confidence_below_min({MIN_CONFIDENCE_THRESHOLD})"
-        eligible = False
-    elif edge_pct_raw <= 0:
-        skip_reason = "non_positive_edge"
-        eligible = False
+    if not identity_quarantine_reason and not _ecr_hold:
+        if market_type and market_type != "player_points":
+            skip_reason = "kelly_points_only_market_lock"
+            eligible = False
+        elif raw_market_type == "milestone" or selection == "milestone":
+            skip_reason = "unsupported_milestone_market"
+            eligible = False
+        elif context_caution_level == "high" and selection == "over":
+            skip_reason = "context_high_caution_over"
+            eligible = False
+        elif raw_american is None:
+            skip_reason = "missing_or_invalid_odds"
+            eligible = False
+        elif decimal_odds is None or decimal_odds <= 1.0:
+            skip_reason = "non_positive_decimal_odds"
+            eligible = False
+        elif confidence is None:
+            skip_reason = "missing_confidence"
+            eligible = False
+        elif edge_pct_raw is None:
+            skip_reason = f"missing_{edge_col}"
+            eligible = False
+        elif confidence < MIN_CONFIDENCE_THRESHOLD:
+            skip_reason = f"confidence_below_min({MIN_CONFIDENCE_THRESHOLD})"
+            eligible = False
+        elif edge_pct_raw <= 0:
+            skip_reason = "non_positive_edge"
+            eligible = False
 
     if eligible:
         stake_fraction = compute_kelly_fraction(
@@ -391,6 +408,7 @@ def _build_stake_row(row: dict[str, str], edge_col: str, bankroll: float) -> Sta
         stake_policy=stake_policy,
         operator_action=operator_action,
         operator_note=operator_note,
+        identity_quarantine_reason=identity_quarantine_reason,
     )
 
 
@@ -448,6 +466,7 @@ def _write_stakes(
         "stake_policy",
         "operator_action",
         "operator_note",
+        "identity_quarantine_reason",
     ]
     with output_path.open("w", encoding="utf-8", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=fieldnames)
@@ -486,6 +505,7 @@ def _write_stakes(
                 "stake_policy": s.stake_policy,
                 "operator_action": s.operator_action,
                 "operator_note": s.operator_note,
+                "identity_quarantine_reason": s.identity_quarantine_reason,
             })
 
 

@@ -726,7 +726,7 @@ class TestPredictionPipeline:
             },
         }
 
-    def test_duplicate_baseline_player_id_collapses_before_operator_outputs(self, tmp_path):
+    def test_duplicate_baseline_player_id_quarantines_stale_team_before_operator_outputs(self, tmp_path):
         from datetime import datetime, timedelta
 
         out_dir = tmp_path / "outputs"
@@ -786,11 +786,133 @@ class TestPredictionPipeline:
         assert not full_market.duplicated(subset=identity_cols).any()
         if not elite.empty:
             assert not elite.duplicated(subset=identity_cols).any()
-        assert result.summary["duplicate_betting_identity_drop_count"] == 1
-        assert result.summary["duplicate_betting_identity_drop_counts_by_market_type"] == {
-            "player_points": 1,
-        }
-        assert result.summary["duplicate_betting_identity"]["rejection_reason"] == "duplicate_betting_identity"
+        assert result.summary["duplicate_betting_identity_drop_count"] == 0
+        assert result.summary["duplicate_betting_identity_drop_counts_by_market_type"] == {}
+        assert result.summary["identity_quarantine_count"] == 1
+        assert result.summary["identity_quarantine_reason_counts"] == {"outside_team_identity": 1}
+        rejected = result.rejected_candidate_diagnostics
+        stale = rejected[
+            rejected["player_name"].eq("James Harden")
+            & rejected["team"].eq("LAC")
+            & rejected["identity_quarantine_reason"].eq("outside_team_identity")
+        ].iloc[0]
+        assert stale["selection_rejection_reason"] == "identity_quarantine"
+        assert stale["identity_quarantine_reason"] == "outside_team_identity"
+
+    def test_mixed_slate_preserves_identity_quarantine_diagnostics(self, tmp_path):
+        from datetime import datetime, timedelta
+
+        out_dir = tmp_path / "outputs"
+        config = PredictionConfig(
+            prediction_date="2026-05-18",
+            out_dir=str(out_dir),
+            min_confidence=0.0,
+            enable_partial_fill=False,
+        )
+        pipeline = PredictionPipeline(config)
+        future_game_datetime = (datetime.now() + timedelta(hours=2)).isoformat()
+        fresh_time = (datetime.now() - timedelta(minutes=5)).isoformat()
+        games = pd.DataFrame([{
+            "game_id": 21709238,
+            "home_team_abbr": "CLE",
+            "visitor_team_abbr": "DET",
+            "game_status": "scheduled",
+            "game_date": future_game_datetime,
+            "datetime": future_game_datetime,
+        }])
+        odds = pd.DataFrame([
+            {
+                "game_id": 21709238,
+                "player_id": 1,
+                "player_name": "Valid Cavalier",
+                "team_abbr": "CLE",
+                "market_type": "player_points",
+                "line": 20.5,
+                "odds": -110,
+                "selection": "over",
+                "is_live": True,
+                "updated_at": fresh_time,
+            },
+            {
+                "game_id": 21709238,
+                "player_id": 2,
+                "player_name": "Dennis Schroder",
+                "team_abbr": "SAC",
+                "market_type": "player_points",
+                "line": 10.5,
+                "odds": -110,
+                "selection": "over",
+                "is_live": True,
+                "updated_at": fresh_time,
+            },
+        ])
+        baselines = pd.DataFrame([
+            {
+                "player_name": "Valid Cavalier",
+                "team_abbr": "CLE",
+                "player_id": 1,
+                "pts_avg": 27.0,
+                "pts_recent": 27.0,
+                "reb_avg": 5.0,
+                "ast_avg": 5.0,
+                "min_avg": 34.0,
+            },
+            {
+                "player_name": "Dennis Schroder",
+                "team_abbr": "SAC",
+                "player_id": 2,
+                "pts_avg": 16.0,
+                "pts_recent": 16.0,
+                "reb_avg": 3.0,
+                "ast_avg": 5.0,
+                "min_avg": 30.0,
+            },
+        ])
+
+        result = pipeline.run(games, odds, baselines)
+
+        assert list(result.full_market_props["player_name"]) == ["Valid Cavalier"]
+        assert result.summary["identity_quarantine_count"] == 1
+        assert result.summary["identity_quarantine_reason_counts"] == {"outside_team_identity": 1}
+        rejected = result.rejected_candidate_diagnostics
+        assert not rejected.empty
+        quarantined = rejected[rejected["player_name"].eq("Dennis Schroder")].iloc[0]
+        assert quarantined["selection_rejection_reason"] == "identity_quarantine"
+        assert quarantined["identity_quarantine_reason"] == "outside_team_identity"
+
+    def test_courtvision_ai_identity_trace_uses_authoritative_package_diagnostics(self, tmp_path):
+        from courtvision_ai import CourtVisionAI
+
+        ai = CourtVisionAI(out_dir=str(tmp_path / "outputs"))
+        result = PredictionResult(
+            prediction_date="2026-05-18",
+            summary={
+                "identity_quarantine": {
+                    "rejection_reason": "identity_quarantine",
+                    "total_rows_dropped": 1,
+                    "counts_by_reason": {"stale_team_identity": 1},
+                }
+            },
+            full_market_props=pd.DataFrame([{"player_name": "Valid Cavalier"}]),
+            elite_props=pd.DataFrame([{"player_name": "Valid Cavalier"}]),
+            rejected_candidate_diagnostics=pd.DataFrame([
+                {
+                    "player_name": "James Harden",
+                    "selection_rejection_reason": "identity_quarantine",
+                    "identity_quarantine_reason": "stale_team_identity",
+                }
+            ]),
+        )
+        trace = ai._attach_identity_quarantine_trace(
+            {"elite": {}, "full_market": {}},
+            result.summary,
+        )
+        rejected_df = result.rejected_candidate_diagnostics.copy()
+
+        assert trace["identity_quarantine"]["total_rows_dropped"] == 1
+        assert trace["full_market"]["identity_quarantine_reason_counts"] == {"stale_team_identity": 1}
+        assert rejected_df.iloc[0]["player_name"] == "James Harden"
+        assert rejected_df.iloc[0]["selection_rejection_reason"] == "identity_quarantine"
 
     def test_market_shadow_grading_summarizes_full_market_by_market(self):
         runtime_root = Path("test_outputs") / "market_shadow_runtime"
@@ -837,6 +959,21 @@ class TestPredictionPipeline:
                 "odds": -105,
                 "context_pick_alignment": "conflicted",
             },
+            {
+                "prediction_date": "2024-01-15",
+                "player_name": "Dennis Schroder",
+                "team_abbr": "SAC",
+                "game_home_team_abbr": "CLE",
+                "game_away_team_abbr": "DET",
+                "market_type": "player_points",
+                "selection": "over",
+                "sportsbook_line": 10.5,
+                "edge": 12.0,
+                "confidence": 0.99,
+                "quality_score": 99.0,
+                "odds": -110,
+                "context_pick_alignment": "aligned",
+            },
         ]).to_csv(runtime_root / "operator" / "full_market_board_2024-01-15.csv", index=False)
 
         pd.DataFrame([
@@ -865,6 +1002,7 @@ class TestPredictionPipeline:
         )
 
         by_market = {row["market_type"]: row for row in payload["markets"]}
+        assert payload["identity_quarantine_excluded_count"] == 1
         assert payload["totals"]["total_picks"] == 3
         assert payload["totals"]["graded_picks"] == 2
         assert payload["totals"]["pending_picks"] == 1

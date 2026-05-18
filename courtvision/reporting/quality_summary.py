@@ -21,6 +21,11 @@ from courtvision.context.game_strength import (
     POWER_RATING_CONTEXT_COLUMNS,
     apply_power_rating_context_to_df,
 )
+from courtvision.context.game_context import (
+    IDENTITY_QUARANTINE_REJECTION_REASON,
+    format_identity_quarantine_line,
+    identity_quarantine_summary,
+)
 from courtvision.ratings.power_ratings_store import get_latest_team_power_ratings
 from courtvision.reporting.same_opponent_rematch import annotate_operator_board_files, manual_review_summary
 from courtvision.reporting.fragility_shadow_eval import (
@@ -1672,6 +1677,11 @@ def build_quality_summary(
     unsupported_active_drop_counts_by_market_type = dict(
         unsupported_active_operator_markets.get("counts_by_market_type", {}) or {}
     )
+    identity_quarantine = identity_quarantine_summary(board_diagnostics)
+    if int(identity_quarantine.get("total_rows_dropped", 0) or 0) <= 0:
+        identity_quarantine = identity_quarantine_summary(prediction_summary)
+    identity_quarantine_count = int(identity_quarantine.get("total_rows_dropped", 0) or 0)
+    identity_quarantine_reason_counts = dict(identity_quarantine.get("counts_by_reason", {}) or {})
     fallback_rejected = max(raw_candidates - elite_count, 0)
     rejection_reasons, rejected_count = _rejection_reasons(
         audit_summary=audit_summary,
@@ -1721,6 +1731,12 @@ def build_quality_summary(
         "unsupported_active_operator_market_drop_count": unsupported_active_drop_count,
         "unsupported_active_operator_market_drop_counts_by_market_type": unsupported_active_drop_counts_by_market_type,
         "unsupported_active_operator_market_rejection_reason": unsupported_active_operator_markets["rejection_reason"],
+        "identity_quarantine_count": identity_quarantine_count,
+        "identity_quarantine_reason_counts": identity_quarantine_reason_counts,
+        "identity_quarantine_rejection_reason": identity_quarantine.get(
+            "rejection_reason",
+            IDENTITY_QUARANTINE_REJECTION_REASON,
+        ),
     }
     kelly_safety = _kelly_safety_summary(kelly_df)
     fragility_summary = _fragility_survivability_summary(full_market_df)
@@ -1817,6 +1833,7 @@ def build_quality_summary(
         "player_baseline_coverage": player_baseline_coverage,
         "candidate_funnel": candidate_funnel,
         "unsupported_active_operator_markets": unsupported_active_operator_markets,
+        "identity_quarantine": identity_quarantine,
         "same_opponent_under_warning_count": manual_review["same_opponent_under_warning_count"],
         "manual_review_required_count": manual_review["manual_review_required_count"],
         "manual_review_summary": manual_review,
@@ -1883,6 +1900,7 @@ def _format_quality_summary_text(payload: dict[str, Any]) -> str:
     isolation = payload["date_isolation_check"]
     warnings = payload.get("warnings", [])
     unsupported_active_drop_line = format_unsupported_active_operator_market_drop_line(payload)
+    identity_quarantine_line = format_identity_quarantine_line(payload)
 
     lines = [
         f"Quality Summary - {run['prediction_date']}",
@@ -1967,8 +1985,17 @@ def _format_quality_summary_text(payload: dict[str, Any]) -> str:
             f"- elite_board_count: {funnel['elite_board_count']}",
             f"- sgp_board_count: {funnel['sgp_board_count']}",
             f"- kelly_rows_count: {funnel['kelly_rows_count']}",
+            f"- identity_quarantine_count: {funnel.get('identity_quarantine_count', 0)}",
         ]
     )
+    if identity_quarantine_line:
+        identity_payload = payload.get("identity_quarantine", {})
+        reason = (
+            identity_payload.get("rejection_reason", IDENTITY_QUARANTINE_REJECTION_REASON)
+            if isinstance(identity_payload, dict)
+            else IDENTITY_QUARANTINE_REJECTION_REASON
+        )
+        lines.append(f"- {identity_quarantine_line}; reason={reason}")
     if unsupported_active_drop_line:
         unsupported_active = payload.get("unsupported_active_operator_markets", {})
         reason = (

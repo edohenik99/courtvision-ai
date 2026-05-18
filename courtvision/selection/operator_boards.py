@@ -12,6 +12,12 @@ from typing import Any, Callable
 
 import pandas as pd
 
+from courtvision.context.game_context import (
+    IDENTITY_QUARANTINE_REJECTION_REASON,
+    identity_quarantine_reason_counts,
+    mark_identity_quarantine_fields,
+)
+
 
 UNSUPPORTED_ACTIVE_OPERATOR_MARKET_REASON = "unsupported_active_operator_market"
 DUPLICATE_BETTING_IDENTITY_REASON = "duplicate_betting_identity"
@@ -686,11 +692,26 @@ def build_operator_boards(
                 "required_selector_columns": [],
                 "selection_rejection_reasons": [],
                 "qualified_but_not_selected_rows": [],
+                "identity_quarantine": {
+                    "rejection_reason": IDENTITY_QUARANTINE_REJECTION_REASON,
+                    "total_rows_dropped": 0,
+                    "counts_by_reason": {},
+                },
             },
         )
 
+    prepared_df = mark_identity_quarantine_fields(prepared_df)
     if "selection_rejection_reason" not in prepared_df.columns:
         prepared_df["selection_rejection_reason"] = ""
+    identity_quarantine_counts = identity_quarantine_reason_counts(prepared_df)
+    identity_quarantine_count = int(sum(identity_quarantine_counts.values()))
+    identity_quarantine_mask = (
+        prepared_df.get("selection_rejection_reason", pd.Series("", index=prepared_df.index))
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .eq(IDENTITY_QUARANTINE_REJECTION_REASON)
+    )
 
     required_selector_columns = [
         "selection_score",
@@ -775,7 +796,9 @@ def build_operator_boards(
             "selection_rejection_reason",
         ] = UNSUPPORTED_ACTIVE_OPERATOR_MARKET_REASON
 
-    live_candidates_before_dedupe_df = prepared_df[unified_live_mask & ~milestone_mask & active_market_mask].copy()
+    live_candidates_before_dedupe_df = prepared_df[
+        unified_live_mask & ~milestone_mask & active_market_mask & ~identity_quarantine_mask
+    ].copy()
     live_candidates_df, duplicate_betting_identity_summary = _dedupe_betting_identities(
         live_candidates_before_dedupe_df
     )
@@ -810,6 +833,11 @@ def build_operator_boards(
     final_board_construction["elite"]["unsupported_milestone_count"] = unsupported_milestone_count
     final_board_construction["elite"]["unsupported_active_operator_market_count"] = unsupported_active_market_count
     final_board_construction["elite"]["unsupported_active_operator_market_counts"] = unsupported_active_market_counts
+    final_board_construction["elite"]["identity_quarantine_count"] = identity_quarantine_count
+    final_board_construction["elite"]["identity_quarantine_reason_counts"] = identity_quarantine_counts
+    final_board_construction["elite"]["identity_quarantine_rejection_reason"] = (
+        IDENTITY_QUARANTINE_REJECTION_REASON
+    )
     final_board_construction["elite"]["duplicate_betting_identity_drop_count"] = duplicate_betting_identity_drop_count
     final_board_construction["elite"]["duplicate_betting_identity_drop_groups"] = duplicate_betting_identity_drop_groups
     final_board_construction["elite"]["duplicate_betting_identity_drop_counts_by_market_type"] = (
@@ -829,6 +857,11 @@ def build_operator_boards(
     final_board_construction["full_market"]["unsupported_milestone_count"] = unsupported_milestone_count
     final_board_construction["full_market"]["unsupported_active_operator_market_count"] = unsupported_active_market_count
     final_board_construction["full_market"]["unsupported_active_operator_market_counts"] = unsupported_active_market_counts
+    final_board_construction["full_market"]["identity_quarantine_count"] = identity_quarantine_count
+    final_board_construction["full_market"]["identity_quarantine_reason_counts"] = identity_quarantine_counts
+    final_board_construction["full_market"]["identity_quarantine_rejection_reason"] = (
+        IDENTITY_QUARANTINE_REJECTION_REASON
+    )
     final_board_construction["full_market"]["duplicate_betting_identity_drop_count"] = (
         duplicate_betting_identity_drop_count
     )
@@ -882,6 +915,14 @@ def build_operator_boards(
         "qualification_reason",
         "source_lane",
         "selection_rejection_reason",
+        "recommended_action",
+        "identity_quarantine_reason",
+        "identity_team_conflict_reason",
+        "provider_team_abbr",
+        "odds_team_abbr",
+        "baseline_team_abbr",
+        "resolved_team_abbr",
+        "identity_source_team_abbr",
     ]
     available_sample_cols = [col for col in sample_cols if col in prepared_df.columns]
     final_board_construction["qualified_but_not_selected_rows"] = (
@@ -889,6 +930,11 @@ def build_operator_boards(
         if available_sample_cols and not not_selected_df.empty
         else []
     )
+    final_board_construction["identity_quarantine"] = {
+        "rejection_reason": IDENTITY_QUARANTINE_REJECTION_REASON,
+        "total_rows_dropped": identity_quarantine_count,
+        "counts_by_reason": identity_quarantine_counts,
+    }
 
     return elite_df, full_market_df, final_board_construction
 

@@ -18,6 +18,11 @@ from courtvision.calibration.buckets import (
     quality_band as bucket_quality_band,
     to_float,
 )
+from courtvision.context.game_context import (
+    IDENTITY_QUARANTINE_REJECTION_REASON,
+    identity_quarantine_reason_counts,
+    identity_quarantine_summary,
+)
 from courtvision.runtime_selection import (
     elite_points_risk_guard_reason,
     player_points_strong_over_calibration_reason,
@@ -132,6 +137,16 @@ class BoardAuditPolicy:
             full_market_df=full_market_df,
         )
 
+        identity_summary = identity_quarantine_summary(final_board_construction)
+        if int(identity_summary.get("total_rows_dropped", 0) or 0) <= 0:
+            rejected_identity_counts = identity_quarantine_reason_counts(rejected_df)
+            if rejected_identity_counts:
+                identity_summary = {
+                    "rejection_reason": IDENTITY_QUARANTINE_REJECTION_REASON,
+                    "total_rows_dropped": int(sum(rejected_identity_counts.values())),
+                    "counts_by_reason": rejected_identity_counts,
+                }
+
         diagnostics = {
             "prediction_date": prediction_date,
             "board_counts": {
@@ -165,6 +180,7 @@ class BoardAuditPolicy:
                 player_points_admission_df
             ),
             "final_board_construction": self._final_board_construction_payload(final_board_construction),
+            "identity_quarantine": identity_summary,
             "duplicate_betting_identity": duplicate_betting_identity_drop_summary(
                 final_board_construction
             ),
@@ -240,6 +256,30 @@ class BoardAuditPolicy:
                             "scope": "overview",
                             "section": "unsupported_active_operator_markets.counts_by_market_type",
                             "key": str(market),
+                            "count": int(count or 0),
+                            "value": None,
+                        }
+                    )
+
+        identity_quarantine = diagnostics.get("identity_quarantine", {})
+        if isinstance(identity_quarantine, Mapping):
+            rows.append(
+                {
+                    "scope": "overview",
+                    "section": "identity_quarantine",
+                    "key": str(identity_quarantine.get("rejection_reason", IDENTITY_QUARANTINE_REJECTION_REASON)),
+                    "count": int(identity_quarantine.get("total_rows_dropped", 0) or 0),
+                    "value": None,
+                }
+            )
+            counts_by_reason = identity_quarantine.get("counts_by_reason", {})
+            if isinstance(counts_by_reason, Mapping):
+                for reason, count in counts_by_reason.items():
+                    rows.append(
+                        {
+                            "scope": "overview",
+                            "section": "identity_quarantine.counts_by_reason",
+                            "key": str(reason),
                             "count": int(count or 0),
                             "value": None,
                         }
@@ -371,6 +411,7 @@ class BoardAuditPolicy:
                     "backfill_added_count",
                     "duplicate_betting_identity_drop_count",
                     "unsupported_active_operator_market_count",
+                    "identity_quarantine_count",
                 ]:
                     rows.append(
                         {
@@ -403,6 +444,19 @@ class BoardAuditPolicy:
                                 "scope": str(scope),
                                 "section": "final_board_construction.unsupported_active_operator_market_counts",
                                 "key": str(market),
+                                "count": int(count or 0),
+                                "value": None,
+                            }
+                        )
+
+                identity_counts = payload.get("identity_quarantine_reason_counts", {})
+                if isinstance(identity_counts, Mapping):
+                    for reason, count in identity_counts.items():
+                        rows.append(
+                            {
+                                "scope": str(scope),
+                                "section": "final_board_construction.identity_quarantine_reason_counts",
+                                "key": str(reason),
                                 "count": int(count or 0),
                                 "value": None,
                             }
@@ -887,6 +941,16 @@ class BoardAuditPolicy:
         normalized["backfill_added_count"] = int(payload.get("backfill_added_count", 0) or 0)
         normalized["backfill_added_by_qualification_gate_mode"] = self._normalize_count_items(
             payload.get("backfill_added_by_qualification_gate_mode", [])
+        )
+        identity_summary = identity_quarantine_summary(payload)
+        normalized["identity_quarantine_count"] = int(
+            identity_summary.get("total_rows_dropped", 0) or 0
+        )
+        normalized["identity_quarantine_reason_counts"] = dict(
+            identity_summary.get("counts_by_reason", {}) or {}
+        )
+        normalized["identity_quarantine_rejection_reason"] = str(
+            identity_summary.get("rejection_reason", IDENTITY_QUARANTINE_REJECTION_REASON)
         )
         duplicate_summary = duplicate_betting_identity_drop_summary(payload)
         normalized["duplicate_betting_identity_drop_count"] = int(

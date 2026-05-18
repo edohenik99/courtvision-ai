@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any
 
 import pandas as pd
@@ -42,11 +43,16 @@ GAME_CONTEXT_COLUMNS: tuple[str, ...] = (
 )
 
 GAME_CONTEXT_DIAGNOSTIC_COLUMNS: tuple[str, ...] = (
+    "game_home_team_abbr",
+    "game_away_team_abbr",
     "candidate_team_not_in_game",
     "game_context_suppressed",
     "game_context_suppression_reason",
     "playoff_only_high_caution",
     "context_conflict_cause",
+    "identity_team_conflict",
+    "identity_team_conflict_reason",
+    "identity_quarantine_reason",
 )
 
 CONTEXT_CONFLICT_CAUSE_BUCKETS: tuple[str, ...] = (
@@ -56,6 +62,24 @@ CONTEXT_CONFLICT_CAUSE_BUCKETS: tuple[str, ...] = (
     "pace_defense_combined",
     "playoff_defense_combined",
     "stale_team_not_in_game",
+)
+
+IDENTITY_QUARANTINE_REJECTION_REASON = "identity_quarantine"
+IDENTITY_QUARANTINE_ACTION = "DATA_INVALID"
+IDENTITY_OUTSIDE_TEAM_REASON = "outside_team_identity"
+IDENTITY_STALE_TEAM_REASON = "stale_team_identity"
+IDENTITY_GAME_NOT_BETTABLE_REASON = "game_not_bettable"
+IDENTITY_QUARANTINE_REASONS: tuple[str, ...] = (
+    IDENTITY_OUTSIDE_TEAM_REASON,
+    IDENTITY_STALE_TEAM_REASON,
+    IDENTITY_GAME_NOT_BETTABLE_REASON,
+)
+IDENTITY_SOURCE_TEAM_COLUMNS: tuple[str, ...] = (
+    "provider_team_abbr",
+    "odds_team_abbr",
+    "baseline_team_abbr",
+    "resolved_team_abbr",
+    "identity_source_team_abbr",
 )
 
 PACE_COLUMNS: tuple[str, ...] = ("team_pace", "pace", "possessions_per_game")
@@ -191,6 +215,226 @@ def _text(value: Any) -> str:
         pass
     text = str(value).strip()
     return "" if text.lower() in {"nan", "none", "null", "<na>", "nat"} else text
+
+
+def _row_get(row: Mapping[str, Any] | pd.Series, key: str, default: Any = None) -> Any:
+    if isinstance(row, pd.Series):
+        return row.get(key, default)
+    return row.get(key, default)
+
+
+def _truthy(value: Any) -> bool:
+    return _text(value).lower() in {"true", "1", "yes", "y", "on"}
+
+
+def _team_abbr(value: Any) -> str:
+    return _text(value).upper()
+
+
+def _first_team(row: Mapping[str, Any] | pd.Series, columns: tuple[str, ...]) -> str:
+    for column in columns:
+        value = _team_abbr(_row_get(row, column))
+        if value:
+            return value
+    return ""
+
+
+def _candidate_team(row: Mapping[str, Any] | pd.Series) -> str:
+    return _first_team(row, ("team_abbr", "team", "team_abbreviation"))
+
+
+def _identity_game_teams(row: Mapping[str, Any] | pd.Series) -> tuple[str, str]:
+    home = _first_team(
+        row,
+        (
+            "game_home_team_abbr",
+            "home_team_abbr",
+            "home_team",
+            "home",
+        ),
+    )
+    away = _first_team(
+        row,
+        (
+            "game_away_team_abbr",
+            "game_visitor_team_abbr",
+            "visitor_team_abbr",
+            "away_team_abbr",
+            "away_team",
+            "visitor_team",
+            "away",
+        ),
+    )
+    return home, away
+
+
+def _has_game_identity_context(row: Mapping[str, Any] | pd.Series, home: str, away: str) -> bool:
+    return bool(_text(_row_get(row, "game_id")) or (home and away))
+
+
+def is_identity_quarantined(row: Mapping[str, Any] | pd.Series) -> str | None:
+    """Return a narrow identity-quarantine reason for explicit stale/wrong-team evidence."""
+    explicit_reason = _text(_row_get(row, "identity_quarantine_reason")).lower()
+    if explicit_reason in IDENTITY_QUARANTINE_REASONS:
+        return explicit_reason
+    if _text(_row_get(row, "selection_rejection_reason")).lower() == IDENTITY_QUARANTINE_REJECTION_REASON:
+        return explicit_reason or IDENTITY_GAME_NOT_BETTABLE_REASON
+    if _truthy(_row_get(row, "candidate_team_not_in_game")):
+        return IDENTITY_OUTSIDE_TEAM_REASON
+    if _text(_row_get(row, "context_conflict_cause")).lower() == "stale_team_not_in_game":
+        return IDENTITY_OUTSIDE_TEAM_REASON
+
+    candidate = _candidate_team(row)
+    home, away = _identity_game_teams(row)
+    game_teams = {team for team in (home, away) if team}
+    if candidate and game_teams and _has_game_identity_context(row, home, away) and candidate not in game_teams:
+        return IDENTITY_OUTSIDE_TEAM_REASON
+
+    if candidate and candidate in game_teams:
+        for column in IDENTITY_SOURCE_TEAM_COLUMNS:
+            source_team = _team_abbr(_row_get(row, column))
+            if source_team and source_team != candidate:
+                return IDENTITY_STALE_TEAM_REASON
+
+    return None
+
+
+def identity_quarantine_reason_counts(df: pd.DataFrame) -> dict[str, int]:
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return {}
+    counts: dict[str, int] = {}
+    for _, row in df.iterrows():
+        reason = is_identity_quarantined(row)
+        if reason:
+            counts[reason] = counts.get(reason, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _safe_count(value: Any, default: int = 0) -> int:
+    try:
+        if pd.isna(value):
+            return default
+    except (TypeError, ValueError):
+        pass
+    try:
+        return int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        return default
+
+
+def identity_quarantine_summary(payload: Mapping[str, Any] | None) -> dict[str, Any]:
+    empty = {
+        "rejection_reason": IDENTITY_QUARANTINE_REJECTION_REASON,
+        "total_rows_dropped": 0,
+        "counts_by_reason": {},
+    }
+    if not isinstance(payload, Mapping):
+        return empty
+
+    existing = payload.get("identity_quarantine")
+    if isinstance(existing, Mapping):
+        counts = existing.get("counts_by_reason") or existing.get("identity_quarantine_reason_counts") or {}
+        counts = {str(key): _safe_count(value) for key, value in counts.items()} if isinstance(counts, Mapping) else {}
+        total = _safe_count(
+            existing.get("total_rows_dropped")
+            or existing.get("identity_quarantine_count")
+            or sum(counts.values())
+            or 0
+        )
+        return {
+            "rejection_reason": str(existing.get("rejection_reason") or IDENTITY_QUARANTINE_REJECTION_REASON),
+            "total_rows_dropped": total,
+            "counts_by_reason": dict(sorted((key, value) for key, value in counts.items() if value > 0)),
+        }
+
+    for nested_key in ("final_board_construction", "candidate_funnel", "summary"):
+        nested = payload.get(nested_key)
+        if isinstance(nested, Mapping):
+            summary = identity_quarantine_summary(nested)
+            if summary["total_rows_dropped"] > 0 or summary["counts_by_reason"]:
+                return summary
+
+    counts: dict[str, int] = {}
+    for key in ("identity_quarantine_reason_counts", "counts_by_reason"):
+        value = payload.get(key)
+        if isinstance(value, Mapping):
+            counts = {
+                str(reason): _safe_count(count)
+                for reason, count in value.items()
+                if _safe_count(count) > 0
+            }
+            break
+
+    total = _safe_count(payload.get("identity_quarantine_count") or payload.get("total_rows_dropped") or sum(counts.values()) or 0)
+    if total > 0 or counts:
+        return {
+            "rejection_reason": str(payload.get("identity_quarantine_rejection_reason") or IDENTITY_QUARANTINE_REJECTION_REASON),
+            "total_rows_dropped": total,
+            "counts_by_reason": dict(sorted(counts.items())),
+        }
+
+    for scope in ("full_market", "elite"):
+        scope_payload = payload.get(scope)
+        if not isinstance(scope_payload, Mapping):
+            continue
+        summary = identity_quarantine_summary(scope_payload)
+        if summary["total_rows_dropped"] > 0 or summary["counts_by_reason"]:
+            return summary
+
+    return empty
+
+
+def format_identity_quarantine_line(payload: Mapping[str, Any] | None) -> str:
+    summary = identity_quarantine_summary(payload)
+    total = int(summary.get("total_rows_dropped", 0) or 0)
+    if total <= 0:
+        return ""
+    counts = summary.get("counts_by_reason", {})
+    if isinstance(counts, Mapping) and counts:
+        count_text = ", ".join(f"{reason}={count}" for reason, count in sorted(counts.items()))
+        return f"identity quarantined: {total} ({count_text})"
+    return f"identity quarantined: {total}"
+
+
+def _mark_identity_quarantine_row(row: Mapping[str, Any] | pd.Series) -> dict[str, Any]:
+    out = dict(row)
+    reason = is_identity_quarantined(out)
+    if not reason:
+        if "identity_team_conflict" not in out or not _text(out.get("identity_team_conflict")):
+            out["identity_team_conflict"] = False
+        if "identity_team_conflict_reason" not in out or not _text(out.get("identity_team_conflict_reason")):
+            out["identity_team_conflict_reason"] = ""
+        if "identity_quarantine_reason" not in out or not _text(out.get("identity_quarantine_reason")):
+            out["identity_quarantine_reason"] = ""
+        if not _text(out.get("selection_rejection_reason")):
+            out["selection_rejection_reason"] = ""
+        if not _text(out.get("rejection_reason")):
+            out["rejection_reason"] = ""
+        return out
+
+    out["identity_team_conflict"] = True
+    out["identity_team_conflict_reason"] = reason
+    out["identity_quarantine_reason"] = reason
+    out["recommended_action"] = IDENTITY_QUARANTINE_ACTION
+    out["selection_rejection_reason"] = IDENTITY_QUARANTINE_REJECTION_REASON
+    out["rejection_reason"] = IDENTITY_QUARANTINE_REJECTION_REASON
+    return out
+
+
+def mark_identity_quarantine_fields(data: pd.DataFrame | Mapping[str, Any] | pd.Series) -> pd.DataFrame | dict[str, Any]:
+    if isinstance(data, pd.DataFrame):
+        if data.empty:
+            out = data.copy()
+            for column, default in (
+                ("identity_team_conflict", False),
+                ("identity_team_conflict_reason", ""),
+                ("identity_quarantine_reason", ""),
+            ):
+                if column not in out.columns:
+                    out[column] = default
+            return out
+        return pd.DataFrame([_mark_identity_quarantine_row(row) for _, row in data.iterrows()], index=data.index)
+    return _mark_identity_quarantine_row(data)
 
 
 def _float(value: Any) -> float | None:
@@ -397,11 +641,16 @@ def _default_context() -> dict[str, Any]:
         "context_pick_alignment": "insufficient_data",
         "context_caution_level": "insufficient_data",
         "context_preview_applied": False,
+        "game_home_team_abbr": "",
+        "game_away_team_abbr": "",
         "candidate_team_not_in_game": False,
         "game_context_suppressed": False,
         "game_context_suppression_reason": "",
         "playoff_only_high_caution": False,
         "context_conflict_cause": "",
+        "identity_team_conflict": False,
+        "identity_team_conflict_reason": "",
+        "identity_quarantine_reason": "",
     }
 
 
@@ -528,6 +777,8 @@ def apply_game_context(
         if game:
             home = _team_key(game.get("home"))
             away = _team_key(game.get("away"))
+            out.at[idx, "game_home_team_abbr"] = home
+            out.at[idx, "game_away_team_abbr"] = away
             team_in_game = bool(team and team in {home, away})
             if team and home and away and not team_in_game:
                 _clear_applied_game_context(out, idx)
@@ -617,6 +868,7 @@ def apply_game_context(
         out.at[idx, "context_conflict_cause"] = _context_conflict_cause(out.loc[idx])
         out.at[idx, "context_preview_applied"] = False
 
+    out = mark_identity_quarantine_fields(out)
     diagnostics.update(_coverage(out))
     return out, diagnostics
 
@@ -694,6 +946,9 @@ def _coverage(df: pd.DataFrame) -> dict[str, Any]:
             cause_counts[cause] = int(count)
     coverage["context_conflict_cause_counts"] = cause_counts
     coverage["stale_team_not_in_game_count"] = int(cause_counts.get("stale_team_not_in_game", 0))
+    identity_counts = identity_quarantine_reason_counts(df)
+    coverage["identity_quarantine_count"] = int(sum(identity_counts.values()))
+    coverage["identity_quarantine_reason_counts"] = identity_counts
     return coverage
 
 

@@ -15,6 +15,10 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from courtvision.artifact_guard import guard_no_existing_artifact  # noqa: E402
+from courtvision.context.game_context import (  # noqa: E402
+    format_identity_quarantine_line,
+    identity_quarantine_summary,
+)
 from courtvision.selection import (  # noqa: E402
     format_unsupported_active_operator_market_drop_line,
     unsupported_active_operator_market_drop_summary,
@@ -1174,6 +1178,12 @@ def build_operator_card(
     if int(unsupported_active_summary.get("total_rows_dropped", 0) or 0) <= 0:
         unsupported_active_summary = unsupported_active_operator_market_drop_summary(board_diagnostics)
     unsupported_active_line = format_unsupported_active_operator_market_drop_line(unsupported_active_summary)
+    identity_summary = identity_quarantine_summary(quality_payload)
+    if int(identity_summary.get("total_rows_dropped", 0) or 0) <= 0:
+        identity_summary = identity_quarantine_summary(board_diagnostics)
+    if int(identity_summary.get("total_rows_dropped", 0) or 0) <= 0:
+        identity_summary = identity_quarantine_summary(game_payload)
+    identity_quarantine_line = format_identity_quarantine_line(identity_summary)
 
     full_manual_df = _filter_truthy(full_market_display_df, "manual_review_required")
     full_same_opponent_df = _filter_truthy(full_market_display_df, "same_opponent_under_warning")
@@ -1212,6 +1222,8 @@ def build_operator_card(
     lines.append(f"- full market candidates count: {full_market_count}")
     if unsupported_active_line:
         lines.append(f"- {unsupported_active_line}")
+    if identity_quarantine_line:
+        lines.append(f"- {identity_quarantine_line}")
     lines.append(f"- SGP candidates count: {sgp_count}")
     lines.append(f"- Kelly rows count: {kelly_rows_count}")
     lines.append(f"- Kelly eligible count: {kelly_eligible_count}")
@@ -1388,6 +1400,7 @@ def build_operator_card(
         "sgp_count": sgp_count,
         "kelly_rows_count": kelly_rows_count,
         "kelly_eligible_count": kelly_eligible_count,
+        "identity_quarantine": identity_summary,
         "manual_review_count": manual_review_count,
         "review_before_bet_count": review_before_bet_count,
         "high_caution_over_count": high_caution_count,
