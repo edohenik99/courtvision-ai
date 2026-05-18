@@ -18,6 +18,11 @@ import pandas as pd
 
 from courtvision.calibration.buckets import to_float
 from courtvision.artifact_guard import log_prediction_artifact_write
+from courtvision.context.game_context import (
+    IDENTITY_QUARANTINE_REJECTION_REASON,
+    identity_quarantine_reason_counts,
+    mark_identity_quarantine_fields,
+)
 from courtvision.data.candidates import score_player_markets
 from courtvision.injuries import InjuryEngine
 from courtvision.market import MarketEvaluator, normalize_market_alias
@@ -135,6 +140,7 @@ class PredictionResult:
     stat_only_props: pd.DataFrame = field(default_factory=pd.DataFrame)
     market_lines: pd.DataFrame = field(default_factory=pd.DataFrame)
     merged_market_props: pd.DataFrame = field(default_factory=pd.DataFrame)
+    rejected_candidate_diagnostics: pd.DataFrame = field(default_factory=pd.DataFrame)
     output_paths: dict[str, Path | None] = field(default_factory=dict)
     injury_context: dict[str, Any] = field(default_factory=_empty_injury_context)
 
@@ -149,6 +155,7 @@ class PredictionResult:
             "stat_only_props": self.stat_only_props.to_dict("records") if not self.stat_only_props.empty else [],
             "market_lines": self.market_lines.to_dict("records") if not self.market_lines.empty else [],
             "merged_market_props": self.merged_market_props.to_dict("records") if not self.merged_market_props.empty else [],
+            "rejected_candidate_diagnostics": self.rejected_candidate_diagnostics.to_dict("records") if not self.rejected_candidate_diagnostics.empty else [],
             "output_paths": {k: str(v) if v else None for k, v in self.output_paths.items()},
         }
 
@@ -363,8 +370,33 @@ class PredictionPipeline:
             result.summary = self._build_empty_summary(games, odds)
             return result
 
-        # Convert candidates to DataFrame
-        candidates_df = pd.DataFrame(candidates)
+        # Convert candidates to DataFrame and mark identity-invalid rows before any board ranking.
+        candidates_df = mark_identity_quarantine_fields(pd.DataFrame(candidates))
+        identity_quarantine_counts = identity_quarantine_reason_counts(candidates_df)
+        identity_quarantine_count = int(sum(identity_quarantine_counts.values()))
+        identity_rejected_df = (
+            candidates_df[
+                candidates_df.get("selection_rejection_reason", pd.Series("", index=candidates_df.index))
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .eq(IDENTITY_QUARANTINE_REJECTION_REASON)
+            ].copy()
+            if identity_quarantine_count
+            else pd.DataFrame()
+        )
+        rejected_source_df = pd.DataFrame(rejected) if rejected else pd.DataFrame()
+        if not identity_rejected_df.empty:
+            rejected_diagnostics_frames = [frame for frame in (rejected_source_df, identity_rejected_df) if not frame.empty]
+            result.rejected_candidate_diagnostics = pd.concat(
+                rejected_diagnostics_frames,
+                ignore_index=True,
+                sort=False,
+            )
+        else:
+            result.rejected_candidate_diagnostics = rejected_source_df
+        print(f"[COUNT] identity_quarantine_count={identity_quarantine_count}", flush=True)
+        print(f"[COUNT] identity_quarantine_reason_counts={identity_quarantine_counts}", flush=True)
 
         # Define selection callables for board building
         selection_stage_trace: dict[str, dict[str, Any]] = {
@@ -784,6 +816,13 @@ class PredictionPipeline:
             duplicate_betting_identity_summary.get("groups", []) or []
         )
         result.summary["duplicate_betting_identity"] = duplicate_betting_identity_summary
+        result.summary["identity_quarantine_count"] = identity_quarantine_count
+        result.summary["identity_quarantine_reason_counts"] = identity_quarantine_counts
+        result.summary["identity_quarantine"] = {
+            "rejection_reason": IDENTITY_QUARANTINE_REJECTION_REASON,
+            "total_rows_dropped": identity_quarantine_count,
+            "counts_by_reason": identity_quarantine_counts,
+        }
 
         # Set summary on telemetry BEFORE writing audit files
         elite_telemetry.set_summary(result.summary)
@@ -861,12 +900,14 @@ class PredictionPipeline:
         # ---- Game status / slate-lock gate: build lookup from games data ----
         # Map team abbreviation -> game status info for quick lookup per candidate
         _game_info_by_team: dict[str, dict[str, Any]] = {}
+        _game_info_by_id: dict[str, dict[str, Any]] = {}
         _games_with_status_count = 0
         _games_with_datetime_count = 0
         if not games.empty and {"home_team_abbr", "visitor_team_abbr"}.issubset(games.columns):
             for _, g in games.iterrows():
                 home_team_abbr = str(g.get("home_team_abbr", "")).strip().upper()
                 visitor_team_abbr = str(g.get("visitor_team_abbr", "")).strip().upper()
+                game_id_value = g.get("game_id") if g.get("game_id") is not None else g.get("id")
                 # Support both normalized (status/date) and renamed (game_status/game_date) columns
                 raw_status = g.get("game_status") or g.get("status") or ""
                 gstatus = str(raw_status).strip().lower()
@@ -879,18 +920,23 @@ class PredictionPipeline:
                     _games_with_status_count += 1
                 if game_datetime_val:
                     _games_with_datetime_count += 1
-                _game_info_by_team[home_team_abbr] = {
+                game_payload = {
+                    "game_id": game_id_value,
+                    "game_home_team_abbr": home_team_abbr,
+                    "game_away_team_abbr": visitor_team_abbr,
                     "game_status": gstatus,
                     "game_datetime": game_datetime_val,
                     "game_date": game_date_val,
                     "game_status_bucket": game_status_bucket,
                 }
-                _game_info_by_team[visitor_team_abbr] = {
-                    "game_status": gstatus,
-                    "game_datetime": game_datetime_val,
-                    "game_date": game_date_val,
-                    "game_status_bucket": game_status_bucket,
-                }
+                _game_info_by_team[home_team_abbr] = game_payload
+                _game_info_by_team[visitor_team_abbr] = game_payload
+                if game_id_value is not None and str(game_id_value).strip():
+                    try:
+                        game_id_key = str(int(float(str(game_id_value).strip())))
+                    except (TypeError, ValueError):
+                        game_id_key = str(game_id_value).strip()
+                    _game_info_by_id[game_id_key] = game_payload
         self.logger.info(
             "games_enrichment games=%s with_status=%s with_datetime=%s mapped_teams=%s",
             len(games),
@@ -1041,7 +1087,12 @@ class PredictionPipeline:
 
             # ---- Game status / slate-lock gate: attach game status to candidate ----
             player_team = str(player_row.get("team_abbr", "")).strip().upper()
-            _game_info = _game_info_by_team.get(player_team, {})
+            market_game_id = market_row.get("game_id") if not market_row.empty else ""
+            try:
+                market_game_id_key = str(int(float(str(market_game_id).strip()))) if str(market_game_id).strip() else ""
+            except (TypeError, ValueError):
+                market_game_id_key = str(market_game_id).strip()
+            _game_info = _game_info_by_id.get(market_game_id_key, {}) or _game_info_by_team.get(player_team, {})
 
             # ---- Player Points Recalibration (feature-flagged) ----
             recal_mode = get_recalibration_mode()
@@ -1132,6 +1183,19 @@ class PredictionPipeline:
                 "player_id": player_row.get("player_id"),
                 "team": str(player_row.get("team_abbr", "")),
                 "team_abbr": str(player_row.get("team_abbr", "")),
+                "baseline_team_abbr": str(player_row.get("baseline_team_abbr", player_row.get("team_abbr", "")) or "").strip().upper(),
+                "provider_team_abbr": str(market_row.get("provider_team_abbr", market_row.get("_team_abbr", "")) or "").strip().upper() if not market_row.empty else "",
+                "odds_team_abbr": str(market_row.get("odds_team_abbr", market_row.get("_team_abbr", "")) or "").strip().upper() if not market_row.empty else "",
+                "resolved_team_abbr": str(market_row.get("resolved_team_abbr", "") or "").strip().upper() if not market_row.empty else "",
+                "identity_source_team_abbr": str(
+                    market_row.get(
+                        "identity_source_team_abbr",
+                        market_row.get("resolved_team_abbr", ""),
+                    )
+                    or ""
+                ).strip().upper() if not market_row.empty else "",
+                "game_home_team_abbr": _game_info.get("game_home_team_abbr", ""),
+                "game_away_team_abbr": _game_info.get("game_away_team_abbr", ""),
                 "market_type": normalized_market,
                 "raw_prop_type": raw_prop_type,
                 "raw_market_type": raw_market_type,
@@ -1363,6 +1427,13 @@ class PredictionPipeline:
                 "player_id": "",
                 "team": team,
                 "team_abbr": team,
+                "baseline_team_abbr": team,
+                "provider_team_abbr": str(row.get("provider_team_abbr", row.get("team_abbr", row.get("team", ""))) or "").strip().upper(),
+                "odds_team_abbr": str(row.get("odds_team_abbr", row.get("team_abbr", row.get("team", ""))) or "").strip().upper(),
+                "resolved_team_abbr": str(row.get("resolved_team_abbr", "") or "").strip().upper(),
+                "identity_source_team_abbr": str(row.get("identity_source_team_abbr", row.get("resolved_team_abbr", "")) or "").strip().upper(),
+                "game_home_team_abbr": _team_game_info.get("game_home_team_abbr", ""),
+                "game_away_team_abbr": _team_game_info.get("game_away_team_abbr", ""),
                 "opponent": opp,
                 "market_type": market,
                 "selection": selection,

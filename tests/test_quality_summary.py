@@ -1073,6 +1073,40 @@ def test_quality_summary_surfaces_unsupported_active_market_drops(tmp_path: Path
     ) in text
 
 
+def test_quality_summary_surfaces_identity_quarantine_counts(tmp_path: Path) -> None:
+    prediction_date = "2026-04-30"
+    runtime_root = tmp_path / "runtime"
+    _seed_market_coverage_artifacts(runtime_root, prediction_date)
+    _write_json(
+        runtime_root / "diagnostics" / f"board_diagnostics_{prediction_date}.json",
+        {
+            "board_counts": {"elite": 1, "full_market": 2, "qualified_pool": 3},
+            "identity_quarantine": {
+                "rejection_reason": "identity_quarantine",
+                "total_rows_dropped": 1,
+                "counts_by_reason": {"stale_team_identity": 1},
+            },
+        },
+    )
+
+    text, payload = build_quality_summary(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        out_dir=tmp_path,
+        generated_at="2026-05-01T00:00:00+00:00",
+    )
+
+    assert payload["identity_quarantine"] == {
+        "rejection_reason": "identity_quarantine",
+        "total_rows_dropped": 1,
+        "counts_by_reason": {"stale_team_identity": 1},
+    }
+    assert payload["candidate_funnel"]["identity_quarantine_count"] == 1
+    assert payload["candidate_funnel"]["identity_quarantine_reason_counts"] == {"stale_team_identity": 1}
+    assert "- identity_quarantine_count: 1" in text
+    assert "- identity quarantined: 1 (stale_team_identity=1); reason=identity_quarantine" in text
+
+
 def test_quality_summary_zero_unsupported_active_market_drops_stays_quiet(tmp_path: Path) -> None:
     prediction_date = "2026-04-30"
     runtime_root = tmp_path / "runtime"

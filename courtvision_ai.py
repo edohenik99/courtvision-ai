@@ -128,9 +128,13 @@ def get_elite_rejection_reason(row: dict[str, Any]) -> str | None:
 from courtvision.pipeline import PredictionPipeline, PredictionConfig
 from courtvision.config import EliteThresholds
 from courtvision.context import (
+    IDENTITY_QUARANTINE_REJECTION_REASON,
     apply_game_context,
     apply_manual_player_context,
+    identity_quarantine_reason_counts,
+    identity_quarantine_summary,
     load_manual_player_context,
+    mark_identity_quarantine_fields,
     write_game_context_outputs,
     write_manual_context_diagnostics,
 )
@@ -2421,9 +2425,18 @@ class CourtVisionAI:
     def _live_market_only(self, df: pd.DataFrame) -> pd.DataFrame:
         if df.empty:
             return df.copy()
-        live_mask = self._boolish_series(df, "is_live_market", True)
-        synthetic_mask = self._boolish_series(df, "synthetic_line", False)
-        out = df[live_mask & ~synthetic_mask].copy()
+        marked_df = mark_identity_quarantine_fields(df)
+        if not isinstance(marked_df, pd.DataFrame):
+            marked_df = pd.DataFrame(marked_df)
+        live_mask = self._boolish_series(marked_df, "is_live_market", True)
+        synthetic_mask = self._boolish_series(marked_df, "synthetic_line", False)
+        rejection_reason = (
+            marked_df.get("selection_rejection_reason", pd.Series("", index=marked_df.index))
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+        out = marked_df[live_mask & ~synthetic_mask & rejection_reason.ne(IDENTITY_QUARANTINE_REJECTION_REASON)].copy()
         raw_market_type = out.get("raw_market_type", pd.Series("", index=out.index)).fillna("").astype(str).str.strip().str.lower()
         selection = out.get("selection", pd.Series("", index=out.index)).fillna("").astype(str).str.strip().str.lower()
         out = out[raw_market_type.ne("milestone") & selection.ne("milestone")].copy()
@@ -3068,6 +3081,30 @@ class CourtVisionAI:
         self._merge_selection_rejection_reason(final_board_construction, reason=reason, count=total)
         return final_board_construction
 
+    def _attach_identity_quarantine_trace(
+        self,
+        final_board_construction: dict[str, Any],
+        summary: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        quarantine_summary = identity_quarantine_summary(summary)
+        total = int(quarantine_summary.get("total_rows_dropped", 0) or 0)
+        counts = dict(quarantine_summary.get("counts_by_reason", {}) or {})
+        reason = str(quarantine_summary.get("rejection_reason") or IDENTITY_QUARANTINE_REJECTION_REASON)
+        for scope in ("elite", "full_market"):
+            scope_payload = final_board_construction.get(scope)
+            if not isinstance(scope_payload, dict):
+                continue
+            scope_payload["identity_quarantine_count"] = total
+            scope_payload["identity_quarantine_reason_counts"] = counts
+            scope_payload["identity_quarantine_rejection_reason"] = reason
+        final_board_construction["identity_quarantine"] = {
+            "rejection_reason": reason,
+            "total_rows_dropped": total,
+            "counts_by_reason": counts,
+        }
+        self._merge_selection_rejection_reason(final_board_construction, reason=reason, count=total)
+        return final_board_construction
+
     def _merge_selection_rejection_reason(
         self,
         final_board_construction: dict[str, Any],
@@ -3363,8 +3400,22 @@ class CourtVisionAI:
                     post_exposure_caps=pd.DataFrame(),
                     post_backfill=pd.DataFrame(),
                 ),
+                "identity_quarantine": {
+                    "rejection_reason": IDENTITY_QUARANTINE_REJECTION_REASON,
+                    "total_rows_dropped": 0,
+                    "counts_by_reason": {},
+                },
             }
 
+        prepared_df = mark_identity_quarantine_fields(prepared_df)
+        if not isinstance(prepared_df, pd.DataFrame):
+            prepared_df = pd.DataFrame(prepared_df)
+        identity_counts = identity_quarantine_reason_counts(prepared_df)
+        identity_summary = {
+            "rejection_reason": IDENTITY_QUARANTINE_REJECTION_REASON,
+            "total_rows_dropped": int(sum(identity_counts.values())),
+            "counts_by_reason": identity_counts,
+        }
         live_candidates_df = self._live_market_only(prepared_df)
         final_board_construction: dict[str, Any] = {"elite": {}, "full_market": {}}
         elite_df = self._select_elite_board(
@@ -3379,6 +3430,10 @@ class CourtVisionAI:
             trace=final_board_construction["full_market"],
         )
         full_market_df = self._annotate_elite_context_safety(full_market_df)
+        final_board_construction = self._attach_identity_quarantine_trace(
+            final_board_construction,
+            {"identity_quarantine": identity_summary},
+        )
         return elite_df, full_market_df, final_board_construction
 
     def _build_near_miss_board(self, rejected_df: pd.DataFrame, limit: int = 60) -> pd.DataFrame:
@@ -4278,7 +4333,16 @@ class CourtVisionAI:
                 final_board_construction,
                 result.summary,
             )
-            rejected_df = pd.DataFrame()
+            final_board_construction = self._attach_identity_quarantine_trace(
+                final_board_construction,
+                result.summary,
+            )
+            rejected_df = (
+                result.rejected_candidate_diagnostics.copy()
+                if isinstance(result.rejected_candidate_diagnostics, pd.DataFrame)
+                and not result.rejected_candidate_diagnostics.empty
+                else pd.DataFrame()
+            )
             grading_df, grading_summary = self._grade_history(prediction_date=prediction_date)
             grading_bucket_summary = summarize_graded_props(grading_df.to_dict("records")) if not grading_df.empty else summarize_graded_props([])
             self._append_history(self.prediction_history_path, elite_df if not elite_df.empty else qualified_pool_df)
@@ -4491,6 +4555,10 @@ class CourtVisionAI:
             result.summary,
         )
         final_board_construction = self._attach_duplicate_betting_identity_trace(
+            final_board_construction,
+            result.summary,
+        )
+        final_board_construction = self._attach_identity_quarantine_trace(
             final_board_construction,
             result.summary,
         )

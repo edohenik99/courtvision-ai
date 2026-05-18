@@ -7,6 +7,7 @@ from typing import Any
 import pandas as pd
 
 from courtvision.calibration.buckets import abs_edge_bucket
+from courtvision.context.game_context import is_identity_quarantined
 
 
 HISTORY_FILE_NAME = "paper_kelly_history.csv"
@@ -339,6 +340,11 @@ def _normalize_paper_rows(
         return pd.DataFrame(columns=list(HISTORY_COLUMNS))
 
     working = paper_df.copy()
+    quarantine_mask = working.apply(lambda row: is_identity_quarantined(row) is not None, axis=1)
+    if quarantine_mask.any():
+        working = working[~quarantine_mask].copy()
+    if working.empty:
+        return pd.DataFrame(columns=list(HISTORY_COLUMNS))
     for column in REQUIRED_HISTORY_COLUMNS:
         if column not in working.columns:
             working[column] = ""

@@ -33,6 +33,11 @@ REQUIRED_COLUMNS: tuple[str, ...] = (
     "odds",
     "vendor",
     "game_id",
+    "team_abbr",
+    "provider_team_abbr",
+    "odds_team_abbr",
+    "resolved_team_abbr",
+    "identity_source_team_abbr",
     "line_source",
     "unresolved_reason",
     "updated_at",
@@ -273,10 +278,9 @@ def normalize_bdl_player_props(
         game_id = _safe_int(_lookup_value(row, "game_id", "game.id"))
         player_id = _safe_int(_lookup_value(row, "player_id", "player.id"))
         player_name = _resolve_player_name_from_row(row, player_id, player_lookup)
-        team_abbr = (
-            _clean_text(_lookup_value(row, "team_abbr", "team.abbreviation", "team.abbr"))
-            or _resolve_player_team_abbr(player_id, player_lookup)
-        )
+        provider_team_abbr = _clean_text(_lookup_value(row, "team_abbr", "team.abbreviation", "team.abbr"))
+        resolved_team_abbr = _resolve_player_team_abbr(player_id, player_lookup)
+        team_abbr = provider_team_abbr or resolved_team_abbr
         raw_prop_type = _lookup_value(row, "prop_type", "raw_prop_type")
         raw_market_name = _resolve_market_name(row)
         market_type = _resolve_market_type(raw_prop_type, raw_market_name, market_type_mapper)
@@ -296,8 +300,12 @@ def normalize_bdl_player_props(
             "line": line,
             "vendor": vendor,
             "game_id": game_id,
+            "team_abbr": team_abbr.upper() if team_abbr else None,
+            "provider_team_abbr": provider_team_abbr.upper() if provider_team_abbr else None,
+            "odds_team_abbr": provider_team_abbr.upper() if provider_team_abbr else None,
+            "resolved_team_abbr": resolved_team_abbr.upper() if resolved_team_abbr else None,
+            "identity_source_team_abbr": resolved_team_abbr.upper() if resolved_team_abbr else None,
             "line_source": line_source,
-            "team_abbr": team_abbr,
             "updated_at": updated_at,
         }
 
