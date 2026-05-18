@@ -209,11 +209,10 @@ def test_suppressed_game_context_candidate_cannot_backfill_elite(
     elite_df, full_market_df, trace = ai._build_final_operator_boards(pd.DataFrame([suppressed, valid]))
 
     assert elite_df["player_name"].tolist() == ["Valid Game Candidate"]
-    stale_full_market = full_market_df.set_index("player_name").loc["Stale Team Candidate"]
-    assert stale_full_market["final_elite_rejection_reason"] == "elite_reject_game_context_suppressed"
-
-    gate = trace["elite"]["elite_context_safety_gate"]
-    assert gate["candidate_rejection_reason_counts"]["elite_reject_game_context_suppressed"] == 1
+    assert full_market_df["player_name"].tolist() == ["Valid Game Candidate"]
+    assert trace["identity_quarantine"]["total_rows_dropped"] == 1
+    assert trace["identity_quarantine"]["counts_by_reason"] == {"outside_team_identity": 1}
+    assert trace["full_market"]["identity_quarantine_count"] == 1
 
 
 def test_player_points_elite_admission_records_context_gate_reason(

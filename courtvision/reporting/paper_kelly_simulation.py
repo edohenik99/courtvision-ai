@@ -6,6 +6,8 @@ from typing import Any
 
 import pandas as pd
 
+from courtvision.context.game_context import is_identity_quarantined
+
 REPORT_FILE_PREFIX = "paper_kelly_simulation"
 ROW_STAKE_CAP = 0.0025
 TOTAL_PAPER_EXPOSURE_CAP = 0.02
@@ -97,6 +99,11 @@ def _prepared_source_frame(
         return pd.DataFrame(columns=REPORT_COLUMNS)
 
     prepared = df.copy()
+    quarantine_mask = prepared.apply(lambda row: is_identity_quarantined(row) is not None, axis=1)
+    if quarantine_mask.any():
+        prepared = prepared[~quarantine_mask].copy()
+    if prepared.empty:
+        return pd.DataFrame(columns=REPORT_COLUMNS)
     fallback_columns = {
         "team_abbr": "team",
         "line": "sportsbook_line",
