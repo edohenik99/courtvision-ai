@@ -25,6 +25,10 @@ from courtvision.scoring import CandidateScoringPolicy
 from courtvision.injuries import InjuryEngine
 from courtvision.market import MarketEvaluator
 from courtvision.data.candidates import score_player_markets
+from courtvision.context.player_identity import (
+    BASELINE_PROVIDER_TEAM_CONFLICT_REASON,
+    PLAYER_ID_TEAM_CONFLICT_REASON,
+)
 from scripts.market_shadow_grading import build_market_shadow_grading
 from scripts.write_daily_summary import write_daily_summary_outputs
 
@@ -788,6 +792,12 @@ class TestPredictionPipeline:
             assert not elite.duplicated(subset=identity_cols).any()
         assert result.summary["duplicate_betting_identity_drop_count"] == 0
         assert result.summary["duplicate_betting_identity_drop_counts_by_market_type"] == {}
+        assert result.summary["player_identity"]["counts_by_reason"] == {
+            PLAYER_ID_TEAM_CONFLICT_REASON: 1
+        }
+        assert result.summary["player_identity_invalid_candidate_counts_by_reason"] == {
+            PLAYER_ID_TEAM_CONFLICT_REASON: 1
+        }
         assert result.summary["identity_quarantine_count"] == 1
         assert result.summary["identity_quarantine_reason_counts"] == {"outside_team_identity": 1}
         rejected = result.rejected_candidate_diagnostics
@@ -798,6 +808,7 @@ class TestPredictionPipeline:
         ].iloc[0]
         assert stale["selection_rejection_reason"] == "identity_quarantine"
         assert stale["identity_quarantine_reason"] == "outside_team_identity"
+        assert stale["player_identity_conflict_reason"] == PLAYER_ID_TEAM_CONFLICT_REASON
 
     def test_mixed_slate_preserves_identity_quarantine_diagnostics(self, tmp_path):
         from datetime import datetime, timedelta
@@ -876,9 +887,73 @@ class TestPredictionPipeline:
         assert result.summary["identity_quarantine_reason_counts"] == {"outside_team_identity": 1}
         rejected = result.rejected_candidate_diagnostics
         assert not rejected.empty
-        quarantined = rejected[rejected["player_name"].eq("Dennis Schroder")].iloc[0]
+        quarantined = rejected[
+            rejected["player_name"].eq("Dennis Schroder")
+            & rejected["selection_rejection_reason"].eq("identity_quarantine")
+        ].iloc[0]
         assert quarantined["selection_rejection_reason"] == "identity_quarantine"
         assert quarantined["identity_quarantine_reason"] == "outside_team_identity"
+
+    def test_stale_baseline_provider_conflict_surfaces_without_silent_drop(self, tmp_path):
+        from datetime import datetime, timedelta
+
+        out_dir = tmp_path / "outputs"
+        config = PredictionConfig(
+            prediction_date="2026-05-18",
+            out_dir=str(out_dir),
+            min_confidence=0.0,
+            enable_partial_fill=False,
+        )
+        pipeline = PredictionPipeline(config)
+        future_game_datetime = (datetime.now() + timedelta(hours=2)).isoformat()
+        fresh_time = (datetime.now() - timedelta(minutes=5)).isoformat()
+        games = pd.DataFrame([{
+            "game_id": 21709238,
+            "home_team_abbr": "CLE",
+            "visitor_team_abbr": "LAC",
+            "game_status": "scheduled",
+            "game_date": future_game_datetime,
+            "datetime": future_game_datetime,
+        }])
+        odds = pd.DataFrame([{
+            "game_id": 21709238,
+            "player_id": 192,
+            "player_name": "James Harden",
+            "team_abbr": "LAC",
+            "provider_team_abbr": "LAC",
+            "market_type": "player_points",
+            "line": 19.5,
+            "odds": -110,
+            "selection": "over",
+            "is_live": True,
+            "updated_at": fresh_time,
+        }])
+        baselines = pd.DataFrame([{
+            "player_name": "James Harden",
+            "team_abbr": "CLE",
+            "player_id": 192,
+            "pts_avg": 23.0,
+            "pts_recent": 23.0,
+            "reb_avg": 4.0,
+            "ast_avg": 6.0,
+            "min_avg": 35.0,
+        }])
+
+        result = pipeline.run(games, odds, baselines)
+
+        assert result.full_market_props.empty
+        assert result.summary["candidate_count"] == 0
+        assert result.summary["player_identity"]["counts_by_reason"] == {
+            BASELINE_PROVIDER_TEAM_CONFLICT_REASON: 1
+        }
+        rejected = result.rejected_candidate_diagnostics
+        assert not rejected.empty
+        diagnostic = rejected[
+            rejected["player_identity_conflict_reason"].eq(BASELINE_PROVIDER_TEAM_CONFLICT_REASON)
+        ].iloc[0]
+        assert diagnostic["rejection_reason"] == "player_identity_validation"
+        assert diagnostic["canonical_team_abbr"] == "CLE"
+        assert diagnostic["team"] == "CLE"
 
     def test_courtvision_ai_identity_trace_uses_authoritative_package_diagnostics(self, tmp_path):
         from courtvision_ai import CourtVisionAI

@@ -19,6 +19,14 @@ from .game_context import (
     mark_identity_quarantine_fields,
     write_game_context_outputs,
 )
+from .player_identity import (
+    BASELINE_PROVIDER_TEAM_CONFLICT_REASON,
+    PLAYER_ID_TEAM_CONFLICT_REASON,
+    PLAYER_IDENTITY_REJECTION_REASON,
+    PLAYER_TEAM_NOT_IN_ACTIVE_GAME_REASON,
+    build_canonical_player_identity_resolver,
+    player_identity_reason_counts,
+)
 from .game_strength import (
     POWER_RATING_CONTEXT_COLUMNS,
     apply_power_rating_context_to_df,
@@ -46,4 +54,10 @@ __all__ = [
     "load_manual_player_context",
     "write_manual_context_diagnostics",
     "write_game_context_outputs",
+    "BASELINE_PROVIDER_TEAM_CONFLICT_REASON",
+    "PLAYER_ID_TEAM_CONFLICT_REASON",
+    "PLAYER_IDENTITY_REJECTION_REASON",
+    "PLAYER_TEAM_NOT_IN_ACTIVE_GAME_REASON",
+    "build_canonical_player_identity_resolver",
+    "player_identity_reason_counts",
 ]
