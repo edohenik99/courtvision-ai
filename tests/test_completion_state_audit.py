@@ -309,6 +309,32 @@ def test_daily_runner_writes_artifact_manifest_after_operator_card_non_blocking(
     assert "continuing daily run" in manifest_block
 
 
+def test_daily_runner_logs_operator_safety_banner_and_card_context() -> None:
+    ps1 = Path("run_today.ps1").read_text(encoding="utf-8")
+
+    assert "COURTVISION_MODE=$CourtVisionMode" in ps1
+    assert "ForcePastDate=$ForcePastDateValue" in ps1
+    assert "ForceOutputs=$ForceOutputsValue" in ps1
+    assert "KellyBankroll=$KellyBankroll" in ps1
+    assert "artifact_manifest_status=$ArtifactManifestStatus" in ps1
+    assert "fatal_missing=$FatalMissing" in ps1
+    assert "--runtime-mode" in ps1
+    assert "--force-past-date" in ps1
+    assert "--force-outputs" in ps1
+    assert "--kelly-bankroll" in ps1
+
+    initial_banner_idx = ps1.index(
+        'Write-OperatorSafetyLine -LogPaths @($RunLog) -ArtifactManifestStatus "pending"'
+    )
+    operator_card_idx = ps1.index("$operatorCardExitCode = Invoke-LoggedCommand")
+    manifest_idx = ps1.index("$artifactManifestExitCode = Invoke-LoggedCommand")
+    final_banner_idx = ps1.index(
+        "Write-OperatorSafetyLine -LogPaths @($RunLog, $GradeLog) -ArtifactManifestStatus $artifactManifestStatusForBanner"
+    )
+    completed_idx = ps1.index('"=== Completed successfully at $(Get-Date) ==="')
+    assert initial_banner_idx < operator_card_idx < manifest_idx < final_banner_idx < completed_idx
+
+
 def test_daily_runner_runs_full_market_sanity_audit_non_blocking() -> None:
     ps1 = Path("run_today.ps1").read_text(encoding="utf-8")
     normalized_ps1 = ps1.replace("\\", "/")

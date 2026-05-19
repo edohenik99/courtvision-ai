@@ -111,6 +111,10 @@ $ArtifactManifestScript = Join-Path $ScriptRoot "scripts\write_artifact_manifest
 
 # Bankroll override: read $env:COURTVISION_BANKROLL when set, else default.
 $KellyBankroll = if ($env:COURTVISION_BANKROLL) { $env:COURTVISION_BANKROLL } else { "1000" }
+$CourtVisionMode = if ($env:COURTVISION_MODE) { $env:COURTVISION_MODE } else { "betting" }
+$ForceOutputs = $false
+$ForcePastDateValue = if ($ForcePastDate.IsPresent) { "true" } else { "false" }
+$ForceOutputsValue = if ($ForceOutputs) { "true" } else { "false" }
 
 function Write-LogLine {
     param(
@@ -189,6 +193,28 @@ function Get-CsvRowCount {
     return @($dataLines).Count
 }
 
+function New-OperatorSafetyLine {
+    param(
+        [string] $ArtifactManifestStatus = "pending",
+        [string] $FatalMissing = "pending"
+    )
+    return "[SAFETY] prediction_date=$Date COURTVISION_MODE=$CourtVisionMode ForcePastDate=$ForcePastDateValue ForceOutputs=$ForceOutputsValue KellyBankroll=$KellyBankroll artifact_manifest_status=$ArtifactManifestStatus fatal_missing=$FatalMissing"
+}
+
+function Write-OperatorSafetyLine {
+    param(
+        [Parameter(Mandatory)] [string[]] $LogPaths,
+        [string] $ArtifactManifestStatus = "pending",
+        [string] $FatalMissing = "pending",
+        [string] $ForegroundColor = "Cyan"
+    )
+    $line = New-OperatorSafetyLine -ArtifactManifestStatus $ArtifactManifestStatus -FatalMissing $FatalMissing
+    foreach ($path in $LogPaths) {
+        $line | Out-File $path -Append
+    }
+    Write-Host $line -ForegroundColor $ForegroundColor
+}
+
 # Resolve the Python interpreter explicitly to avoid Windows picking up a
 # bare `python` that points at a 3.14 install with missing dependencies.
 # Order: project venv -> py launcher 3.13 -> hard error.
@@ -215,6 +241,7 @@ Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "CourtVision Runner - $Date" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "Log file: $RunLog" -ForegroundColor Gray
+Write-OperatorSafetyLine -LogPaths @($RunLog) -ArtifactManifestStatus "pending" -FatalMissing "pending" -ForegroundColor "Cyan"
 
 if (-not $PyExe) {
     Write-Host "" -ForegroundColor Red
@@ -566,7 +593,14 @@ if (-not (Test-Path $OperatorCardScript)) {
 $operatorCardExitCode = Invoke-LoggedCommand `
     -LogPath $GradeLog `
     -Exe $PyExe `
-    -Arguments ($PyArgsPrefix + @($OperatorCardScript, "--prediction-date", $Date)) `
+    -Arguments ($PyArgsPrefix + @(
+        $OperatorCardScript,
+        "--prediction-date", $Date,
+        "--runtime-mode", $CourtVisionMode,
+        "--force-past-date", $ForcePastDateValue,
+        "--force-outputs", $ForceOutputsValue,
+        "--kelly-bankroll", $KellyBankroll
+    )) `
     -StreamToConsole:$VerboseMode
 if ($operatorCardExitCode -ne 0) {
     Stop-StageFailure -Stage "Operator Card" -ExitCode $operatorCardExitCode -LogPath $GradeLog
@@ -579,9 +613,13 @@ Write-Host "[OK] Operator card written to $operatorCardPath" -ForegroundColor Gr
 
 Write-Host ""
 Write-Host "[START] Artifact Manifest" -ForegroundColor Yellow
+$artifactManifestStatusForBanner = "unavailable"
+$artifactFatalMissingForBanner = "unknown"
+$artifactManifestBannerColor = "Yellow"
 if (-not (Test-Path $ArtifactManifestScript)) {
     Write-LogLine -Path $GradeLog -Message "[WARNING] Artifact manifest script not found: $ArtifactManifestScript" -AlsoConsole:$VerboseMode
     Write-Host "[WARN] Artifact manifest skipped; script not found: $ArtifactManifestScript" -ForegroundColor Yellow
+    $artifactManifestStatusForBanner = "script_missing"
 } else {
     "`n--- Artifact manifest ---" | Out-File $GradeLog -Append
     $artifactManifestExitCode = Invoke-LoggedCommand `
@@ -593,12 +631,15 @@ if (-not (Test-Path $ArtifactManifestScript)) {
     if ($artifactManifestExitCode -ne 0) {
         Write-LogLine -Path $GradeLog -Message "[WARNING] Artifact manifest writer failed or exited nonzero (exit code: $artifactManifestExitCode)." -AlsoConsole:$VerboseMode
         Write-Host "[WARN] Artifact manifest writer failed or exited nonzero; continuing daily run." -ForegroundColor Yellow
+        $artifactManifestStatusForBanner = "writer_failed"
     } elseif (-not (Test-Path $artifactManifestJsonPath)) {
         Write-LogLine -Path $GradeLog -Message "[WARNING] Artifact manifest JSON output not found: $artifactManifestJsonPath" -AlsoConsole:$VerboseMode
         Write-Host "[WARN] Artifact manifest JSON output not found; continuing daily run." -ForegroundColor Yellow
+        $artifactManifestStatusForBanner = "json_missing"
     } elseif (-not (Test-Path $artifactManifestTextPath)) {
         Write-LogLine -Path $GradeLog -Message "[WARNING] Artifact manifest TXT output not found: $artifactManifestTextPath" -AlsoConsole:$VerboseMode
         Write-Host "[WARN] Artifact manifest TXT output not found; continuing daily run." -ForegroundColor Yellow
+        $artifactManifestStatusForBanner = "txt_missing"
     } else {
         try {
             $artifactManifestPayload = Get-Content -Path $artifactManifestJsonPath -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -609,19 +650,24 @@ if (-not (Test-Path $ArtifactManifestScript)) {
             }
             Write-LogLine -Path $GradeLog -Message "[OK] Artifact manifest JSON: $artifactManifestJsonPath" -AlsoConsole:$VerboseMode
             Write-LogLine -Path $GradeLog -Message "[OK] Artifact manifest TXT: $artifactManifestTextPath" -AlsoConsole:$VerboseMode
+            $artifactManifestStatusForBanner = $artifactManifestStatus
+            $artifactFatalMissingForBanner = [string]$artifactFatalMissing
             if ($artifactFatalMissing -gt 0) {
                 Write-LogLine -Path $GradeLog -Message "[WARNING] Artifact manifest status: $artifactManifestStatus fatal_missing=$artifactFatalMissing" -AlsoConsole:$VerboseMode
                 Write-Host "[WARN] Artifact manifest reports fatal_missing=$artifactFatalMissing. Review $artifactManifestTextPath" -ForegroundColor Yellow
             } else {
+                $artifactManifestBannerColor = "Green"
                 Write-LogLine -Path $GradeLog -Message "[OK] Artifact manifest status: $artifactManifestStatus fatal_missing=0" -AlsoConsole:$VerboseMode
                 Write-Host "[OK] Artifact manifest written to $artifactManifestTextPath and $artifactManifestJsonPath" -ForegroundColor Green
             }
         } catch {
             Write-LogLine -Path $GradeLog -Message "[WARNING] Could not read artifact manifest JSON: $artifactManifestJsonPath error=$($_.Exception.Message)" -AlsoConsole:$VerboseMode
             Write-Host "[WARN] Could not read artifact manifest JSON; continuing daily run." -ForegroundColor Yellow
+            $artifactManifestStatusForBanner = "read_failed"
         }
     }
 }
+Write-OperatorSafetyLine -LogPaths @($RunLog, $GradeLog) -ArtifactManifestStatus $artifactManifestStatusForBanner -FatalMissing $artifactFatalMissingForBanner -ForegroundColor $artifactManifestBannerColor
 
 "=== Completed successfully at $(Get-Date) ===" | Out-File $RunLog -Append
 Write-Host ""

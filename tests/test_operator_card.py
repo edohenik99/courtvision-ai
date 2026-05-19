@@ -220,6 +220,39 @@ def test_operator_card_completion_recommendation_complete_clean(tmp_path: Path) 
     assert "- recommended action: slate closed / no action required" in text
 
 
+def test_operator_card_renders_runtime_safety_summary(tmp_path: Path) -> None:
+    prediction_date = "2026-05-10"
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+    _seed_basic_operator_card_artifacts(runtime_root, history_root, prediction_date)
+    _write_json(
+        runtime_root / "diagnostics" / f"artifact_manifest_{prediction_date}.json",
+        {"status": "ok", "missing_by_severity": {"fatal": 0}},
+    )
+
+    output_path, payload = write_operator_card_outputs(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+        runtime_mode="research",
+        force_past_date=True,
+        force_outputs=False,
+        kelly_bankroll="2500",
+    )
+
+    text = output_path.read_text(encoding="utf-8")
+    assert "Runtime Safety" in text
+    assert "- prediction_date: 2026-05-10" in text
+    assert "- COURTVISION_MODE: research" in text
+    assert "- ForcePastDate: true" in text
+    assert "- ForceOutputs: false" in text
+    assert "- Kelly bankroll: 2500" in text
+    assert "- artifact_manifest_status: ok" in text
+    assert "- fatal_missing: 0" in text
+    assert payload["runtime_safety"]["artifact_manifest_status"] == "ok"
+    assert payload["runtime_safety"]["fatal_missing"] == 0
+
+
 def test_operator_card_renders_unsupported_active_market_drops(tmp_path: Path) -> None:
     prediction_date = "2026-05-10"
     runtime_root = tmp_path / "runtime"

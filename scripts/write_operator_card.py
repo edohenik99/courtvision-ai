@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
 from collections import Counter
 from pathlib import Path
@@ -133,6 +134,8 @@ def _artifact_paths(runtime_root: Path, prediction_date: str) -> dict[str, Path]
         "board_diagnostics": diagnostics / f"board_diagnostics_{prediction_date}.json",
         "completion_state_audit_json": diagnostics / f"completion_state_audit_{prediction_date}.json",
         "completion_state_audit_text": operator / f"completion_state_audit_{prediction_date}.txt",
+        "artifact_manifest_json": diagnostics / f"artifact_manifest_{prediction_date}.json",
+        "artifact_manifest_text": operator / f"artifact_manifest_{prediction_date}.txt",
         "market_shadow_report": operator / f"market_shadow_report_{prediction_date}.txt",
         "market_shadow_grading": diagnostics / f"market_shadow_grading_{prediction_date}.json",
         "high_caution_over_watchlist": operator / f"high_caution_over_watchlist_{prediction_date}.csv",
@@ -1032,11 +1035,62 @@ def _files_written_lines(paths: dict[str, Path]) -> list[str]:
     return lines
 
 
+def _bool_label(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    text = _safe_text(value).lower()
+    if text in TRUE_STRINGS:
+        return "true"
+    if text in {"false", "0", "no", "n"}:
+        return "false"
+    return text or "n/a"
+
+
+def _runtime_safety_summary(
+    *,
+    prediction_date: str,
+    paths: dict[str, Path],
+    warnings: list[str],
+    runtime_mode: str | None,
+    force_past_date: bool | str | None,
+    force_outputs: bool | str | None,
+    kelly_bankroll: str | int | float | None,
+) -> dict[str, Any]:
+    manifest_path = paths["artifact_manifest_json"]
+    summary: dict[str, Any] = {
+        "prediction_date": prediction_date,
+        "COURTVISION_MODE": _safe_text(runtime_mode) or _safe_text(os.environ.get("COURTVISION_MODE")) or "betting",
+        "ForcePastDate": _bool_label(force_past_date),
+        "ForceOutputs": _bool_label(force_outputs),
+        "KellyBankroll": _safe_text(kelly_bankroll) or "n/a",
+        "artifact_manifest_status": "pending_after_operator_card",
+        "fatal_missing": "n/a",
+        "artifact_manifest_path": str(manifest_path),
+    }
+
+    if manifest_path.exists():
+        manifest_payload = _read_json(manifest_path, warnings)
+        missing_by_severity = (
+            manifest_payload.get("missing_by_severity", {})
+            if isinstance(manifest_payload.get("missing_by_severity"), dict)
+            else {}
+        )
+        summary["artifact_manifest_status"] = _safe_text(manifest_payload.get("status")) or "unknown"
+        summary["fatal_missing"] = _safe_int(missing_by_severity.get("fatal"), 0)
+    return summary
+
+
 def build_operator_card(
     *,
     prediction_date: str,
     runtime_root: str | Path = "outputs/runtime",
     history_root: str | Path = "data/history",
+    runtime_mode: str | None = None,
+    force_past_date: bool | str | None = None,
+    force_outputs: bool | str | None = None,
+    kelly_bankroll: str | int | float | None = None,
 ) -> tuple[str, dict[str, Any]]:
     runtime_root = Path(runtime_root)
     history_root = Path(history_root)
@@ -1192,6 +1246,15 @@ def build_operator_card(
         same_opponent_examples_df = full_same_opponent_df
     else:
         same_opponent_examples_df = same_opponent_file_df
+    runtime_safety = _runtime_safety_summary(
+        prediction_date=prediction_date,
+        paths=paths,
+        warnings=warnings,
+        runtime_mode=runtime_mode,
+        force_past_date=force_past_date,
+        force_outputs=force_outputs,
+        kelly_bankroll=kelly_bankroll,
+    )
 
     lines: list[str] = []
     lines.append("=" * 40)
@@ -1202,6 +1265,21 @@ def build_operator_card(
     lines.append(f"final_decision: {final_decision}")
     if warnings:
         lines.append(f"report_warnings: {len(warnings)}")
+    lines.append("")
+
+    lines.append("Runtime Safety")
+    lines.append("-" * 40)
+    lines.append(f"- prediction_date: {runtime_safety['prediction_date']}")
+    lines.append(f"- COURTVISION_MODE: {runtime_safety['COURTVISION_MODE']}")
+    lines.append(f"- ForcePastDate: {runtime_safety['ForcePastDate']}")
+    lines.append(f"- ForceOutputs: {runtime_safety['ForceOutputs']}")
+    lines.append(f"- Kelly bankroll: {runtime_safety['KellyBankroll']}")
+    lines.append(f"- artifact_manifest_status: {runtime_safety['artifact_manifest_status']}")
+    fatal_missing = runtime_safety["fatal_missing"]
+    if isinstance(fatal_missing, int) and fatal_missing > 0:
+        lines.append(f"- fatal_missing: {fatal_missing} (DANGER: core operator artifacts missing)")
+    else:
+        lines.append(f"- fatal_missing: {fatal_missing}")
     lines.append("")
 
     lines.append("Slate Summary")
@@ -1408,6 +1486,7 @@ def build_operator_card(
         "same_opponent_warning_count": same_opponent_warning_count,
         "unsupported_active_operator_markets": unsupported_active_summary,
         "provider_status": provider_status,
+        "runtime_safety": runtime_safety,
         "missing_required": missing_required,
         "completion_state_audit_status": _safe_text(completion_state_payload.get("report_agreement_status")) if completion_state_payload else "missing",
         "warnings": warnings,
@@ -1420,6 +1499,10 @@ def write_operator_card_outputs(
     prediction_date: str,
     runtime_root: str | Path = "outputs/runtime",
     history_root: str | Path = "data/history",
+    runtime_mode: str | None = None,
+    force_past_date: bool | str | None = None,
+    force_outputs: bool | str | None = None,
+    kelly_bankroll: str | int | float | None = None,
     force: bool = False,
 ) -> tuple[Path, dict[str, Any]]:
     runtime_root = Path(runtime_root)
@@ -1435,6 +1518,10 @@ def write_operator_card_outputs(
         prediction_date=prediction_date,
         runtime_root=runtime_root,
         history_root=history_root,
+        runtime_mode=runtime_mode,
+        force_past_date=force_past_date,
+        force_outputs=force_outputs,
+        kelly_bankroll=kelly_bankroll,
     )
     paths["operator_card"].write_text(text + "\n", encoding="utf-8")
     return paths["operator_card"], payload
@@ -1445,6 +1532,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--prediction-date", required=True)
     parser.add_argument("--runtime-root", default="outputs/runtime")
     parser.add_argument("--history-root", default="data/history")
+    parser.add_argument("--runtime-mode", help="Runtime mode visible in the operator safety summary.")
+    parser.add_argument("--force-past-date", choices=("true", "false"), help="Whether -ForcePastDate was active.")
+    parser.add_argument("--force-outputs", choices=("true", "false"), help="Whether output overwrite forcing was active.")
+    parser.add_argument("--kelly-bankroll", help="Bankroll value passed to Kelly staking.")
     parser.add_argument(
         "--force",
         action="store_true",
@@ -1456,6 +1547,10 @@ def main(argv: list[str] | None = None) -> int:
         prediction_date=args.prediction_date,
         runtime_root=args.runtime_root,
         history_root=args.history_root,
+        runtime_mode=args.runtime_mode,
+        force_past_date=args.force_past_date,
+        force_outputs=args.force_outputs,
+        kelly_bankroll=args.kelly_bankroll,
         force=args.force,
     )
     print(f"operator_card_txt={output_path}")

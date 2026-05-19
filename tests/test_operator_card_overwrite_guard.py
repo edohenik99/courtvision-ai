@@ -83,6 +83,14 @@ def test_write_operator_card_cli_passes_force(
             str(tmp_path / "runtime"),
             "--history-root",
             str(tmp_path / "history"),
+            "--runtime-mode",
+            "research",
+            "--force-past-date",
+            "true",
+            "--force-outputs",
+            "false",
+            "--kelly-bankroll",
+            "2500",
             "--force",
         ]
     )
@@ -92,6 +100,10 @@ def test_write_operator_card_cli_passes_force(
     assert captured["prediction_date"] == "2026-05-06"
     assert captured["runtime_root"] == str(tmp_path / "runtime")
     assert captured["history_root"] == str(tmp_path / "history")
+    assert captured["runtime_mode"] == "research"
+    assert captured["force_past_date"] == "true"
+    assert captured["force_outputs"] == "false"
+    assert captured["kelly_bankroll"] == "2500"
     assert captured["force"] is True
     assert f"operator_card_txt={output_path}" in output
     assert "operator_card_decision=NO BET" in output
