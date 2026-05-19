@@ -23,6 +23,43 @@ from courtvision.context.game_context import (
     identity_quarantine_reason_counts,
     identity_quarantine_summary,
 )
+from courtvision.reason_codes import (
+    DUPLICATE_BETTING_IDENTITY_REASON,
+    ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER,
+    ELITE_REJECT_GAME_CONTEXT_SUPPRESSED,
+    ELITE_REJECT_GAME_FINAL,
+    ELITE_REJECT_GAME_IN_PROGRESS,
+    ELITE_REJECT_GAME_LOCKED,
+    ELITE_REJECT_GAME_NOT_BETTABLE,
+    ELITE_REJECT_GAME_POSTPONED,
+    ELITE_REJECT_ODDS_STALE,
+    ELITE_REJECT_PLAYER_POINTS_STRONG_OVER_CALIBRATION,
+    GAME_STATUS_REASON_FINAL,
+    GAME_STATUS_REASON_IN_PROGRESS,
+    GAME_STATUS_REASON_LOCKED,
+    GAME_STATUS_REASON_POSTPONED,
+    GAME_STATUS_REASON_UNKNOWN,
+    KELLY_PROJECTED_SKIP_CONTEXT_HIGH_CAUTION_OVER,
+    KELLY_PROJECTED_SKIP_PLAYER_POINTS_STRONG_OVER_CALIBRATION,
+    KELLY_SKIP_GAME_FINAL,
+    KELLY_SKIP_GAME_IN_PROGRESS,
+    KELLY_SKIP_GAME_LOCKED,
+    KELLY_SKIP_GAME_NOT_BETTABLE,
+    KELLY_SKIP_GAME_POSTPONED,
+    KELLY_SKIP_ODDS_STALE,
+    PASSED_TO_ELITE,
+    REJECT_CONFIDENCE_BELOW_THRESHOLD,
+    REJECT_EXPOSURE_LIMIT,
+    REJECT_HEAVY_FAVORITE_ODDS,
+    REJECT_INJURY_FLAG,
+    REJECT_MINUTES_VOLATILITY,
+    REJECT_NEGATIVE_EDGE_DIRECTION,
+    REJECT_OTHER,
+    REJECT_PROJECTION_REALISM,
+    REJECT_UNREALISTIC_LINE,
+    TOTAL_CANDIDATES,
+    UNSUPPORTED_ACTIVE_OPERATOR_MARKET_REASON,
+)
 from courtvision.runtime_selection import (
     elite_points_risk_guard_reason,
     player_points_strong_over_calibration_reason,
@@ -243,7 +280,7 @@ class BoardAuditPolicy:
                 {
                     "scope": "overview",
                     "section": "unsupported_active_operator_markets",
-                    "key": str(unsupported_active.get("rejection_reason", "unsupported_active_operator_market")),
+                    "key": str(unsupported_active.get("rejection_reason", UNSUPPORTED_ACTIVE_OPERATOR_MARKET_REASON)),
                     "count": int(unsupported_active.get("total_rows_dropped", 0) or 0),
                     "value": None,
                 }
@@ -963,7 +1000,7 @@ class BoardAuditPolicy:
             duplicate_summary.get("counts_by_market_type", {}) or {}
         )
         normalized["duplicate_betting_identity_rejection_reason"] = str(
-            duplicate_summary.get("rejection_reason", "duplicate_betting_identity")
+            duplicate_summary.get("rejection_reason", DUPLICATE_BETTING_IDENTITY_REASON)
         )
         unsupported_summary = unsupported_active_operator_market_drop_summary(payload)
         normalized["unsupported_active_operator_market_count"] = int(
@@ -973,7 +1010,7 @@ class BoardAuditPolicy:
             unsupported_summary.get("counts_by_market_type", {}) or {}
         )
         normalized["unsupported_active_operator_market_rejection_reason"] = str(
-            unsupported_summary.get("rejection_reason", "unsupported_active_operator_market")
+            unsupported_summary.get("rejection_reason", UNSUPPORTED_ACTIVE_OPERATOR_MARKET_REASON)
         )
         return normalized
 
@@ -1401,44 +1438,7 @@ import csv
 import json
 
 
-# Normalized rejection reasons - do not freestyle these at runtime
-REJECT_INJURY_FLAG = "reject_injury_flag"
-REJECT_MINUTES_VOLATILITY = "reject_minutes_volatility"
-REJECT_CONFIDENCE_BELOW_THRESHOLD = "reject_confidence_below_threshold"
-REJECT_PROJECTION_REALISM = "reject_projection_realism"
-REJECT_EXPOSURE_LIMIT = "reject_exposure_limit"
-REJECT_NEGATIVE_EDGE_DIRECTION = "reject_negative_edge_direction"
-REJECT_UNREALISTIC_LINE = "reject_unrealistic_line"
-REJECT_HEAVY_FAVORITE_ODDS = "reject_heavy_favorite_odds"
-REJECT_OTHER = "reject_other"
-ELITE_REJECT_CONTEXT_HIGH_CAUTION_OVER = "elite_reject_context_high_caution_over"
-ELITE_REJECT_GAME_CONTEXT_SUPPRESSED = "elite_reject_game_context_suppressed"
-ELITE_REJECT_PLAYER_POINTS_STRONG_OVER_CALIBRATION = (
-    "elite_reject_player_points_strong_over_calibration"
-)
-KELLY_PROJECTED_SKIP_CONTEXT_HIGH_CAUTION_OVER = "context_high_caution_over"
-KELLY_PROJECTED_SKIP_PLAYER_POINTS_STRONG_OVER_CALIBRATION = (
-    "player_points_strong_over_calibration"
-)
-
-# Game status / slate-lock gate rejection reasons
-ELITE_REJECT_GAME_NOT_BETTABLE = "elite_reject_game_not_bettable"
-ELITE_REJECT_GAME_FINAL = "elite_reject_game_final"
-ELITE_REJECT_GAME_IN_PROGRESS = "elite_reject_game_in_progress"
-ELITE_REJECT_GAME_LOCKED = "elite_reject_game_locked"
-ELITE_REJECT_GAME_POSTPONED = "elite_reject_game_postponed"
-KELLY_SKIP_GAME_NOT_BETTABLE = "game_not_bettable"
-KELLY_SKIP_GAME_FINAL = "game_final"
-KELLY_SKIP_GAME_IN_PROGRESS = "game_in_progress"
-KELLY_SKIP_GAME_LOCKED = "game_locked"
-KELLY_SKIP_GAME_POSTPONED = "game_postponed"
-
-# Odds freshness gate rejection reasons
-ELITE_REJECT_ODDS_STALE = "elite_reject_odds_stale"
-KELLY_SKIP_ODDS_STALE = "odds_stale"
-
-PASSED_TO_ELITE = "passed_to_elite"
-TOTAL_CANDIDATES = "total_candidates"
+# Normalized rejection reasons are imported from courtvision.reason_codes.
 
 
 @dataclass
@@ -1592,11 +1592,11 @@ def get_elite_rejection_reason(row: dict[str, Any], now: Any = None) -> str | No
     game_status_reason = game_status_ineligibility_reason(row, now=now)
     if game_status_reason:
         reason_map = {
-            "game_final": ELITE_REJECT_GAME_FINAL,
-            "game_in_progress": ELITE_REJECT_GAME_IN_PROGRESS,
-            "game_postponed": ELITE_REJECT_GAME_POSTPONED,
-            "game_locked": ELITE_REJECT_GAME_LOCKED,
-            "game_status_unknown": ELITE_REJECT_GAME_NOT_BETTABLE,
+            GAME_STATUS_REASON_FINAL: ELITE_REJECT_GAME_FINAL,
+            GAME_STATUS_REASON_IN_PROGRESS: ELITE_REJECT_GAME_IN_PROGRESS,
+            GAME_STATUS_REASON_POSTPONED: ELITE_REJECT_GAME_POSTPONED,
+            GAME_STATUS_REASON_LOCKED: ELITE_REJECT_GAME_LOCKED,
+            GAME_STATUS_REASON_UNKNOWN: ELITE_REJECT_GAME_NOT_BETTABLE,
         }
         return reason_map.get(game_status_reason, ELITE_REJECT_GAME_NOT_BETTABLE)
 
@@ -1674,11 +1674,11 @@ def projected_kelly_skip_reason(row: Mapping[str, Any], now: Any = None) -> str:
     game_status_reason = game_status_ineligibility_reason(row, now=now)
     if game_status_reason:
         reason_map = {
-            "game_final": KELLY_SKIP_GAME_FINAL,
-            "game_in_progress": KELLY_SKIP_GAME_IN_PROGRESS,
-            "game_postponed": KELLY_SKIP_GAME_POSTPONED,
-            "game_locked": KELLY_SKIP_GAME_LOCKED,
-            "game_status_unknown": KELLY_SKIP_GAME_NOT_BETTABLE,
+            GAME_STATUS_REASON_FINAL: KELLY_SKIP_GAME_FINAL,
+            GAME_STATUS_REASON_IN_PROGRESS: KELLY_SKIP_GAME_IN_PROGRESS,
+            GAME_STATUS_REASON_POSTPONED: KELLY_SKIP_GAME_POSTPONED,
+            GAME_STATUS_REASON_LOCKED: KELLY_SKIP_GAME_LOCKED,
+            GAME_STATUS_REASON_UNKNOWN: KELLY_SKIP_GAME_NOT_BETTABLE,
         }
         return reason_map.get(game_status_reason, KELLY_SKIP_GAME_NOT_BETTABLE)
 

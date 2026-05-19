@@ -57,6 +57,18 @@ from courtvision.context.game_context import (  # noqa: E402
     IDENTITY_QUARANTINE_REJECTION_REASON,
     is_identity_quarantined,
 )
+from courtvision.reason_codes import (  # noqa: E402
+    EDGE_CONTAINMENT_HOLD_SKIP_REASON,
+    KELLY_SKIP_CONTEXT_HIGH_CAUTION_OVER,
+    KELLY_SKIP_MISSING_CONFIDENCE,
+    KELLY_SKIP_MISSING_OR_INVALID_ODDS,
+    KELLY_SKIP_NON_POSITIVE_DECIMAL_ODDS,
+    KELLY_SKIP_NON_POSITIVE_EDGE,
+    KELLY_SKIP_POINTS_ONLY_MARKET_LOCK,
+    KELLY_SKIP_RETURNED_ZERO,
+    MEDIUM_NEUTRAL_OVER_DAMPENER_REASON,
+    UNSUPPORTED_MILESTONE_MARKET_REASON,
+)
 
 REQUIRED_COLUMNS: tuple[str, ...] = ("odds", "confidence")
 EDGE_COLUMN_PREFERENCE: tuple[str, ...] = ("side_edge_pct", "edge_pct", "edge")
@@ -65,7 +77,6 @@ EDGE_COLUMN_PREFERENCE: tuple[str, ...] = ("side_edge_pct", "edge_pct", "edge")
 # COURTVISION_MAX_DAILY_EXPOSURE env var or --max-daily-exposure CLI flag.
 DEFAULT_MAX_DAILY_EXPOSURE: float = 0.08
 MEDIUM_NEUTRAL_OVER_DAMPENER_FACTOR: float = 0.5
-MEDIUM_NEUTRAL_OVER_DAMPENER_REASON: str = "medium_neutral_over_dampener"
 REVIEW_BEFORE_BET_ACTION: str = "REVIEW_BEFORE_BET"
 OK_TO_CONSIDER_ACTION: str = "OK_TO_CONSIDER"
 
@@ -73,7 +84,6 @@ OK_TO_CONSIDER_ACTION: str = "OK_TO_CONSIDER"
 # A row is held when: selection==over, market_type in HOLD_COMBO_MARKETS, edge>=threshold.
 # Applies BEFORE normal eligibility gating so it fires even for currently-ineligible
 # combo markets (protective for future expansion).
-EDGE_CONTAINMENT_HOLD_SKIP_REASON: str = "edge_containment_hold_for_review"
 _HOLD_COMBO_MARKETS: frozenset[str] = frozenset({
     "player_points_assists",
     "player_points_rebounds",
@@ -304,7 +314,7 @@ def _build_stake_row(row: dict[str, str], edge_col: str, bankroll: float) -> Sta
         stake_policy = "HOLD_FOR_REVIEW"
         recommended_action = "DO_NOT_BET_UNTIL_REVIEWED"
         operator_action = "DO_NOT_BET_UNTIL_REVIEWED"
-        operator_note = "edge_containment_hold_for_review"
+        operator_note = EDGE_CONTAINMENT_HOLD_SKIP_REASON
     elif manual_review_required:
         review_status = "REVIEW_REQUIRED"
         stake_policy = "HOLD"
@@ -325,22 +335,22 @@ def _build_stake_row(row: dict[str, str], edge_col: str, bankroll: float) -> Sta
 
     if not identity_quarantine_reason and not _ecr_hold:
         if market_type and market_type != "player_points":
-            skip_reason = "kelly_points_only_market_lock"
+            skip_reason = KELLY_SKIP_POINTS_ONLY_MARKET_LOCK
             eligible = False
         elif raw_market_type == "milestone" or selection == "milestone":
-            skip_reason = "unsupported_milestone_market"
+            skip_reason = UNSUPPORTED_MILESTONE_MARKET_REASON
             eligible = False
         elif context_caution_level == "high" and selection == "over":
-            skip_reason = "context_high_caution_over"
+            skip_reason = KELLY_SKIP_CONTEXT_HIGH_CAUTION_OVER
             eligible = False
         elif raw_american is None:
-            skip_reason = "missing_or_invalid_odds"
+            skip_reason = KELLY_SKIP_MISSING_OR_INVALID_ODDS
             eligible = False
         elif decimal_odds is None or decimal_odds <= 1.0:
-            skip_reason = "non_positive_decimal_odds"
+            skip_reason = KELLY_SKIP_NON_POSITIVE_DECIMAL_ODDS
             eligible = False
         elif confidence is None:
-            skip_reason = "missing_confidence"
+            skip_reason = KELLY_SKIP_MISSING_CONFIDENCE
             eligible = False
         elif edge_pct_raw is None:
             skip_reason = f"missing_{edge_col}"
@@ -349,7 +359,7 @@ def _build_stake_row(row: dict[str, str], edge_col: str, bankroll: float) -> Sta
             skip_reason = f"confidence_below_min({MIN_CONFIDENCE_THRESHOLD})"
             eligible = False
         elif edge_pct_raw <= 0:
-            skip_reason = "non_positive_edge"
+            skip_reason = KELLY_SKIP_NON_POSITIVE_EDGE
             eligible = False
 
     if eligible:
@@ -360,7 +370,7 @@ def _build_stake_row(row: dict[str, str], edge_col: str, bankroll: float) -> Sta
         )
         if stake_fraction <= 0:
             eligible = False
-            skip_reason = "kelly_returned_zero"
+            skip_reason = KELLY_SKIP_RETURNED_ZERO
     else:
         stake_fraction = 0.0
 

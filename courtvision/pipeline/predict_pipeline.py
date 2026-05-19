@@ -43,6 +43,7 @@ from courtvision.selection import (
     duplicate_betting_identity_drop_summary,
     unsupported_active_operator_market_drop_summary,
 )
+from courtvision.reason_codes import REJECT_NEGATIVE_EDGE_DIRECTION
 from courtvision.betting.kelly import compute_kelly_fraction
 from courtvision.selection.operator_boards import assign_candidate_lanes
 from courtvision.projection.recalibration import (
@@ -1319,7 +1320,7 @@ class PredictionPipeline:
                     return None
 
             if side_edge <= 0:
-                candidate_row["pre_rejection_reason"] = "reject_negative_edge_direction"
+                candidate_row["pre_rejection_reason"] = REJECT_NEGATIVE_EDGE_DIRECTION
                 return None
             if side_edge < self.config.min_edge:
                 return None

@@ -4,6 +4,21 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from courtvision.calibration.buckets import injury_influence_value, player_points_line_band, player_profile_bucket
+from courtvision.reason_codes import (
+    GAME_STATUS_REASON_FINAL,
+    GAME_STATUS_REASON_IN_PROGRESS,
+    GAME_STATUS_REASON_LOCKED,
+    GAME_STATUS_REASON_POSTPONED,
+    GAME_STATUS_REASON_UNKNOWN,
+    ODDS_STALE_REASON,
+    PLAYER_POINTS_STRONG_OVER_CALIBRATION_GUARD_REASON,
+    REJECT_CONFIDENCE_BELOW_THRESHOLD,
+    REJECT_EXPOSURE_LIMIT,
+    REJECT_INJURY_FLAG,
+    REJECT_MINUTES_VOLATILITY,
+    REJECT_NEGATIVE_EDGE_DIRECTION,
+    REJECT_PROJECTION_REALISM,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -358,9 +373,6 @@ def passes_elite_points_risk_guard(row: Mapping[str, Any]) -> bool:
 # recalibrated, block strong OVERs from elite/Kelly. Diagnostic-only otherwise:
 # rows remain in Full Market.
 PLAYER_POINTS_STRONG_OVER_CALIBRATION_EDGE_THRESHOLD: float = 3.0
-PLAYER_POINTS_STRONG_OVER_CALIBRATION_GUARD_REASON: str = (
-    "player_points_strong_over_calibration_guard"
-)
 
 
 def player_points_strong_over_calibration_reason(row: Mapping[str, Any]) -> str:
@@ -474,15 +486,6 @@ def elite_points_ranking_pressure(row: Mapping[str, Any]) -> dict[str, Any]:
 
 def get_elite_rejection_reason(row: dict[str, Any]) -> str | None:
     """Return rejection reason if row fails elite criteria, else None."""
-    from courtvision.runtime_audit import (
-        REJECT_INJURY_FLAG,
-        REJECT_MINUTES_VOLATILITY,
-        REJECT_CONFIDENCE_BELOW_THRESHOLD,
-        REJECT_PROJECTION_REALISM,
-        REJECT_EXPOSURE_LIMIT,
-        REJECT_NEGATIVE_EDGE_DIRECTION,
-    )
-
     market = str(row.get("market", "")).lower()
     selection = str(row.get("selection", "")).lower()
     edge = float(row.get("edge_pct", row.get("edge", 0.0)) or 0.0)
@@ -667,15 +670,15 @@ def game_status_ineligibility_reason(
 
     # Check if game is already complete
     if status in GAME_STATUS_FINAL:
-        return "game_final"
+        return GAME_STATUS_REASON_FINAL
 
     # Check if game is in progress
     if status in GAME_STATUS_IN_PROGRESS:
-        return "game_in_progress"
+        return GAME_STATUS_REASON_IN_PROGRESS
 
     # Check if game is postponed/cancelled
     if status in GAME_STATUS_CANCELLED:
-        return "game_postponed"
+        return GAME_STATUS_REASON_POSTPONED
 
     # Parse game datetime for lock buffer checks
     game_datetime_raw = row.get("game_datetime") or row.get("game_date") or row.get("datetime")
@@ -686,11 +689,11 @@ def game_status_ineligibility_reason(
     if status == "unknown" or not status:
         if game_dt is None:
             # Unknown status and no datetime - cannot determine if bettable
-            return "game_status_unknown"
+            return GAME_STATUS_REASON_UNKNOWN
         # Have datetime - check if game is in the future outside lock buffer
         if not _is_before_lock_buffer(game_dt, now, lock_buffer_minutes):
             # Game has started or is within lock buffer
-            return "game_locked"
+            return GAME_STATUS_REASON_LOCKED
         # Game is in the future outside lock buffer - treat as bettable
         return ""
 
@@ -699,16 +702,16 @@ def game_status_ineligibility_reason(
         if game_dt is not None:
             # Have datetime - verify game hasn't started
             if not _is_before_lock_buffer(game_dt, now, lock_buffer_minutes):
-                return "game_locked"
+                return GAME_STATUS_REASON_LOCKED
         # No datetime but status is scheduled - allow (trust the status)
         return ""
 
     # Truly unrecognized status - be conservative and block
     # Check if it's numeric (quarter/period indicator)
     if status.isdigit() or status in ("q1", "q2", "q3", "q4", "ot", "halftime"):
-        return "game_in_progress"
+        return GAME_STATUS_REASON_IN_PROGRESS
 
-    return "game_status_unknown"
+    return GAME_STATUS_REASON_UNKNOWN
 
 
 def is_game_bettable(
@@ -759,16 +762,16 @@ def odds_stale_ineligibility_reason(
 
     updated_at_raw = row.get("odds_updated_at", "")
     if not updated_at_raw:
-        return "odds_stale"
+        return ODDS_STALE_REASON
 
     updated_at_str = str(updated_at_raw).strip()
     if not updated_at_str:
-        return "odds_stale"
+        return ODDS_STALE_REASON
 
     # Try to parse the datetime
     updated_at = _parse_game_datetime(updated_at_str)
     if updated_at is None:
-        return "odds_stale"
+        return ODDS_STALE_REASON
 
     if isinstance(now, datetime):
         now_dt = now
@@ -777,7 +780,7 @@ def odds_stale_ineligibility_reason(
 
     age = now_dt - updated_at
     if age > timedelta(minutes=stale_threshold_minutes):
-        return "odds_stale"
+        return ODDS_STALE_REASON
 
     return ""
 

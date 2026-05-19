@@ -17,10 +17,15 @@ from courtvision.context.game_context import (
     identity_quarantine_reason_counts,
     mark_identity_quarantine_fields,
 )
-
-
-UNSUPPORTED_ACTIVE_OPERATOR_MARKET_REASON = "unsupported_active_operator_market"
-DUPLICATE_BETTING_IDENTITY_REASON = "duplicate_betting_identity"
+from courtvision.reason_codes import (
+    DUPLICATE_BETTING_IDENTITY_REASON,
+    SELECTION_LIVE_GATE_FILTERED_REASON,
+    SELECTION_LIVE_GATE_MISSING_QUALIFICATION_REASON,
+    SELECTION_NOT_LIVE_MARKET_ELIGIBLE_REASON,
+    SELECTION_NOT_SELECTED_BY_BOARD_SELECTOR_REASON,
+    UNSUPPORTED_ACTIVE_OPERATOR_MARKET_REASON,
+    UNSUPPORTED_MILESTONE_MARKET_REASON,
+)
 
 ACTIVE_OPERATOR_MARKETS = {
     "player_points",
@@ -765,20 +770,20 @@ def build_operator_boards(
         & ~unified_live_mask
         & ~diagnostic_live_mask,
         "selection_rejection_reason",
-    ] = "selection_not_live_market_eligible"
+    ] = SELECTION_NOT_LIVE_MARKET_ELIGIBLE_REASON
     prepared_df.loc[
         prepared_df["selection_rejection_reason"].eq("")
         & diagnostic_live_mask
         & ~origin_live_mask
         & qualification_reason_series.fillna("").astype(str).str.strip().eq(""),
         "selection_rejection_reason",
-    ] = "selection_live_gate_missing_qualification_reason"
+    ] = SELECTION_LIVE_GATE_MISSING_QUALIFICATION_REASON
     prepared_df.loc[
         prepared_df["selection_rejection_reason"].eq("")
         & diagnostic_live_mask
         & ~origin_live_mask,
         "selection_rejection_reason",
-    ] = "selection_live_gate_filtered"
+    ] = SELECTION_LIVE_GATE_FILTERED_REASON
 
     # Filter using the SAME unified mask used for eligibility marking
     milestone_mask = ~_non_milestone_mask(prepared_df)
@@ -786,7 +791,7 @@ def build_operator_boards(
         prepared_df.loc[
             prepared_df["selection_rejection_reason"].eq("") & milestone_mask,
             "selection_rejection_reason",
-        ] = "unsupported_milestone_market"
+        ] = UNSUPPORTED_MILESTONE_MARKET_REASON
 
     active_market_mask = _active_operator_market_mask(prepared_df)
     unsupported_active_market_mask = unified_live_mask & ~milestone_mask & ~active_market_mask
@@ -894,7 +899,7 @@ def build_operator_boards(
                 str(row.get("team", row.get("team_abbr", "")) or "").strip().upper(),
             )
             if identity not in selected_identities and not str(prepared_df.at[idx, "selection_rejection_reason"]).strip():
-                prepared_df.at[idx, "selection_rejection_reason"] = "selection_not_selected_by_board_selector"
+                prepared_df.at[idx, "selection_rejection_reason"] = SELECTION_NOT_SELECTED_BY_BOARD_SELECTOR_REASON
 
     not_selected_df = prepared_df[prepared_df["selection_rejection_reason"].astype(str).str.strip().ne("")].copy()
     final_board_construction["selection_rejection_reasons"] = (
