@@ -283,6 +283,32 @@ def test_daily_runner_writes_completion_state_audit_after_summaries() -> None:
     assert "completion_state_audit" in bat
 
 
+def test_daily_runner_writes_artifact_manifest_after_operator_card_non_blocking() -> None:
+    ps1 = Path("run_today.ps1").read_text(encoding="utf-8")
+    normalized_ps1 = ps1.replace("\\", "/")
+
+    assert "scripts/write_artifact_manifest.py" in normalized_ps1
+    assert "[START] Artifact Manifest" in ps1
+    assert "artifact_manifest_$Date.txt" in ps1
+    assert "artifact_manifest_$Date.json" in ps1
+    assert "fatal_missing=" in ps1
+
+    operator_idx = ps1.index("$operatorCardExitCode = Invoke-LoggedCommand")
+    manifest_idx = ps1.index("$artifactManifestExitCode = Invoke-LoggedCommand")
+    completed_idx = ps1.index('"=== Completed successfully at $(Get-Date) ==="')
+    assert operator_idx < manifest_idx < completed_idx
+
+    manifest_block = ps1[
+        ps1.index('Write-Host "[START] Artifact Manifest"') :
+        ps1.index('"=== Completed successfully at $(Get-Date) ==="')
+    ]
+    assert "Stop-StageFailure" not in manifest_block
+    assert "[WARNING] Artifact manifest writer failed or exited nonzero" in manifest_block
+    assert "Artifact manifest JSON:" in manifest_block
+    assert "Artifact manifest TXT:" in manifest_block
+    assert "continuing daily run" in manifest_block
+
+
 def test_daily_runner_runs_full_market_sanity_audit_non_blocking() -> None:
     ps1 = Path("run_today.ps1").read_text(encoding="utf-8")
     normalized_ps1 = ps1.replace("\\", "/")

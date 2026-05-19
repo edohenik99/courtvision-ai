@@ -107,6 +107,7 @@ $DailySummaryScript = Join-Path $ScriptRoot "scripts\write_daily_summary.py"
 $QualitySummaryScript = Join-Path $ScriptRoot "scripts\write_quality_summary.py"
 $CompletionStateAuditScript = Join-Path $ScriptRoot "scripts\write_completion_state_audit.py"
 $OperatorCardScript = Join-Path $ScriptRoot "scripts\write_operator_card.py"
+$ArtifactManifestScript = Join-Path $ScriptRoot "scripts\write_artifact_manifest.py"
 
 # Bankroll override: read $env:COURTVISION_BANKROLL when set, else default.
 $KellyBankroll = if ($env:COURTVISION_BANKROLL) { $env:COURTVISION_BANKROLL } else { "1000" }
@@ -282,9 +283,11 @@ $eliteOperatorCsv = Join-Path $operatorDir "elite_board_$Date.csv"
 $fullMarketOperatorCsv = Join-Path $operatorDir "full_market_board_$Date.csv"
 $statOnlyOptionalCsv = Join-Path $optionalDir "stat_only_board_$Date.csv"
 $operatorCardPath = Join-Path $operatorDir "operator_card_$Date.txt"
+$artifactManifestTextPath = Join-Path $operatorDir "artifact_manifest_$Date.txt"
 $kellyOutputCsv = Join-Path $operatorDir "kelly_stakes_$Date.csv"
 $completionAuditTextPath = Join-Path $operatorDir "completion_state_audit_$Date.txt"
 $completionAuditJsonPath = "outputs\runtime\diagnostics\completion_state_audit_$Date.json"
+$artifactManifestJsonPath = "outputs\runtime\diagnostics\artifact_manifest_$Date.json"
 $fullMarketSanityAuditJsonPath = "outputs\runtime\diagnostics\full_market_sanity_audit_$Date.json"
 $candidateQualityDriftAuditJsonPath = "outputs\runtime\diagnostics\candidate_quality_drift_audit_$Date.json"
 
@@ -573,6 +576,52 @@ if (-not (Test-Path $operatorCardPath)) {
     Stop-StageFailure -Stage "Operator Card" -ExitCode 1 -LogPath $GradeLog
 }
 Write-Host "[OK] Operator card written to $operatorCardPath" -ForegroundColor Green
+
+Write-Host ""
+Write-Host "[START] Artifact Manifest" -ForegroundColor Yellow
+if (-not (Test-Path $ArtifactManifestScript)) {
+    Write-LogLine -Path $GradeLog -Message "[WARNING] Artifact manifest script not found: $ArtifactManifestScript" -AlsoConsole:$VerboseMode
+    Write-Host "[WARN] Artifact manifest skipped; script not found: $ArtifactManifestScript" -ForegroundColor Yellow
+} else {
+    "`n--- Artifact manifest ---" | Out-File $GradeLog -Append
+    $artifactManifestExitCode = Invoke-LoggedCommand `
+        -LogPath $GradeLog `
+        -Exe $PyExe `
+        -Arguments ($PyArgsPrefix + @($ArtifactManifestScript, "--prediction-date", $Date)) `
+        -StreamToConsole:$VerboseMode
+
+    if ($artifactManifestExitCode -ne 0) {
+        Write-LogLine -Path $GradeLog -Message "[WARNING] Artifact manifest writer failed or exited nonzero (exit code: $artifactManifestExitCode)." -AlsoConsole:$VerboseMode
+        Write-Host "[WARN] Artifact manifest writer failed or exited nonzero; continuing daily run." -ForegroundColor Yellow
+    } elseif (-not (Test-Path $artifactManifestJsonPath)) {
+        Write-LogLine -Path $GradeLog -Message "[WARNING] Artifact manifest JSON output not found: $artifactManifestJsonPath" -AlsoConsole:$VerboseMode
+        Write-Host "[WARN] Artifact manifest JSON output not found; continuing daily run." -ForegroundColor Yellow
+    } elseif (-not (Test-Path $artifactManifestTextPath)) {
+        Write-LogLine -Path $GradeLog -Message "[WARNING] Artifact manifest TXT output not found: $artifactManifestTextPath" -AlsoConsole:$VerboseMode
+        Write-Host "[WARN] Artifact manifest TXT output not found; continuing daily run." -ForegroundColor Yellow
+    } else {
+        try {
+            $artifactManifestPayload = Get-Content -Path $artifactManifestJsonPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            $artifactManifestStatus = [string]$artifactManifestPayload.status
+            $artifactFatalMissing = 0
+            if ($null -ne $artifactManifestPayload.missing_by_severity -and $null -ne $artifactManifestPayload.missing_by_severity.fatal) {
+                $artifactFatalMissing = [int]$artifactManifestPayload.missing_by_severity.fatal
+            }
+            Write-LogLine -Path $GradeLog -Message "[OK] Artifact manifest JSON: $artifactManifestJsonPath" -AlsoConsole:$VerboseMode
+            Write-LogLine -Path $GradeLog -Message "[OK] Artifact manifest TXT: $artifactManifestTextPath" -AlsoConsole:$VerboseMode
+            if ($artifactFatalMissing -gt 0) {
+                Write-LogLine -Path $GradeLog -Message "[WARNING] Artifact manifest status: $artifactManifestStatus fatal_missing=$artifactFatalMissing" -AlsoConsole:$VerboseMode
+                Write-Host "[WARN] Artifact manifest reports fatal_missing=$artifactFatalMissing. Review $artifactManifestTextPath" -ForegroundColor Yellow
+            } else {
+                Write-LogLine -Path $GradeLog -Message "[OK] Artifact manifest status: $artifactManifestStatus fatal_missing=0" -AlsoConsole:$VerboseMode
+                Write-Host "[OK] Artifact manifest written to $artifactManifestTextPath and $artifactManifestJsonPath" -ForegroundColor Green
+            }
+        } catch {
+            Write-LogLine -Path $GradeLog -Message "[WARNING] Could not read artifact manifest JSON: $artifactManifestJsonPath error=$($_.Exception.Message)" -AlsoConsole:$VerboseMode
+            Write-Host "[WARN] Could not read artifact manifest JSON; continuing daily run." -ForegroundColor Yellow
+        }
+    }
+}
 
 "=== Completed successfully at $(Get-Date) ===" | Out-File $RunLog -Append
 Write-Host ""
