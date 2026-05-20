@@ -616,6 +616,7 @@ Write-Host "[START] Artifact Manifest" -ForegroundColor Yellow
 $artifactManifestStatusForBanner = "unavailable"
 $artifactFatalMissingForBanner = "unknown"
 $artifactManifestBannerColor = "Yellow"
+$artifactManifestFatalFailure = $false
 if (-not (Test-Path $ArtifactManifestScript)) {
     Write-LogLine -Path $GradeLog -Message "[WARNING] Artifact manifest script not found: $ArtifactManifestScript" -AlsoConsole:$VerboseMode
     Write-Host "[WARN] Artifact manifest skipped; script not found: $ArtifactManifestScript" -ForegroundColor Yellow
@@ -653,8 +654,12 @@ if (-not (Test-Path $ArtifactManifestScript)) {
             $artifactManifestStatusForBanner = $artifactManifestStatus
             $artifactFatalMissingForBanner = [string]$artifactFatalMissing
             if ($artifactFatalMissing -gt 0) {
-                Write-LogLine -Path $GradeLog -Message "[WARNING] Artifact manifest status: $artifactManifestStatus fatal_missing=$artifactFatalMissing" -AlsoConsole:$VerboseMode
-                Write-Host "[WARN] Artifact manifest reports fatal_missing=$artifactFatalMissing. Review $artifactManifestTextPath" -ForegroundColor Yellow
+                $artifactManifestBannerColor = "Red"
+                $artifactManifestFatalFailure = $true
+                Write-LogLine -Path $GradeLog -Message "[ERROR] Artifact manifest safety failure: status=$artifactManifestStatus fatal_missing=$artifactFatalMissing" -AlsoConsole:$VerboseMode
+                Write-Host "[FAIL] Artifact manifest safety failure: fatal_missing=$artifactFatalMissing" -ForegroundColor Red
+                Write-Host "       Fatal operator artifacts are missing; refusing to mark run complete." -ForegroundColor Red
+                Write-Host "       Review $artifactManifestTextPath" -ForegroundColor Red
             } else {
                 $artifactManifestBannerColor = "Green"
                 Write-LogLine -Path $GradeLog -Message "[OK] Artifact manifest status: $artifactManifestStatus fatal_missing=0" -AlsoConsole:$VerboseMode
@@ -668,6 +673,9 @@ if (-not (Test-Path $ArtifactManifestScript)) {
     }
 }
 Write-OperatorSafetyLine -LogPaths @($RunLog, $GradeLog) -ArtifactManifestStatus $artifactManifestStatusForBanner -FatalMissing $artifactFatalMissingForBanner -ForegroundColor $artifactManifestBannerColor
+if ($artifactManifestFatalFailure) {
+    Stop-StageFailure -Stage "Artifact Manifest" -ExitCode 1 -LogPath $GradeLog
+}
 
 "=== Completed successfully at $(Get-Date) ===" | Out-File $RunLog -Append
 Write-Host ""

@@ -283,7 +283,7 @@ def test_daily_runner_writes_completion_state_audit_after_summaries() -> None:
     assert "completion_state_audit" in bat
 
 
-def test_daily_runner_writes_artifact_manifest_after_operator_card_non_blocking() -> None:
+def test_daily_runner_blocks_only_fatal_artifact_manifest_missing() -> None:
     ps1 = Path("run_today.ps1").read_text(encoding="utf-8")
     normalized_ps1 = ps1.replace("\\", "/")
 
@@ -302,11 +302,26 @@ def test_daily_runner_writes_artifact_manifest_after_operator_card_non_blocking(
         ps1.index('Write-Host "[START] Artifact Manifest"') :
         ps1.index('"=== Completed successfully at $(Get-Date) ==="')
     ]
-    assert "Stop-StageFailure" not in manifest_block
+    assert "$artifactManifestFatalFailure = $false" in manifest_block
+    assert "if ($artifactFatalMissing -gt 0)" in manifest_block
+    assert "$artifactManifestFatalFailure = $true" in manifest_block
+    assert "[FAIL] Artifact manifest safety failure: fatal_missing=$artifactFatalMissing" in manifest_block
+    assert "Fatal operator artifacts are missing; refusing to mark run complete." in manifest_block
+    assert "Stop-StageFailure -Stage \"Artifact Manifest\" -ExitCode 1" in manifest_block
     assert "[WARNING] Artifact manifest writer failed or exited nonzero" in manifest_block
     assert "Artifact manifest JSON:" in manifest_block
     assert "Artifact manifest TXT:" in manifest_block
     assert "continuing daily run" in manifest_block
+
+    fatal_branch_idx = manifest_block.index("if ($artifactFatalMissing -gt 0)")
+    fatal_flag_idx = manifest_block.index("$artifactManifestFatalFailure = $true")
+    safety_banner_idx = manifest_block.index(
+        "Write-OperatorSafetyLine -LogPaths @($RunLog, $GradeLog)"
+    )
+    failure_idx = manifest_block.index("Stop-StageFailure -Stage \"Artifact Manifest\" -ExitCode 1")
+    ok_status_idx = manifest_block.index("[OK] Artifact manifest status: $artifactManifestStatus fatal_missing=0")
+    assert fatal_branch_idx < fatal_flag_idx < safety_banner_idx < failure_idx
+    assert ok_status_idx < safety_banner_idx
 
 
 def test_daily_runner_logs_operator_safety_banner_and_card_context() -> None:

@@ -598,8 +598,11 @@ def test_operator_card_empty_elite_shows_no_bet_and_candidate_preview(tmp_path: 
 
     text = output_path.read_text(encoding="utf-8")
     assert payload["final_decision"] == "NO BET"
+    assert payload["kelly_rows_count"] == 0
+    assert not (operator / f"kelly_stakes_{prediction_date}.csv").exists()
     assert "COURTVISION DAILY CARD - 2026-05-12" in text
     assert "NO ELITE PICKS - all candidates were filtered" in text
+    assert "- Kelly rows count: 0" in text
     assert "Top Candidate Preview" in text
     assert "player_points: 1" in text
     assert "player_rebounds: 1" in text

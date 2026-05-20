@@ -4,6 +4,7 @@ from pathlib import Path
 from courtvision.reporting.artifact_manifest import (
     SEVERITY_FATAL,
     SEVERITY_INFORMATIONAL,
+    SEVERITY_WARNING,
     build_artifact_manifest,
     write_artifact_manifest_outputs,
 )
@@ -58,7 +59,27 @@ def test_manifest_optional_artifacts_are_not_fatal(tmp_path: Path) -> None:
     stat_only = _artifact(manifest, "stat_only_board")
     assert stat_only["exists"] is False
     assert stat_only["severity"] == SEVERITY_INFORMATIONAL
+    assert manifest["status"] == "warning_missing"
     assert manifest["missing_by_severity"]["fatal"] == 0
+
+
+def test_manifest_missing_kelly_stakes_is_warning_not_fatal(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    _write_core_boards(runtime_root)
+
+    manifest = build_artifact_manifest(
+        prediction_date=PREDICTION_DATE,
+        runtime_root=runtime_root,
+        generated_at="2026-04-10T12:00:00Z",
+    )
+
+    kelly = _artifact(manifest, "kelly_stakes")
+    assert kelly["exists"] is False
+    assert kelly["severity"] == SEVERITY_WARNING
+    assert "absence is not fatal for no-bet slates" in kelly["notes"]
+    assert manifest["status"] == "warning_missing"
+    assert manifest["missing_by_severity"]["fatal"] == 0
+    assert manifest["missing_by_severity"]["warning"] > 0
 
 
 def test_manifest_counts_csv_rows(tmp_path: Path) -> None:
