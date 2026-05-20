@@ -19,6 +19,9 @@ from courtvision.reason_codes import (
     GAME_STATUS_REASON_POSTPONED,
     GAME_STATUS_REASON_UNKNOWN,
     ODDS_STALE_REASON,
+    SELECTION_LIVE_GATE_FILTERED_REASON,
+    SELECTION_LIVE_GATE_MISSING_QUALIFICATION_REASON,
+    SELECTION_NOT_LIVE_MARKET_ELIGIBLE_REASON,
 )
 
 IDENTITY_QUARANTINE_REJECTION_REASON = "identity_quarantine"
@@ -383,6 +386,82 @@ def identity_gate_status(row: Mapping[str, Any] | pd.Series) -> dict[str, Any]:
     }
 
 
+def _operator_row_get(row: Mapping[str, Any] | pd.Series, key: str, default: Any = None) -> Any:
+    if isinstance(row, pd.Series):
+        return row.get(key, default)
+    return row.get(key, default)
+
+
+def _operator_bool(value: Any) -> bool:
+    try:
+        if pd.isna(value):
+            return False
+    except (TypeError, ValueError):
+        pass
+    return bool(value)
+
+
+def _operator_str(value: Any, default: str = "") -> str:
+    try:
+        if pd.isna(value):
+            return default
+    except (TypeError, ValueError):
+        pass
+    return str(value)
+
+
+def operator_live_source_gate_status(row: Mapping[str, Any] | pd.Series) -> dict[str, Any]:
+    """Return the current operator-board live/source gate status for one row."""
+    qualification_reason = _operator_str(_operator_row_get(row, "qualification_reason", ""))
+    line_source = _operator_str(_operator_row_get(row, "line_source", ""))
+    diagnostic_live = _operator_bool(_operator_row_get(row, "is_live_market", False)) and not _operator_bool(
+        _operator_row_get(row, "synthetic_line", False)
+    )
+    origin_live = (
+        "live_market" in qualification_reason.lower()
+        or "sportsbook" in qualification_reason.lower()
+        or "live_market" in line_source.lower()
+    )
+    eligible = diagnostic_live and origin_live
+    qualification_reason_missing = _operator_str(
+        _operator_row_get(row, "qualification_reason", ""),
+        default="",
+    ).strip() == ""
+
+    rejection_reason = ""
+    if not eligible and not diagnostic_live:
+        rejection_reason = SELECTION_NOT_LIVE_MARKET_ELIGIBLE_REASON
+    elif diagnostic_live and not origin_live and qualification_reason_missing:
+        rejection_reason = SELECTION_LIVE_GATE_MISSING_QUALIFICATION_REASON
+    elif diagnostic_live and not origin_live:
+        rejection_reason = SELECTION_LIVE_GATE_FILTERED_REASON
+
+    return {
+        "eligible": eligible,
+        "diagnostic_live": diagnostic_live,
+        "origin_live": origin_live,
+        "qualification_reason_missing": qualification_reason_missing,
+        "rejection_reason": rejection_reason,
+    }
+
+
+def is_operator_live_source_eligible(row: Mapping[str, Any] | pd.Series) -> bool:
+    """Return True when a row passes the current operator-board live/source gate."""
+    return bool(operator_live_source_gate_status(row)["eligible"])
+
+
+def operator_live_source_rejection_reason(row: Mapping[str, Any] | pd.Series) -> str:
+    """Return the current operator-board live/source rejection reason, or ''."""
+    return str(operator_live_source_gate_status(row)["rejection_reason"])
+
+
+def is_unsupported_milestone_market(row: Mapping[str, Any] | pd.Series) -> bool:
+    """Return True when current operator-board milestone filtering rejects a row."""
+    raw_market_type = _operator_str(_operator_row_get(row, "raw_market_type", "")).strip().lower()
+    selection = _operator_str(_operator_row_get(row, "selection", "")).strip().lower()
+    return raw_market_type == "milestone" or selection == "milestone"
+
+
 __all__ = [
     "DEFAULT_GAME_LOCK_BUFFER_MINUTES",
     "DEFAULT_ODDS_STALE_MINUTES",
@@ -401,8 +480,12 @@ __all__ = [
     "game_status_ineligibility_reason",
     "identity_gate_status",
     "identity_quarantine_reason",
+    "is_operator_live_source_eligible",
+    "is_unsupported_milestone_market",
     "is_game_bettable",
     "is_identity_quarantined",
     "is_odds_fresh",
+    "operator_live_source_gate_status",
+    "operator_live_source_rejection_reason",
     "odds_stale_ineligibility_reason",
 ]

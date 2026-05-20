@@ -19,14 +19,15 @@ from courtvision.context.game_context import (
 )
 from courtvision.reason_codes import (
     DUPLICATE_BETTING_IDENTITY_REASON,
-    SELECTION_LIVE_GATE_FILTERED_REASON,
-    SELECTION_LIVE_GATE_MISSING_QUALIFICATION_REASON,
-    SELECTION_NOT_LIVE_MARKET_ELIGIBLE_REASON,
     SELECTION_NOT_SELECTED_BY_BOARD_SELECTOR_REASON,
     UNSUPPORTED_ACTIVE_OPERATOR_MARKET_REASON,
     UNSUPPORTED_MILESTONE_MARKET_REASON,
 )
-from courtvision.runtime_gates import is_identity_quarantined
+from courtvision.runtime_gates import (
+    is_identity_quarantined,
+    is_unsupported_milestone_market,
+    operator_live_source_gate_status,
+)
 
 ACTIVE_OPERATOR_MARKETS = {
     "player_points",
@@ -550,9 +551,7 @@ def _selection_identity_frame(df: pd.DataFrame) -> set[tuple[Any, ...]]:
 def _non_milestone_mask(df: pd.DataFrame) -> pd.Series:
     if df.empty:
         return pd.Series(dtype=bool)
-    raw_market_type = df.get("raw_market_type", pd.Series("", index=df.index)).fillna("").astype(str).str.strip().str.lower()
-    selection = df.get("selection", pd.Series("", index=df.index)).fillna("").astype(str).str.strip().str.lower()
-    return raw_market_type.ne("milestone") & selection.ne("milestone")
+    return ~df.apply(is_unsupported_milestone_market, axis=1)
 
 
 def _active_operator_market_mask(df: pd.DataFrame) -> pd.Series:
@@ -738,50 +737,29 @@ def build_operator_boards(
 
     # Unified live gate logic: single mask for both eligibility marking AND filtering
     qualification_reason_series = prepared_df.get("qualification_reason", pd.Series("", index=prepared_df.index))
-    is_live_market_series = prepared_df.get("is_live_market", pd.Series(False, index=prepared_df.index))
-    synthetic_line_series = prepared_df.get("synthetic_line", pd.Series(False, index=prepared_df.index))
-    line_source_series = prepared_df.get("line_source", pd.Series("", index=prepared_df.index))
-
-    # Unified live eligibility mask: must satisfy ALL conditions
-    # 1. is_live_market=True (diagnostic flag)
-    # 2. NOT synthetic_line (must have real sportsbook line)
-    # 3. qualification_reason OR line_source indicates live market origin
-    legacy_live_mask = qualification_reason_series.astype(str).str.contains(
-        "live_market|sportsbook", regex=True, case=False, na=False
+    live_gate_statuses = [
+        operator_live_source_gate_status(row)
+        for _, row in prepared_df.iterrows()
+    ]
+    diagnostic_live_mask = pd.Series(
+        [bool(status["diagnostic_live"]) for status in live_gate_statuses],
+        index=prepared_df.index,
     )
-    line_source_live_mask = line_source_series.astype(str).str.contains(
-        "live_market", regex=False, case=False, na=False
+    unified_live_mask = pd.Series(
+        [bool(status["eligible"]) for status in live_gate_statuses],
+        index=prepared_df.index,
     )
-    origin_live_mask = legacy_live_mask | line_source_live_mask
-
-    diagnostic_live_mask = (
-        is_live_market_series.fillna(False).astype(bool)
-        & ~synthetic_line_series.fillna(False).astype(bool)
+    live_gate_rejection_reason = pd.Series(
+        [str(status["rejection_reason"]) for status in live_gate_statuses],
+        index=prepared_df.index,
     )
-
-    # Unified mask: ALL conditions must be met for live eligibility
-    unified_live_mask = diagnostic_live_mask & origin_live_mask
 
     # Rejection reasons - unified logic ensures no row marked valid is later dropped
     prepared_df.loc[
         prepared_df["selection_rejection_reason"].eq("")
-        & ~unified_live_mask
-        & ~diagnostic_live_mask,
+        & live_gate_rejection_reason.ne(""),
         "selection_rejection_reason",
-    ] = SELECTION_NOT_LIVE_MARKET_ELIGIBLE_REASON
-    prepared_df.loc[
-        prepared_df["selection_rejection_reason"].eq("")
-        & diagnostic_live_mask
-        & ~origin_live_mask
-        & qualification_reason_series.fillna("").astype(str).str.strip().eq(""),
-        "selection_rejection_reason",
-    ] = SELECTION_LIVE_GATE_MISSING_QUALIFICATION_REASON
-    prepared_df.loc[
-        prepared_df["selection_rejection_reason"].eq("")
-        & diagnostic_live_mask
-        & ~origin_live_mask,
-        "selection_rejection_reason",
-    ] = SELECTION_LIVE_GATE_FILTERED_REASON
+    ] = live_gate_rejection_reason
 
     # Filter using the SAME unified mask used for eligibility marking
     milestone_mask = ~_non_milestone_mask(prepared_df)

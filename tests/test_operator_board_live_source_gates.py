@@ -10,6 +10,12 @@ from courtvision.reason_codes import (
     UNSUPPORTED_ACTIVE_OPERATOR_MARKET_REASON,
     UNSUPPORTED_MILESTONE_MARKET_REASON,
 )
+from courtvision.runtime_gates import (
+    is_operator_live_source_eligible,
+    is_unsupported_milestone_market,
+    operator_live_source_gate_status,
+    operator_live_source_rejection_reason,
+)
 from courtvision.selection.operator_boards import build_operator_boards
 
 
@@ -53,6 +59,99 @@ def _reason_counts(trace: dict[str, object]) -> dict[str, int]:
     rows = trace.get("selection_rejection_reasons", [])
     assert isinstance(rows, list)
     return {str(row["reason"]): int(row["count"]) for row in rows}
+
+
+def test_runtime_live_source_helpers_match_characterized_behavior() -> None:
+    missing_live_flag = _candidate("missing-live-flag")
+    missing_live_flag.pop("is_live_market")
+    cases = [
+        (
+            _candidate("line-source-live", qualification_reason="", source_lane=""),
+            True,
+            "",
+            True,
+            True,
+            True,
+        ),
+        (
+            _candidate(
+                "sportsbook-qualification-live",
+                line_source="provider_feed",
+                qualification_reason="sportsbook_edge_pass",
+                source_lane="",
+            ),
+            True,
+            "",
+            True,
+            True,
+            False,
+        ),
+        (
+            _candidate(
+                "source-lane-only-empty-qualification",
+                line_source="",
+                qualification_reason="",
+                source_lane="live_market_candidate",
+                vendor="fanduel",
+                bookmaker="draftkings",
+            ),
+            False,
+            SELECTION_LIVE_GATE_MISSING_QUALIFICATION_REASON,
+            True,
+            False,
+            True,
+        ),
+        (
+            _candidate(
+                "source-lane-only-nonlive-qualification",
+                line_source="",
+                qualification_reason="model_pass",
+                source_lane="live_market_candidate",
+                vendor="fanduel",
+                bookmaker="draftkings",
+            ),
+            False,
+            SELECTION_LIVE_GATE_FILTERED_REASON,
+            True,
+            False,
+            False,
+        ),
+        (
+            _candidate("synthetic-live-source", synthetic_line=True),
+            False,
+            SELECTION_NOT_LIVE_MARKET_ELIGIBLE_REASON,
+            False,
+            True,
+            False,
+        ),
+        (
+            missing_live_flag,
+            False,
+            SELECTION_NOT_LIVE_MARKET_ELIGIBLE_REASON,
+            False,
+            True,
+            False,
+        ),
+    ]
+
+    for row, eligible, reason, diagnostic_live, origin_live, qualification_missing in cases:
+        status = operator_live_source_gate_status(row)
+        assert is_operator_live_source_eligible(row) is eligible
+        assert operator_live_source_rejection_reason(row) == reason
+        assert status == {
+            "eligible": eligible,
+            "diagnostic_live": diagnostic_live,
+            "origin_live": origin_live,
+            "qualification_reason_missing": qualification_missing,
+            "rejection_reason": reason,
+        }
+
+
+def test_runtime_milestone_helper_matches_current_operator_filter() -> None:
+    assert is_unsupported_milestone_market(_candidate("regular")) is False
+    assert is_unsupported_milestone_market(_candidate("raw-market", raw_market_type="milestone")) is True
+    assert is_unsupported_milestone_market(_candidate("selection", selection="milestone")) is True
+    assert is_unsupported_milestone_market(_candidate("missing", raw_market_type=None)) is False
 
 
 def test_live_source_synthetic_gate_characterization_matrix() -> None:
@@ -199,4 +298,3 @@ def test_duplicate_betting_identity_runs_after_live_gate_characterization() -> N
         SELECTION_NOT_LIVE_MARKET_ELIGIBLE_REASON: 1,
         DUPLICATE_BETTING_IDENTITY_REASON: 1,
     }
-
