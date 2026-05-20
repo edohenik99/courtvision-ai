@@ -168,6 +168,7 @@ def test_projected_and_actual_kelly_skip_reasons_still_emit_same_strings() -> No
 def test_reason_code_imports_do_not_introduce_cycles() -> None:
     for module_name in (
         "courtvision.reason_codes",
+        "courtvision.runtime_gates",
         "courtvision.runtime_audit",
         "courtvision.runtime_selection",
         "courtvision.selection.operator_boards",
@@ -175,3 +176,27 @@ def test_reason_code_imports_do_not_introduce_cycles() -> None:
         "scripts.run_kelly_stakes",
     ):
         importlib.import_module(module_name)
+
+
+def test_runtime_selection_reexports_shared_runtime_gate_helpers() -> None:
+    from courtvision import runtime_gates
+    from courtvision import runtime_selection
+
+    assert (
+        runtime_selection.game_status_ineligibility_reason
+        is runtime_gates.game_status_ineligibility_reason
+    )
+    assert runtime_selection.is_game_bettable is runtime_gates.is_game_bettable
+    assert (
+        runtime_selection.odds_stale_ineligibility_reason
+        is runtime_gates.odds_stale_ineligibility_reason
+    )
+    assert runtime_selection.is_odds_fresh is runtime_gates.is_odds_fresh
+    assert (
+        runtime_selection.DEFAULT_GAME_LOCK_BUFFER_MINUTES
+        == runtime_gates.DEFAULT_GAME_LOCK_BUFFER_MINUTES
+    )
+    assert (
+        runtime_selection.DEFAULT_ODDS_STALE_MINUTES
+        == runtime_gates.DEFAULT_ODDS_STALE_MINUTES
+    )

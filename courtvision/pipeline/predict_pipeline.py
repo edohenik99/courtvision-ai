@@ -35,6 +35,12 @@ from courtvision.runtime_audit import (
     assemble_elite_board,
     get_elite_rejection_reason,
 )
+from courtvision.runtime_gates import (
+    _is_before_lock_buffer,
+    _parse_game_datetime,
+    game_status_ineligibility_reason,
+    odds_stale_ineligibility_reason,
+)
 from courtvision.scoring import CandidateScoringPolicy
 from courtvision.config import EliteThresholds, DEFAULT_BANKROLL
 from courtvision.selection import (
@@ -1553,7 +1559,6 @@ class PredictionPipeline:
 
         # ---- Game status / slate-lock gate diagnostics ----
         # Count how many candidates would be blocked by game status alone.
-        from courtvision.runtime_selection import game_status_ineligibility_reason
         _game_status_excluded_count = 0
         _game_status_reason_counts: dict[str, int] = {}
         for cand in accepted:
@@ -1566,7 +1571,6 @@ class PredictionPipeline:
             print(f"[COUNT] game_status_exclusion_reasons={dict(sorted(_game_status_reason_counts.items()))}", flush=True)
 
         # ---- Game status enrichment diagnostics ----
-        from courtvision.runtime_selection import _parse_game_datetime, _is_before_lock_buffer
         _candidates_with_game_status = 0
         _candidates_with_game_datetime = 0
         _unknown_future = 0
@@ -1607,7 +1611,6 @@ class PredictionPipeline:
 
         # ---- Odds freshness gate diagnostics ----
         # Count how many rows have updated_at, how many are stale, and by vendor.
-        from courtvision.runtime_selection import odds_stale_ineligibility_reason
         _odds_rows_total = 0
         _odds_rows_with_updated_at = 0
         _stale_odds_count = 0
@@ -1625,8 +1628,6 @@ class PredictionPipeline:
                 _stale_odds_by_vendor[vendor] = _stale_odds_by_vendor.get(vendor, 0) + 1
                 # Compute rough age for diagnostics
                 try:
-                    from datetime import datetime, timedelta
-                    from courtvision.runtime_selection import _parse_game_datetime
                     dt = _parse_game_datetime(oa)
                     if dt:
                         age = datetime.now() - dt

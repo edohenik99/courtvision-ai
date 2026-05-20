@@ -64,6 +64,10 @@ from courtvision.runtime_selection import (
     elite_points_risk_guard_reason,
     player_points_strong_over_calibration_reason,
 )
+from courtvision.runtime_gates import (
+    game_status_ineligibility_reason,
+    odds_stale_ineligibility_reason,
+)
 from courtvision.selection.operator_boards import (
     duplicate_betting_identity_drop_summary,
     unsupported_active_operator_market_drop_summary,
@@ -1579,11 +1583,6 @@ def get_elite_rejection_reason(row: dict[str, Any], now: Any = None) -> str | No
 
     Mirrors the real gate order in the pipeline.
     """
-    from courtvision.runtime_selection import (
-        game_status_ineligibility_reason,
-        odds_stale_ineligibility_reason,
-    )
-
     market = str(row.get("market_type", row.get("market", ""))).lower()
     selection = str(row.get("selection", "")).lower()
     edge = float(row.get("edge_pct", row.get("edge", 0.0)) or 0.0)
@@ -1665,11 +1664,6 @@ def projected_kelly_skip_reason(row: Mapping[str, Any], now: Any = None) -> str:
     sizing can be applied to Full-Market rows that are not already filtered
     out by the elite board.
     """
-    from courtvision.runtime_selection import (
-        game_status_ineligibility_reason,
-        odds_stale_ineligibility_reason,
-    )
-
     # ---- Game status / slate-lock gate (early: no bets on completed games) ----
     game_status_reason = game_status_ineligibility_reason(row, now=now)
     if game_status_reason:
