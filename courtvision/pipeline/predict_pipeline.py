@@ -49,6 +49,7 @@ from courtvision.selection import (
     duplicate_betting_identity_drop_summary,
     unsupported_active_operator_market_drop_summary,
 )
+from courtvision.selection.pipeline_selectors import select_top_per_market as select_top_per_market_helper
 from courtvision.reason_codes import REJECT_NEGATIVE_EDGE_DIRECTION
 from courtvision.betting.kelly import compute_kelly_fraction
 from courtvision.selection.operator_boards import assign_candidate_lanes
@@ -671,20 +672,8 @@ class PredictionPipeline:
         def select_top_per_market(df: pd.DataFrame, limit: int) -> pd.DataFrame:
             """Select top candidates per market type."""
             selection_stage_trace["full_market"]["candidate_count_entering_full_market_selection"] = len(df)
-            if df.empty:
-                selection_stage_trace["full_market"]["candidate_count_after_final_full_market_selection"] = 0
-                return df
-            # Group by market_type and select top by selection_score (not just quality_score)
-            sort_column = "selection_score" if "selection_score" in df.columns else "quality_score"
-            result = []
-            for market_type, group in df.groupby("market_type", sort=False):
-                sorted_group = group.sort_values(sort_column, ascending=False).head(limit)
-                result.append(sorted_group)
-            selected_df = pd.concat(result).copy() if result else pd.DataFrame()
+            selected_df = select_top_per_market_helper(df, per_market_limit=limit)
             selection_stage_trace["full_market"]["candidate_count_after_final_full_market_selection"] = len(selected_df)
-            # Clean rejection_reason in selected rows
-            if "selection_rejection_reason" in selected_df.columns:
-                selected_df["selection_rejection_reason"] = ""
             return selected_df
 
         # Build operator boards (returns elite_df, full_market_df, construction_trace)

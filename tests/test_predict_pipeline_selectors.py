@@ -10,6 +10,7 @@ import pandas as pd
 import pytest
 
 from courtvision.pipeline.predict_pipeline import PredictionConfig, PredictionPipeline
+from courtvision.selection.pipeline_selectors import select_top_per_market
 
 
 class _ConfigProxy:
@@ -157,6 +158,54 @@ def _elite_telemetry_rows(config: Any) -> list[dict[str, Any]]:
     rows = payload["rows"]
     assert isinstance(rows, list)
     return rows
+
+
+def test_extracted_full_market_selector_preserves_nested_selection_behavior() -> None:
+    candidates = pd.DataFrame(
+        [
+            {
+                "player_name": "Points Low",
+                "market_type": "player_points",
+                "selection_score": 10.0,
+                "quality_score": 99.0,
+                "selection_rejection_reason": "stale",
+            },
+            {
+                "player_name": "Points High",
+                "market_type": "player_points",
+                "selection_score": 30.0,
+                "quality_score": 10.0,
+                "selection_rejection_reason": "stale",
+            },
+            {
+                "player_name": "Points Mid",
+                "market_type": "player_points",
+                "selection_score": 20.0,
+                "quality_score": 20.0,
+                "selection_rejection_reason": "stale",
+            },
+            {
+                "player_name": "Rebound High",
+                "market_type": "player_rebounds",
+                "selection_score": 5.0,
+                "quality_score": 5.0,
+                "selection_rejection_reason": "stale",
+            },
+        ]
+    )
+
+    selected = select_top_per_market(candidates, per_market_limit=2)
+
+    assert list(selected["player_name"]) == ["Points High", "Points Mid", "Rebound High"]
+    assert list(selected.columns) == list(candidates.columns)
+    assert selected["selection_rejection_reason"].tolist() == ["", "", ""]
+
+    no_selection_score = candidates.drop(columns=["selection_score"])
+    quality_selected = select_top_per_market(no_selection_score, per_market_limit=1)
+    assert list(quality_selected["player_name"]) == ["Points Low", "Rebound High"]
+
+    empty_candidates = candidates.iloc[0:0]
+    assert select_top_per_market(empty_candidates, per_market_limit=2) is empty_candidates
 
 
 def test_nested_full_market_selector_keeps_top_twenty_by_market_selection_score(
