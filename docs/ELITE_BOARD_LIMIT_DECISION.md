@@ -13,11 +13,11 @@ This is a recommendation only. Runtime behavior remains unchanged in this phase.
 The package-owned selector in `courtvision/pipeline/predict_pipeline.py` applies elite truncation after team/game concentration caps:
 
 ```python
-elite_size = self.config.elite_size if hasattr(self.config, 'elite_size') else 10
+elite_size = self.config.elite_size if hasattr(self.config, 'elite_size') else DEFAULT_ELITE_BOARD_SIZE
 selected_df = capped_df.head(elite_size).copy()
 ```
 
-`PredictionConfig` does not define `elite_size`, so normal package-pipeline usage currently defaults the final elite board to 10 rows. Separately, `EliteThresholds.board_limit` is 20, and `courtvision_ai.py` exposes that value as `ELITE_BOARD_LIMIT`.
+`PredictionConfig` does not define `elite_size`, so normal package-pipeline usage currently defaults the final elite board to `DEFAULT_ELITE_BOARD_SIZE = 10`. Separately, `EliteThresholds.board_limit` is 20, `courtvision.config` exposes that value as `MAX_ELITE_BOARD_LIMIT`, and `courtvision_ai.py` exposes that value as `ELITE_BOARD_LIMIT`.
 
 ## Evidence Used
 
@@ -63,11 +63,10 @@ Minimum revisit evidence:
 
 If approved later, implement in a behavior-preserving first step:
 
-1. Add explicit named fields for `elite_default_size = 10` and `elite_max_size = 20`.
-2. Route `PredictionConfig` through the explicit default instead of relying on the current `hasattr(..., "elite_size") else 10` fallback.
-3. Clamp explicit `elite_size` overrides to the hard max of 20.
+1. Keep the explicit named constants `DEFAULT_ELITE_BOARD_SIZE = 10` and `MAX_ELITE_BOARD_LIMIT = 20`.
+2. Route any new operator config fields through those constants.
+3. Clamp explicit `elite_size` overrides to the hard max of 20 only in an approved behavior-change phase.
 4. Keep team/game caps before final board truncation.
 5. Keep reason strings, eligibility, scoring, Kelly, and thresholds unchanged.
 6. Add tests proving default 10, explicit override, max clamp, and cap-before-truncation ordering.
 7. Only in a separate approved phase, consider changing the default above 10 with shadow evidence attached.
-

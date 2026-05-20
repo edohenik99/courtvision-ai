@@ -9,7 +9,7 @@ from typing import Any
 import pandas as pd
 import pytest
 
-from courtvision.config import EliteThresholds
+from courtvision.config import DEFAULT_ELITE_BOARD_SIZE, MAX_ELITE_BOARD_LIMIT, EliteThresholds
 from courtvision.pipeline.predict_pipeline import PredictionConfig, PredictionPipeline
 from courtvision.reason_codes import REJECT_NEGATIVE_EDGE_DIRECTION
 from courtvision.selection.pipeline_selectors import (
@@ -586,12 +586,14 @@ def test_nested_elite_selector_default_board_limit_is_ten_after_caps(
     thresholds = EliteThresholds.default()
     trace = _board_trace_from_caplog(caplog)
     assert thresholds.board_limit == 20
+    assert DEFAULT_ELITE_BOARD_SIZE == 10
+    assert MAX_ELITE_BOARD_LIMIT == thresholds.board_limit
     assert not hasattr(config, "elite_size")
     assert list(result.elite_props["player_name"]) == [
         f"Board Limit Rank {rank:02d}" for rank in range(1, 11)
     ]
     assert len(result.full_market_props) == 12
-    assert len(result.elite_props) == 10
+    assert len(result.elite_props) == DEFAULT_ELITE_BOARD_SIZE
     assert len(result.elite_props) != min(len(candidates), thresholds.board_limit)
     assert trace["elite"]["candidate_count_after_elite_admission_filter"] == 12
     assert trace["elite"]["candidate_count_after_concentration_caps"] == 12
@@ -634,6 +636,43 @@ def test_nested_elite_selector_explicit_elite_size_override_controls_final_board
     assert trace["elite"]["candidate_count_after_concentration_caps"] == 9
     assert trace["elite"]["candidate_count_after_backfill"] == 4
     assert trace["elite"]["selected_count"] == 4
+
+
+def test_nested_elite_selector_explicit_elite_size_override_remains_unclamped(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    candidates = [
+        _candidate(
+            f"Unclamped Override Rank {rank:02d}",
+            player_id=f"unclamped-override-{rank}",
+            team=f"U{rank:02d}",
+            team_abbr=f"U{rank:02d}",
+            game_id=9350 + rank,
+            selection_score=100.0 - rank,
+        )
+        for rank in range(1, 22)
+    ]
+
+    with caplog.at_level(logging.INFO, logger="test_predict_pipeline_selectors"):
+        result, config = _run_pipeline_with_candidates(
+            monkeypatch,
+            tmp_path,
+            candidates,
+            config_overrides={
+                "elite_team_cap": 25,
+                "elite_game_cap": 25,
+                "elite_size": MAX_ELITE_BOARD_LIMIT + 1,
+            },
+        )
+
+    trace = _board_trace_from_caplog(caplog)
+    assert config.elite_size == MAX_ELITE_BOARD_LIMIT + 1
+    assert len(result.elite_props) == MAX_ELITE_BOARD_LIMIT + 1
+    assert trace["elite"]["candidate_count_after_concentration_caps"] == MAX_ELITE_BOARD_LIMIT + 1
+    assert trace["elite"]["candidate_count_after_backfill"] == MAX_ELITE_BOARD_LIMIT + 1
+    assert trace["elite"]["selected_count"] == MAX_ELITE_BOARD_LIMIT + 1
 
 
 def test_nested_elite_selector_final_board_limit_runs_after_game_cap(

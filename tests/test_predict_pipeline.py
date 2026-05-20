@@ -15,6 +15,7 @@ import pandas as pd
 import pytest
 
 from courtvision.calibration.grading_summary import summarize_graded_props
+from courtvision.config import DEFAULT_ELITE_BOARD_SIZE, MAX_ELITE_BOARD_LIMIT
 from courtvision.pipeline import (
     PredictionConfig,
     PredictionPipeline,
@@ -45,6 +46,8 @@ class TestPredictionConfig:
         assert config.enable_injury_context is True
         assert config.enable_market_quality is True
         assert not hasattr(config, "elite_size")
+        assert DEFAULT_ELITE_BOARD_SIZE == 10
+        assert MAX_ELITE_BOARD_LIMIT == 20
 
     def test_custom_config(self):
         config = PredictionConfig(

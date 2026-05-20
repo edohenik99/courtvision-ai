@@ -42,7 +42,7 @@ from courtvision.runtime_gates import (
     odds_stale_ineligibility_reason,
 )
 from courtvision.scoring import CandidateScoringPolicy
-from courtvision.config import EliteThresholds, DEFAULT_BANKROLL
+from courtvision.config import DEFAULT_BANKROLL, DEFAULT_ELITE_BOARD_SIZE, EliteThresholds
 from courtvision.selection import (
     ACTIVE_OPERATOR_MARKETS,
     build_operator_boards,
@@ -619,7 +619,7 @@ class PredictionPipeline:
             selection_stage_trace["elite"]["unique_games"] = len(game_counts)
             
             # Final selection: take top N after caps applied
-            elite_size = self.config.elite_size if hasattr(self.config, 'elite_size') else 10
+            elite_size = self.config.elite_size if hasattr(self.config, 'elite_size') else DEFAULT_ELITE_BOARD_SIZE
             selected_df = capped_df.head(elite_size).copy()
             selection_stage_trace["elite"]["candidate_count_after_backfill"] = len(selected_df)
             

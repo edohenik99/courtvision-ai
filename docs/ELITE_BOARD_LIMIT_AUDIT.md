@@ -21,10 +21,10 @@ When the pipeline config object does not expose `elite_size`, the final package-
 
 ## Source Of 10
 
-`courtvision/pipeline/predict_pipeline.py` sets:
+`courtvision/config/__init__.py` defines `DEFAULT_ELITE_BOARD_SIZE = 10`, and `courtvision/pipeline/predict_pipeline.py` uses it for the missing-override fallback:
 
 ```python
-elite_size = self.config.elite_size if hasattr(self.config, 'elite_size') else 10
+elite_size = self.config.elite_size if hasattr(self.config, 'elite_size') else DEFAULT_ELITE_BOARD_SIZE
 selected_df = capped_df.head(elite_size).copy()
 ```
 
@@ -34,7 +34,7 @@ No environment variable or `.env.example` setting was found for `elite_size` or 
 
 ## Source Of 20
 
-`courtvision/config/__init__.py` defines `EliteThresholds.board_limit = 20`.
+`courtvision/config/__init__.py` defines `EliteThresholds.board_limit = 20` and exposes that value as `MAX_ELITE_BOARD_LIMIT`.
 
 That value is consumed by the broader `CourtVisionAI` path as `ELITE_BOARD_LIMIT = EliteThresholds.default().board_limit`, including late context-safety/backfill and board-construction diagnostics. The package-owned nested `select_elite_board` does not currently use `EliteThresholds.board_limit` for its final `head(...)` fallback.
 
@@ -63,4 +63,3 @@ Changing `EliteThresholds.board_limit` downward to 10 could affect the broader `
 3. Route both the package-owned selector and `CourtVisionAI.ELITE_BOARD_LIMIT` through the same source.
 4. Keep caps and final truncation ordering unchanged unless explicitly approved.
 5. Update docs and golden tests in the same change so historical behavior remains traceable.
-

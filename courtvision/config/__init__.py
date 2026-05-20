@@ -68,6 +68,13 @@ class EliteThresholds:
         return cls()
 
 
+# Elite board size policy. The package pipeline uses the default only when no
+# config.elite_size override exists; explicit override clamping is deferred to
+# preserve current selector behavior.
+DEFAULT_ELITE_BOARD_SIZE: int = 10
+MAX_ELITE_BOARD_LIMIT: int = EliteThresholds.default().board_limit
+
+
 # Kelly betting configuration
 DEFAULT_BANKROLL = 1000
 
@@ -137,6 +144,8 @@ __all__ = [
     "Settings",
     "ProviderSettings",
     "EliteThresholds",
+    "DEFAULT_ELITE_BOARD_SIZE",
+    "MAX_ELITE_BOARD_LIMIT",
     "OperatorConfig",
     "ModePreset",
     "create_conservative_mode",
