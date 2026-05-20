@@ -10,6 +10,8 @@ import os
 from datetime import datetime, timedelta
 from typing import Any, Mapping
 
+import pandas as pd
+
 from courtvision.reason_codes import (
     GAME_STATUS_REASON_FINAL,
     GAME_STATUS_REASON_IN_PROGRESS,
@@ -17,6 +19,23 @@ from courtvision.reason_codes import (
     GAME_STATUS_REASON_POSTPONED,
     GAME_STATUS_REASON_UNKNOWN,
     ODDS_STALE_REASON,
+)
+
+IDENTITY_QUARANTINE_REJECTION_REASON = "identity_quarantine"
+IDENTITY_OUTSIDE_TEAM_REASON = "outside_team_identity"
+IDENTITY_STALE_TEAM_REASON = "stale_team_identity"
+IDENTITY_GAME_NOT_BETTABLE_REASON = "game_not_bettable"
+IDENTITY_QUARANTINE_REASONS: tuple[str, ...] = (
+    IDENTITY_OUTSIDE_TEAM_REASON,
+    IDENTITY_STALE_TEAM_REASON,
+    IDENTITY_GAME_NOT_BETTABLE_REASON,
+)
+IDENTITY_SOURCE_TEAM_COLUMNS: tuple[str, ...] = (
+    "provider_team_abbr",
+    "odds_team_abbr",
+    "baseline_team_abbr",
+    "resolved_team_abbr",
+    "identity_source_team_abbr",
 )
 
 #: Default lock buffer before game start when betting is disabled
@@ -253,6 +272,117 @@ def is_odds_fresh(
     return odds_stale_ineligibility_reason(row, now, stale_threshold_minutes) == ""
 
 
+def _identity_text(value: Any) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()
+    return "" if text.lower() in {"nan", "none", "null", "<na>", "nat"} else text
+
+
+def _identity_row_get(row: Mapping[str, Any] | pd.Series, key: str, default: Any = None) -> Any:
+    if isinstance(row, pd.Series):
+        return row.get(key, default)
+    return row.get(key, default)
+
+
+def _identity_truthy(value: Any) -> bool:
+    return _identity_text(value).lower() in {"true", "1", "yes", "y", "on"}
+
+
+def _identity_team_abbr(value: Any) -> str:
+    return _identity_text(value).upper()
+
+
+def _identity_first_team(row: Mapping[str, Any] | pd.Series, columns: tuple[str, ...]) -> str:
+    for column in columns:
+        value = _identity_team_abbr(_identity_row_get(row, column))
+        if value:
+            return value
+    return ""
+
+
+def _identity_candidate_team(row: Mapping[str, Any] | pd.Series) -> str:
+    return _identity_first_team(row, ("team_abbr", "team", "team_abbreviation"))
+
+
+def _identity_game_teams(row: Mapping[str, Any] | pd.Series) -> tuple[str, str]:
+    home = _identity_first_team(
+        row,
+        (
+            "game_home_team_abbr",
+            "home_team_abbr",
+            "home_team",
+            "home",
+        ),
+    )
+    away = _identity_first_team(
+        row,
+        (
+            "game_away_team_abbr",
+            "game_visitor_team_abbr",
+            "visitor_team_abbr",
+            "away_team_abbr",
+            "away_team",
+            "visitor_team",
+            "away",
+        ),
+    )
+    return home, away
+
+
+def _has_identity_game_context(row: Mapping[str, Any] | pd.Series, home: str, away: str) -> bool:
+    return bool(_identity_text(_identity_row_get(row, "game_id")) or (home and away))
+
+
+def identity_quarantine_reason(row: Mapping[str, Any] | pd.Series) -> str | None:
+    """Return a narrow identity-quarantine reason for stale/wrong-team evidence."""
+    explicit_reason = _identity_text(_identity_row_get(row, "identity_quarantine_reason")).lower()
+    if explicit_reason in IDENTITY_QUARANTINE_REASONS:
+        return explicit_reason
+    if (
+        _identity_text(_identity_row_get(row, "selection_rejection_reason")).lower()
+        == IDENTITY_QUARANTINE_REJECTION_REASON
+    ):
+        return explicit_reason or IDENTITY_GAME_NOT_BETTABLE_REASON
+    if _identity_truthy(_identity_row_get(row, "candidate_team_not_in_game")):
+        return IDENTITY_OUTSIDE_TEAM_REASON
+    if _identity_text(_identity_row_get(row, "context_conflict_cause")).lower() == "stale_team_not_in_game":
+        return IDENTITY_OUTSIDE_TEAM_REASON
+
+    candidate = _identity_candidate_team(row)
+    home, away = _identity_game_teams(row)
+    game_teams = {team for team in (home, away) if team}
+    if candidate and game_teams and _has_identity_game_context(row, home, away) and candidate not in game_teams:
+        return IDENTITY_OUTSIDE_TEAM_REASON
+
+    if candidate and candidate in game_teams:
+        for column in IDENTITY_SOURCE_TEAM_COLUMNS:
+            source_team = _identity_team_abbr(_identity_row_get(row, column))
+            if source_team and source_team != candidate:
+                return IDENTITY_STALE_TEAM_REASON
+
+    return None
+
+
+def is_identity_quarantined(row: Mapping[str, Any] | pd.Series) -> str | None:
+    """Return a narrow identity-quarantine reason, or None when the row passes."""
+    return identity_quarantine_reason(row)
+
+
+def identity_gate_status(row: Mapping[str, Any] | pd.Series) -> dict[str, Any]:
+    """Return a compact identity gate status without changing reason strings."""
+    reason = identity_quarantine_reason(row)
+    return {
+        "quarantined": reason is not None,
+        "reason": reason or "",
+    }
+
+
 __all__ = [
     "DEFAULT_GAME_LOCK_BUFFER_MINUTES",
     "DEFAULT_ODDS_STALE_MINUTES",
@@ -260,10 +390,19 @@ __all__ = [
     "GAME_STATUS_FINAL",
     "GAME_STATUS_IN_PROGRESS",
     "GAME_STATUS_SCHEDULED",
+    "IDENTITY_GAME_NOT_BETTABLE_REASON",
+    "IDENTITY_OUTSIDE_TEAM_REASON",
+    "IDENTITY_QUARANTINE_REASONS",
+    "IDENTITY_QUARANTINE_REJECTION_REASON",
+    "IDENTITY_SOURCE_TEAM_COLUMNS",
+    "IDENTITY_STALE_TEAM_REASON",
     "_is_before_lock_buffer",
     "_parse_game_datetime",
     "game_status_ineligibility_reason",
+    "identity_gate_status",
+    "identity_quarantine_reason",
     "is_game_bettable",
+    "is_identity_quarantined",
     "is_odds_fresh",
     "odds_stale_ineligibility_reason",
 ]

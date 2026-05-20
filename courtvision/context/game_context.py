@@ -8,6 +8,16 @@ from typing import Any
 import pandas as pd
 
 from courtvision.artifact_guard import log_prediction_artifact_write
+from courtvision.runtime_gates import (
+    IDENTITY_GAME_NOT_BETTABLE_REASON,
+    IDENTITY_OUTSIDE_TEAM_REASON,
+    IDENTITY_QUARANTINE_REASONS,
+    IDENTITY_QUARANTINE_REJECTION_REASON,
+    IDENTITY_SOURCE_TEAM_COLUMNS,
+    IDENTITY_STALE_TEAM_REASON,
+    identity_quarantine_reason as _runtime_identity_quarantine_reason,
+    is_identity_quarantined as _runtime_is_identity_quarantined,
+)
 
 GAME_CONTEXT_COLUMNS: tuple[str, ...] = (
     "game_id",
@@ -64,23 +74,7 @@ CONTEXT_CONFLICT_CAUSE_BUCKETS: tuple[str, ...] = (
     "stale_team_not_in_game",
 )
 
-IDENTITY_QUARANTINE_REJECTION_REASON = "identity_quarantine"
 IDENTITY_QUARANTINE_ACTION = "DATA_INVALID"
-IDENTITY_OUTSIDE_TEAM_REASON = "outside_team_identity"
-IDENTITY_STALE_TEAM_REASON = "stale_team_identity"
-IDENTITY_GAME_NOT_BETTABLE_REASON = "game_not_bettable"
-IDENTITY_QUARANTINE_REASONS: tuple[str, ...] = (
-    IDENTITY_OUTSIDE_TEAM_REASON,
-    IDENTITY_STALE_TEAM_REASON,
-    IDENTITY_GAME_NOT_BETTABLE_REASON,
-)
-IDENTITY_SOURCE_TEAM_COLUMNS: tuple[str, ...] = (
-    "provider_team_abbr",
-    "odds_team_abbr",
-    "baseline_team_abbr",
-    "resolved_team_abbr",
-    "identity_source_team_abbr",
-)
 
 PACE_COLUMNS: tuple[str, ...] = ("team_pace", "pace", "possessions_per_game")
 OFF_RATING_COLUMNS: tuple[str, ...] = ("team_off_rating", "off_rating", "offensive_rating")
@@ -217,86 +211,14 @@ def _text(value: Any) -> str:
     return "" if text.lower() in {"nan", "none", "null", "<na>", "nat"} else text
 
 
-def _row_get(row: Mapping[str, Any] | pd.Series, key: str, default: Any = None) -> Any:
-    if isinstance(row, pd.Series):
-        return row.get(key, default)
-    return row.get(key, default)
-
-
-def _truthy(value: Any) -> bool:
-    return _text(value).lower() in {"true", "1", "yes", "y", "on"}
-
-
-def _team_abbr(value: Any) -> str:
-    return _text(value).upper()
-
-
-def _first_team(row: Mapping[str, Any] | pd.Series, columns: tuple[str, ...]) -> str:
-    for column in columns:
-        value = _team_abbr(_row_get(row, column))
-        if value:
-            return value
-    return ""
-
-
-def _candidate_team(row: Mapping[str, Any] | pd.Series) -> str:
-    return _first_team(row, ("team_abbr", "team", "team_abbreviation"))
-
-
-def _identity_game_teams(row: Mapping[str, Any] | pd.Series) -> tuple[str, str]:
-    home = _first_team(
-        row,
-        (
-            "game_home_team_abbr",
-            "home_team_abbr",
-            "home_team",
-            "home",
-        ),
-    )
-    away = _first_team(
-        row,
-        (
-            "game_away_team_abbr",
-            "game_visitor_team_abbr",
-            "visitor_team_abbr",
-            "away_team_abbr",
-            "away_team",
-            "visitor_team",
-            "away",
-        ),
-    )
-    return home, away
-
-
-def _has_game_identity_context(row: Mapping[str, Any] | pd.Series, home: str, away: str) -> bool:
-    return bool(_text(_row_get(row, "game_id")) or (home and away))
+def identity_quarantine_reason(row: Mapping[str, Any] | pd.Series) -> str | None:
+    """Compatibility wrapper for the centralized runtime identity gate."""
+    return _runtime_identity_quarantine_reason(row)
 
 
 def is_identity_quarantined(row: Mapping[str, Any] | pd.Series) -> str | None:
-    """Return a narrow identity-quarantine reason for explicit stale/wrong-team evidence."""
-    explicit_reason = _text(_row_get(row, "identity_quarantine_reason")).lower()
-    if explicit_reason in IDENTITY_QUARANTINE_REASONS:
-        return explicit_reason
-    if _text(_row_get(row, "selection_rejection_reason")).lower() == IDENTITY_QUARANTINE_REJECTION_REASON:
-        return explicit_reason or IDENTITY_GAME_NOT_BETTABLE_REASON
-    if _truthy(_row_get(row, "candidate_team_not_in_game")):
-        return IDENTITY_OUTSIDE_TEAM_REASON
-    if _text(_row_get(row, "context_conflict_cause")).lower() == "stale_team_not_in_game":
-        return IDENTITY_OUTSIDE_TEAM_REASON
-
-    candidate = _candidate_team(row)
-    home, away = _identity_game_teams(row)
-    game_teams = {team for team in (home, away) if team}
-    if candidate and game_teams and _has_game_identity_context(row, home, away) and candidate not in game_teams:
-        return IDENTITY_OUTSIDE_TEAM_REASON
-
-    if candidate and candidate in game_teams:
-        for column in IDENTITY_SOURCE_TEAM_COLUMNS:
-            source_team = _team_abbr(_row_get(row, column))
-            if source_team and source_team != candidate:
-                return IDENTITY_STALE_TEAM_REASON
-
-    return None
+    """Compatibility wrapper for the centralized runtime identity gate."""
+    return _runtime_is_identity_quarantined(row)
 
 
 def identity_quarantine_reason_counts(df: pd.DataFrame) -> dict[str, int]:

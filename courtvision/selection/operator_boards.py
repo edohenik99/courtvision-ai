@@ -26,6 +26,7 @@ from courtvision.reason_codes import (
     UNSUPPORTED_ACTIVE_OPERATOR_MARKET_REASON,
     UNSUPPORTED_MILESTONE_MARKET_REASON,
 )
+from courtvision.runtime_gates import is_identity_quarantined
 
 ACTIVE_OPERATOR_MARKETS = {
     "player_points",
@@ -710,12 +711,9 @@ def build_operator_boards(
         prepared_df["selection_rejection_reason"] = ""
     identity_quarantine_counts = identity_quarantine_reason_counts(prepared_df)
     identity_quarantine_count = int(sum(identity_quarantine_counts.values()))
-    identity_quarantine_mask = (
-        prepared_df.get("selection_rejection_reason", pd.Series("", index=prepared_df.index))
-        .fillna("")
-        .astype(str)
-        .str.strip()
-        .eq(IDENTITY_QUARANTINE_REJECTION_REASON)
+    identity_quarantine_mask = prepared_df.apply(
+        lambda row: is_identity_quarantined(row) is not None,
+        axis=1,
     )
 
     required_selector_columns = [
