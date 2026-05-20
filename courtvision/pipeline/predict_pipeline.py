@@ -52,6 +52,7 @@ from courtvision.selection import (
 from courtvision.selection.pipeline_selectors import (
     apply_elite_exposure_caps,
     elite_market_policy_rejection_reason,
+    finalize_elite_board,
     resolve_elite_allowed_markets,
     select_top_per_market as select_top_per_market_helper,
 )
@@ -597,7 +598,7 @@ class PredictionPipeline:
             
             # Final selection: take top N after caps applied
             elite_size = self.config.elite_size if hasattr(self.config, 'elite_size') else DEFAULT_ELITE_BOARD_SIZE
-            selected_df = capped_df.head(elite_size).copy()
+            selected_df = finalize_elite_board(capped_df, elite_size=elite_size)
             selection_stage_trace["elite"]["candidate_count_after_backfill"] = len(selected_df)
             
             # Recalculate max exposure from ACTUAL final selection (not full capped_df)

@@ -6,6 +6,7 @@ from typing import Any
 
 import pandas as pd
 
+from courtvision.config import DEFAULT_ELITE_BOARD_SIZE
 from courtvision.market import normalize_market_alias
 from courtvision.reason_codes import REJECT_NEGATIVE_EDGE_DIRECTION
 
@@ -183,6 +184,14 @@ def apply_elite_exposure_caps(
     )
 
 
+def finalize_elite_board(
+    capped_df: pd.DataFrame,
+    elite_size: int = DEFAULT_ELITE_BOARD_SIZE,
+) -> pd.DataFrame:
+    """Apply the final elite board size while preserving post-cap row order."""
+    return capped_df.head(elite_size).copy()
+
+
 def resolve_elite_allowed_markets(
     elite_market_mode: Any = "points_only",
     elite_allowed_markets: Iterable[Any] = (),
@@ -269,6 +278,7 @@ __all__ = [
     "apply_elite_exposure_caps",
     "elite_direction_rejection_reason",
     "elite_market_policy_rejection_reason",
+    "finalize_elite_board",
     "is_negative_edge_direction",
     "resolve_elite_allowed_markets",
     "select_top_per_market",

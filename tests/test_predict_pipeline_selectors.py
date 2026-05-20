@@ -16,6 +16,7 @@ from courtvision.selection.pipeline_selectors import (
     apply_elite_exposure_caps,
     elite_direction_rejection_reason,
     elite_market_policy_rejection_reason,
+    finalize_elite_board,
     resolve_elite_allowed_markets,
     select_top_per_market,
 )
@@ -680,6 +681,55 @@ def test_apply_elite_exposure_caps_preserves_unknown_game_and_missing_team_behav
     assert result.skipped_by_game_cap == 0
     assert result.annotated_df["team_exposure_count_at_decision"].tolist() == [-1, -1]
     assert result.annotated_df["game_exposure_count_at_decision"].tolist() == [-1, -1]
+
+
+def test_finalize_elite_board_default_limit_preserves_post_cap_order_and_columns() -> None:
+    capped_df = pd.DataFrame(
+        [
+            {
+                "player_name": f"Finalize Rank {rank:02d}",
+                "selection_score": 999.0 if rank == 2 else float(rank),
+                "selection_rejection_reason": "",
+                "downstream_column": f"keep-{rank}",
+            }
+            for rank in range(1, 13)
+        ]
+    )
+
+    result = finalize_elite_board(capped_df)
+
+    assert list(result["player_name"]) == [
+        f"Finalize Rank {rank:02d}" for rank in range(1, 11)
+    ]
+    assert len(result) == DEFAULT_ELITE_BOARD_SIZE
+    assert list(result.columns) == list(capped_df.columns)
+    assert result.loc[0, "downstream_column"] == "keep-1"
+    assert result.loc[1, "selection_score"] == 999.0
+
+
+def test_finalize_elite_board_explicit_limit_override_remains_unclamped() -> None:
+    capped_df = pd.DataFrame(
+        [
+            {"player_name": f"Override Finalize {rank:02d}", "selection_score": 100.0 - rank}
+            for rank in range(1, MAX_ELITE_BOARD_LIMIT + 2)
+        ]
+    )
+
+    result = finalize_elite_board(capped_df, elite_size=MAX_ELITE_BOARD_LIMIT + 1)
+
+    assert len(result) == MAX_ELITE_BOARD_LIMIT + 1
+    assert list(result["player_name"])[-1] == f"Override Finalize {MAX_ELITE_BOARD_LIMIT + 1:02d}"
+
+
+def test_finalize_elite_board_empty_input_preserves_columns() -> None:
+    capped_df = pd.DataFrame(columns=["player_name", "selection_score", "downstream_column"])
+
+    result = finalize_elite_board(capped_df)
+
+    assert result.empty
+    assert list(result.columns) == ["player_name", "selection_score", "downstream_column"]
+    result.loc[0, "player_name"] = "mutated"
+    assert capped_df.empty
 
 
 def test_nested_elite_selector_default_board_limit_is_ten_after_caps(
