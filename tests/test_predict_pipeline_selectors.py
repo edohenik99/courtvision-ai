@@ -9,7 +9,9 @@ from typing import Any
 import pandas as pd
 import pytest
 
+from courtvision.config import EliteThresholds
 from courtvision.pipeline.predict_pipeline import PredictionConfig, PredictionPipeline
+from courtvision.reason_codes import REJECT_NEGATIVE_EDGE_DIRECTION
 from courtvision.selection.pipeline_selectors import select_top_per_market
 
 
@@ -42,6 +44,7 @@ def _candidate(label: str, **overrides: Any) -> dict[str, Any]:
         "player_id": label,
         "team": "AAA",
         "team_abbr": "AAA",
+        "opponent": "BBB",
         "game_id": "selector-game",
         "market_type": "player_points",
         "raw_prop_type": "points",
@@ -158,6 +161,14 @@ def _elite_telemetry_rows(config: Any) -> list[dict[str, Any]]:
     rows = payload["rows"]
     assert isinstance(rows, list)
     return rows
+
+
+def _elite_telemetry_reason_counts(config: Any) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in _elite_telemetry_rows(config):
+        reason = str(row["rejection_reason"])
+        counts[reason] = counts.get(reason, 0) + int(row["count"])
+    return counts
 
 
 def test_extracted_full_market_selector_preserves_nested_selection_behavior() -> None:
@@ -322,6 +333,122 @@ def test_nested_elite_selector_default_points_only_records_current_rejection_rea
     assert telemetry_reasons["reject_quality_confidence_threshold"] == 1
 
 
+def test_nested_elite_selector_default_points_only_admits_allowed_points_rows(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    candidates = [
+        _candidate("Points Allowed", player_id="points-allowed", selection_score=90.0),
+        _candidate(
+            "Rebound Policy Rejected",
+            player_id="rebound-policy",
+            market_type="player_rebounds",
+            raw_prop_type="rebounds",
+            line=9.5,
+            selection_score=100.0,
+        ),
+        _candidate(
+            "Assists Policy Rejected",
+            player_id="assists-policy",
+            market_type="player_assists",
+            raw_prop_type="assists",
+            line=7.5,
+            selection_score=95.0,
+        ),
+    ]
+
+    with caplog.at_level(logging.INFO, logger="test_predict_pipeline_selectors"):
+        result, config = _run_pipeline_with_candidates(monkeypatch, tmp_path, candidates)
+
+    trace = _board_trace_from_caplog(caplog)
+    telemetry_reasons = _elite_telemetry_reason_counts(config)
+
+    assert list(result.elite_props["player_name"]) == ["Points Allowed"]
+    assert set(result.full_market_props["player_name"]) == {
+        "Points Allowed",
+        "Rebound Policy Rejected",
+        "Assists Policy Rejected",
+    }
+    assert telemetry_reasons["passed_to_elite"] == 1
+    assert telemetry_reasons["market_filtered_by_elite_policy"] == 2
+    assert trace["elite"]["candidate_count_entering_elite_selection"] == 3
+    assert trace["elite"]["candidate_count_after_elite_admission_filter"] == 1
+    assert trace["elite"]["candidate_count_after_concentration_caps"] == 1
+    assert trace["elite"]["candidate_count_after_backfill"] == 1
+    assert trace["elite"]["selected_count"] == 1
+
+
+def test_nested_elite_selector_rejection_reasons_and_no_bet_output_remain_stable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    candidates = [
+        _candidate(
+            "Market Rejected",
+            player_id="market-rejected",
+            market_type="player_rebounds",
+            raw_prop_type="rebounds",
+            line=9.5,
+            selection_score=95.0,
+        ),
+        _candidate(
+            "Negative Edge Rejected",
+            player_id="negative-edge-rejected",
+            selection="over",
+            edge=-1.0,
+            edge_pct=-0.05,
+            side_edge=1.0,
+            side_edge_pct=0.05,
+            selection_score=90.0,
+        ),
+        _candidate(
+            "Quality Confidence Rejected",
+            player_id="quality-confidence-rejected",
+            is_elite=False,
+            quality_score=49.99,
+            confidence=0.679,
+            selection_score=85.0,
+        ),
+    ]
+
+    with caplog.at_level(logging.INFO, logger="test_predict_pipeline_selectors"):
+        result, config = _run_pipeline_with_candidates(monkeypatch, tmp_path, candidates)
+
+    trace = _board_trace_from_caplog(caplog)
+    telemetry_reasons = _elite_telemetry_reason_counts(config)
+
+    assert result.elite_props.empty
+    assert result.selected_props.empty
+    assert result.summary["elite_count"] == 0
+    assert result.summary["selected_count"] == 0
+    assert result.summary["board_analytics"] == {
+        "elite_count": 0,
+        "overs_count": 0,
+        "unders_count": 0,
+        "avg_edge": 0.0,
+        "avg_abs_edge": 0.0,
+        "max_team_exposure": 0,
+        "max_game_exposure": 0,
+        "unique_teams": 0,
+        "unique_games": 0,
+    }
+    assert list(result.full_market_props["player_name"]) == [
+        "Market Rejected",
+        "Negative Edge Rejected",
+        "Quality Confidence Rejected",
+    ]
+    assert telemetry_reasons["market_filtered_by_elite_policy"] == 1
+    assert telemetry_reasons[REJECT_NEGATIVE_EDGE_DIRECTION] == 1
+    assert telemetry_reasons["reject_quality_confidence_threshold"] == 1
+    assert trace["elite"]["candidate_count_entering_elite_selection"] == 3
+    assert trace["elite"]["candidate_count_after_elite_admission_filter"] == 0
+    assert trace["elite"]["candidate_count_after_concentration_caps"] == 0
+    assert trace["elite"]["candidate_count_after_backfill"] == 0
+    assert trace["elite"]["selected_count"] == 0
+
+
 def test_nested_elite_selector_enforces_exposure_caps_before_final_elite_board(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
@@ -348,6 +475,74 @@ def test_nested_elite_selector_enforces_exposure_caps_before_final_elite_board(
     assert trace["elite"]["skipped_by_game_cap"] == 2
     assert trace["elite"]["candidate_count_after_concentration_caps"] == 2
     assert result.elite_props["selection_rejection_reason"].fillna("").eq("").all()
+
+
+def test_nested_elite_selector_enforces_team_cap_before_final_elite_board(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    candidates = [
+        _candidate(f"Team Cap Rank {rank}", player_id=f"team-cap-{rank}", team="AAA", team_abbr="AAA", game_id=9100 + rank, selection_score=100.0 - rank)
+        for rank in range(1, 6)
+    ]
+
+    with caplog.at_level(logging.INFO, logger="test_predict_pipeline_selectors"):
+        result, _ = _run_pipeline_with_candidates(
+            monkeypatch,
+            tmp_path,
+            candidates,
+            config_overrides={"elite_team_cap": 3, "elite_game_cap": 10, "elite_size": 10},
+        )
+
+    trace = _board_trace_from_caplog(caplog)
+    assert list(result.elite_props["player_name"]) == [
+        "Team Cap Rank 1",
+        "Team Cap Rank 2",
+        "Team Cap Rank 3",
+    ]
+    assert result.summary["elite_max_team_exposure"] == 3
+    assert trace["elite"]["skipped_by_team_cap"] == 2
+    assert trace["elite"]["skipped_by_game_cap"] == 0
+    assert trace["elite"]["candidate_count_after_concentration_caps"] == 3
+    assert result.elite_props["selection_rejection_reason"].fillna("").eq("").all()
+
+
+def test_nested_elite_selector_default_board_limit_is_ten_after_caps(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    candidates = [
+        _candidate(
+            f"Board Limit Rank {rank:02d}",
+            player_id=f"board-limit-{rank}",
+            team=f"T{rank:02d}",
+            team_abbr=f"T{rank:02d}",
+            game_id=9200 + rank,
+            selection_score=100.0 - rank,
+        )
+        for rank in range(1, 13)
+    ]
+
+    with caplog.at_level(logging.INFO, logger="test_predict_pipeline_selectors"):
+        result, _ = _run_pipeline_with_candidates(
+            monkeypatch,
+            tmp_path,
+            candidates,
+            config_overrides={"elite_team_cap": 20, "elite_game_cap": 20},
+        )
+
+    trace = _board_trace_from_caplog(caplog)
+    assert list(result.elite_props["player_name"]) == [
+        f"Board Limit Rank {rank:02d}" for rank in range(1, 11)
+    ]
+    assert len(result.full_market_props) == 12
+    assert len(result.elite_props) == 10
+    assert trace["elite"]["candidate_count_after_elite_admission_filter"] == 12
+    assert trace["elite"]["candidate_count_after_concentration_caps"] == 12
+    assert trace["elite"]["candidate_count_after_backfill"] == 10
+    assert trace["elite"]["selected_count"] == 10
 
 
 def test_nested_selectors_use_post_live_identity_and_duplicate_gate_pool(
@@ -423,3 +618,68 @@ def test_nested_selectors_use_post_live_identity_and_duplicate_gate_pool(
     }
     assert expected_board_columns.issubset(result.full_market_props.columns)
     assert expected_board_columns.issubset(result.elite_props.columns)
+
+
+def test_nested_elite_selector_output_keeps_kelly_and_operator_card_columns(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    result, _ = _run_pipeline_with_candidates(
+        monkeypatch,
+        tmp_path,
+        [
+            _candidate(
+                "Downstream Columns",
+                player_id="downstream-columns",
+                selection_score=99.0,
+                stake_fraction=0.0125,
+                recommended_bet=12.5,
+            )
+        ],
+    )
+
+    required_columns = {
+        "prediction_date",
+        "player_name",
+        "entity_name",
+        "team",
+        "team_abbr",
+        "opponent",
+        "game_id",
+        "market_type",
+        "selection",
+        "line",
+        "sportsbook_line",
+        "odds",
+        "edge",
+        "edge_pct",
+        "side_edge",
+        "side_edge_pct",
+        "confidence",
+        "quality_score",
+        "selection_score",
+        "stake_fraction",
+        "recommended_bet",
+        "is_live_market",
+        "synthetic_line",
+        "line_source",
+        "source_lane",
+        "qualification_reason",
+        "selection_rejection_reason",
+        "game_status",
+        "game_datetime",
+        "odds_updated_at",
+    }
+    missing = required_columns.difference(result.elite_props.columns)
+
+    assert missing == set()
+    assert len(result.elite_props) == 1
+    row = result.elite_props.iloc[0]
+    assert row["player_name"] == "Downstream Columns"
+    assert row["odds"] == -110
+    assert row["confidence"] == 0.82
+    assert row["side_edge_pct"] == 0.08
+    assert row["stake_fraction"] == 0.0125
+    assert row["recommended_bet"] == 12.5
+    assert row["selection_rejection_reason"] == ""
+    assert result.summary["elite_max_game_exposure"] <= EliteThresholds.default().game_cap
