@@ -49,7 +49,11 @@ from courtvision.selection import (
     duplicate_betting_identity_drop_summary,
     unsupported_active_operator_market_drop_summary,
 )
-from courtvision.selection.pipeline_selectors import select_top_per_market as select_top_per_market_helper
+from courtvision.selection.pipeline_selectors import (
+    elite_market_policy_rejection_reason,
+    resolve_elite_allowed_markets,
+    select_top_per_market as select_top_per_market_helper,
+)
 from courtvision.reason_codes import REJECT_NEGATIVE_EDGE_DIRECTION
 from courtvision.betting.kelly import compute_kelly_fraction
 from courtvision.selection.operator_boards import assign_candidate_lanes
@@ -211,19 +215,10 @@ class PredictionPipeline:
         self._elite_allowed_markets = self._resolve_elite_allowed_markets()
 
     def _resolve_elite_allowed_markets(self) -> set[str]:
-        mode = str(getattr(self.config, "elite_market_mode", "points_only") or "points_only").strip().lower()
-        explicit = [normalize_market_alias(m) or str(m).strip().lower() for m in getattr(self.config, "elite_allowed_markets", ()) if str(m).strip()]
-        explicit_set = {m for m in explicit if m}
-        points_only = {"player_points"}
-        player_props = {"player_points", "player_rebounds", "player_assists", "player_3pt_made", "player_steals", "player_blocks"}
-        full = set(player_props) | {"moneyline", "team_total"}
-        if explicit_set:
-            return explicit_set
-        if mode == "full":
-            return full
-        if mode == "player_props":
-            return player_props
-        return points_only
+        return resolve_elite_allowed_markets(
+            elite_market_mode=getattr(self.config, "elite_market_mode", "points_only"),
+            elite_allowed_markets=getattr(self.config, "elite_allowed_markets", ()),
+        )
 
     def _normalize_injury_context(
         self,
@@ -470,12 +465,15 @@ class PredictionPipeline:
             for _, row in df_sorted.iterrows():
                 market = str(row.get("market_type", row.get("market", "unknown")))
                 selection = str(row.get("selection", "unknown")).lower()
-                normalized_market = normalize_market_alias(market) or market
-                if normalized_market not in self._elite_allowed_markets:
+                market_rejection_reason = elite_market_policy_rejection_reason(
+                    market,
+                    self._elite_allowed_markets,
+                )
+                if market_rejection_reason is not None:
                     elite_telemetry.record(
                         market=market,
                         selection_side=selection,
-                        rejection_reason="market_filtered_by_elite_policy",
+                        rejection_reason=market_rejection_reason,
                     )
                     passed_mask.append(False)
                     continue

@@ -12,7 +12,12 @@ import pytest
 from courtvision.config import EliteThresholds
 from courtvision.pipeline.predict_pipeline import PredictionConfig, PredictionPipeline
 from courtvision.reason_codes import REJECT_NEGATIVE_EDGE_DIRECTION
-from courtvision.selection.pipeline_selectors import select_top_per_market
+from courtvision.selection.pipeline_selectors import (
+    elite_direction_rejection_reason,
+    elite_market_policy_rejection_reason,
+    resolve_elite_allowed_markets,
+    select_top_per_market,
+)
 
 
 class _ConfigProxy:
@@ -169,6 +174,51 @@ def _elite_telemetry_reason_counts(config: Any) -> dict[str, int]:
         reason = str(row["rejection_reason"])
         counts[reason] = counts.get(reason, 0) + int(row["count"])
     return counts
+
+
+def test_elite_policy_helpers_preserve_current_market_modes_and_reasons() -> None:
+    assert resolve_elite_allowed_markets() == {"player_points"}
+    assert resolve_elite_allowed_markets("points_only") == {"player_points"}
+    assert resolve_elite_allowed_markets("player_props") == {
+        "player_points",
+        "player_rebounds",
+        "player_assists",
+        "player_3pt_made",
+        "player_steals",
+        "player_blocks",
+    }
+    assert resolve_elite_allowed_markets("full") == {
+        "player_points",
+        "player_rebounds",
+        "player_assists",
+        "player_3pt_made",
+        "player_steals",
+        "player_blocks",
+        "moneyline",
+        "team_total",
+    }
+    assert resolve_elite_allowed_markets(
+        "full",
+        elite_allowed_markets=("points", "rebounds"),
+    ) == {"player_points", "player_rebounds"}
+
+    allowed = resolve_elite_allowed_markets()
+    assert elite_market_policy_rejection_reason("player_points", allowed) is None
+    assert elite_market_policy_rejection_reason("points", allowed) is None
+    assert (
+        elite_market_policy_rejection_reason("player_rebounds", allowed)
+        == "market_filtered_by_elite_policy"
+    )
+
+
+def test_elite_direction_helper_preserves_points_edge_reason() -> None:
+    assert elite_direction_rejection_reason("player_points", "over", -0.01) == REJECT_NEGATIVE_EDGE_DIRECTION
+    assert elite_direction_rejection_reason("player_points", "over", 0.0) == REJECT_NEGATIVE_EDGE_DIRECTION
+    assert elite_direction_rejection_reason("player_points", "under", 0.01) == REJECT_NEGATIVE_EDGE_DIRECTION
+    assert elite_direction_rejection_reason("player_points", "under", 0.0) == REJECT_NEGATIVE_EDGE_DIRECTION
+    assert elite_direction_rejection_reason("player_points", "over", 0.01) is None
+    assert elite_direction_rejection_reason("player_points", "under", -0.01) is None
+    assert elite_direction_rejection_reason("player_rebounds", "over", -0.01) is None
 
 
 def test_extracted_full_market_selector_preserves_nested_selection_behavior() -> None:

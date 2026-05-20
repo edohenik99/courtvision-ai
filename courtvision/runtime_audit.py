@@ -72,6 +72,7 @@ from courtvision.selection.operator_boards import (
     duplicate_betting_identity_drop_summary,
     unsupported_active_operator_market_drop_summary,
 )
+from courtvision.selection.pipeline_selectors import elite_direction_rejection_reason
 
 
 class BoardAuditPolicy:
@@ -1628,11 +1629,9 @@ def get_elite_rejection_reason(row: dict[str, Any], now: Any = None) -> str | No
         return context_reason
 
     # Check directional edge for player_points
-    if market == "player_points":
-        if selection == "over" and edge <= 0:
-            return REJECT_NEGATIVE_EDGE_DIRECTION
-        if selection == "under" and edge >= 0:
-            return REJECT_NEGATIVE_EDGE_DIRECTION
+    direction_rejection_reason = elite_direction_rejection_reason(market, selection, edge)
+    if direction_rejection_reason is not None:
+        return direction_rejection_reason
 
     # Check for unrealistic lines (e.g., 2.0 points for NBA players)
     line_val = float(row.get("sportsbook_line", 0))
