@@ -253,6 +253,27 @@ def test_operator_card_renders_runtime_safety_summary(tmp_path: Path) -> None:
     assert payload["runtime_safety"]["fatal_missing"] == 0
 
 
+def test_operator_card_renders_deferred_manifest_status_when_manifest_missing(tmp_path: Path) -> None:
+    prediction_date = "2026-05-10"
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+    _seed_basic_operator_card_artifacts(runtime_root, history_root, prediction_date)
+
+    output_path, payload = write_operator_card_outputs(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+
+    text = output_path.read_text(encoding="utf-8")
+    assert "- artifact_manifest_status: written_after_operator_card" in text
+    assert "pending_after_operator_card" not in text
+    assert (
+        payload["runtime_safety"]["artifact_manifest_status"]
+        == "written_after_operator_card"
+    )
+
+
 def test_operator_card_renders_unsupported_active_market_drops(tmp_path: Path) -> None:
     prediction_date = "2026-05-10"
     runtime_root = tmp_path / "runtime"

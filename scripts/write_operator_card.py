@@ -1065,7 +1065,7 @@ def _runtime_safety_summary(
         "ForcePastDate": _bool_label(force_past_date),
         "ForceOutputs": _bool_label(force_outputs),
         "KellyBankroll": _safe_text(kelly_bankroll) or "n/a",
-        "artifact_manifest_status": "pending_after_operator_card",
+        "artifact_manifest_status": "written_after_operator_card",
         "fatal_missing": "n/a",
         "artifact_manifest_path": str(manifest_path),
     }
