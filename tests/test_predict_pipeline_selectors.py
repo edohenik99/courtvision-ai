@@ -13,6 +13,7 @@ from courtvision.config import DEFAULT_ELITE_BOARD_SIZE, MAX_ELITE_BOARD_LIMIT, 
 from courtvision.pipeline.predict_pipeline import PredictionConfig, PredictionPipeline
 from courtvision.reason_codes import REJECT_NEGATIVE_EDGE_DIRECTION
 from courtvision.selection.pipeline_selectors import (
+    apply_elite_exposure_caps,
     elite_direction_rejection_reason,
     elite_market_policy_rejection_reason,
     resolve_elite_allowed_markets,
@@ -527,6 +528,30 @@ def test_nested_elite_selector_enforces_exposure_caps_before_final_elite_board(
     assert result.elite_props["selection_rejection_reason"].fillna("").eq("").all()
 
 
+def test_apply_elite_exposure_caps_matches_characterized_game_cap_behavior() -> None:
+    candidates = [
+        _candidate("Cap Rank 1", player_id="cap-1", team="AAA", team_abbr="AAA", game_id=9001, selection_score=100.0),
+        _candidate("Cap Rank 2", player_id="cap-2", team="BBB", team_abbr="BBB", game_id=9001, selection_score=90.0),
+        _candidate("Cap Rank 3", player_id="cap-3", team="CCC", team_abbr="CCC", game_id=9001, selection_score=80.0),
+        _candidate("Cap Rank 4", player_id="cap-4", team="DDD", team_abbr="DDD", game_id=9001, selection_score=70.0),
+    ]
+    admitted_df = pd.DataFrame(candidates)
+
+    result = apply_elite_exposure_caps(
+        admitted_df,
+        elite_team_cap=10,
+        elite_game_cap=2,
+    )
+
+    assert list(result.capped_df["player_name"]) == ["Cap Rank 1", "Cap Rank 2"]
+    assert result.game_counts == {"9001": 2}
+    assert result.skipped_by_team_cap == 0
+    assert result.skipped_by_game_cap == 2
+    assert result.annotated_df.loc[2, "selection_rejection_reason"] == "reject_game_exposure_cap"
+    assert result.annotated_df.loc[3, "selection_rejection_reason"] == "reject_game_exposure_cap"
+    assert "game_exposure_count_at_decision" not in admitted_df.columns
+
+
 def test_nested_elite_selector_enforces_team_cap_before_final_elite_board(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
@@ -556,6 +581,105 @@ def test_nested_elite_selector_enforces_team_cap_before_final_elite_board(
     assert trace["elite"]["skipped_by_game_cap"] == 0
     assert trace["elite"]["candidate_count_after_concentration_caps"] == 3
     assert result.elite_props["selection_rejection_reason"].fillna("").eq("").all()
+
+
+def test_apply_elite_exposure_caps_matches_characterized_team_cap_behavior() -> None:
+    candidates = [
+        _candidate(f"Team Cap Rank {rank}", player_id=f"team-cap-{rank}", team="AAA", team_abbr="AAA", game_id=9100 + rank, selection_score=100.0 - rank)
+        for rank in range(1, 6)
+    ]
+
+    result = apply_elite_exposure_caps(
+        pd.DataFrame(candidates),
+        elite_team_cap=3,
+        elite_game_cap=10,
+    )
+
+    assert list(result.capped_df["player_name"]) == [
+        "Team Cap Rank 1",
+        "Team Cap Rank 2",
+        "Team Cap Rank 3",
+    ]
+    assert result.team_counts == {"AAA": 3}
+    assert result.skipped_by_team_cap == 2
+    assert result.skipped_by_game_cap == 0
+    assert result.annotated_df.loc[3, "selection_rejection_reason"] == "reject_team_exposure_cap"
+    assert result.annotated_df.loc[4, "selection_rejection_reason"] == "reject_team_exposure_cap"
+
+
+def test_apply_elite_exposure_caps_preserves_non_numeric_game_id_fallback() -> None:
+    candidates = [
+        _candidate(
+            "Fallback Game Rank 1",
+            player_id="fallback-game-1",
+            team="AAA",
+            team_abbr="AAA",
+            opponent="BBB",
+            game_id="not-a-number",
+            selection_score=100.0,
+        ),
+        _candidate(
+            "Fallback Game Rank 2",
+            player_id="fallback-game-2",
+            team="BBB",
+            team_abbr="BBB",
+            opponent="AAA",
+            game_id="not-a-number",
+            selection_score=90.0,
+        ),
+    ]
+
+    result = apply_elite_exposure_caps(
+        pd.DataFrame(candidates),
+        elite_team_cap=10,
+        elite_game_cap=1,
+    )
+
+    assert result.sample_game_keys == ["AAA@BBB", "AAA@BBB"]
+    assert result.first_10_game_keys == ["AAA@BBB", "AAA@BBB"]
+    assert list(result.capped_df["player_name"]) == ["Fallback Game Rank 1"]
+    assert result.game_counts == {"AAA@BBB": 1}
+    assert result.skipped_by_game_cap == 1
+    assert result.annotated_df.loc[1, "selection_rejection_reason"] == "reject_game_exposure_cap"
+    assert result.annotated_df.loc[1, "game_exposure_count_at_decision"] == 1
+
+
+def test_apply_elite_exposure_caps_preserves_unknown_game_and_missing_team_behavior() -> None:
+    candidates = [
+        _candidate(
+            "Unknown Game Rank 1",
+            player_id="unknown-game-1",
+            team="",
+            team_abbr="",
+            opponent="",
+            game_id="",
+            selection_score=100.0,
+        ),
+        _candidate(
+            "Unknown Game Rank 2",
+            player_id="unknown-game-2",
+            team="",
+            team_abbr="",
+            opponent="",
+            game_id="",
+            selection_score=90.0,
+        ),
+    ]
+
+    result = apply_elite_exposure_caps(
+        pd.DataFrame(candidates),
+        elite_team_cap=1,
+        elite_game_cap=1,
+    )
+
+    assert result.sample_game_keys == ["unknown", "unknown"]
+    assert list(result.capped_df["player_name"]) == ["Unknown Game Rank 1", "Unknown Game Rank 2"]
+    assert result.team_counts == {}
+    assert result.game_counts == {}
+    assert result.skipped_by_team_cap == 0
+    assert result.skipped_by_game_cap == 0
+    assert result.annotated_df["team_exposure_count_at_decision"].tolist() == [-1, -1]
+    assert result.annotated_df["game_exposure_count_at_decision"].tolist() == [-1, -1]
 
 
 def test_nested_elite_selector_default_board_limit_is_ten_after_caps(

@@ -50,6 +50,7 @@ from courtvision.selection import (
     unsupported_active_operator_market_drop_summary,
 )
 from courtvision.selection.pipeline_selectors import (
+    apply_elite_exposure_caps,
     elite_market_policy_rejection_reason,
     resolve_elite_allowed_markets,
     select_top_per_market as select_top_per_market_helper,
@@ -527,81 +528,57 @@ class PredictionPipeline:
                 cap_source, elite_team_cap, elite_game_cap, len(admitted_df)
             )
             
-            capped_selection = []
-            team_counts: dict[str, int] = {}
-            game_counts: dict = {}
-            skipped_by_team_cap = 0
-            skipped_by_game_cap = 0
-            
-            # Log unique game keys in admitted_df before cap enforcement
-            sample_game_keys = [_normalize_game_key(row) for _, row in admitted_df.head(10).iterrows()]
+            cap_result = apply_elite_exposure_caps(
+                admitted_df,
+                elite_team_cap=elite_team_cap,
+                elite_game_cap=elite_game_cap,
+            )
+            capped_df = cap_result.capped_df
+            team_counts = cap_result.team_counts
+            game_counts = cap_result.game_counts
+            skipped_by_team_cap = cap_result.skipped_by_team_cap
+            skipped_by_game_cap = cap_result.skipped_by_game_cap
+
             self.logger.info(
                 "[CAP_DEBUG] Cap enforcement starting: admitted_df has %d rows, sample game_keys: %s",
-                len(admitted_df), sample_game_keys
+                len(admitted_df), cap_result.sample_game_keys
             )
-            
-            for idx, row in admitted_df.iterrows():
-                team = str(row.get("team_abbr", row.get("team", ""))).strip().upper()
-                game_key = _normalize_game_key(row)
-                player = row.get("player_name", "unknown")
-                market = row.get("market_type", "unknown")
-                
-                # Detailed game cap check logging
-                current_game_count = game_counts.get(game_key, 0)
-                game_cap_check = game_key != "unknown" and current_game_count >= elite_game_cap
-                
+
+            for decision in cap_result.row_decisions:
                 self.logger.info(
                     "[CAP_DEBUG] Row %d: player=%s, team=%s, game_key=%s, "
                     "current_team_count=%d, current_game_count=%d, "
                     "team_cap=%d, game_cap=%d, "
                     "team_would_skip=%s, game_would_skip=%s",
-                    idx, player, team, str(game_key), 
-                    team_counts.get(team, 0), current_game_count,
+                    decision.index, decision.player, decision.team, str(decision.game_key),
+                    decision.current_team_count, decision.current_game_count,
                     elite_team_cap, elite_game_cap,
-                    team and team_counts.get(team, 0) >= elite_team_cap,
-                    game_cap_check
+                    decision.team_would_skip,
+                    decision.game_would_skip
                 )
-                
-                # Check team cap
-                if team and team_counts.get(team, 0) >= elite_team_cap:
-                    if "selection_rejection_reason" in admitted_df.columns:
-                        admitted_df.at[idx, "selection_rejection_reason"] = "reject_team_exposure_cap"
-                    admitted_df.at[idx, "team_exposure_count_at_decision"] = team_counts.get(team, 0)
-                    skipped_by_team_cap += 1
-                    self.logger.info("[CAP_DEBUG] Row %d: SKIPPED by team_cap (count=%d)", idx, team_counts.get(team, 0))
-                    continue
-                
-                # Check game cap
-                if game_key != "unknown" and game_counts.get(game_key, 0) >= elite_game_cap:
-                    if "selection_rejection_reason" in admitted_df.columns:
-                        admitted_df.at[idx, "selection_rejection_reason"] = "reject_game_exposure_cap"
-                    admitted_df.at[idx, "game_exposure_count_at_decision"] = game_counts.get(game_key, 0)
-                    skipped_by_game_cap += 1
-                    self.logger.info("[CAP_DEBUG] Row %d: SKIPPED by game_cap (count=%d)", idx, game_counts.get(game_key, 0))
-                    continue
-                
-                # Row passes caps - select it
-                capped_selection.append(idx)
-                if team:
-                    team_counts[team] = team_counts.get(team, 0) + 1
-                if game_key != "unknown":
-                    game_counts[game_key] = game_counts.get(game_key, 0) + 1
-                
-                self.logger.info(
-                    "[CAP_DEBUG] Row %d: SELECTED (team_count now=%d, game_count now=%d)",
-                    idx, team_counts.get(team, 0), game_counts.get(game_key, 0)
-                )
-                
-                # Track exposure at decision time
-                admitted_df.at[idx, "team_exposure_count_at_decision"] = team_counts.get(team, 0) - 1
-                admitted_df.at[idx, "game_exposure_count_at_decision"] = game_counts.get(game_key, 0) - 1
-            
-            # Create capped DataFrame
-            capped_df = admitted_df.loc[capped_selection].copy() if capped_selection else pd.DataFrame()
-            
+
+                if decision.action == "team_cap":
+                    self.logger.info(
+                        "[CAP_DEBUG] Row %d: SKIPPED by team_cap (count=%d)",
+                        decision.index,
+                        decision.current_team_count,
+                    )
+                elif decision.action == "game_cap":
+                    self.logger.info(
+                        "[CAP_DEBUG] Row %d: SKIPPED by game_cap (count=%d)",
+                        decision.index,
+                        decision.current_game_count,
+                    )
+                else:
+                    self.logger.info(
+                        "[CAP_DEBUG] Row %d: SELECTED (team_count now=%d, game_count now=%d)",
+                        decision.index,
+                        decision.selected_team_count,
+                        decision.selected_game_count,
+                    )
+
             # Log first 10 row game_keys for verification
-            first_10_game_keys = [str(_normalize_game_key(admitted_df.iloc[i])) for i in range(min(10, len(admitted_df)))]
-            self.logger.info("[CAP_DEBUG] First 10 row game_keys: %s", ",".join(first_10_game_keys))
+            self.logger.info("[CAP_DEBUG] First 10 row game_keys: %s", ",".join(cap_result.first_10_game_keys))
             
             # Log final game counts
             final_game_counts_str = ",".join([f"{k}:{v}" for k, v in game_counts.items()]) if game_counts else "none"
