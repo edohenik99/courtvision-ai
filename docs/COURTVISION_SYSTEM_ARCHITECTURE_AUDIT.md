@@ -621,7 +621,7 @@ Elite board selection enforces:
 
 - Team cap: `EliteThresholds.default().team_cap` = 3.
 - Game cap: `EliteThresholds.default().game_cap` = 4.
-- Board limit: `EliteThresholds.default().board_limit` = 20.
+- Board limit ambiguity: `EliteThresholds.default().board_limit` = 20, while the package-owned nested selector currently falls back to `config.elite_size` else 10. See `docs/ELITE_BOARD_LIMIT_AUDIT.md`.
 
 `PredictionPipeline.run` raises if final elite max game exposure exceeds the cap. `_write_cli_outputs` also hard-validates final elite game exposure before writing.
 

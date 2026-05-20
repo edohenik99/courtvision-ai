@@ -40,7 +40,7 @@ This map documents the current candidate funnel from provider odds to final elit
 
 16. The full-market board is selected by nested `select_top_per_market`, ranking live candidates by `selection_score` or `quality_score` and taking `per_market_limit`.
 
-17. The elite board is selected by nested `select_elite_board`. It sorts by `selection_score`, applies elite market-mode filtering, checks elite quality/confidence admission, calls `runtime_audit.get_elite_rejection_reason`, applies team/game exposure caps, and takes the final elite size.
+17. The elite board is selected by nested `select_elite_board`. It sorts by `selection_score`, applies elite market-mode filtering, checks elite quality/confidence admission, calls `runtime_audit.get_elite_rejection_reason`, applies team/game exposure caps, and takes the final elite size. Current board-limit ambiguity is documented in `docs/ELITE_BOARD_LIMIT_AUDIT.md`.
 
 18. After the package pipeline returns, `CourtVisionAI.predict` attaches manual player context and passive game context to qualified, elite, and full-market DataFrames. Then `_apply_elite_context_safety_gate` removes context-blocked elite rows and attempts player-points backfill from the full-market pool.
 

@@ -44,6 +44,7 @@ class TestPredictionConfig:
         assert config.min_confidence == 0.35
         assert config.enable_injury_context is True
         assert config.enable_market_quality is True
+        assert not hasattr(config, "elite_size")
 
     def test_custom_config(self):
         config = PredictionConfig(

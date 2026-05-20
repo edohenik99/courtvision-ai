@@ -576,23 +576,103 @@ def test_nested_elite_selector_default_board_limit_is_ten_after_caps(
     ]
 
     with caplog.at_level(logging.INFO, logger="test_predict_pipeline_selectors"):
-        result, _ = _run_pipeline_with_candidates(
+        result, config = _run_pipeline_with_candidates(
             monkeypatch,
             tmp_path,
             candidates,
             config_overrides={"elite_team_cap": 20, "elite_game_cap": 20},
         )
 
+    thresholds = EliteThresholds.default()
     trace = _board_trace_from_caplog(caplog)
+    assert thresholds.board_limit == 20
+    assert not hasattr(config, "elite_size")
     assert list(result.elite_props["player_name"]) == [
         f"Board Limit Rank {rank:02d}" for rank in range(1, 11)
     ]
     assert len(result.full_market_props) == 12
     assert len(result.elite_props) == 10
+    assert len(result.elite_props) != min(len(candidates), thresholds.board_limit)
     assert trace["elite"]["candidate_count_after_elite_admission_filter"] == 12
     assert trace["elite"]["candidate_count_after_concentration_caps"] == 12
     assert trace["elite"]["candidate_count_after_backfill"] == 10
     assert trace["elite"]["selected_count"] == 10
+
+
+def test_nested_elite_selector_explicit_elite_size_override_controls_final_board(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    candidates = [
+        _candidate(
+            f"Override Limit Rank {rank:02d}",
+            player_id=f"override-limit-{rank}",
+            team=f"O{rank:02d}",
+            team_abbr=f"O{rank:02d}",
+            game_id=9250 + rank,
+            selection_score=100.0 - rank,
+        )
+        for rank in range(1, 10)
+    ]
+
+    with caplog.at_level(logging.INFO, logger="test_predict_pipeline_selectors"):
+        result, config = _run_pipeline_with_candidates(
+            monkeypatch,
+            tmp_path,
+            candidates,
+            config_overrides={"elite_team_cap": 20, "elite_game_cap": 20, "elite_size": 4},
+        )
+
+    trace = _board_trace_from_caplog(caplog)
+    assert config.elite_size == 4
+    assert list(result.elite_props["player_name"]) == [
+        f"Override Limit Rank {rank:02d}" for rank in range(1, 5)
+    ]
+    assert len(result.elite_props) == 4
+    assert trace["elite"]["candidate_count_after_elite_admission_filter"] == 9
+    assert trace["elite"]["candidate_count_after_concentration_caps"] == 9
+    assert trace["elite"]["candidate_count_after_backfill"] == 4
+    assert trace["elite"]["selected_count"] == 4
+
+
+def test_nested_elite_selector_final_board_limit_runs_after_game_cap(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    candidates = [
+        _candidate(
+            f"Post Cap Rank {rank:02d}",
+            player_id=f"post-cap-{rank}",
+            team=f"G{rank:02d}",
+            team_abbr=f"G{rank:02d}",
+            game_id=9300 if rank <= 5 else 9300 + rank,
+            selection_score=100.0 - rank,
+        )
+        for rank in range(1, 9)
+    ]
+
+    with caplog.at_level(logging.INFO, logger="test_predict_pipeline_selectors"):
+        result, _ = _run_pipeline_with_candidates(
+            monkeypatch,
+            tmp_path,
+            candidates,
+            config_overrides={"elite_team_cap": 20, "elite_game_cap": 2, "elite_size": 3},
+        )
+
+    trace = _board_trace_from_caplog(caplog)
+    assert list(result.elite_props["player_name"]) == [
+        "Post Cap Rank 01",
+        "Post Cap Rank 02",
+        "Post Cap Rank 06",
+    ]
+    assert result.summary["elite_max_game_exposure"] == 2
+    assert trace["elite"]["skipped_by_game_cap"] == 3
+    assert trace["elite"]["candidate_count_after_elite_admission_filter"] == 8
+    assert trace["elite"]["candidate_count_after_concentration_caps"] == 5
+    assert trace["elite"]["candidate_count_after_backfill"] == 3
+    assert trace["elite"]["selected_count"] == 3
 
 
 def test_nested_selectors_use_post_live_identity_and_duplicate_gate_pool(
