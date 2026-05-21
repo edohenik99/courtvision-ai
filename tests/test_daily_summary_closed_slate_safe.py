@@ -9,6 +9,11 @@ from courtvision.reporting.same_opponent_rematch import annotate_operator_board_
 from scripts import write_daily_summary as daily_summary
 
 
+def _write_csv(path: Path, rows: list[dict], columns: list[str] | None = None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows, columns=columns).to_csv(path, index=False)
+
+
 def _write_minimal_board(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(
@@ -75,6 +80,51 @@ def test_annotate_operator_board_files_default_writes_annotations(tmp_path: Path
     assert "same_opponent_recent_games" in elite_after.columns
     assert result["boards"]["full_market_board"]["write_enabled"] is True
     assert result["boards"]["full_market_board"]["skipped_write"] is False
+
+
+def test_daily_summary_uses_repaired_shadow_history_pending_count(tmp_path: Path) -> None:
+    prediction_date = "2026-05-20"
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+    operator = runtime_root / "operator"
+    diagnostics = runtime_root / "diagnostics"
+
+    rows = [
+        {
+            "prediction_date": prediction_date,
+            "player_name": f"Voided Shadow {idx}",
+            "team_abbr": "AAA",
+            "opponent": "BBB",
+            "market_type": "player_points",
+            "selection": "over",
+            "line": 10.5,
+            "result_status": "void",
+            "actual_value": "",
+        }
+        for idx in range(51)
+    ]
+    columns = list(rows[0].keys())
+    _write_csv(operator / f"full_market_board_{prediction_date}.csv", rows, columns=columns)
+    _write_csv(operator / f"elite_board_{prediction_date}.csv", [], columns=columns)
+    _write_csv(operator / f"kelly_stakes_{prediction_date}.csv", [], columns=columns)
+    _write_csv(history_root / "market_shadow_history.csv", rows, columns=columns)
+    _write_csv(history_root / "paper_kelly_history.csv", [], columns=columns)
+    diagnostics.mkdir(parents=True, exist_ok=True)
+    (diagnostics / f"market_shadow_grading_{prediction_date}.json").write_text(
+        '{"totals":{"total_picks":51,"graded_picks":0,"pending_picks":51,"hit_rate":null}}',
+        encoding="utf-8",
+    )
+
+    text, metadata = daily_summary.build_daily_summary(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+
+    assert "- pending picks: 0" in text
+    assert "Pending grading count: 0" in text
+    assert metadata["pending_grading_count"] == 0
+    assert metadata["shadow_totals"]["pending_picks"] == 0
 
 
 def test_write_daily_summary_main_closed_slate_safe_passes_read_only_flags(monkeypatch, tmp_path: Path) -> None:

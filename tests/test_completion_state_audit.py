@@ -204,6 +204,86 @@ def test_inconsistent_daily_summary_pending_count(tmp_path: Path) -> None:
     assert any("daily_summary_pending_grading_mismatch" in issue for issue in payload["agreement_issues"])
 
 
+def test_repaired_closed_slate_ignores_stale_daily_summary_shadow_pending(tmp_path: Path) -> None:
+    prediction_date = "2026-05-20"
+    history_root = tmp_path / "data" / "history"
+    runtime_root = tmp_path / "outputs" / "runtime"
+    _write_csv(history_root / "pick_history.csv", [_pick_row("Prior Pick", prediction_date="2026-05-19")])
+    _write_csv(
+        history_root / "market_shadow_history.csv",
+        [
+            _history_row(f"Voided Shadow {idx}", prediction_date=prediction_date, result_status="void")
+            for idx in range(51)
+        ],
+    )
+    _write_csv(
+        history_root / "paper_kelly_history.csv",
+        [
+            _history_row(f"Voided Paper {idx}", prediction_date=prediction_date, result_status="void")
+            for idx in range(46)
+        ],
+    )
+    _write_daily_summary(runtime_root, prediction_date, pending=51)
+    _write_quality_summary(runtime_root, prediction_date, elite=0, kelly=0)
+
+    payload = build_completion_state_audit(
+        prediction_date=prediction_date,
+        history_root=history_root,
+        runtime_root=runtime_root,
+    )
+
+    assert payload["daily_summary_pending_grading"] == 51
+    assert payload["real_pick_pending_count"] == 0
+    assert payload["shadow_pending_count"] == 0
+    assert payload["paper_pending_count"] == 0
+    assert payload["report_agreement_status"] == STATUS_COMPLETE
+    assert payload["agreement_issues"] == []
+    assert payload["details"]["daily_summary_pending_grading_resolution"] == "resolved_history_snapshot"
+
+
+def test_open_game_shadow_and_paper_pending_remain_non_blocking_without_repair_audit(tmp_path: Path) -> None:
+    prediction_date = "2099-01-15"
+    history_root = tmp_path / "data" / "history"
+    runtime_root = tmp_path / "outputs" / "runtime"
+    _write_csv(history_root / "pick_history.csv", [_pick_row("Real Pick", prediction_date=prediction_date)])
+    _write_csv(
+        history_root / "market_shadow_history.csv",
+        [
+            _history_row(
+                "Live Shadow",
+                prediction_date=prediction_date,
+                game_status="in_progress",
+            )
+        ],
+    )
+    _write_csv(
+        history_root / "paper_kelly_history.csv",
+        [
+            _history_row(
+                "Scheduled Paper",
+                prediction_date=prediction_date,
+                grading_skip_reason="game_not_final",
+            )
+        ],
+    )
+    _write_daily_summary(runtime_root, prediction_date, pending=0)
+    _write_quality_summary(runtime_root, prediction_date, elite=1, kelly=1)
+
+    payload = build_completion_state_audit(
+        prediction_date=prediction_date,
+        history_root=history_root,
+        runtime_root=runtime_root,
+    )
+
+    assert payload["report_agreement_status"] == STATUS_COMPLETE_WITH_SHADOW_OPEN_NOISE
+    assert payload["shadow_pending_count"] == 1
+    assert payload["shadow_open_game_pending_count"] == 1
+    assert payload["shadow_stale_pending_count"] == 0
+    assert payload["paper_pending_count"] == 1
+    assert payload["paper_open_game_pending_count"] == 1
+    assert payload["paper_stale_pending_count"] == 0
+
+
 def test_missing_optional_files_do_not_crash(tmp_path: Path) -> None:
     prediction_date = "2026-01-30"
     text_path, json_path, payload = write_completion_state_audit(

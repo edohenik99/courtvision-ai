@@ -542,6 +542,67 @@ def test_operator_card_no_slate_still_renders_cleanly(tmp_path: Path) -> None:
     assert "- recommended action: slate closed / no action required" in text
 
 
+def test_operator_card_no_bet_stays_clean_after_repaired_stale_daily_pending(tmp_path: Path) -> None:
+    prediction_date = "2026-05-20"
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+    operator = runtime_root / "operator"
+    columns = list(_candidate(prediction_date).keys())
+    history_columns = [*columns, "result_status", "actual_value"]
+    repaired_rows = [
+        _candidate(prediction_date, player_name=f"Voided Shadow {idx}") | {
+            "result_status": "void",
+            "actual_value": "",
+        }
+        for idx in range(51)
+    ]
+
+    _write_csv(operator / f"elite_board_{prediction_date}.csv", [], columns=columns)
+    _write_csv(operator / f"full_market_board_{prediction_date}.csv", [], columns=columns)
+    _write_csv(operator / f"sgp_board_{prediction_date}.csv", [], columns=["prediction_date"])
+    _write_json(
+        operator / f"quality_summary_{prediction_date}.json",
+        _quality_payload(
+            prediction_date,
+            elite_count=0,
+            full_market_count=0,
+            run_health_status="NO_BET",
+            games_count=0,
+        ),
+    )
+    _seed_required_json(runtime_root, prediction_date)
+    _write_json(
+        runtime_root / "diagnostics" / f"market_shadow_grading_{prediction_date}.json",
+        {"totals": {"total_picks": 51, "graded_picks": 0, "pending_picks": 51, "hit_rate": None}},
+    )
+    _write_completion_audit_json(
+        runtime_root,
+        prediction_date,
+        status="COMPLETE",
+        shadow_pending=0,
+        shadow_open=0,
+        paper_pending=0,
+        paper_open=0,
+    )
+    _seed_history(history_root)
+    _write_csv(history_root / "market_shadow_history.csv", repaired_rows, columns=history_columns)
+
+    output_path, payload = write_operator_card_outputs(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+
+    text = output_path.read_text(encoding="utf-8")
+    assert payload["final_decision"] == "NO BET"
+    assert "- pending grading: 0" in text
+    assert "- report_agreement_status: COMPLETE" in text
+    assert "- agreement issue count: none" in text
+    assert "- recommended action: slate closed / no action required" in text
+    assert "INCONSISTENT_REPORTING" not in text
+    assert "- recommended action: inspect completion audit before trusting results" not in text
+
+
 def test_operator_card_empty_elite_shows_no_bet_and_candidate_preview(tmp_path: Path) -> None:
     prediction_date = "2026-05-12"
     runtime_root = tmp_path / "runtime"

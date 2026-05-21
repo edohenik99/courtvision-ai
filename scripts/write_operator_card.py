@@ -20,6 +20,7 @@ from courtvision.context.game_context import (  # noqa: E402
     format_identity_quarantine_line,
     identity_quarantine_summary,
 )
+from courtvision.reporting.completion_state_audit import history_pending_grading_count  # noqa: E402
 from courtvision.selection import (  # noqa: E402
     format_unsupported_active_operator_market_drop_line,
     unsupported_active_operator_market_drop_summary,
@@ -1214,7 +1215,15 @@ def build_operator_card(
     all_time_rate = history_rates["all_time"] if history_rates["all_time"] is not None else shadow_history_rates["all_time"]
     last_7_rate = history_rates["last_7"] if history_rates["last_7"] is not None else shadow_history_rates["last_7"]
     graded_count = _safe_int(market_shadow_totals.get("graded_picks"), 0)
-    pending_count = _safe_int(market_shadow_totals.get("pending_picks"), 0)
+    history_pending_count = history_pending_grading_count(
+        history_root / "market_shadow_history.csv",
+        prediction_date,
+    )
+    pending_count = (
+        history_pending_count
+        if history_pending_count is not None
+        else _safe_int(market_shadow_totals.get("pending_picks"), 0)
+    )
     market_shadow_rows = _safe_int(market_shadow_totals.get("total_picks"), len(full_market_df))
     kelly_performance = market_shadow_payload.get("kelly_decision_performance", {}) if isinstance(market_shadow_payload, dict) else {}
     kelly_performance_status = (

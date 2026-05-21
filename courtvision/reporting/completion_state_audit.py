@@ -203,6 +203,21 @@ def _pending_breakdown(
     }
 
 
+def history_pending_grading_count(path: str | Path, prediction_date: str) -> int | None:
+    path = Path(path)
+    if not path.exists() or path.stat().st_size == 0:
+        return None
+    try:
+        history = pd.read_csv(path, keep_default_na=False, low_memory=False)
+    except Exception:
+        return None
+    scoped = _scoped_to_date(history, prediction_date)
+    if scoped.empty:
+        return None
+    statuses = scoped.apply(_row_status, axis=1)
+    return int(statuses.eq(PENDING_STATUS).sum())
+
+
 def _real_pick_counts(df: pd.DataFrame, *, prediction_date: str) -> dict[str, Any]:
     scoped = _scoped_to_date(df, prediction_date)
     if scoped.empty:
@@ -309,6 +324,38 @@ def _quality_counts(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _daily_pending_is_resolved_history_snapshot(
+    *,
+    daily_summary_pending_grading: int | None,
+    real_pick_pending_count: int,
+    shadow_rows: int,
+    shadow_pending_count: int,
+    shadow_stale_pending_count: int,
+    paper_rows: int,
+    paper_pending_count: int,
+    paper_stale_pending_count: int,
+) -> bool:
+    if daily_summary_pending_grading is None or daily_summary_pending_grading <= 0:
+        return False
+    if real_pick_pending_count != 0:
+        return False
+    if shadow_pending_count != 0 or shadow_stale_pending_count != 0:
+        return False
+    if paper_pending_count != 0 or paper_stale_pending_count != 0:
+        return False
+
+    resolved_history_counts = {
+        count
+        for count in (
+            shadow_rows,
+            paper_rows,
+            shadow_rows + paper_rows,
+        )
+        if count > 0
+    }
+    return daily_summary_pending_grading in resolved_history_counts
+
+
 def _agreement_issues(
     *,
     real_pick_rows: int,
@@ -317,9 +364,13 @@ def _agreement_issues(
     daily_summary_pending_grading: int | None,
     quality_summary_kelly_rows: int | None,
     quality_summary_kelly_pending_count: int | None,
+    shadow_rows: int,
     shadow_pending_count: int,
     shadow_open_game_pending_count: int,
     shadow_stale_pending_count: int,
+    paper_rows: int,
+    paper_pending_count: int,
+    paper_stale_pending_count: int,
 ) -> list[str]:
     issues: list[str] = []
 
@@ -332,9 +383,20 @@ def _agreement_issues(
         and shadow_pending_count == shadow_open_game_pending_count
         and shadow_stale_pending_count == 0
     )
+    daily_pending_is_resolved_history_snapshot = _daily_pending_is_resolved_history_snapshot(
+        daily_summary_pending_grading=daily_summary_pending_grading,
+        real_pick_pending_count=real_pick_pending_count,
+        shadow_rows=shadow_rows,
+        shadow_pending_count=shadow_pending_count,
+        shadow_stale_pending_count=shadow_stale_pending_count,
+        paper_rows=paper_rows,
+        paper_pending_count=paper_pending_count,
+        paper_stale_pending_count=paper_stale_pending_count,
+    )
 
     if daily_summary_pending_grading is not None and not (
         daily_pending_is_real_pick_count or daily_pending_is_open_shadow_noise
+        or daily_pending_is_resolved_history_snapshot
     ):
         issues.append(
             "daily_summary_pending_grading_mismatch:"
@@ -485,6 +547,20 @@ def build_completion_state_audit(
 
     daily_summary_pending_grading = _daily_pending_count(daily_text) if daily_text else None
     quality = _quality_counts(quality_payload)
+    daily_summary_pending_resolution = (
+        "resolved_history_snapshot"
+        if _daily_pending_is_resolved_history_snapshot(
+            daily_summary_pending_grading=daily_summary_pending_grading,
+            real_pick_pending_count=real_counts["real_pick_pending_count"],
+            shadow_rows=int(shadow_counts["rows"]),
+            shadow_pending_count=int(shadow_counts["pending_count"]),
+            shadow_stale_pending_count=int(shadow_counts["stale_pending_count"]),
+            paper_rows=int(paper_counts["rows"]),
+            paper_pending_count=int(paper_counts["pending_count"]),
+            paper_stale_pending_count=int(paper_counts["stale_pending_count"]),
+        )
+        else "reported"
+    )
     agreement_issues = _agreement_issues(
         real_pick_rows=real_counts["real_pick_rows"],
         real_pick_pending_count=real_counts["real_pick_pending_count"],
@@ -492,9 +568,13 @@ def build_completion_state_audit(
         daily_summary_pending_grading=daily_summary_pending_grading,
         quality_summary_kelly_rows=quality["quality_summary_kelly_rows"],
         quality_summary_kelly_pending_count=quality["quality_summary_kelly_pending_count"],
+        shadow_rows=int(shadow_counts["rows"]),
         shadow_pending_count=int(shadow_counts["pending_count"]),
         shadow_open_game_pending_count=int(shadow_counts["open_game_pending_count"]),
         shadow_stale_pending_count=int(shadow_counts["stale_pending_count"]),
+        paper_rows=int(paper_counts["rows"]),
+        paper_pending_count=int(paper_counts["pending_count"]),
+        paper_stale_pending_count=int(paper_counts["stale_pending_count"]),
     )
 
     status = _classify(
@@ -540,6 +620,7 @@ def build_completion_state_audit(
             "paper_direct_open_game_pending_count": int(paper_counts.get("direct_open_game_pending_count", 0) or 0),
             "paper_direct_stale_pending_count": int(paper_counts.get("direct_stale_pending_count", 0) or 0),
             "quality_summary_kelly_pending_count": quality["quality_summary_kelly_pending_count"],
+            "daily_summary_pending_grading_resolution": daily_summary_pending_resolution,
         },
         "repair_audit": {
             "path": repair_record["path"],
@@ -678,6 +759,7 @@ __all__ = [
     "build_completion_state_audit",
     "completion_state_audit_json_path",
     "completion_state_audit_txt_path",
+    "history_pending_grading_count",
     "render_completion_state_audit_text",
     "write_completion_state_audit",
 ]

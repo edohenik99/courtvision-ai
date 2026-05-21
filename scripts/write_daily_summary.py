@@ -61,6 +61,7 @@ from courtvision.reporting.correlation_exposure import (
     report_row_line as correlation_exposure_row_line,
     write_correlation_exposure_report,
 )
+from courtvision.reporting.completion_state_audit import history_pending_grading_count
 from courtvision.reporting.team_distribution import (
     OBSERVATION_ONLY_NOTE as TEAM_DISTRIBUTION_OBSERVATION_ONLY_NOTE,
     REPORT_TITLE as TEAM_DISTRIBUTION_TITLE,
@@ -751,7 +752,7 @@ def build_daily_summary(
         kelly_eligible_count=int(len(kelly_eligible)),
         warnings=warnings,
     )
-    shadow_totals = shadow.get("totals", {}) if isinstance(shadow, dict) else {}
+    shadow_totals = dict(shadow.get("totals", {}) if isinstance(shadow, dict) else {})
     context_alignment_performance = (
         shadow.get("context_alignment_performance", {})
         if isinstance(shadow, dict)
@@ -766,7 +767,16 @@ def build_daily_summary(
             out_dir=runtime_root.parent if runtime_root.name == "runtime" else runtime_root,
             history_root=history_root,
         )
-    pending_grading = int(shadow_totals.get("pending_picks") or 0)
+    history_pending_grading = history_pending_grading_count(
+        market_shadow_history_path,
+        prediction_date,
+    )
+    pending_grading = (
+        history_pending_grading
+        if history_pending_grading is not None
+        else int(shadow_totals.get("pending_picks") or 0)
+    )
+    shadow_totals["pending_picks"] = pending_grading
 
     readiness_markets = readiness.get("markets", []) if isinstance(readiness, dict) else []
     rejection_counts = readiness.get("rejection_count_by_market_type_reason", {}) if isinstance(readiness, dict) else {}
