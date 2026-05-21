@@ -80,6 +80,8 @@ DEFAULT_MAX_DAILY_EXPOSURE: float = 0.08
 MEDIUM_NEUTRAL_OVER_DAMPENER_FACTOR: float = 0.5
 REVIEW_BEFORE_BET_ACTION: str = "REVIEW_BEFORE_BET"
 OK_TO_CONSIDER_ACTION: str = "OK_TO_CONSIDER"
+DO_NOT_BET_UNTIL_REVIEWED_ACTION: str = "DO_NOT_BET_UNTIL_REVIEWED"
+PRE_KELLY_HARD_BLOCK_SKIP_REASON: str = "pre_kelly_hard_block"
 
 # Phase 12G: Edge Containment HOLD risk control constants
 # A row is held when: selection==over, market_type in HOLD_COMBO_MARKETS, edge>=threshold.
@@ -125,6 +127,8 @@ class StakeRow:
     manual_review_required: bool
     manual_review_reason: str
     recommended_action: str
+    review_before_bet: bool
+    review_policy_hold: bool
     review_status: str
     stake_policy: str
     operator_action: str
@@ -159,6 +163,22 @@ def _is_truthy(value: Any) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"true", "1", "yes", "y"}
+
+
+def _clean_text(value: Any) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    return "" if text.lower() in {"nan", "none", "null", "<na>", "nat"} else text
+
+
+def _is_falsey(value: Any) -> bool:
+    if isinstance(value, bool):
+        return not value
+    text = _clean_text(value).lower()
+    if not text:
+        return False
+    return text in {"false", "0", "no", "n", "off"}
 
 
 def _american_to_decimal(american: float) -> float | None:
@@ -247,6 +267,47 @@ def _check_edge_containment_hold(
     return edge_pct_raw >= threshold
 
 
+def _pre_kelly_hard_block_reasons(
+    row: dict[str, str],
+    *,
+    identity_quarantine_reason: str,
+    same_opponent_under_warning: bool,
+    manual_review_required: bool,
+    review_before_bet: bool,
+    review_policy_hold: bool,
+) -> list[str]:
+    """Return safety reasons that must zero the row before Kelly sizing."""
+    reasons: list[str] = []
+
+    if _is_truthy(row.get("source_identity_conflicted")):
+        reasons.append("source_identity_conflicted")
+    if _is_truthy(row.get("row_identity_quarantined")):
+        reasons.append("row_identity_quarantined")
+    if _clean_text(identity_quarantine_reason):
+        reasons.append(f"identity_quarantine_reason={_clean_text(identity_quarantine_reason)}")
+    row_identity_quarantine_reason = _clean_text(row.get("row_identity_quarantine_reason"))
+    if row_identity_quarantine_reason and not _clean_text(identity_quarantine_reason):
+        reasons.append(f"row_identity_quarantine_reason={row_identity_quarantine_reason}")
+    if _is_falsey(row.get("player_identity_valid")):
+        reasons.append("player_identity_valid=false")
+    if manual_review_required:
+        reasons.append("manual_review_required")
+    if review_before_bet:
+        reasons.append("review_before_bet")
+    if review_policy_hold:
+        reasons.append("review_policy_hold")
+    if same_opponent_under_warning:
+        reasons.append("same_opponent_under_warning")
+    if _clean_text(row.get("operator_action")).upper() == DO_NOT_BET_UNTIL_REVIEWED_ACTION:
+        reasons.append("operator_action=DO_NOT_BET_UNTIL_REVIEWED")
+    if _clean_text(row.get("stake_policy")).upper() in {"HOLD", "HOLD_FOR_REVIEW"}:
+        reasons.append(f"stake_policy={_clean_text(row.get('stake_policy')).upper()}")
+    if _clean_text(row.get("review_status")).upper() == "REVIEW_REQUIRED":
+        reasons.append("review_status=REVIEW_REQUIRED")
+
+    return reasons
+
+
 def _medium_neutral_over_dampener(selection: str, context_caution_level: str, context_pick_alignment: str, eligible: bool) -> tuple[str, float]:
     if (
         eligible
@@ -293,11 +354,32 @@ def _build_stake_row(row: dict[str, str], edge_col: str, bankroll: float) -> Sta
     opponent = str(row.get("opponent", "") or "").strip()
     same_opponent_under_warning = _is_truthy(row.get("same_opponent_under_warning"))
     manual_review_required = _is_truthy(row.get("manual_review_required"))
-    identity_quarantine_reason = is_identity_quarantined(row) or ""
+    incoming_recommended_action = _clean_text(row.get("recommended_action")).upper()
+    review_before_bet = (
+        _is_truthy(row.get("review_before_bet"))
+        or incoming_recommended_action in {REVIEW_BEFORE_BET_ACTION, DO_NOT_BET_UNTIL_REVIEWED_ACTION}
+    )
+    review_policy_hold = _is_truthy(row.get("review_policy_hold"))
+    inferred_identity_quarantine_reason = is_identity_quarantined(row) or ""
+    raw_identity_quarantine_reason = _clean_text(row.get("identity_quarantine_reason"))
+    row_identity_quarantine_reason = _clean_text(row.get("row_identity_quarantine_reason"))
+    identity_quarantine_reason = (
+        inferred_identity_quarantine_reason
+        or raw_identity_quarantine_reason
+        or row_identity_quarantine_reason
+    )
     _manual_review_reason_raw = str(row.get("manual_review_reason", "") or "").strip()
     _same_opponent_warning_reason_raw = str(row.get("same_opponent_warning_reason", "") or "").strip()
     if not same_opponent_under_warning and "same_opponent_under_warning" in _manual_review_reason_raw:
         same_opponent_under_warning = True
+    hard_block_reasons = _pre_kelly_hard_block_reasons(
+        row,
+        identity_quarantine_reason=identity_quarantine_reason,
+        same_opponent_under_warning=same_opponent_under_warning,
+        manual_review_required=manual_review_required,
+        review_before_bet=review_before_bet,
+        review_policy_hold=review_policy_hold,
+    )
 
     # Phase 12G: Edge Containment HOLD — evaluated BEFORE market_type lock and all
     # other eligibility gates so it fires even for currently-ineligible combo markets.
@@ -305,30 +387,53 @@ def _build_stake_row(row: dict[str, str], edge_col: str, bankroll: float) -> Sta
         row, market_type, selection, edge_pct_raw, edge_col
     )
 
-    if identity_quarantine_reason:
-        skip_reason = IDENTITY_QUARANTINE_REJECTION_REASON
+    if hard_block_reasons:
         eligible = False
         manual_review_required = True
-        review_status = IDENTITY_QUARANTINE_ACTION
-        stake_policy = "DATA_INVALID"
-        recommended_action = IDENTITY_QUARANTINE_ACTION
-        operator_action = IDENTITY_QUARANTINE_ACTION
-        operator_note = f"identity_quarantine_reason={identity_quarantine_reason}"
+        review_before_bet = True
+        review_policy_hold = True
+        identity_hard_block = any(
+            reason.startswith(("identity_quarantine_reason=", "row_identity_quarantined"))
+            for reason in hard_block_reasons
+        )
+        skip_reason = (
+            IDENTITY_QUARANTINE_REJECTION_REASON
+            if identity_hard_block
+            else PRE_KELLY_HARD_BLOCK_SKIP_REASON
+        )
+        review_status = "REVIEW_REQUIRED"
+        stake_policy = "HOLD"
+        recommended_action = (
+            IDENTITY_QUARANTINE_ACTION
+            if identity_hard_block
+            else DO_NOT_BET_UNTIL_REVIEWED_ACTION
+        )
+        operator_action = DO_NOT_BET_UNTIL_REVIEWED_ACTION
+        _note_parts = [f"pre_kelly_hard_block_reasons={','.join(hard_block_reasons)}"]
+        if _manual_review_reason_raw:
+            _note_parts.append(f"manual_review_reason={_manual_review_reason_raw}")
+        if _same_opponent_warning_reason_raw:
+            _note_parts.append(f"same_opponent_warning_reason={_same_opponent_warning_reason_raw}")
+        operator_note = "; ".join(_note_parts)
     elif _ecr_hold:
         # HOLD overrides all other routing
         skip_reason = EDGE_CONTAINMENT_HOLD_SKIP_REASON
         eligible = False
         manual_review_required = True
+        review_before_bet = True
+        review_policy_hold = True
         review_status = "HOLD"
         stake_policy = "HOLD_FOR_REVIEW"
-        recommended_action = "DO_NOT_BET_UNTIL_REVIEWED"
-        operator_action = "DO_NOT_BET_UNTIL_REVIEWED"
+        recommended_action = DO_NOT_BET_UNTIL_REVIEWED_ACTION
+        operator_action = DO_NOT_BET_UNTIL_REVIEWED_ACTION
         operator_note = EDGE_CONTAINMENT_HOLD_SKIP_REASON
     elif manual_review_required:
         review_status = "REVIEW_REQUIRED"
         stake_policy = "HOLD"
-        recommended_action = REVIEW_BEFORE_BET_ACTION
-        operator_action = "DO_NOT_BET_UNTIL_REVIEWED"
+        review_before_bet = True
+        review_policy_hold = True
+        recommended_action = DO_NOT_BET_UNTIL_REVIEWED_ACTION
+        operator_action = DO_NOT_BET_UNTIL_REVIEWED_ACTION
         _note_parts = []
         if _manual_review_reason_raw:
             _note_parts.append(f"manual_review_reason={_manual_review_reason_raw}")
@@ -342,7 +447,7 @@ def _build_stake_row(row: dict[str, str], edge_col: str, bankroll: float) -> Sta
         operator_action = "OK_TO_CONSIDER"
         operator_note = ""
 
-    if not identity_quarantine_reason and not _ecr_hold:
+    if not hard_block_reasons and not _ecr_hold:
         if market_type and market_type != "player_points":
             skip_reason = KELLY_SKIP_POINTS_ONLY_MARKET_LOCK
             eligible = False
@@ -424,6 +529,8 @@ def _build_stake_row(row: dict[str, str], edge_col: str, bankroll: float) -> Sta
         manual_review_required=manual_review_required,
         manual_review_reason=str(row.get("manual_review_reason", "") or ""),
         recommended_action=recommended_action,
+        review_before_bet=review_before_bet,
+        review_policy_hold=review_policy_hold,
         review_status=review_status,
         stake_policy=stake_policy,
         operator_action=operator_action,
@@ -490,6 +597,8 @@ def _write_stakes(
         "manual_review_required",
         "manual_review_reason",
         "recommended_action",
+        "review_before_bet",
+        "review_policy_hold",
         "review_status",
         "stake_policy",
         "operator_action",
@@ -531,6 +640,8 @@ def _write_stakes(
                 "manual_review_required": s.manual_review_required,
                 "manual_review_reason": s.manual_review_reason,
                 "recommended_action": s.recommended_action,
+                "review_before_bet": s.review_before_bet,
+                "review_policy_hold": s.review_policy_hold,
                 "review_status": s.review_status,
                 "stake_policy": s.stake_policy,
                 "operator_action": s.operator_action,
@@ -617,7 +728,7 @@ def main(argv: list[str] | None = None) -> int:
     eligible = [s for s in stakes if s.eligible]
     skipped = [s for s in stakes if not s.eligible]
     manual_review_required_count = sum(1 for s in stakes if s.manual_review_required)
-    review_before_bet_count = sum(1 for s in stakes if s.recommended_action == REVIEW_BEFORE_BET_ACTION)
+    review_before_bet_count = sum(1 for s in stakes if s.review_before_bet)
     review_required_count = sum(1 for s in stakes if s.review_status == "REVIEW_REQUIRED")
     hold_policy_count = sum(1 for s in stakes if s.stake_policy == "HOLD")
     clear_policy_count = sum(1 for s in stakes if s.stake_policy == "NORMAL")

@@ -450,16 +450,32 @@ class TestConservativeKellyLogic:
         assert review["same_opponent_warning_reason"] == "last_same_opponent_actual_exceeded_current_under_line"
         assert review["manual_review_required"] == "True"
         assert review["manual_review_reason"] == "same_opponent_under_warning"
-        assert review["recommended_action"] == "REVIEW_BEFORE_BET"
+        assert review["recommended_action"] == "DO_NOT_BET_UNTIL_REVIEWED"
+        assert review["review_before_bet"] == "True"
+        assert review["review_policy_hold"] == "True"
+        assert review["kelly_eligible"] == "False"
+        assert float(review["stake_amount"]) == 0.0
+        assert float(review["stake_fraction"]) == 0.0
         assert clean["same_opponent_under_warning"] == "False"
         assert clean["manual_review_required"] == "False"
         assert clean["recommended_action"] == "OK_TO_CONSIDER"
+        assert clean["review_before_bet"] == "False"
+        assert clean["review_policy_hold"] == "False"
+        assert clean["kelly_eligible"] == "True"
+        assert float(clean["stake_amount"]) > 0.0
         log = capsys.readouterr().out
         assert "manual_review_required_count=1" in log
         assert "review_before_bet_count=1" in log
 
 
-_REQUIRED_POLICY_COLUMNS = ("review_status", "stake_policy", "operator_action", "operator_note")
+_REQUIRED_POLICY_COLUMNS = (
+    "review_before_bet",
+    "review_policy_hold",
+    "review_status",
+    "stake_policy",
+    "operator_action",
+    "operator_note",
+)
 
 
 class TestReviewPolicyOutput:
@@ -509,9 +525,17 @@ class TestReviewPolicyOutput:
         }
         stake = _build_stake_row(row, edge_col, bankroll=1000.0)
 
+        assert stake.eligible is False
+        assert stake.stake_amount == 0.0
+        assert stake.stake_fraction == 0.0
+        assert stake.skip_reason == "pre_kelly_hard_block"
+        assert stake.recommended_action == "DO_NOT_BET_UNTIL_REVIEWED"
+        assert stake.review_before_bet is True
+        assert stake.review_policy_hold is True
         assert stake.review_status == "REVIEW_REQUIRED"
         assert stake.stake_policy == "HOLD"
         assert stake.operator_action == "DO_NOT_BET_UNTIL_REVIEWED"
+        assert "manual_review_required" in stake.operator_note
         assert "manual_review_reason=same_opponent_under_warning" in stake.operator_note
         assert "same_opponent_warning_reason=last_same_opponent_actual_exceeded_current_under_line" in stake.operator_note
 
@@ -522,13 +546,18 @@ class TestReviewPolicyOutput:
         row = {**_kelly_row(selection="under", edge="0.10", confidence="0.75"), "manual_review_required": "False"}
         stake = _build_stake_row(row, edge_col, bankroll=1000.0)
 
+        assert stake.eligible is True
+        assert stake.stake_amount > 0.0
+        assert stake.recommended_action == "OK_TO_CONSIDER"
+        assert stake.review_before_bet is False
+        assert stake.review_policy_hold is False
         assert stake.review_status == "CLEAR"
         assert stake.stake_policy == "NORMAL"
         assert stake.operator_action == "OK_TO_CONSIDER"
         assert stake.operator_note == ""
 
-    def test_stake_amount_unchanged_by_review_policy(self):
-        """stake_amount must be byte-for-byte identical regardless of manual_review_required."""
+    def test_manual_review_required_zeroes_stake_without_touching_clean_row(self):
+        """Manual-review rows are preserved but hard-blocked before Kelly math."""
         fieldnames = ["player_name", "market_type", "selection", "odds", "confidence",
                       "edge_pct", "side_edge_pct", "manual_review_required",
                       "manual_review_reason", "same_opponent_warning_reason"]
@@ -544,11 +573,16 @@ class TestReviewPolicyOutput:
         stake_review = _build_stake_row(row_review, edge_col, bankroll=1000.0)
         stake_clean = _build_stake_row(row_clean, edge_col, bankroll=1000.0)
 
-        assert stake_review.stake_amount == stake_clean.stake_amount, (
-            f"stake_amount must not change: review={stake_review.stake_amount} clean={stake_clean.stake_amount}"
-        )
-        assert stake_review.stake_fraction == stake_clean.stake_fraction
-        assert stake_review.eligible == stake_clean.eligible
+        assert stake_review.eligible is False
+        assert stake_review.stake_amount == 0.0
+        assert stake_review.stake_fraction == 0.0
+        assert stake_review.operator_action == "DO_NOT_BET_UNTIL_REVIEWED"
+        assert stake_review.stake_policy == "HOLD"
+        assert stake_clean.eligible is True
+        assert stake_clean.stake_amount > 0.0
+        assert stake_clean.stake_fraction > 0.0
+        assert stake_clean.operator_action == "OK_TO_CONSIDER"
+        assert stake_clean.stake_policy == "NORMAL"
 
     # ------------------------------------------------------------------
     # CSV column presence – the primary regression the user hit
@@ -572,7 +606,7 @@ class TestReviewPolicyOutput:
         assert missing == [], f"missing required columns: {missing}"
 
     def test_review_policy_fields_in_csv_output(self, tmp_path):
-        """End-to-end: written CSV rows have correct values and stake math is unchanged."""
+        """End-to-end: review rows are kept in the CSV with zero stake and hold fields."""
         rows = self._two_rows()
         input_path = self._make_input_csv(tmp_path, rows)
         output_path = tmp_path / "kelly_stakes.csv"
@@ -596,28 +630,37 @@ class TestReviewPolicyOutput:
         assert hold["review_status"] == "REVIEW_REQUIRED"
         assert hold["stake_policy"] == "HOLD"
         assert hold["operator_action"] == "DO_NOT_BET_UNTIL_REVIEWED"
+        assert hold["recommended_action"] == "DO_NOT_BET_UNTIL_REVIEWED"
+        assert hold["review_before_bet"] == "True"
+        assert hold["review_policy_hold"] == "True"
         assert "manual_review_reason=same_opponent_under_warning" in hold["operator_note"]
         assert "same_opponent_warning_reason=last_same_opponent_actual_exceeded_current_under_line" in hold["operator_note"]
 
         assert clear["review_status"] == "CLEAR"
         assert clear["stake_policy"] == "NORMAL"
         assert clear["operator_action"] == "OK_TO_CONSIDER"
+        assert clear["recommended_action"] == "OK_TO_CONSIDER"
+        assert clear["review_before_bet"] == "False"
+        assert clear["review_policy_hold"] == "False"
         assert clear["operator_note"] == ""
 
-        # Stake math unchanged
-        assert float(hold["stake_amount"]) == float(clear["stake_amount"])
-        assert float(hold["stake_fraction"]) == float(clear["stake_fraction"])
+        assert hold["kelly_eligible"] == "False"
+        assert float(hold["stake_amount"]) == 0.0
+        assert float(hold["stake_fraction"]) == 0.0
+        assert clear["kelly_eligible"] == "True"
+        assert float(clear["stake_amount"]) > 0.0
+        assert float(clear["stake_fraction"]) > 0.0
 
     # ------------------------------------------------------------------
     # Ajay regression: manual-review row has HOLD, clean row has NORMAL,
-    # and stake_amount is identical for both.
+    # and the review row carries no stake.
     # ------------------------------------------------------------------
 
-    def test_ajay_regression_hold_policy_and_stake_unchanged(self, tmp_path):
+    def test_ajay_regression_hold_policy_and_stake_zeroed(self, tmp_path):
         """
         Regression: Ajay's under pick triggered same_opponent_under_warning.
         The written CSV must have stake_policy=HOLD for that row and
-        stake_policy=NORMAL for a clean row, with stake_amount identical.
+        stake_policy=NORMAL for a clean row, with the review stake zeroed.
         """
         rows = [
             {
@@ -660,15 +703,21 @@ class TestReviewPolicyOutput:
         assert ajay["stake_policy"] == "HOLD", f"expected HOLD, got {ajay['stake_policy']!r}"
         assert ajay["review_status"] == "REVIEW_REQUIRED"
         assert ajay["operator_action"] == "DO_NOT_BET_UNTIL_REVIEWED"
+        assert ajay["recommended_action"] == "DO_NOT_BET_UNTIL_REVIEWED"
+        assert ajay["review_before_bet"] == "True"
+        assert ajay["review_policy_hold"] == "True"
         assert clean["stake_policy"] == "NORMAL", f"expected NORMAL, got {clean['stake_policy']!r}"
         assert clean["review_status"] == "CLEAR"
         assert clean["operator_action"] == "OK_TO_CONSIDER"
+        assert clean["review_before_bet"] == "False"
+        assert clean["review_policy_hold"] == "False"
 
-        # Stake math unchanged
-        assert float(ajay["stake_amount"]) == float(clean["stake_amount"]), (
-            f"stake_amount changed: Ajay={ajay['stake_amount']} Clean={clean['stake_amount']}"
-        )
-        assert float(ajay["stake_fraction"]) == float(clean["stake_fraction"])
+        assert ajay["kelly_eligible"] == "False"
+        assert float(ajay["stake_amount"]) == 0.0
+        assert float(ajay["stake_fraction"]) == 0.0
+        assert clean["kelly_eligible"] == "True"
+        assert float(clean["stake_amount"]) > 0.0
+        assert float(clean["stake_fraction"]) > 0.0
 
     # ------------------------------------------------------------------
     # Console [COUNT] lines
@@ -709,6 +758,155 @@ class TestReviewPolicyOutput:
         assert "[COUNT] hold_policy_count=2" in log
         assert "[COUNT] clear_policy_count=1" in log
         assert "[COUNT] do_not_bet_until_reviewed_count=2" in log
+
+
+_SAFETY_METADATA_COLUMNS = (
+    "source_identity_conflicted",
+    "source_identity_conflict_reason",
+    "source_identity_conflict_details",
+    "source_identity_conflict_policy",
+    "row_identity_valid",
+    "row_identity_quarantined",
+    "row_identity_quarantine_reason",
+    "manual_review_required",
+    "review_before_bet",
+    "same_opponent_under_warning",
+    "review_policy_hold",
+    "operator_action",
+    "stake_policy",
+    "review_status",
+)
+
+
+class TestPreKellyHardBlocks:
+    """Phase R1E safety blocks must zero stake before Kelly sizing."""
+
+    def _stake(self, extra: dict[str, str]):
+        row = {
+            **_kelly_row(selection="under", edge="0.10", confidence="0.75", odds="-110"),
+            **extra,
+        }
+        edge_col = _validate_columns(list(row.keys()))
+        return _build_stake_row(row, edge_col, bankroll=1000.0)
+
+    @pytest.mark.parametrize(
+        ("extra", "expected_reason"),
+        [
+            ({"source_identity_conflicted": "True"}, "source_identity_conflicted"),
+            ({"manual_review_required": "True"}, "manual_review_required"),
+            ({"review_before_bet": "True"}, "review_before_bet"),
+            ({"same_opponent_under_warning": "True"}, "same_opponent_under_warning"),
+            ({"review_policy_hold": "True"}, "review_policy_hold"),
+            ({"row_identity_quarantined": "True"}, "row_identity_quarantined"),
+            ({"identity_quarantine_reason": "custom_identity_reason"}, "identity_quarantine_reason=custom_identity_reason"),
+            ({"player_identity_valid": "False"}, "player_identity_valid=false"),
+            ({"operator_action": "DO_NOT_BET_UNTIL_REVIEWED"}, "operator_action=DO_NOT_BET_UNTIL_REVIEWED"),
+            ({"stake_policy": "HOLD"}, "stake_policy=HOLD"),
+            ({"review_status": "REVIEW_REQUIRED"}, "review_status=REVIEW_REQUIRED"),
+        ],
+    )
+    def test_pre_kelly_hard_block_forces_zero_stake_and_hold_action(self, extra, expected_reason):
+        stake = self._stake(extra)
+
+        assert stake.eligible is False
+        assert stake.stake_amount == 0.0
+        assert stake.stake_fraction == 0.0
+        assert stake.expected_value == 0.0
+        assert stake.manual_review_required is True
+        assert stake.review_before_bet is True
+        assert stake.review_policy_hold is True
+        assert stake.operator_action == "DO_NOT_BET_UNTIL_REVIEWED"
+        assert stake.stake_policy == "HOLD"
+        assert stake.review_status == "REVIEW_REQUIRED"
+        assert stake.recommended_action in {"DO_NOT_BET_UNTIL_REVIEWED", "DATA_INVALID"}
+        assert expected_reason in stake.operator_note
+
+    def test_clean_row_behavior_remains_unchanged(self):
+        stake = self._stake({})
+
+        assert stake.eligible is True
+        assert stake.stake_amount > 0.0
+        assert stake.stake_fraction > 0.0
+        assert stake.recommended_action == "OK_TO_CONSIDER"
+        assert stake.review_before_bet is False
+        assert stake.review_policy_hold is False
+        assert stake.operator_action == "OK_TO_CONSIDER"
+        assert stake.stake_policy == "NORMAL"
+        assert stake.review_status == "CLEAR"
+        assert stake.operator_note == ""
+
+    def test_kelly_csv_preserves_safety_metadata_columns(self, tmp_path):
+        input_path = tmp_path / "elite_board.csv"
+        output_path = tmp_path / "kelly_stakes.csv"
+        row = {
+            **_kelly_row(player_name="Source Conflict", selection="under", edge="0.10", confidence="0.75"),
+            "source_identity_conflicted": "True",
+            "source_identity_conflict_reason": "player_id_team_conflict",
+            "source_identity_conflict_details": '{"baseline_team_abbrs":["CLE","LAC"]}',
+            "source_identity_conflict_policy": "row_valid_but_source_conflicted",
+            "row_identity_valid": "True",
+            "row_identity_quarantined": "False",
+            "row_identity_quarantine_reason": "",
+            "manual_review_required": "False",
+            "review_before_bet": "False",
+            "same_opponent_under_warning": "False",
+            "review_policy_hold": "False",
+            "operator_action": "",
+            "stake_policy": "",
+            "review_status": "",
+        }
+        with input_path.open("w", encoding="utf-8", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=list(row.keys()))
+            writer.writeheader()
+            writer.writerow(row)
+
+        rc = main([
+            "--prediction-date", "2026-05-07",
+            "--bankroll", "1000",
+            "--input-csv", str(input_path),
+            "--output-csv", str(output_path),
+            "--max-daily-exposure", "1.0",
+        ])
+
+        assert rc == 0
+        with output_path.open("r", encoding="utf-8", newline="") as fh:
+            header = next(csv.reader(fh))
+        missing = [column for column in _SAFETY_METADATA_COLUMNS if column not in header]
+        assert missing == []
+
+        out = next(csv.DictReader(output_path.open("r", encoding="utf-8", newline="")))
+        assert out["source_identity_conflicted"] == "True"
+        assert out["source_identity_conflict_reason"] == "player_id_team_conflict"
+        assert out["source_identity_conflict_details"] == '{"baseline_team_abbrs":["CLE","LAC"]}'
+        assert out["source_identity_conflict_policy"] == "row_valid_but_source_conflicted"
+        assert out["row_identity_valid"] == "True"
+        assert out["row_identity_quarantined"] == "False"
+        assert out["kelly_eligible"] == "False"
+        assert float(out["stake_amount"]) == 0.0
+        assert float(out["stake_fraction"]) == 0.0
+        assert out["review_before_bet"] == "True"
+        assert out["review_policy_hold"] == "True"
+        assert out["operator_action"] == "DO_NOT_BET_UNTIL_REVIEWED"
+        assert out["stake_policy"] == "HOLD"
+        assert out["review_status"] == "REVIEW_REQUIRED"
+        assert "source_identity_conflicted" in out["operator_note"]
+
+    def test_empty_elite_board_behavior_is_unchanged(self, tmp_path):
+        input_path = tmp_path / "elite_board.csv"
+        output_path = tmp_path / "kelly_stakes.csv"
+        with input_path.open("w", encoding="utf-8", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=list(_kelly_row().keys()))
+            writer.writeheader()
+
+        with pytest.raises(SystemExit, match="Elite board is empty"):
+            main([
+                "--prediction-date", "2026-05-07",
+                "--bankroll", "1000",
+                "--input-csv", str(input_path),
+                "--output-csv", str(output_path),
+            ])
+
+        assert not output_path.exists()
 
 
 class TestConfigConstants:

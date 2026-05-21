@@ -585,20 +585,28 @@ def _kelly_safety_summary(kelly_df: pd.DataFrame) -> dict[str, Any]:
     manual_review_required = (
         kelly_df.get("manual_review_required", pd.Series(False, index=kelly_df.index)).map(_is_truthy)
     )
-    review_before_bet = (
+    review_before_bet_action = (
         kelly_df.get("recommended_action", pd.Series("", index=kelly_df.index))
         .fillna("")
         .astype(str)
         .str.strip()
         .eq("REVIEW_BEFORE_BET")
     )
-    review_policy_hold = (
+    review_before_bet_flag = (
+        kelly_df.get("review_before_bet", pd.Series(False, index=kelly_df.index)).map(_is_truthy)
+    )
+    review_before_bet = review_before_bet_action | review_before_bet_flag
+    stake_policy_hold = (
         kelly_df.get("stake_policy", pd.Series("", index=kelly_df.index))
         .fillna("")
         .astype(str)
         .str.strip()
-        .eq("HOLD")
+        .isin({"HOLD", "HOLD_FOR_REVIEW"})
     )
+    review_policy_hold_flag = (
+        kelly_df.get("review_policy_hold", pd.Series(False, index=kelly_df.index)).map(_is_truthy)
+    )
+    review_policy_hold = stake_policy_hold | review_policy_hold_flag
     return {
         "total_rows": int(len(kelly_df)),
         "kelly_eligible_count": int(eligible_mask.sum()),
