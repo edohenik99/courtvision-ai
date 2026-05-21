@@ -3,13 +3,14 @@ from __future__ import annotations
 import json
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping
 
 import pandas as pd
 
 from courtvision.context.game_context import (
     IDENTITY_OUTSIDE_TEAM_REASON,
     IDENTITY_STALE_TEAM_REASON,
+    is_identity_quarantined,
 )
 
 
@@ -17,6 +18,9 @@ PLAYER_IDENTITY_REJECTION_REASON = "player_identity_validation"
 PLAYER_ID_TEAM_CONFLICT_REASON = "player_id_team_conflict"
 BASELINE_PROVIDER_TEAM_CONFLICT_REASON = "baseline_provider_team_conflict"
 PLAYER_TEAM_NOT_IN_ACTIVE_GAME_REASON = "player_team_not_in_active_game"
+SOURCE_IDENTITY_CONFLICT_POLICY_ROW_VALID = "row_valid_but_source_conflicted"
+SOURCE_IDENTITY_CONFLICT_POLICY_ROW_INVALID = "row_invalid_source_conflicted"
+SOURCE_IDENTITY_CONFLICT_POLICY_ROW_QUARANTINED = "row_quarantined_source_conflicted"
 
 PLAYER_IDENTITY_COLUMNS: tuple[str, ...] = (
     "canonical_player_id",
@@ -27,6 +31,15 @@ PLAYER_IDENTITY_COLUMNS: tuple[str, ...] = (
     "player_identity_conflict_reason",
     "player_identity_conflict_details",
     "identity_roster_date",
+)
+SOURCE_IDENTITY_CONFLICT_COLUMNS: tuple[str, ...] = (
+    "row_identity_valid",
+    "row_identity_quarantined",
+    "row_identity_quarantine_reason",
+    "source_identity_conflicted",
+    "source_identity_conflict_reason",
+    "source_identity_conflict_details",
+    "source_identity_conflict_policy",
 )
 
 
@@ -55,6 +68,17 @@ def _player_id_key(value: Any) -> str:
     except (TypeError, ValueError):
         return text
     return str(int(number)) if number.is_integer() and number > 0 else text
+
+
+def _truthy(value: Any) -> bool | None:
+    text = _text(value).lower()
+    if not text:
+        return None
+    if text in {"true", "1", "yes", "y", "on"}:
+        return True
+    if text in {"false", "0", "no", "n", "off"}:
+        return False
+    return None
 
 
 def _game_id_key(value: Any) -> str:
@@ -455,3 +479,222 @@ def player_identity_reason_counts(*frames: pd.DataFrame) -> dict[str, int]:
         reasons = df["player_identity_conflict_reason"].fillna("").astype(str).str.strip()
         counts.update(reason for reason in reasons if reason)
     return dict(sorted(counts.items()))
+
+
+def _source_identity_diagnostic_rows(payload: Any) -> list[Mapping[str, Any]]:
+    if isinstance(payload, list):
+        return [row for row in payload if isinstance(row, Mapping)]
+    if not isinstance(payload, Mapping):
+        return []
+    direct_rows = payload.get("diagnostic_rows")
+    if isinstance(direct_rows, list):
+        return [row for row in direct_rows if isinstance(row, Mapping)]
+    player_identity = payload.get("player_identity")
+    if isinstance(player_identity, Mapping):
+        rows = player_identity.get("diagnostic_rows")
+        if isinstance(rows, list):
+            return [row for row in rows if isinstance(row, Mapping)]
+    summary = payload.get("summary")
+    if isinstance(summary, Mapping):
+        return _source_identity_diagnostic_rows(summary)
+    return []
+
+
+def source_identity_conflict_lookup(payload: Any) -> dict[str, dict[str, str]]:
+    """Return source-conflict metadata keyed by canonical player id.
+
+    This lookup is diagnostic-only. It does not imply row-level identity failure
+    or quarantine; it exposes resolver source conflicts on operator artifacts.
+    """
+
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in _source_identity_diagnostic_rows(payload):
+        player_id = _player_id_key(row.get("player_id") or row.get("canonical_player_id"))
+        if not player_id:
+            continue
+        bucket = grouped.setdefault(
+            player_id,
+            {
+                "player_id": player_id,
+                "reasons": [],
+                "details": [],
+            },
+        )
+        reason = _text(row.get("player_identity_conflict_reason"))
+        if reason and reason not in bucket["reasons"]:
+            bucket["reasons"].append(reason)
+        details = _text(row.get("player_identity_conflict_details"))
+        if details and details not in bucket["details"]:
+            bucket["details"].append(details)
+
+    lookup: dict[str, dict[str, str]] = {}
+    for player_id, bucket in grouped.items():
+        detail_values: list[Any] = []
+        for raw_detail in bucket["details"]:
+            try:
+                detail_values.append(json.loads(raw_detail))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                detail_values.append(raw_detail)
+        if not detail_values:
+            detail_text = ""
+        elif len(detail_values) == 1:
+            detail_text = json.dumps(detail_values[0], sort_keys=True)
+        else:
+            detail_text = json.dumps(detail_values, sort_keys=True)
+        lookup[player_id] = {
+            "source_identity_conflict_reason": ";".join(bucket["reasons"]),
+            "source_identity_conflict_details": detail_text,
+        }
+    return lookup
+
+
+def source_identity_conflict_diagnostic_count(payload: Any) -> int:
+    if isinstance(payload, Mapping):
+        if "conflict_count" in payload:
+            try:
+                return int(payload.get("conflict_count") or 0)
+            except (TypeError, ValueError):
+                pass
+        player_identity = payload.get("player_identity")
+        if isinstance(player_identity, Mapping) and "conflict_count" in player_identity:
+            try:
+                return int(player_identity.get("conflict_count") or 0)
+            except (TypeError, ValueError):
+                pass
+        summary = payload.get("summary")
+        if isinstance(summary, Mapping):
+            return source_identity_conflict_diagnostic_count(summary)
+    return len(_source_identity_diagnostic_rows(payload))
+
+
+def annotate_source_identity_conflicts(
+    df: pd.DataFrame,
+    source_identity_payload: Any,
+) -> pd.DataFrame:
+    """Annotate rows whose player id exists in source identity diagnostics."""
+
+    out = df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+    lookup = source_identity_conflict_lookup(source_identity_payload)
+    if out.empty:
+        for column in SOURCE_IDENTITY_CONFLICT_COLUMNS:
+            if column not in out.columns:
+                out[column] = "" if column not in {"row_identity_valid", "row_identity_quarantined", "source_identity_conflicted"} else False
+        return out
+
+    if "player_id" not in out.columns and "canonical_player_id" not in out.columns:
+        for column in SOURCE_IDENTITY_CONFLICT_COLUMNS:
+            if column not in out.columns:
+                out[column] = "" if column not in {"row_identity_valid", "row_identity_quarantined", "source_identity_conflicted"} else False
+        return out
+
+    row_valid_values: list[bool] = []
+    row_quarantined_values: list[bool] = []
+    row_quarantine_reasons: list[str] = []
+    source_conflicted_values: list[bool] = []
+    source_reasons: list[str] = []
+    source_details: list[str] = []
+    source_policies: list[str] = []
+
+    for _, row in out.iterrows():
+        player_id = _player_id_key(row.get("player_id") or row.get("canonical_player_id"))
+        source_meta = lookup.get(player_id)
+        quarantine_reason = is_identity_quarantined(row) or ""
+        row_quarantined = bool(quarantine_reason)
+        explicit_valid = _truthy(row.get("player_identity_valid"))
+        row_conflict_reason = _text(row.get("player_identity_conflict_reason"))
+        row_valid = explicit_valid if explicit_valid is not None else not row_quarantined and not bool(row_conflict_reason)
+        source_conflicted = source_meta is not None
+
+        if source_conflicted:
+            if row_quarantined:
+                policy = SOURCE_IDENTITY_CONFLICT_POLICY_ROW_QUARANTINED
+            elif row_valid:
+                policy = SOURCE_IDENTITY_CONFLICT_POLICY_ROW_VALID
+            else:
+                policy = SOURCE_IDENTITY_CONFLICT_POLICY_ROW_INVALID
+        else:
+            policy = ""
+
+        row_valid_values.append(bool(row_valid))
+        row_quarantined_values.append(row_quarantined)
+        row_quarantine_reasons.append(quarantine_reason)
+        source_conflicted_values.append(source_conflicted)
+        source_reasons.append(source_meta.get("source_identity_conflict_reason", "") if source_meta else "")
+        source_details.append(source_meta.get("source_identity_conflict_details", "") if source_meta else "")
+        source_policies.append(policy)
+
+    out["row_identity_valid"] = row_valid_values
+    out["row_identity_quarantined"] = row_quarantined_values
+    out["row_identity_quarantine_reason"] = row_quarantine_reasons
+    out["source_identity_conflicted"] = source_conflicted_values
+    out["source_identity_conflict_reason"] = source_reasons
+    out["source_identity_conflict_details"] = source_details
+    out["source_identity_conflict_policy"] = source_policies
+    return out
+
+
+def source_identity_conflicted_row_count(df: pd.DataFrame) -> int:
+    if not isinstance(df, pd.DataFrame) or df.empty or "source_identity_conflicted" not in df.columns:
+        return 0
+    values = df["source_identity_conflicted"].map(lambda value: _truthy(value) is True)
+    return int(values.sum())
+
+
+def source_identity_conflict_exposure_summary(
+    *,
+    source_identity_payload: Any,
+    full_market_df: pd.DataFrame | None = None,
+    elite_df: pd.DataFrame | None = None,
+    kelly_df: pd.DataFrame | None = None,
+    high_caution_watchlist_df: pd.DataFrame | None = None,
+    combo_under_watchlist_df: pd.DataFrame | None = None,
+    paper_kelly_df: pd.DataFrame | None = None,
+) -> dict[str, Any]:
+    lookup = source_identity_conflict_lookup(source_identity_payload)
+
+    def _annotated_count(frame: pd.DataFrame | None) -> int:
+        if not isinstance(frame, pd.DataFrame):
+            frame = pd.DataFrame()
+        if "source_identity_conflicted" in frame.columns:
+            return source_identity_conflicted_row_count(frame)
+        return source_identity_conflicted_row_count(
+            annotate_source_identity_conflicts(frame, source_identity_payload)
+        )
+
+    full_market_count = _annotated_count(full_market_df)
+    elite_count = _annotated_count(elite_df)
+    kelly_count = _annotated_count(kelly_df)
+    high_caution_count = _annotated_count(high_caution_watchlist_df)
+    combo_under_count = _annotated_count(combo_under_watchlist_df)
+    paper_count = _annotated_count(paper_kelly_df)
+    watchlist_count = high_caution_count + combo_under_count
+    blocking_count = elite_count + kelly_count
+    operator_visible_count = full_market_count + watchlist_count + paper_count
+    if blocking_count > 0:
+        safety_state = "blocking_manual_review_required"
+    elif operator_visible_count > 0:
+        safety_state = "non_blocking_diagnostic_warning"
+    else:
+        safety_state = "clear"
+    return {
+        "source_identity_conflict_count": int(source_identity_conflict_diagnostic_count(source_identity_payload)),
+        "source_identity_conflicted_player_count": int(len(lookup)),
+        "source_identity_conflicted_operator_rows": full_market_count,
+        "source_identity_conflicted_full_market_rows": full_market_count,
+        "source_identity_conflicted_elite_rows": elite_count,
+        "source_identity_conflicted_kelly_rows": kelly_count,
+        "source_identity_conflicted_watchlist_rows": watchlist_count,
+        "source_identity_conflicted_high_caution_watchlist_rows": high_caution_count,
+        "source_identity_conflicted_combo_under_watchlist_rows": combo_under_count,
+        "source_identity_conflicted_paper_rows": paper_count,
+        "source_identity_conflicted_operator_visible_rows": operator_visible_count,
+        "source_identity_conflict_blocking_rows": blocking_count,
+        "source_identity_conflict_safety_state": safety_state,
+        "source_identity_conflict_policy": (
+            "blocking_manual_review_required_for_elite_or_kelly"
+            if blocking_count > 0
+            else "row_valid_but_source_conflicted_non_blocking_diagnostic"
+            if operator_visible_count > 0
+            else "no_operator_visible_source_conflict"
+        ),
+    }

@@ -24,8 +24,13 @@ from .player_identity import (
     PLAYER_ID_TEAM_CONFLICT_REASON,
     PLAYER_IDENTITY_REJECTION_REASON,
     PLAYER_TEAM_NOT_IN_ACTIVE_GAME_REASON,
+    SOURCE_IDENTITY_CONFLICT_COLUMNS,
+    SOURCE_IDENTITY_CONFLICT_POLICY_ROW_VALID,
+    annotate_source_identity_conflicts,
     build_canonical_player_identity_resolver,
     player_identity_reason_counts,
+    source_identity_conflict_exposure_summary,
+    source_identity_conflicted_row_count,
 )
 from .game_strength import (
     POWER_RATING_CONTEXT_COLUMNS,
@@ -58,6 +63,11 @@ __all__ = [
     "PLAYER_ID_TEAM_CONFLICT_REASON",
     "PLAYER_IDENTITY_REJECTION_REASON",
     "PLAYER_TEAM_NOT_IN_ACTIVE_GAME_REASON",
+    "SOURCE_IDENTITY_CONFLICT_COLUMNS",
+    "SOURCE_IDENTITY_CONFLICT_POLICY_ROW_VALID",
+    "annotate_source_identity_conflicts",
     "build_canonical_player_identity_resolver",
     "player_identity_reason_counts",
+    "source_identity_conflict_exposure_summary",
+    "source_identity_conflicted_row_count",
 ]

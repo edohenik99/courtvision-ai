@@ -57,6 +57,7 @@ from courtvision.context.game_context import (  # noqa: E402
     IDENTITY_QUARANTINE_REJECTION_REASON,
     is_identity_quarantined,
 )
+from courtvision.context.player_identity import SOURCE_IDENTITY_CONFLICT_COLUMNS  # noqa: E402
 from courtvision.reason_codes import (  # noqa: E402
     EDGE_CONTAINMENT_HOLD_SKIP_REASON,
     KELLY_SKIP_CONTEXT_HIGH_CAUTION_OVER,
@@ -98,6 +99,7 @@ _HOLD_EDGE_THRESHOLD_ABS: float = 4.0
 
 @dataclass
 class StakeRow:
+    player_id: str
     player_name: str
     team_abbr: str
     opponent: str
@@ -128,6 +130,13 @@ class StakeRow:
     operator_action: str
     operator_note: str
     identity_quarantine_reason: str
+    row_identity_valid: str
+    row_identity_quarantined: str
+    row_identity_quarantine_reason: str
+    source_identity_conflicted: str
+    source_identity_conflict_reason: str
+    source_identity_conflict_details: str
+    source_identity_conflict_policy: str
 
 
 def _log(msg: str) -> None:
@@ -389,6 +398,7 @@ def _build_stake_row(row: dict[str, str], edge_col: str, bankroll: float) -> Sta
         expected_value = 0.0
 
     return StakeRow(
+        player_id=str(row.get("player_id", row.get("canonical_player_id", "")) or ""),
         player_name=str(row.get("player_name", "")),
         team_abbr=team_abbr,
         opponent=opponent,
@@ -419,6 +429,13 @@ def _build_stake_row(row: dict[str, str], edge_col: str, bankroll: float) -> Sta
         operator_action=operator_action,
         operator_note=operator_note,
         identity_quarantine_reason=identity_quarantine_reason,
+        row_identity_valid=str(row.get("row_identity_valid", row.get("player_identity_valid", "")) or ""),
+        row_identity_quarantined=str(row.get("row_identity_quarantined", bool(identity_quarantine_reason)) or ""),
+        row_identity_quarantine_reason=str(row.get("row_identity_quarantine_reason", identity_quarantine_reason) or ""),
+        source_identity_conflicted=str(row.get("source_identity_conflicted", "") or ""),
+        source_identity_conflict_reason=str(row.get("source_identity_conflict_reason", "") or ""),
+        source_identity_conflict_details=str(row.get("source_identity_conflict_details", "") or ""),
+        source_identity_conflict_policy=str(row.get("source_identity_conflict_policy", "") or ""),
     )
 
 
@@ -445,6 +462,7 @@ def _write_stakes(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
         "prediction_date",
+        "player_id",
         "player_name",
         "team_abbr",
         "opponent",
@@ -477,6 +495,7 @@ def _write_stakes(
         "operator_action",
         "operator_note",
         "identity_quarantine_reason",
+        *SOURCE_IDENTITY_CONFLICT_COLUMNS,
     ]
     with output_path.open("w", encoding="utf-8", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=fieldnames)
@@ -484,6 +503,7 @@ def _write_stakes(
         for s in stakes:
             writer.writerow({
                 "prediction_date": prediction_date,
+                "player_id": s.player_id,
                 "player_name": s.player_name,
                 "team_abbr": s.team_abbr,
                 "opponent": s.opponent,
@@ -516,6 +536,13 @@ def _write_stakes(
                 "operator_action": s.operator_action,
                 "operator_note": s.operator_note,
                 "identity_quarantine_reason": s.identity_quarantine_reason,
+                "row_identity_valid": s.row_identity_valid,
+                "row_identity_quarantined": s.row_identity_quarantined,
+                "row_identity_quarantine_reason": s.row_identity_quarantine_reason,
+                "source_identity_conflicted": s.source_identity_conflicted,
+                "source_identity_conflict_reason": s.source_identity_conflict_reason,
+                "source_identity_conflict_details": s.source_identity_conflict_details,
+                "source_identity_conflict_policy": s.source_identity_conflict_policy,
             })
 
 

@@ -7,6 +7,7 @@ from typing import Any
 import pandas as pd
 
 from courtvision.context.game_context import is_identity_quarantined
+from courtvision.context.player_identity import SOURCE_IDENTITY_CONFLICT_COLUMNS
 
 REPORT_FILE_PREFIX = "paper_kelly_simulation"
 ROW_STAKE_CAP = 0.0025
@@ -26,6 +27,7 @@ PAPER_BUCKET_PRIORITY = {
 REPORT_COLUMNS: tuple[str, ...] = (
     "prediction_date",
     "paper_bucket",
+    "player_id",
     "player_name",
     "team_abbr",
     "opponent",
@@ -52,6 +54,7 @@ REPORT_COLUMNS: tuple[str, ...] = (
     "real_kelly_eligible",
     "simulation_only",
     "reason_not_real_kelly",
+    *SOURCE_IDENTITY_CONFLICT_COLUMNS,
 )
 
 

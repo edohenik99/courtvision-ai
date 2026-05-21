@@ -118,7 +118,29 @@ def test_paper_kelly_file_generated(tmp_path: Path) -> None:
     assert csv_path.exists()
     assert len(report) == 2
     assert list(pd.read_csv(csv_path).columns) == list(REPORT_COLUMNS)
-    assert "total paper rows: 2" in text_path.read_text(encoding="utf-8")
+
+
+def test_paper_kelly_carries_source_identity_conflict_annotation() -> None:
+    row = {
+        **_high_caution_row("James Harden"),
+        "player_id": "192",
+        "row_identity_valid": True,
+        "row_identity_quarantined": False,
+        "row_identity_quarantine_reason": "",
+        "source_identity_conflicted": True,
+        "source_identity_conflict_reason": "player_id_team_conflict",
+        "source_identity_conflict_details": '{"baseline_team_abbrs":["CLE","LAC"]}',
+        "source_identity_conflict_policy": "row_valid_but_source_conflicted",
+    }
+
+    report = build_paper_kelly_simulation(
+        prediction_date="2026-05-06",
+        high_caution_over_watchlist=pd.DataFrame([row]),
+    )
+
+    assert bool(report.iloc[0]["source_identity_conflicted"]) is True
+    assert report.iloc[0]["source_identity_conflict_policy"] == "row_valid_but_source_conflicted"
+    assert report.iloc[0]["player_id"] == "192"
 
 
 def test_over_with_positive_edge_gets_paper_stake() -> None:

@@ -20,6 +20,11 @@ from courtvision.context.game_context import (  # noqa: E402
     format_identity_quarantine_line,
     identity_quarantine_summary,
 )
+from courtvision.context.player_identity import (  # noqa: E402
+    annotate_source_identity_conflicts,
+    source_identity_conflict_diagnostic_count,
+    source_identity_conflict_exposure_summary,
+)
 from courtvision.reporting.completion_state_audit import history_pending_grading_count  # noqa: E402
 from courtvision.selection import (  # noqa: E402
     format_unsupported_active_operator_market_drop_line,
@@ -132,6 +137,7 @@ def _artifact_paths(runtime_root: Path, prediction_date: str) -> dict[str, Path]
         "quality_summary": operator / f"quality_summary_{prediction_date}.txt",
         "quality_summary_json": operator / f"quality_summary_{prediction_date}.json",
         "operator_card": operator / f"operator_card_{prediction_date}.txt",
+        "elite_pipeline_audit_summary": operator / f"elite_pipeline_audit_summary_{prediction_date}.json",
         "board_diagnostics": diagnostics / f"board_diagnostics_{prediction_date}.json",
         "completion_state_audit_json": diagnostics / f"completion_state_audit_{prediction_date}.json",
         "completion_state_audit_text": operator / f"completion_state_audit_{prediction_date}.txt",
@@ -141,6 +147,7 @@ def _artifact_paths(runtime_root: Path, prediction_date: str) -> dict[str, Path]
         "market_shadow_grading": diagnostics / f"market_shadow_grading_{prediction_date}.json",
         "high_caution_over_watchlist": operator / f"high_caution_over_watchlist_{prediction_date}.csv",
         "combo_under_watchlist": operator / f"combo_under_watchlist_{prediction_date}.csv",
+        "paper_kelly_simulation": operator / f"paper_kelly_simulation_{prediction_date}.csv",
         "same_opponent_under_warnings": operator / f"same_opponent_under_warnings_{prediction_date}.csv",
     }
 
@@ -994,6 +1001,7 @@ def _final_decision(
     manual_review_count: int,
     review_before_bet_count: int,
     kelly_hold_count: int,
+    source_identity_blocking_count: int,
     missing_required: list[str],
     provider_unsafe: bool,
     quality_payload: dict[str, Any],
@@ -1011,6 +1019,8 @@ def _final_decision(
         or run_health.startswith("DEGRADED")
     ):
         return "DEGRADED"
+    if source_identity_blocking_count > 0:
+        return "REVIEW REQUIRED"
     if elite_count <= 0:
         return "NO BET"
     if manual_review_count > 0 or review_before_bet_count > 0 or kelly_hold_count > 0:
@@ -1103,6 +1113,7 @@ def build_operator_card(
     sgp_df = _read_csv(paths["sgp_board"], warnings)
     kelly_df = _read_csv(paths["kelly_stakes"], warnings)
     quality_payload = _read_json(paths["quality_summary_json"], warnings, required=True)
+    audit_summary_payload = _read_json(paths["elite_pipeline_audit_summary"], warnings)
     board_diagnostics = _read_json(paths["board_diagnostics"], warnings, required=True)
     full_market_sanity_payload = _read_json(
         runtime_root / "diagnostics" / f"full_market_sanity_audit_{prediction_date}.json",
@@ -1118,6 +1129,7 @@ def build_operator_card(
     game_payload = _read_json(runtime_root / "diagnostics" / f"game_context_{prediction_date}.json", warnings)
     high_caution_df = _read_csv(paths["high_caution_over_watchlist"], warnings)
     combo_under_df = _read_csv(paths["combo_under_watchlist"], warnings)
+    paper_kelly_df = _read_csv(paths["paper_kelly_simulation"], warnings)
     same_opponent_file_df = _read_csv(paths["same_opponent_under_warnings"], warnings)
 
     missing_required = [
@@ -1177,6 +1189,42 @@ def build_operator_card(
             int(kelly_df["operator_action"].map(lambda value: _safe_text(value) == "DO_NOT_BET_UNTIL_REVIEWED").sum()),
         )
 
+    quality_source_identity = quality_payload.get("source_identity_conflict", {})
+    if not isinstance(quality_source_identity, dict):
+        quality_source_identity = {}
+    source_identity_payload: dict[str, Any] = (
+        audit_summary_payload
+        if source_identity_conflict_diagnostic_count(audit_summary_payload) > 0
+        else quality_payload
+    )
+    full_market_df = annotate_source_identity_conflicts(full_market_df, source_identity_payload)
+    elite_df = annotate_source_identity_conflicts(elite_df, source_identity_payload)
+    kelly_df = annotate_source_identity_conflicts(kelly_df, source_identity_payload)
+    high_caution_df = annotate_source_identity_conflicts(high_caution_df, source_identity_payload)
+    combo_under_df = annotate_source_identity_conflicts(combo_under_df, source_identity_payload)
+    paper_kelly_df = annotate_source_identity_conflicts(paper_kelly_df, source_identity_payload)
+    source_identity_summary = source_identity_conflict_exposure_summary(
+        source_identity_payload=source_identity_payload,
+        full_market_df=full_market_df,
+        elite_df=elite_df,
+        kelly_df=kelly_df,
+        high_caution_watchlist_df=high_caution_df,
+        combo_under_watchlist_df=combo_under_df,
+        paper_kelly_df=paper_kelly_df,
+    )
+    for key, value in quality_source_identity.items():
+        if (
+            key in {"source_identity_conflict_safety_state", "source_identity_conflict_policy"}
+            or key not in source_identity_summary
+            or not source_identity_summary.get(key)
+        ):
+            source_identity_summary[key] = value
+    source_identity_blocking_count = _safe_int(
+        source_identity_summary.get("source_identity_conflict_blocking_rows"),
+        _safe_int(source_identity_summary.get("source_identity_conflicted_elite_rows"), 0)
+        + _safe_int(source_identity_summary.get("source_identity_conflicted_kelly_rows"), 0),
+    )
+
     elite_display_df = _with_kelly_review_fields(elite_df, kelly_df)
     full_market_display_df = _with_kelly_review_fields(full_market_df, kelly_df)
     elite_manual_review_count = _count_bool_column(elite_display_df, "manual_review_required")
@@ -1187,6 +1235,7 @@ def build_operator_card(
         manual_review_count=manual_review_count,
         review_before_bet_count=review_before_bet_count,
         kelly_hold_count=kelly_hold_count,
+        source_identity_blocking_count=source_identity_blocking_count,
         missing_required=missing_required,
         provider_unsafe=provider_unsafe,
         quality_payload=quality_payload,
@@ -1247,6 +1296,30 @@ def build_operator_card(
     if int(identity_summary.get("total_rows_dropped", 0) or 0) <= 0:
         identity_summary = identity_quarantine_summary(game_payload)
     identity_quarantine_line = format_identity_quarantine_line(identity_summary)
+    source_identity_total = _safe_int(source_identity_summary.get("source_identity_conflict_count"), 0)
+    source_identity_operator_rows = _safe_int(
+        source_identity_summary.get("source_identity_conflicted_operator_rows"),
+        0,
+    )
+    source_identity_elite_rows = _safe_int(
+        source_identity_summary.get("source_identity_conflicted_elite_rows"),
+        0,
+    )
+    source_identity_kelly_rows = _safe_int(
+        source_identity_summary.get("source_identity_conflicted_kelly_rows"),
+        0,
+    )
+    source_identity_watchlist_rows = _safe_int(
+        source_identity_summary.get("source_identity_conflicted_watchlist_rows"),
+        0,
+    )
+    source_identity_paper_rows = _safe_int(
+        source_identity_summary.get("source_identity_conflicted_paper_rows"),
+        0,
+    )
+    source_identity_safety = _safe_text(
+        source_identity_summary.get("source_identity_conflict_safety_state")
+    ) or "clear"
 
     full_manual_df = _filter_truthy(full_market_display_df, "manual_review_required")
     full_same_opponent_df = _filter_truthy(full_market_display_df, "same_opponent_under_warning")
@@ -1311,6 +1384,35 @@ def build_operator_card(
         lines.append(f"- {unsupported_active_line}")
     if identity_quarantine_line:
         lines.append(f"- {identity_quarantine_line}")
+    if (
+        source_identity_total > 0
+        or source_identity_operator_rows
+        or source_identity_elite_rows
+        or source_identity_kelly_rows
+        or source_identity_watchlist_rows
+        or source_identity_paper_rows
+    ):
+        lines.append(
+            "- source identity conflicts: "
+            f"total={source_identity_total}, "
+            f"operator_rows={source_identity_operator_rows}, "
+            f"elite_rows={source_identity_elite_rows}, "
+            f"kelly_rows={source_identity_kelly_rows}, "
+            f"watchlist_rows={source_identity_watchlist_rows}, "
+            f"paper_rows={source_identity_paper_rows}"
+        )
+        if source_identity_safety == "blocking_manual_review_required":
+            lines.append(
+                "- source identity safety: BLOCKING manual review required "
+                "(source-conflicted row reached Elite/Kelly)"
+            )
+        elif source_identity_operator_rows or source_identity_watchlist_rows or source_identity_paper_rows:
+            lines.append(
+                "- source identity safety: non-blocking diagnostic warning "
+                "(no Elite/Kelly source-conflict exposure)"
+            )
+        else:
+            lines.append("- source identity safety: clear")
     lines.append(f"- SGP candidates count: {sgp_count}")
     lines.append(f"- Kelly rows count: {kelly_rows_count}")
     lines.append(f"- Kelly eligible count: {kelly_eligible_count}")
@@ -1406,6 +1508,10 @@ def build_operator_card(
             review_lines.append(
                 "- Kelly exists, but stake should not be treated as clean until review is complete."
             )
+        if source_identity_blocking_count > 0:
+            review_lines.append(
+                "- Source-conflicted identity reached Elite/Kelly; manual review is required before betting."
+            )
         if not review_lines:
             review_lines.append("- Review flags are present on the board or Kelly artifact.")
         lines.extend(review_lines)
@@ -1463,7 +1569,9 @@ def build_operator_card(
 
     lines.append("Final Decision")
     lines.append("-" * 40)
-    if final_decision == "REVIEW REQUIRED":
+    if final_decision == "REVIEW REQUIRED" and source_identity_blocking_count > 0:
+        lines.append("REVIEW REQUIRED - source identity conflict reached Elite/Kelly.")
+    elif final_decision == "REVIEW REQUIRED":
         lines.append("REVIEW REQUIRED — elite candidates exist, but review flags are present.")
     else:
         lines.append(final_decision)
@@ -1488,6 +1596,7 @@ def build_operator_card(
         "kelly_rows_count": kelly_rows_count,
         "kelly_eligible_count": kelly_eligible_count,
         "identity_quarantine": identity_summary,
+        "source_identity_conflict": source_identity_summary,
         "manual_review_count": manual_review_count,
         "review_before_bet_count": review_before_bet_count,
         "high_caution_over_count": high_caution_count,

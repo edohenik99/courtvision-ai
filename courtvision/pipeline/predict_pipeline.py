@@ -24,8 +24,10 @@ from courtvision.context.game_context import (
     mark_identity_quarantine_fields,
 )
 from courtvision.context.player_identity import (
+    annotate_source_identity_conflicts,
     build_canonical_player_identity_resolver,
     player_identity_reason_counts,
+    source_identity_conflict_exposure_summary,
 )
 from courtvision.data.candidates import score_player_markets
 from courtvision.injuries import InjuryEngine
@@ -397,6 +399,7 @@ class PredictionPipeline:
 
         # Convert candidates to DataFrame and mark identity-invalid rows before any board ranking.
         candidates_df = mark_identity_quarantine_fields(pd.DataFrame(candidates))
+        candidates_df = annotate_source_identity_conflicts(candidates_df, player_identity_summary)
         candidate_identity_counts = player_identity_reason_counts(candidates_df)
         identity_quarantine_counts = identity_quarantine_reason_counts(candidates_df)
         identity_quarantine_count = int(sum(identity_quarantine_counts.values()))
@@ -659,6 +662,8 @@ class PredictionPipeline:
             select_elite_board=select_elite_board,
             select_top_per_market=select_top_per_market,
         )
+        elite_df = annotate_source_identity_conflicts(elite_df, player_identity_summary)
+        full_market_df = annotate_source_identity_conflicts(full_market_df, player_identity_summary)
         if "selection" in candidates_df.columns:
             qualified_selection_counts = candidates_df["selection"].fillna("").astype(str).str.strip().str.lower().value_counts().to_dict()
             print(f"[COUNT] qualified_over_rows={int(qualified_selection_counts.get('over', 0))}", flush=True)
@@ -816,6 +821,13 @@ class PredictionPipeline:
             "total_rows_dropped": identity_quarantine_count,
             "counts_by_reason": identity_quarantine_counts,
         }
+        source_identity_exposure = source_identity_conflict_exposure_summary(
+            source_identity_payload=player_identity_summary,
+            full_market_df=full_market_df,
+            elite_df=elite_df,
+        )
+        result.summary["source_identity_conflict"] = source_identity_exposure
+        result.summary.update(source_identity_exposure)
         self._attach_player_identity_summary(
             result.summary,
             player_identity_summary,
@@ -2067,6 +2079,7 @@ class PredictionPipeline:
         summary["player_identity_conflict_reason_counts"] = source_counts
         summary["player_identity_invalid_candidate_count"] = int(sum(candidate_counts.values()))
         summary["player_identity_invalid_candidate_counts_by_reason"] = candidate_counts
+        summary.setdefault("source_identity_conflict_count", summary["player_identity_conflict_count"])
 
     def _build_empty_summary(
         self,

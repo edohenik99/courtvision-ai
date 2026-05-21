@@ -10,6 +10,8 @@ from courtvision.context.player_identity import (
     BASELINE_PROVIDER_TEAM_CONFLICT_REASON,
     PLAYER_ID_TEAM_CONFLICT_REASON,
     PLAYER_TEAM_NOT_IN_ACTIVE_GAME_REASON,
+    SOURCE_IDENTITY_CONFLICT_POLICY_ROW_VALID,
+    annotate_source_identity_conflicts,
     build_canonical_player_identity_resolver,
 )
 
@@ -78,6 +80,64 @@ def test_resolver_detects_player_id_multiple_teams_and_marks_noncanonical_candid
     assert by_team["LAC"]["candidate_team_not_in_game"] is True
     assert by_team["CLE"]["player_identity_valid"] is True
     assert by_team["CLE"]["player_identity_conflict_reason"] == ""
+
+
+def test_source_identity_annotation_preserves_row_valid_alignment() -> None:
+    games = pd.DataFrame(
+        [
+            {
+                "prediction_date": "2026-05-18",
+                "game_id": 1,
+                "home_team_abbr": "CLE",
+                "visitor_team_abbr": "DET",
+            }
+        ]
+    )
+    baselines = pd.DataFrame(
+        [
+            {"player_id": 192, "player_name": "James Harden", "team_abbr": "LAC"},
+            {"player_id": 192, "player_name": "James Harden", "team_abbr": "CLE"},
+        ]
+    )
+    odds = pd.DataFrame(
+        [
+            {
+                "game_id": 1,
+                "player_id": 192,
+                "player_name": "James Harden",
+                "team_abbr": "CLE",
+                "provider_team_abbr": "CLE",
+                "market_type": "player_points",
+            }
+        ]
+    )
+    resolver = build_canonical_player_identity_resolver(
+        prediction_date="2026-05-18",
+        player_baselines=baselines,
+        odds=odds,
+        games=games,
+    )
+    row = resolver.annotate_record(
+        {
+            "player_id": 192,
+            "player_name": "James Harden",
+            "team_abbr": "CLE",
+            "provider_team_abbr": "CLE",
+            "game_id": 1,
+            "game_home_team_abbr": "CLE",
+            "game_away_team_abbr": "DET",
+        }
+    )
+
+    annotated = annotate_source_identity_conflicts(pd.DataFrame([row]), resolver.summary())
+    out = annotated.iloc[0]
+
+    assert bool(out["player_identity_valid"]) is True
+    assert bool(out["row_identity_valid"]) is True
+    assert bool(out["row_identity_quarantined"]) is False
+    assert bool(out["source_identity_conflicted"]) is True
+    assert out["source_identity_conflict_reason"] == PLAYER_ID_TEAM_CONFLICT_REASON
+    assert out["source_identity_conflict_policy"] == SOURCE_IDENTITY_CONFLICT_POLICY_ROW_VALID
 
 
 def test_resolver_detects_provider_player_id_multiple_teams() -> None:

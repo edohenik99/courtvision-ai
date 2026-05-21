@@ -129,12 +129,14 @@ from courtvision.pipeline import PredictionPipeline, PredictionConfig
 from courtvision.config import EliteThresholds
 from courtvision.context import (
     IDENTITY_QUARANTINE_REJECTION_REASON,
+    annotate_source_identity_conflicts,
     apply_game_context,
     apply_manual_player_context,
     identity_quarantine_reason_counts,
     identity_quarantine_summary,
     load_manual_player_context,
     mark_identity_quarantine_fields,
+    source_identity_conflict_exposure_summary,
     write_game_context_outputs,
     write_manual_context_diagnostics,
 )
@@ -8834,6 +8836,9 @@ def _write_cli_outputs(
     )
     full_market_df = add_fragility_survivability_diagnostics(full_market_df)
     elite_df = add_fragility_survivability_diagnostics(elite_df)
+    source_identity_payload = summary.get("player_identity", summary)
+    full_market_df = annotate_source_identity_conflicts(full_market_df, source_identity_payload)
+    elite_df = annotate_source_identity_conflicts(elite_df, source_identity_payload)
     canonical_board_columns: list[str] = []
     for frame in (full_market_df, qualified_pool_df, elite_df):
         if isinstance(frame, pd.DataFrame) and len(frame.columns) > 0:
@@ -8849,6 +8854,13 @@ def _write_cli_outputs(
     summary["manual_review_required_count"] = full_market_manual_review["manual_review_required_count"]
     summary["elite_same_opponent_under_warning_count"] = elite_manual_review["same_opponent_under_warning_count"]
     summary["elite_manual_review_required_count"] = elite_manual_review["manual_review_required_count"]
+    source_identity_exposure = source_identity_conflict_exposure_summary(
+        source_identity_payload=source_identity_payload,
+        full_market_df=full_market_df,
+        elite_df=elite_df,
+    )
+    summary["source_identity_conflict"] = source_identity_exposure
+    summary.update(source_identity_exposure)
     diagnostics_df = audit_policy.diagnostics_dataframe(board_diagnostics)
 
     combined_df = pd.concat([elite_df, rejected_df], ignore_index=True) if not elite_df.empty or not rejected_df.empty else pd.DataFrame()

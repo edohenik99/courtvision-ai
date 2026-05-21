@@ -5,6 +5,8 @@ from typing import Any
 
 import pandas as pd
 
+from courtvision.context.player_identity import SOURCE_IDENTITY_CONFLICT_COLUMNS
+
 WATCHLIST_FILE_PREFIX = "combo_under_watchlist"
 OBSERVATION_ONLY_NOTE = "These combo UNDER candidates are not Elite/Kelly eligible yet."
 COMBO_UNDER_MARKETS: frozenset[str] = frozenset(
@@ -17,6 +19,7 @@ COMBO_UNDER_MARKETS: frozenset[str] = frozenset(
 
 WATCHLIST_COLUMNS: tuple[str, ...] = (
     "prediction_date",
+    "player_id",
     "player_name",
     "team_abbr",
     "opponent",
@@ -35,6 +38,7 @@ WATCHLIST_COLUMNS: tuple[str, ...] = (
     "final_elite_rejection_reason",
     "result_status",
     "actual_value",
+    *SOURCE_IDENTITY_CONFLICT_COLUMNS,
 )
 
 

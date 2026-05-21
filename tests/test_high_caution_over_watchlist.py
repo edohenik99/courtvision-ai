@@ -76,6 +76,35 @@ def test_watchlist_csv_is_generated_from_full_market_rows_and_sorted_by_edge(tmp
     assert list(pd.read_csv(output_path).columns) == list(WATCHLIST_COLUMNS)
 
 
+def test_watchlist_carries_source_identity_conflict_annotation(tmp_path: Path) -> None:
+    prediction_date = "2026-05-06"
+    runtime_root = tmp_path / "runtime"
+    source_conflicted = {
+        **_watchlist_row("James Harden", edge="3.50", elite_reason=FINAL_ELITE_REJECTION_REASON),
+        "player_id": "192",
+        "row_identity_valid": True,
+        "row_identity_quarantined": False,
+        "row_identity_quarantine_reason": "",
+        "source_identity_conflicted": True,
+        "source_identity_conflict_reason": "player_id_team_conflict",
+        "source_identity_conflict_details": '{"baseline_team_abbrs":["CLE","LAC"]}',
+        "source_identity_conflict_policy": "row_valid_but_source_conflicted",
+    }
+    _write_csv(
+        runtime_root / "operator" / f"full_market_board_{prediction_date}.csv",
+        [source_conflicted],
+    )
+
+    output_path, watchlist = write_high_caution_over_watchlist(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+    )
+
+    written = pd.read_csv(output_path)
+    assert bool(watchlist.iloc[0]["source_identity_conflicted"]) is True
+    assert written.iloc[0]["source_identity_conflict_policy"] == "row_valid_but_source_conflicted"
+
+
 def test_empty_watchlist_still_writes_headers(tmp_path: Path) -> None:
     prediction_date = "2026-05-06"
     runtime_root = tmp_path / "runtime"

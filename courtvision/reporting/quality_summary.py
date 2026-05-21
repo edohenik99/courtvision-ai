@@ -26,6 +26,11 @@ from courtvision.context.game_context import (
     format_identity_quarantine_line,
     identity_quarantine_summary,
 )
+from courtvision.context.player_identity import (
+    annotate_source_identity_conflicts,
+    source_identity_conflict_diagnostic_count,
+    source_identity_conflict_exposure_summary,
+)
 from courtvision.ratings.power_ratings_store import get_latest_team_power_ratings
 from courtvision.reporting.same_opponent_rematch import annotate_operator_board_files, manual_review_summary
 from courtvision.reporting.fragility_shadow_eval import (
@@ -1636,6 +1641,14 @@ def build_quality_summary(
     market_availability = _read_json(diagnostics_dir / f"market_availability_audit_{prediction_date}.json", warnings)
 
     prediction_summary = model_metrics.get("prediction_summary", {}) if isinstance(model_metrics, dict) else {}
+    source_identity_payload = (
+        audit_summary
+        if source_identity_conflict_diagnostic_count(audit_summary) > 0
+        else prediction_summary
+    )
+    full_market_df = annotate_source_identity_conflicts(full_market_df, source_identity_payload)
+    elite_df = annotate_source_identity_conflicts(elite_df, source_identity_payload)
+    kelly_df = annotate_source_identity_conflicts(kelly_df, source_identity_payload)
     counts = _artifact_counts(full_market_df, elite_df)
     run_data_mode = _infer_run_data_mode(prediction_summary, [elite_df, full_market_df])
 
@@ -1756,6 +1769,47 @@ def build_quality_summary(
         prediction_date=prediction_date,
         runtime_root=runtime_root,
     )
+    combo_under_path = operator_dir / f"combo_under_watchlist_{prediction_date}.csv"
+    paper_kelly_path = operator_dir / f"paper_kelly_simulation_{prediction_date}.csv"
+    combo_under_watchlist_df = (
+        annotate_source_identity_conflicts(_read_csv(combo_under_path, []), source_identity_payload)
+        if combo_under_path.exists()
+        else pd.DataFrame()
+    )
+    paper_kelly_df = (
+        annotate_source_identity_conflicts(_read_csv(paper_kelly_path, []), source_identity_payload)
+        if paper_kelly_path.exists()
+        else pd.DataFrame()
+    )
+    source_identity_conflict = source_identity_conflict_exposure_summary(
+        source_identity_payload=source_identity_payload,
+        full_market_df=full_market_df,
+        elite_df=elite_df,
+        kelly_df=kelly_df,
+        high_caution_watchlist_df=high_caution_over_watchlist,
+        combo_under_watchlist_df=combo_under_watchlist_df,
+        paper_kelly_df=paper_kelly_df,
+    )
+    candidate_funnel.update(
+        {
+            "source_identity_conflict_count": source_identity_conflict["source_identity_conflict_count"],
+            "source_identity_conflicted_operator_rows": source_identity_conflict[
+                "source_identity_conflicted_operator_rows"
+            ],
+            "source_identity_conflicted_full_market_rows": source_identity_conflict[
+                "source_identity_conflicted_full_market_rows"
+            ],
+            "source_identity_conflicted_elite_rows": source_identity_conflict[
+                "source_identity_conflicted_elite_rows"
+            ],
+            "source_identity_conflicted_kelly_rows": source_identity_conflict[
+                "source_identity_conflicted_kelly_rows"
+            ],
+            "source_identity_conflicted_watchlist_rows": source_identity_conflict[
+                "source_identity_conflicted_watchlist_rows"
+            ],
+        }
+    )
     rejection_reasons_market_rows, rejection_counts_by_market = _rejection_reasons_by_market(
         audit_summary=audit_summary,
         market_availability=market_availability,
@@ -1789,6 +1843,15 @@ def build_quality_summary(
             "Manual review required for "
             f"{manual_review['manual_review_required_count']} full-market row(s); "
             "same-opponent rematch flags are diagnostic only."
+        )
+    if source_identity_conflict["source_identity_conflict_safety_state"] == "blocking_manual_review_required":
+        coverage_warnings.append(
+            "Source identity conflict reached Elite/Kelly; blocking manual review is required."
+        )
+    elif source_identity_conflict["source_identity_conflicted_operator_visible_rows"] > 0:
+        coverage_warnings.append(
+            "Source identity conflicts reached operator-visible non-staking artifacts only; "
+            "non-blocking diagnostic warning."
         )
     board_movement = _board_movement_summary(
         previous_payload=previous_payload,
@@ -1834,6 +1897,7 @@ def build_quality_summary(
         "candidate_funnel": candidate_funnel,
         "unsupported_active_operator_markets": unsupported_active_operator_markets,
         "identity_quarantine": identity_quarantine,
+        "source_identity_conflict": source_identity_conflict,
         "same_opponent_under_warning_count": manual_review["same_opponent_under_warning_count"],
         "manual_review_required_count": manual_review["manual_review_required_count"],
         "manual_review_summary": manual_review,
@@ -1895,6 +1959,9 @@ def _format_quality_summary_text(payload: dict[str, Any]) -> str:
     elite_context_safety = payload.get("elite_context_safety_gate", {})
     manual_review = payload.get("manual_review_summary", {}) if isinstance(payload.get("manual_review_summary"), dict) else {}
     high_caution_over_watchlist = payload.get("high_caution_over_watchlist", {})
+    source_identity = payload.get("source_identity_conflict", {})
+    if not isinstance(source_identity, dict):
+        source_identity = {}
     exposure = payload["risk_exposure_summary"]
     movement = payload["board_movement_summary"]
     isolation = payload["date_isolation_check"]
@@ -1986,8 +2053,23 @@ def _format_quality_summary_text(payload: dict[str, Any]) -> str:
             f"- sgp_board_count: {funnel['sgp_board_count']}",
             f"- kelly_rows_count: {funnel['kelly_rows_count']}",
             f"- identity_quarantine_count: {funnel.get('identity_quarantine_count', 0)}",
+            f"- source_identity_conflict_count: {funnel.get('source_identity_conflict_count', 0)}",
+            "- source_identity_conflicted_operator_rows: "
+            f"{funnel.get('source_identity_conflicted_operator_rows', 0)}",
+            "- source_identity_conflicted_elite_rows: "
+            f"{funnel.get('source_identity_conflicted_elite_rows', 0)}",
+            "- source_identity_conflicted_kelly_rows: "
+            f"{funnel.get('source_identity_conflicted_kelly_rows', 0)}",
+            "- source_identity_conflicted_watchlist_rows: "
+            f"{funnel.get('source_identity_conflicted_watchlist_rows', 0)}",
         ]
     )
+    if source_identity.get("source_identity_conflict_count", 0):
+        lines.append(
+            "- source identity safety: "
+            f"{source_identity.get('source_identity_conflict_safety_state', 'unknown')} "
+            f"({source_identity.get('source_identity_conflict_policy', 'unknown')})"
+        )
     if identity_quarantine_line:
         identity_payload = payload.get("identity_quarantine", {})
         reason = (

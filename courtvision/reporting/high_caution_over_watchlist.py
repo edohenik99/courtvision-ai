@@ -5,6 +5,8 @@ from typing import Any
 
 import pandas as pd
 
+from courtvision.context.player_identity import SOURCE_IDENTITY_CONFLICT_COLUMNS
+
 WATCHLIST_FILE_PREFIX = "high_caution_over_watchlist"
 KELLY_PROJECTED_SKIP_REASON = "context_high_caution_over"
 FINAL_ELITE_REJECTION_REASON = "elite_reject_context_high_caution_over"
@@ -14,6 +16,7 @@ OBSERVATION_ONLY_NOTE = (
 
 WATCHLIST_COLUMNS: tuple[str, ...] = (
     "prediction_date",
+    "player_id",
     "player_name",
     "team_abbr",
     "opponent",
@@ -31,6 +34,7 @@ WATCHLIST_COLUMNS: tuple[str, ...] = (
     "context_conflict_cause",
     "kelly_projected_skip_reason",
     "final_elite_rejection_reason",
+    *SOURCE_IDENTITY_CONFLICT_COLUMNS,
 )
 
 
@@ -67,17 +71,30 @@ def _reason_mask(df: pd.DataFrame) -> pd.Series:
     return mask
 
 
+def _prepared_watchlist_frame(source_df: pd.DataFrame) -> pd.DataFrame:
+    prepared = source_df.copy()
+    fallback_columns = {
+        "team_abbr": "team",
+        "line": "sportsbook_line",
+        "model_projection": "projection",
+    }
+    for column, fallback in fallback_columns.items():
+        if column not in prepared.columns and fallback in prepared.columns:
+            prepared[column] = prepared[fallback]
+    for column in WATCHLIST_COLUMNS:
+        if column not in prepared.columns:
+            prepared[column] = ""
+    return prepared
+
+
 def build_high_caution_over_watchlist(full_market_df: pd.DataFrame) -> pd.DataFrame:
     """Build an observation-only watchlist from an already-produced full market board."""
 
     if not isinstance(full_market_df, pd.DataFrame) or full_market_df.empty:
         return pd.DataFrame(columns=WATCHLIST_COLUMNS)
 
-    selected_columns = [column for column in WATCHLIST_COLUMNS if column in full_market_df.columns]
-    if not selected_columns:
-        selected_columns = list(WATCHLIST_COLUMNS)
-
-    watchlist = full_market_df.loc[_reason_mask(full_market_df), selected_columns].copy()
+    prepared = _prepared_watchlist_frame(full_market_df)
+    watchlist = prepared.loc[_reason_mask(prepared), list(WATCHLIST_COLUMNS)].copy()
     if "edge" in watchlist.columns:
         watchlist["_sort_edge"] = pd.to_numeric(watchlist["edge"], errors="coerce")
         watchlist = watchlist.sort_values(

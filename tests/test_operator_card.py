@@ -339,6 +339,149 @@ def test_operator_card_renders_identity_quarantine_summary_with_elite_picks(tmp_
     assert payload["identity_quarantine"]["total_rows_dropped"] == 1
 
 
+def _source_conflict_fields() -> dict:
+    return {
+        "player_id": "192",
+        "row_identity_valid": True,
+        "row_identity_quarantined": False,
+        "row_identity_quarantine_reason": "",
+        "source_identity_conflicted": True,
+        "source_identity_conflict_reason": "player_id_team_conflict",
+        "source_identity_conflict_details": '{"baseline_team_abbrs":["CLE","LAC"]}',
+        "source_identity_conflict_policy": "row_valid_but_source_conflicted",
+    }
+
+
+def _source_identity_summary(
+    *,
+    total: int = 1,
+    operator_rows: int = 1,
+    elite_rows: int = 0,
+    kelly_rows: int = 0,
+    watchlist_rows: int = 0,
+    paper_rows: int = 0,
+) -> dict:
+    blocking_rows = elite_rows + kelly_rows
+    visible_rows = operator_rows + watchlist_rows + paper_rows
+    return {
+        "source_identity_conflict_count": total,
+        "source_identity_conflicted_player_count": total,
+        "source_identity_conflicted_operator_rows": operator_rows,
+        "source_identity_conflicted_full_market_rows": operator_rows,
+        "source_identity_conflicted_elite_rows": elite_rows,
+        "source_identity_conflicted_kelly_rows": kelly_rows,
+        "source_identity_conflicted_watchlist_rows": watchlist_rows,
+        "source_identity_conflicted_paper_rows": paper_rows,
+        "source_identity_conflicted_operator_visible_rows": visible_rows,
+        "source_identity_conflict_blocking_rows": blocking_rows,
+        "source_identity_conflict_safety_state": (
+            "blocking_manual_review_required" if blocking_rows else "non_blocking_diagnostic_warning"
+        ),
+        "source_identity_conflict_policy": (
+            "blocking_manual_review_required_for_elite_or_kelly"
+            if blocking_rows
+            else "row_valid_but_source_conflicted_non_blocking_diagnostic"
+        ),
+    }
+
+
+def test_operator_card_nonblocking_source_identity_warning_without_elite_or_kelly(tmp_path: Path) -> None:
+    prediction_date = "2026-05-21"
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+    operator = runtime_root / "operator"
+    row = {**_candidate(prediction_date, player_name="James Harden"), **_source_conflict_fields()}
+    columns = list(row.keys())
+
+    _write_csv(operator / f"elite_board_{prediction_date}.csv", [], columns=columns)
+    _write_csv(operator / f"full_market_board_{prediction_date}.csv", [row], columns=columns)
+    _write_csv(operator / f"high_caution_over_watchlist_{prediction_date}.csv", [row], columns=columns)
+    _write_csv(operator / f"paper_kelly_simulation_{prediction_date}.csv", [row], columns=columns)
+    _write_csv(operator / f"sgp_board_{prediction_date}.csv", [], columns=["prediction_date"])
+    _write_json(
+        operator / f"quality_summary_{prediction_date}.json",
+        {
+            **_quality_payload(
+                prediction_date,
+                elite_count=0,
+                full_market_count=1,
+                high_caution_count=1,
+                run_health_status="NO_BET",
+            ),
+            "source_identity_conflict": _source_identity_summary(
+                operator_rows=1,
+                watchlist_rows=1,
+                paper_rows=1,
+            ),
+        },
+    )
+    _seed_required_json(runtime_root, prediction_date)
+    _seed_history(history_root)
+
+    output_path, payload = write_operator_card_outputs(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+
+    text = output_path.read_text(encoding="utf-8")
+    assert payload["final_decision"] == "NO BET"
+    assert "- source identity conflicts: total=1, operator_rows=1, elite_rows=0, kelly_rows=0, watchlist_rows=1, paper_rows=1" in text
+    assert "- source identity safety: non-blocking diagnostic warning (no Elite/Kelly source-conflict exposure)" in text
+
+
+def test_operator_card_blocks_when_source_identity_reaches_elite_or_kelly(tmp_path: Path) -> None:
+    prediction_date = "2026-05-22"
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+    operator = runtime_root / "operator"
+    row = {**_candidate(prediction_date, player_name="James Harden"), **_source_conflict_fields()}
+    kelly_row = {
+        **row,
+        "kelly_eligible": True,
+        "eligible": True,
+        "stake_amount": 5.0,
+        "expected_value": 0.5,
+    }
+    columns = list(row.keys())
+
+    _write_csv(operator / f"elite_board_{prediction_date}.csv", [row], columns=columns)
+    _write_csv(operator / f"full_market_board_{prediction_date}.csv", [row], columns=columns)
+    _write_csv(operator / f"kelly_stakes_{prediction_date}.csv", [kelly_row], columns=list(kelly_row.keys()))
+    _write_csv(operator / f"sgp_board_{prediction_date}.csv", [], columns=["prediction_date"])
+    _write_json(
+        operator / f"quality_summary_{prediction_date}.json",
+        {
+            **_quality_payload(
+                prediction_date,
+                elite_count=1,
+                full_market_count=1,
+                kelly_rows=1,
+                kelly_eligible=1,
+            ),
+            "source_identity_conflict": _source_identity_summary(
+                operator_rows=1,
+                elite_rows=1,
+                kelly_rows=1,
+            ),
+        },
+    )
+    _seed_required_json(runtime_root, prediction_date)
+    _seed_history(history_root)
+
+    output_path, payload = write_operator_card_outputs(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+
+    text = output_path.read_text(encoding="utf-8")
+    assert payload["final_decision"] == "REVIEW REQUIRED"
+    assert "- source identity safety: BLOCKING manual review required (source-conflicted row reached Elite/Kelly)" in text
+    assert "- Source-conflicted identity reached Elite/Kelly; manual review is required before betting." in text
+    assert "REVIEW REQUIRED - source identity conflict reached Elite/Kelly." in text
+
+
 def test_operator_card_zero_unsupported_active_market_drops_stays_quiet(tmp_path: Path) -> None:
     prediction_date = "2026-05-10"
     runtime_root = tmp_path / "runtime"
