@@ -618,9 +618,12 @@ $artifactFatalMissingForBanner = "unknown"
 $artifactManifestBannerColor = "Yellow"
 $artifactManifestFatalFailure = $false
 if (-not (Test-Path $ArtifactManifestScript)) {
-    Write-LogLine -Path $GradeLog -Message "[WARNING] Artifact manifest script not found: $ArtifactManifestScript" -AlsoConsole:$VerboseMode
-    Write-Host "[WARN] Artifact manifest skipped; script not found: $ArtifactManifestScript" -ForegroundColor Yellow
+    Write-LogLine -Path $GradeLog -Message "[ERROR] Artifact manifest safety failure: script not found: $ArtifactManifestScript" -AlsoConsole:$VerboseMode
+    Write-Host "[FAIL] Artifact manifest safety failure: script not found." -ForegroundColor Red
+    Write-Host "       Artifact manifest unavailable; refusing to mark run complete." -ForegroundColor Red
     $artifactManifestStatusForBanner = "script_missing"
+    $artifactManifestBannerColor = "Red"
+    $artifactManifestFatalFailure = $true
 } else {
     "`n--- Artifact manifest ---" | Out-File $GradeLog -Append
     $artifactManifestExitCode = Invoke-LoggedCommand `
@@ -630,17 +633,26 @@ if (-not (Test-Path $ArtifactManifestScript)) {
         -StreamToConsole:$VerboseMode
 
     if ($artifactManifestExitCode -ne 0) {
-        Write-LogLine -Path $GradeLog -Message "[WARNING] Artifact manifest writer failed or exited nonzero (exit code: $artifactManifestExitCode)." -AlsoConsole:$VerboseMode
-        Write-Host "[WARN] Artifact manifest writer failed or exited nonzero; continuing daily run." -ForegroundColor Yellow
+        Write-LogLine -Path $GradeLog -Message "[ERROR] Artifact manifest safety failure: writer failed or exited nonzero (exit code: $artifactManifestExitCode)." -AlsoConsole:$VerboseMode
+        Write-Host "[FAIL] Artifact manifest safety failure: writer failed or exited nonzero." -ForegroundColor Red
+        Write-Host "       Artifact manifest unavailable; refusing to mark run complete." -ForegroundColor Red
         $artifactManifestStatusForBanner = "writer_failed"
+        $artifactManifestBannerColor = "Red"
+        $artifactManifestFatalFailure = $true
     } elseif (-not (Test-Path $artifactManifestJsonPath)) {
-        Write-LogLine -Path $GradeLog -Message "[WARNING] Artifact manifest JSON output not found: $artifactManifestJsonPath" -AlsoConsole:$VerboseMode
-        Write-Host "[WARN] Artifact manifest JSON output not found; continuing daily run." -ForegroundColor Yellow
+        Write-LogLine -Path $GradeLog -Message "[ERROR] Artifact manifest safety failure: JSON output not found: $artifactManifestJsonPath" -AlsoConsole:$VerboseMode
+        Write-Host "[FAIL] Artifact manifest safety failure: JSON output not found." -ForegroundColor Red
+        Write-Host "       Artifact manifest unavailable; refusing to mark run complete." -ForegroundColor Red
         $artifactManifestStatusForBanner = "json_missing"
+        $artifactManifestBannerColor = "Red"
+        $artifactManifestFatalFailure = $true
     } elseif (-not (Test-Path $artifactManifestTextPath)) {
-        Write-LogLine -Path $GradeLog -Message "[WARNING] Artifact manifest TXT output not found: $artifactManifestTextPath" -AlsoConsole:$VerboseMode
-        Write-Host "[WARN] Artifact manifest TXT output not found; continuing daily run." -ForegroundColor Yellow
+        Write-LogLine -Path $GradeLog -Message "[ERROR] Artifact manifest safety failure: TXT output not found: $artifactManifestTextPath" -AlsoConsole:$VerboseMode
+        Write-Host "[FAIL] Artifact manifest safety failure: TXT output not found." -ForegroundColor Red
+        Write-Host "       Artifact manifest unavailable; refusing to mark run complete." -ForegroundColor Red
         $artifactManifestStatusForBanner = "txt_missing"
+        $artifactManifestBannerColor = "Red"
+        $artifactManifestFatalFailure = $true
     } else {
         try {
             $artifactManifestPayload = Get-Content -Path $artifactManifestJsonPath -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -660,15 +672,23 @@ if (-not (Test-Path $ArtifactManifestScript)) {
                 Write-Host "[FAIL] Artifact manifest safety failure: fatal_missing=$artifactFatalMissing" -ForegroundColor Red
                 Write-Host "       Fatal operator artifacts are missing; refusing to mark run complete." -ForegroundColor Red
                 Write-Host "       Review $artifactManifestTextPath" -ForegroundColor Red
+            } elseif ($artifactManifestStatus -eq "warning_missing") {
+                $artifactManifestBannerColor = "Yellow"
+                Write-LogLine -Path $GradeLog -Message "[WARNING] Artifact manifest warning_missing allowed: fatal_missing=0" -AlsoConsole:$VerboseMode
+                Write-Host "[WARN] Artifact manifest warning_missing allowed: fatal_missing=0" -ForegroundColor Yellow
+                Write-Host "       Nonfatal artifacts may be absent; review $artifactManifestTextPath" -ForegroundColor Yellow
             } else {
                 $artifactManifestBannerColor = "Green"
                 Write-LogLine -Path $GradeLog -Message "[OK] Artifact manifest status: $artifactManifestStatus fatal_missing=0" -AlsoConsole:$VerboseMode
                 Write-Host "[OK] Artifact manifest written to $artifactManifestTextPath and $artifactManifestJsonPath" -ForegroundColor Green
             }
         } catch {
-            Write-LogLine -Path $GradeLog -Message "[WARNING] Could not read artifact manifest JSON: $artifactManifestJsonPath error=$($_.Exception.Message)" -AlsoConsole:$VerboseMode
-            Write-Host "[WARN] Could not read artifact manifest JSON; continuing daily run." -ForegroundColor Yellow
+            Write-LogLine -Path $GradeLog -Message "[ERROR] Artifact manifest safety failure: could not read artifact manifest JSON: $artifactManifestJsonPath error=$($_.Exception.Message)" -AlsoConsole:$VerboseMode
+            Write-Host "[FAIL] Artifact manifest safety failure: could not read artifact manifest JSON." -ForegroundColor Red
+            Write-Host "       Artifact manifest read failed; refusing to mark run complete." -ForegroundColor Red
             $artifactManifestStatusForBanner = "read_failed"
+            $artifactManifestBannerColor = "Red"
+            $artifactManifestFatalFailure = $true
         }
     }
 }
