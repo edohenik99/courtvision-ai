@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 60" width="400" height="60">
+  <g fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round">
+    <line x1="0" y1="30" x2="120" y2="30"></line>
+    <path d="M 120 30 A 80 80 0 0 1 280 30"></path>
+    <line x1="280" y1="30" x2="400" y2="30"></line>
+    <circle cx="200" cy="30" r="3"></circle>
+  </g>
+</svg>

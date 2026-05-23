@@ -39,3 +39,7 @@ htmlcov/
 dist/
 build/
 *.egg-info/
+
+# Local generated design previews / font-link scratch
+preview/
+fonts/
