@@ -17,6 +17,13 @@ from courtvision.reporting.high_caution_over_watchlist import (
     watchlist_path_for_date,
     write_high_caution_over_watchlist,
 )
+from courtvision.reporting.near_elite_review import (
+    REVIEW_ONLY_NOTE as NEAR_ELITE_REVIEW_ONLY_NOTE,
+    build_near_elite_review,
+    read_near_elite_review,
+    review_path_for_date as near_elite_review_path_for_date,
+    write_near_elite_review,
+)
 from courtvision.context.game_strength import (
     POWER_RATING_CONTEXT_COLUMNS,
     apply_power_rating_context_to_df,
@@ -149,6 +156,7 @@ CONTEXT_CONFLICT_CAUSE_BUCKETS: tuple[str, ...] = (
 PREDICTION_ARTIFACT_NAMES: tuple[str, ...] = (
     "elite_board",
     "full_market_board",
+    "near_elite_review",
     "high_caution_over_watchlist",
     "sgp_board",
     "elite_pipeline_audit",
@@ -1772,6 +1780,16 @@ def build_quality_summary(
         "elite_manual_review_required_count": elite_manual_review["manual_review_required_count"],
         "mode": "passive_diagnostic_only",
     }
+    near_elite_review_path = near_elite_review_path_for_date(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+    )
+    near_elite_review_df = (
+        read_near_elite_review(near_elite_review_path)
+        if near_elite_review_path.exists()
+        else build_near_elite_review(full_market_df, elite_df)
+    )
+    candidate_funnel["near_elite_review_count"] = int(len(near_elite_review_df))
     high_caution_over_watchlist = build_high_caution_over_watchlist(full_market_df)
     high_caution_over_watchlist_path = watchlist_path_for_date(
         prediction_date=prediction_date,
@@ -1950,6 +1968,15 @@ def build_quality_summary(
             "note": OBSERVATION_ONLY_NOTE,
             "source": str(operator_dir / f"full_market_board_{prediction_date}.csv"),
         },
+        "near_elite_review": {
+            "path": str(near_elite_review_path),
+            "row_count": int(len(near_elite_review_df)),
+            "shadow_only": True,
+            "review_only": True,
+            "kelly_eligible": False,
+            "note": NEAR_ELITE_REVIEW_ONLY_NOTE,
+            "source": str(operator_dir / f"full_market_board_{prediction_date}.csv"),
+        },
         "risk_exposure_summary": risk_exposure,
         "board_movement_summary": board_movement,
         "date_isolation_check": date_isolation,
@@ -2019,6 +2046,7 @@ def _format_quality_summary_text(payload: dict[str, Any]) -> str:
     elite_context_safety = payload.get("elite_context_safety_gate", {})
     manual_review = payload.get("manual_review_summary", {}) if isinstance(payload.get("manual_review_summary"), dict) else {}
     high_caution_over_watchlist = payload.get("high_caution_over_watchlist", {})
+    near_elite_review = payload.get("near_elite_review", {})
     source_identity = payload.get("source_identity_conflict", {})
     if not isinstance(source_identity, dict):
         source_identity = {}
@@ -2112,6 +2140,7 @@ def _format_quality_summary_text(payload: dict[str, Any]) -> str:
             f"- elite_board_count: {funnel['elite_board_count']}",
             f"- sgp_board_count: {funnel['sgp_board_count']}",
             f"- kelly_rows_count: {funnel['kelly_rows_count']}",
+            f"- near_elite_review_count: {funnel.get('near_elite_review_count', 0)}",
             f"- identity_quarantine_count: {funnel.get('identity_quarantine_count', 0)}",
             f"- source_identity_conflict_count: {funnel.get('source_identity_conflict_count', 0)} diagnostic row(s)",
             f"- source_identity_conflicted_player_count: {funnel.get('source_identity_conflicted_player_count', 0)}",
@@ -2197,6 +2226,14 @@ def _format_quality_summary_text(payload: dict[str, Any]) -> str:
 
     lines.extend(
         [
+            "",
+            "Near-Elite Review Lane",
+            "-" * 72,
+            f"- path: {near_elite_review.get('path', 'unavailable') if isinstance(near_elite_review, dict) else 'unavailable'}",
+            f"- row count: {near_elite_review.get('row_count', 0) if isinstance(near_elite_review, dict) else 0}",
+            f"- review_only: {near_elite_review.get('review_only', True) if isinstance(near_elite_review, dict) else True}",
+            f"- kelly_eligible: {near_elite_review.get('kelly_eligible', False) if isinstance(near_elite_review, dict) else False}",
+            f"- note: {near_elite_review.get('note', NEAR_ELITE_REVIEW_ONLY_NOTE) if isinstance(near_elite_review, dict) else NEAR_ELITE_REVIEW_ONLY_NOTE}",
             "",
             "High-Caution OVER Watchlist",
             "-" * 72,
@@ -2523,6 +2560,10 @@ def write_quality_summary_outputs(
         write=write_board_annotations,
     )
     write_high_caution_over_watchlist(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+    )
+    write_near_elite_review(
         prediction_date=prediction_date,
         runtime_root=runtime_root,
     )

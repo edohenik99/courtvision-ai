@@ -49,6 +49,9 @@ def main(argv: list[str] | None = None) -> int:
     watchlist = payload.get("high_caution_over_watchlist", {})
     if isinstance(watchlist, dict) and watchlist.get("path"):
         print(f"high_caution_over_watchlist_csv={watchlist['path']}")
+    near_elite = payload.get("near_elite_review", {})
+    if isinstance(near_elite, dict) and near_elite.get("path"):
+        print(f"near_elite_review_csv={near_elite['path']}")
     history_csv = Path(args.runtime_root) / "operator" / QUALITY_HISTORY_CSV_NAME
     history_jsonl = Path(args.runtime_root) / "operator" / QUALITY_HISTORY_JSONL_NAME
     if history_csv.exists():
@@ -61,6 +64,7 @@ def main(argv: list[str] | None = None) -> int:
         f"full_market={funnel['full_market_board_count']} "
         f"kelly_rows={kelly['total_rows']} "
         f"kelly_eligible={kelly['kelly_eligible_count']} "
+        f"near_elite_review={funnel.get('near_elite_review_count', 0)} "
         f"high_caution_over_skips={kelly['context_high_caution_over_skip_count']} "
         f"medium_neutral_over_dampeners={kelly['medium_neutral_over_dampened_count']} "
         f"kelly_manual_review_required={kelly.get('manual_review_required_count', 0)} "

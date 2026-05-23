@@ -36,6 +36,7 @@ class OutputLayoutPolicy:
             "elite_decision_report": self._lane_file("operator", f"elite_decision_report_{prediction_date}.txt"),
             "elite_board": self._lane_file("operator", f"elite_board_{prediction_date}.csv"),
             "full_market_board": self._lane_file("operator", f"full_market_board_{prediction_date}.csv"),
+            "near_elite_review": self._lane_file("operator", f"near_elite_review_{prediction_date}.csv"),
             "sgp_board": self._lane_file("operator", f"sgp_board_{prediction_date}.csv"),
             "board_diagnostics_json": self._lane_file("diagnostics", f"board_diagnostics_{prediction_date}.json"),
             "player_points_elite_admission_csv": self._lane_file(

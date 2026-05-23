@@ -29,6 +29,14 @@ from courtvision.reporting.high_caution_over_watchlist import (
     watchlist_row_line,
     write_high_caution_over_watchlist,
 )
+from courtvision.reporting.near_elite_review import (
+    REVIEW_ONLY_NOTE as NEAR_ELITE_REVIEW_ONLY_NOTE,
+    build_near_elite_review,
+    near_elite_row_line,
+    read_near_elite_review,
+    review_path_for_date as near_elite_review_path_for_date,
+    write_near_elite_review,
+)
 from courtvision.reporting.promotion_readiness import (
     OBSERVATION_ONLY_NOTE as PROMOTION_READINESS_OBSERVATION_ONLY_NOTE,
     build_promotion_readiness_report,
@@ -558,6 +566,15 @@ def build_daily_summary(
         else _read_csv(kelly_path, warnings)
     )
     full_market_df = _read_csv(operator_dir / f"full_market_board_{prediction_date}.csv", warnings)
+    near_elite_review_path = near_elite_review_path_for_date(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+    )
+    near_elite_review_df = (
+        read_near_elite_review(near_elite_review_path)
+        if near_elite_review_path.exists()
+        else build_near_elite_review(full_market_df, elite_df)
+    )
     kelly_df = _kelly_df_for_reporting(
         elite_path=elite_path,
         elite_df=elite_df,
@@ -829,6 +846,17 @@ def build_daily_summary(
         f"manual_review_required_count={full_market_manual_review['manual_review_required_count']}"
     )
     lines.append("- mode: passive_diagnostic_only")
+
+    lines.extend(["", "Near-Elite Review Lane — Review Only / No Stake", "-" * 72])
+    lines.append(f"- review row count: {int(len(near_elite_review_df))}")
+    lines.append(f"- artifact: {near_elite_review_path}")
+    lines.append(f"- note: {NEAR_ELITE_REVIEW_ONLY_NOTE}")
+    lines.append("- top 5 by edge/confidence/quality:")
+    if near_elite_review_df.empty:
+        lines.append("  - None")
+    else:
+        for _, row in near_elite_review_df.head(5).iterrows():
+            lines.append(f"  - {near_elite_row_line(row)}")
 
     lines.extend(["", "Context-Pick Alignment", "-" * 72])
     lines.append(
@@ -1178,6 +1206,8 @@ def build_daily_summary(
         "elite_manual_review_required_count": elite_manual_review["manual_review_required_count"],
         "kelly_manual_review_required_count": kelly_manual_review_required_count,
         "kelly_review_before_bet_count": kelly_review_before_bet_count,
+        "near_elite_review_count": int(len(near_elite_review_df)),
+        "near_elite_review_path": str(near_elite_review_path),
         "high_caution_over_watchlist_count": int(len(high_caution_over_watchlist)),
         "high_caution_over_watchlist_path": str(high_caution_over_watchlist_path),
         "combo_under_watchlist_count": int(len(combo_under_watchlist)),
@@ -1372,6 +1402,10 @@ def write_daily_summary_outputs(
         prediction_date=prediction_date,
         runtime_root=runtime_root,
     )
+    near_elite_path, near_elite_df = write_near_elite_review(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+    )
     combo_under_path, combo_under_df = write_combo_under_watchlist(
         prediction_date=prediction_date,
         runtime_root=runtime_root,
@@ -1414,6 +1448,8 @@ def write_daily_summary_outputs(
     )
     metadata["high_caution_over_watchlist_path"] = str(watchlist_path)
     metadata["high_caution_over_watchlist_count"] = int(len(watchlist_df))
+    metadata["near_elite_review_path"] = str(near_elite_path)
+    metadata["near_elite_review_count"] = int(len(near_elite_df))
     metadata["combo_under_watchlist_path"] = str(combo_under_path)
     metadata["combo_under_watchlist_count"] = int(len(combo_under_df))
     metadata["board_annotation_write_enabled"] = bool(write_board_annotations)

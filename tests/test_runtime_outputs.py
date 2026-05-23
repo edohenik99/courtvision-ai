@@ -13,6 +13,7 @@ def test_stat_only_board_uses_optional_lane_when_verbose(tmp_path: Path) -> None
 
     assert paths["elite_board"] == runtime_root / "operator" / "elite_board_2026-04-10.csv"
     assert paths["full_market_board"] == runtime_root / "operator" / "full_market_board_2026-04-10.csv"
+    assert paths["near_elite_review"] == runtime_root / "operator" / "near_elite_review_2026-04-10.csv"
     assert paths["sgp_board"] == runtime_root / "operator" / "sgp_board_2026-04-10.csv"
     assert paths["stat_only_board"] == runtime_root / "optional" / "stat_only_board_2026-04-10.csv"
     assert paths["stat_only_board"] != runtime_root / "operator" / "stat_only_board_2026-04-10.csv"

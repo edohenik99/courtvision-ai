@@ -53,6 +53,7 @@ from courtvision.calibration.grading_summary import (
     summarize_player_points_uplift_audit,
 )
 from courtvision.reporting.kelly_performance import build_kelly_decision_performance, kelly_perf_log_lines
+from courtvision.reporting.near_elite_review import build_near_elite_review
 from courtvision.reporting.same_opponent_rematch import (
     SameOpponentRematchLookup,
     annotate_same_opponent_rematches,
@@ -8879,6 +8880,7 @@ def _write_cli_outputs(
     protected_board_artifacts = [
         "elite_board",
         "full_market_board",
+        "near_elite_review",
         "sgp_board",
         "stat_only_board",
         "strike_board",
@@ -8949,6 +8951,8 @@ def _write_cli_outputs(
     
     _write_prediction_dataframe(paths["elite_board"], elite_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="elite_board", protect_existing=True, force_overwrite=force_output_overwrite)
     _write_prediction_dataframe(paths["full_market_board"], full_market_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="full_market_board", protect_existing=True, force_overwrite=force_output_overwrite)
+    near_elite_review_df = build_near_elite_review(full_market_df, elite_df)
+    _write_prediction_dataframe(paths["near_elite_review"], near_elite_review_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="near_elite_review", protect_existing=True, force_overwrite=force_output_overwrite)
     _write_prediction_dataframe(paths["sgp_board"], sgp_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="sgp_board", protect_existing=True, force_overwrite=force_output_overwrite)
     _write_prediction_dataframe(paths["player_points_elite_admission_csv"], player_points_elite_admission_df, requested_prediction_date=prediction_date, caller=prediction_artifact_caller, artifact_label="player_points_elite_admission_csv")
     _write_prediction_json(

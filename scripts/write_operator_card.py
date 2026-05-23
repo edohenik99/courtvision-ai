@@ -26,6 +26,10 @@ from courtvision.context.player_identity import (  # noqa: E402
     source_identity_conflict_exposure_summary,
 )
 from courtvision.reporting.completion_state_audit import history_pending_grading_count  # noqa: E402
+from courtvision.reporting.near_elite_review import (  # noqa: E402
+    REVIEW_ONLY_NOTE as NEAR_ELITE_REVIEW_ONLY_NOTE,
+    near_elite_row_line,
+)
 from courtvision.selection import (  # noqa: E402
     format_unsupported_active_operator_market_drop_line,
     unsupported_active_operator_market_drop_summary,
@@ -154,6 +158,7 @@ def _artifact_paths(runtime_root: Path, prediction_date: str) -> dict[str, Path]
     return {
         "elite_board": operator / f"elite_board_{prediction_date}.csv",
         "full_market_board": operator / f"full_market_board_{prediction_date}.csv",
+        "near_elite_review": operator / f"near_elite_review_{prediction_date}.csv",
         "sgp_board": operator / f"sgp_board_{prediction_date}.csv",
         "kelly_stakes": operator / f"kelly_stakes_{prediction_date}.csv",
         "daily_summary": operator / f"daily_summary_{prediction_date}.txt",
@@ -854,6 +859,7 @@ def _example_lines(df: pd.DataFrame, *, limit: int = 3) -> list[str]:
             "kelly_projected_skip_reason",
             "skip_reason",
             "operator_note",
+            "review_reason",
         ):
             if column in row.index and _safe_text(row.get(column)):
                 reason = _safe_text(row.get(column))
@@ -1055,6 +1061,7 @@ def _files_written_lines(paths: dict[str, Path]) -> list[str]:
     keys = (
         "elite_board",
         "full_market_board",
+        "near_elite_review",
         "daily_summary",
         "quality_summary",
         "operator_card",
@@ -1133,6 +1140,7 @@ def build_operator_card(
 
     elite_df = _read_csv(paths["elite_board"], warnings, required=True)
     full_market_df = _read_csv(paths["full_market_board"], warnings, required=True)
+    near_elite_df = _read_csv(paths["near_elite_review"], warnings)
     sgp_df = _read_csv(paths["sgp_board"], warnings)
     kelly_df = _read_csv(paths["kelly_stakes"], warnings)
     quality_payload = _read_json(paths["quality_summary_json"], warnings, required=True)
@@ -1170,6 +1178,11 @@ def build_operator_card(
 
     elite_count = _quality_count(quality_payload, ("candidate_funnel", "elite_board_count"), len(elite_df))
     full_market_count = _quality_count(quality_payload, ("candidate_funnel", "full_market_board_count"), len(full_market_df))
+    near_elite_count = _quality_count(
+        quality_payload,
+        ("near_elite_review", "row_count"),
+        _quality_count(quality_payload, ("candidate_funnel", "near_elite_review_count"), len(near_elite_df)),
+    )
     sgp_count = _quality_count(quality_payload, ("candidate_funnel", "sgp_board_count"), len(sgp_df))
     if elite_count <= 0:
         kelly_rows_count = _quality_count(quality_payload, ("kelly_safety_summary", "total_rows"), 0)
@@ -1428,6 +1441,8 @@ def build_operator_card(
     lines.append("-" * 40)
     lines.append(f"- elite picks count: {elite_count}")
     lines.append(f"- full market candidates count: {full_market_count}")
+    lines.append(f"- near-elite review count: {near_elite_count}")
+    lines.append(f"- near-elite policy: {NEAR_ELITE_REVIEW_ONLY_NOTE}")
     if unsupported_active_line:
         lines.append(f"- {unsupported_active_line}")
     if identity_quarantine_line:
@@ -1535,6 +1550,18 @@ def build_operator_card(
     lines.extend(_example_lines(full_manual_df, limit=3))
     lines.append(f"- review_before_bet: {review_before_bet_count}")
     lines.extend(_example_lines(review_before_bet_df, limit=3))
+    lines.append("")
+
+    lines.append("Near-Elite Review")
+    lines.append("-" * 40)
+    lines.append(f"- near-elite review count: {near_elite_count}")
+    lines.append(f"- {NEAR_ELITE_REVIEW_ONLY_NOTE}")
+    lines.append("- top 5 near-elite candidates:")
+    if near_elite_df.empty:
+        lines.append("  - None")
+    else:
+        for _, row in _sort_candidates(near_elite_df, 5).iterrows():
+            lines.append(f"  - {near_elite_row_line(row)}")
     lines.append("")
 
     if final_decision == "REVIEW REQUIRED":
@@ -1652,6 +1679,7 @@ def build_operator_card(
         "final_decision": final_decision,
         "elite_count": elite_count,
         "full_market_count": full_market_count,
+        "near_elite_review_count": near_elite_count,
         "sgp_count": sgp_count,
         "kelly_rows_count": kelly_rows_count,
         "kelly_eligible_count": kelly_eligible_count,

@@ -314,6 +314,14 @@ def _specs(prediction_date: str) -> tuple[ArtifactSpec, ...]:
         ),
         ArtifactSpec(
             "shadow_only",
+            "near_elite_review",
+            "operator",
+            f"near_elite_review_{prediction_date}.csv",
+            SEVERITY_SHADOW_ONLY,
+            "Review-only candidate surface; not an Elite, Kelly, SGP, or staking input.",
+        ),
+        ArtifactSpec(
+            "shadow_only",
             "market_shadow_report",
             "operator",
             f"market_shadow_report_{prediction_date}.txt",

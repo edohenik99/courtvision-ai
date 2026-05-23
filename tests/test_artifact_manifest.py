@@ -4,6 +4,7 @@ from pathlib import Path
 from courtvision.reporting.artifact_manifest import (
     SEVERITY_FATAL,
     SEVERITY_INFORMATIONAL,
+    SEVERITY_SHADOW_ONLY,
     SEVERITY_WARNING,
     build_artifact_manifest,
     write_artifact_manifest_outputs,
@@ -80,6 +81,23 @@ def test_manifest_missing_kelly_stakes_is_warning_not_fatal(tmp_path: Path) -> N
     assert manifest["status"] == "warning_missing"
     assert manifest["missing_by_severity"]["fatal"] == 0
     assert manifest["missing_by_severity"]["warning"] > 0
+
+
+def test_manifest_missing_near_elite_review_is_shadow_only_not_fatal(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    _write_core_boards(runtime_root)
+
+    manifest = build_artifact_manifest(
+        prediction_date=PREDICTION_DATE,
+        runtime_root=runtime_root,
+        generated_at="2026-04-10T12:00:00Z",
+    )
+
+    near_elite = _artifact(manifest, "near_elite_review")
+    assert near_elite["exists"] is False
+    assert near_elite["severity"] == SEVERITY_SHADOW_ONLY
+    assert "not an Elite, Kelly, SGP, or staking input" in near_elite["notes"]
+    assert manifest["missing_by_severity"]["fatal"] == 0
 
 
 def test_manifest_counts_csv_rows(tmp_path: Path) -> None:
