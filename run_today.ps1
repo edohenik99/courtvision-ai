@@ -45,6 +45,7 @@ try {
 }
 
 $todayDate = (Get-Date).Date
+$ForceOutputs = $false
 
 if ($slateDate -lt $todayDate -and -not $ForcePastDate) {
     Write-Host ""
@@ -71,6 +72,31 @@ if ($slateDate -lt $todayDate -and -not $ForcePastDate) {
     Write-Host "  WARNING: -ForcePastDate overwrites all existing outputs for that date." -ForegroundColor Yellow
     Write-Host ""
     exit 2
+}
+
+$protectedPredictionArtifacts = @(
+    "outputs\runtime\operator\elite_board_$Date.csv",
+    "outputs\runtime\operator\full_market_board_$Date.csv",
+    "outputs\runtime\operator\sgp_board_$Date.csv"
+)
+$existingPredictionArtifacts = @(
+    $protectedPredictionArtifacts | Where-Object { Test-Path -LiteralPath $_ }
+)
+
+if ($existingPredictionArtifacts.Count -gt 0 -and -not $ForceOutputs) {
+    Write-Host ""
+    Write-Host "PROTECTED NO-OP: prediction artifacts already exist for $Date. No boards regenerated." -ForegroundColor Yellow
+    Write-Host "Existing prediction artifacts:" -ForegroundColor Yellow
+    foreach ($artifactPath in $existingPredictionArtifacts) {
+        Write-Host "  $artifactPath" -ForegroundColor Gray
+    }
+    Write-Host ""
+    Write-Host "Use reporting-only refresh commands for summaries/cards; do not rerun the prediction pipeline." -ForegroundColor Cyan
+    Write-Host "  py -3.13 scripts\write_daily_summary.py --prediction-date $Date --no-board-annotation-write" -ForegroundColor Cyan
+    Write-Host "  py -3.13 scripts\write_quality_summary.py --prediction-date $Date --no-board-annotation-write" -ForegroundColor Cyan
+    Write-Host "  py -3.13 scripts\write_operator_card.py --prediction-date $Date --force" -ForegroundColor Cyan
+    Write-Host "  py -3.13 scripts\write_artifact_manifest.py --prediction-date $Date" -ForegroundColor Cyan
+    exit 0
 }
 
 if ($ForcePastDate -and $slateDate -lt $todayDate) {
@@ -112,7 +138,6 @@ $ArtifactManifestScript = Join-Path $ScriptRoot "scripts\write_artifact_manifest
 # Bankroll override: read $env:COURTVISION_BANKROLL when set, else default.
 $KellyBankroll = if ($env:COURTVISION_BANKROLL) { $env:COURTVISION_BANKROLL } else { "1000" }
 $CourtVisionMode = if ($env:COURTVISION_MODE) { $env:COURTVISION_MODE } else { "betting" }
-$ForceOutputs = $false
 $ForcePastDateValue = if ($ForcePastDate.IsPresent) { "true" } else { "false" }
 $ForceOutputsValue = if ($ForceOutputs) { "true" } else { "false" }
 

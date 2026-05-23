@@ -425,6 +425,35 @@ def test_daily_runner_writes_completion_state_audit_after_summaries() -> None:
     assert "completion_state_audit" in bat
 
 
+def test_daily_runner_protected_noop_happens_before_prediction_pipeline() -> None:
+    ps1 = Path("run_today.ps1").read_text(encoding="utf-8")
+
+    force_outputs_idx = ps1.index("$ForceOutputs = $false")
+    preflight_idx = ps1.index("$protectedPredictionArtifacts = @(")
+    logs_idx = ps1.index("# Ensure logs directory exists")
+    first_courtvision_idx = ps1.index("courtvision_ai.py")
+    assert force_outputs_idx < preflight_idx < logs_idx < first_courtvision_idx
+
+    preflight_block = ps1[
+        preflight_idx : ps1.index('if ($ForcePastDate -and $slateDate -lt $todayDate)', preflight_idx)
+    ]
+    assert "outputs\\runtime\\operator\\elite_board_$Date.csv" in preflight_block
+    assert "outputs\\runtime\\operator\\full_market_board_$Date.csv" in preflight_block
+    assert "outputs\\runtime\\operator\\sgp_board_$Date.csv" in preflight_block
+    assert "Test-Path -LiteralPath" in preflight_block
+    assert "if ($existingPredictionArtifacts.Count -gt 0 -and -not $ForceOutputs)" in preflight_block
+    assert (
+        "PROTECTED NO-OP: prediction artifacts already exist for $Date. "
+        "No boards regenerated."
+    ) in preflight_block
+    assert "py -3.13 scripts\\write_daily_summary.py --prediction-date $Date --no-board-annotation-write" in preflight_block
+    assert "py -3.13 scripts\\write_quality_summary.py --prediction-date $Date --no-board-annotation-write" in preflight_block
+    assert "py -3.13 scripts\\write_operator_card.py --prediction-date $Date --force" in preflight_block
+    assert "py -3.13 scripts\\write_artifact_manifest.py --prediction-date $Date" in preflight_block
+    assert "refresh_closed_slate_reports.py" not in preflight_block
+    assert "exit 0" in preflight_block
+
+
 def test_daily_runner_blocks_unknown_or_fatal_artifact_manifest_state() -> None:
     ps1 = Path("run_today.ps1").read_text(encoding="utf-8")
     normalized_ps1 = ps1.replace("\\", "/")
