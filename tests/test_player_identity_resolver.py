@@ -13,6 +13,7 @@ from courtvision.context.player_identity import (
     SOURCE_IDENTITY_CONFLICT_POLICY_ROW_VALID,
     annotate_source_identity_conflicts,
     build_canonical_player_identity_resolver,
+    source_identity_conflict_exposure_summary,
 )
 
 
@@ -138,6 +139,59 @@ def test_source_identity_annotation_preserves_row_valid_alignment() -> None:
     assert bool(out["source_identity_conflicted"]) is True
     assert out["source_identity_conflict_reason"] == PLAYER_ID_TEAM_CONFLICT_REASON
     assert out["source_identity_conflict_policy"] == SOURCE_IDENTITY_CONFLICT_POLICY_ROW_VALID
+
+
+def test_source_identity_exposure_counts_rows_and_unique_players_by_lane() -> None:
+    payload = {
+        "conflict_count": 1,
+        "diagnostic_rows": [
+            {
+                "player_id": "192",
+                "player_name": "James Harden",
+                "player_identity_conflict_reason": PLAYER_ID_TEAM_CONFLICT_REASON,
+                "player_identity_conflict_details": '{"baseline_team_abbrs":["CLE","LAC"]}',
+            }
+        ],
+    }
+    base = {
+        "player_id": "192",
+        "player_name": "James Harden",
+        "team_abbr": "LAC",
+        "selection": "over",
+    }
+
+    summary = source_identity_conflict_exposure_summary(
+        source_identity_payload=payload,
+        full_market_df=pd.DataFrame(
+            [
+                {**base, "market_type": "player_points"},
+                {**base, "market_type": "player_rebounds"},
+            ]
+        ),
+        elite_df=pd.DataFrame([{**base, "market_type": "player_points"}]),
+        kelly_df=pd.DataFrame([{**base, "market_type": "player_points"}]),
+        high_caution_watchlist_df=pd.DataFrame([{**base, "market_type": "player_points"}]),
+        combo_under_watchlist_df=pd.DataFrame([{**base, "market_type": "player_points_rebounds"}]),
+        paper_kelly_df=pd.DataFrame([{**base, "market_type": "player_points"}]),
+    )
+
+    assert summary["source_identity_conflicted_full_market_rows"] == 2
+    assert summary["source_identity_conflicted_full_market_players"] == 1
+    assert summary["source_identity_conflicted_watchlist_rows"] == 2
+    assert summary["source_identity_conflicted_watchlist_players"] == 1
+    assert summary["source_identity_conflicted_elite_rows"] == 1
+    assert summary["source_identity_conflicted_elite_players"] == 1
+    assert summary["source_identity_conflicted_kelly_rows"] == 1
+    assert summary["source_identity_conflicted_kelly_players"] == 1
+    assert summary["source_identity_conflicted_paper_rows"] == 1
+    assert summary["source_identity_conflicted_paper_players"] == 1
+
+    examples = summary["source_identity_conflict_examples"]
+    assert len(examples) == 5
+    assert examples[0]["player_id"] == "192"
+    assert examples[0]["player_name"] == "James Harden"
+    assert examples[0]["lane"] == "full_market"
+    assert {example["lane"] for example in examples}.issuperset({"full_market", "elite", "kelly"})
 
 
 def test_resolver_detects_provider_player_id_multiple_teams() -> None:

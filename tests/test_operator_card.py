@@ -372,6 +372,11 @@ def _source_identity_summary(
         "source_identity_conflicted_kelly_rows": kelly_rows,
         "source_identity_conflicted_watchlist_rows": watchlist_rows,
         "source_identity_conflicted_paper_rows": paper_rows,
+        "source_identity_conflicted_full_market_players": 1 if operator_rows else 0,
+        "source_identity_conflicted_elite_players": 1 if elite_rows else 0,
+        "source_identity_conflicted_kelly_players": 1 if kelly_rows else 0,
+        "source_identity_conflicted_watchlist_players": 1 if watchlist_rows else 0,
+        "source_identity_conflicted_paper_players": 1 if paper_rows else 0,
         "source_identity_conflicted_operator_visible_rows": visible_rows,
         "source_identity_conflict_blocking_rows": blocking_rows,
         "source_identity_conflict_safety_state": (
@@ -426,8 +431,12 @@ def test_operator_card_nonblocking_source_identity_warning_without_elite_or_kell
 
     text = output_path.read_text(encoding="utf-8")
     assert payload["final_decision"] == "NO BET"
-    assert "- source identity conflicts: total=1, operator_rows=1, elite_rows=0, kelly_rows=0, watchlist_rows=1, paper_rows=1" in text
+    assert "- source identity diagnostic conflicts: rows=1, unique_players=1" in text
+    assert "- source identity operator row exposure: full_market=1, elite=0, kelly=0, watchlist=1, paper=1" in text
+    assert "- source identity unique-player exposure: full_market=1, elite=0, kelly=0, watchlist=1, paper=1" in text
     assert "- source identity safety: non-blocking diagnostic warning (no Elite/Kelly source-conflict exposure)" in text
+    assert "- source identity examples (non-blocking):" in text
+    assert "James Harden (192) | lane=full_market | artifact=full_market_board | market=player_points" in text
 
 
 def test_operator_card_blocks_when_source_identity_reaches_elite_or_kelly(tmp_path: Path) -> None:
@@ -477,7 +486,9 @@ def test_operator_card_blocks_when_source_identity_reaches_elite_or_kelly(tmp_pa
 
     text = output_path.read_text(encoding="utf-8")
     assert payload["final_decision"] == "REVIEW REQUIRED"
+    assert "- source identity operator row exposure: full_market=1, elite=1, kelly=1, watchlist=0, paper=0" in text
     assert "- source identity safety: BLOCKING manual review required (source-conflicted row reached Elite/Kelly)" in text
+    assert "- source identity examples (non-blocking):" not in text
     assert "- Source-conflicted identity reached Elite/Kelly; manual review is required before betting." in text
     assert "REVIEW REQUIRED - source identity conflict reached Elite/Kelly." in text
 

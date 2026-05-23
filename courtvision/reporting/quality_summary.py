@@ -1801,6 +1801,9 @@ def build_quality_summary(
     candidate_funnel.update(
         {
             "source_identity_conflict_count": source_identity_conflict["source_identity_conflict_count"],
+            "source_identity_conflicted_player_count": source_identity_conflict[
+                "source_identity_conflicted_player_count"
+            ],
             "source_identity_conflicted_operator_rows": source_identity_conflict[
                 "source_identity_conflicted_operator_rows"
             ],
@@ -1815,6 +1818,21 @@ def build_quality_summary(
             ],
             "source_identity_conflicted_watchlist_rows": source_identity_conflict[
                 "source_identity_conflicted_watchlist_rows"
+            ],
+            "source_identity_conflicted_full_market_players": source_identity_conflict[
+                "source_identity_conflicted_full_market_players"
+            ],
+            "source_identity_conflicted_elite_players": source_identity_conflict[
+                "source_identity_conflicted_elite_players"
+            ],
+            "source_identity_conflicted_kelly_players": source_identity_conflict[
+                "source_identity_conflicted_kelly_players"
+            ],
+            "source_identity_conflicted_watchlist_players": source_identity_conflict[
+                "source_identity_conflicted_watchlist_players"
+            ],
+            "source_identity_conflicted_paper_players": source_identity_conflict[
+                "source_identity_conflicted_paper_players"
             ],
         }
     )
@@ -1956,6 +1974,40 @@ def _format_mapping(mapping: dict[str, Any], *, indent: str = "- ") -> list[str]
     return [f"{indent}{key}: {value}" for key, value in sorted(mapping.items())]
 
 
+def _source_identity_lane_line(source_identity: dict[str, Any], *, label: str, suffix: str) -> str:
+    return (
+        f"- source identity {label}: "
+        f"full_market={source_identity.get(f'source_identity_conflicted_full_market_{suffix}', 0)}, "
+        f"elite={source_identity.get(f'source_identity_conflicted_elite_{suffix}', 0)}, "
+        f"kelly={source_identity.get(f'source_identity_conflicted_kelly_{suffix}', 0)}, "
+        f"watchlist={source_identity.get(f'source_identity_conflicted_watchlist_{suffix}', 0)}, "
+        f"paper={source_identity.get(f'source_identity_conflicted_paper_{suffix}', 0)}"
+    )
+
+
+def _source_identity_example_lines(source_identity: dict[str, Any], *, limit: int = 5) -> list[str]:
+    raw_examples = source_identity.get("source_identity_conflict_examples", [])
+    if not isinstance(raw_examples, list) or not raw_examples:
+        return []
+    lines = ["- source identity examples:"]
+    for raw_example in raw_examples[:limit]:
+        if not isinstance(raw_example, dict):
+            continue
+        player_name = _safe_text(raw_example.get("player_name")) or "Unknown"
+        player_id = _safe_text(raw_example.get("player_id"))
+        identity = f"{player_name} ({player_id})" if player_id else player_name
+        lane = _safe_text(raw_example.get("lane")) or "unknown"
+        artifact = _safe_text(raw_example.get("artifact")) or lane
+        market = _safe_text(raw_example.get("market_type")) or "unknown"
+        policy = _safe_text(raw_example.get("policy")) or "unknown"
+        reason = _safe_text(raw_example.get("conflict_reason")) or "unknown"
+        lines.append(
+            f"  - {identity} | lane={lane} | artifact={artifact} | "
+            f"market={market} | policy={policy} | reason={reason}"
+        )
+    return lines if len(lines) > 1 else []
+
+
 def _format_quality_summary_text(payload: dict[str, Any]) -> str:
     run = payload["run_identity"]
     run_health = payload.get("run_health", {}) if isinstance(payload.get("run_health"), dict) else {}
@@ -2061,15 +2113,10 @@ def _format_quality_summary_text(payload: dict[str, Any]) -> str:
             f"- sgp_board_count: {funnel['sgp_board_count']}",
             f"- kelly_rows_count: {funnel['kelly_rows_count']}",
             f"- identity_quarantine_count: {funnel.get('identity_quarantine_count', 0)}",
-            f"- source_identity_conflict_count: {funnel.get('source_identity_conflict_count', 0)}",
-            "- source_identity_conflicted_operator_rows: "
-            f"{funnel.get('source_identity_conflicted_operator_rows', 0)}",
-            "- source_identity_conflicted_elite_rows: "
-            f"{funnel.get('source_identity_conflicted_elite_rows', 0)}",
-            "- source_identity_conflicted_kelly_rows: "
-            f"{funnel.get('source_identity_conflicted_kelly_rows', 0)}",
-            "- source_identity_conflicted_watchlist_rows: "
-            f"{funnel.get('source_identity_conflicted_watchlist_rows', 0)}",
+            f"- source_identity_conflict_count: {funnel.get('source_identity_conflict_count', 0)} diagnostic row(s)",
+            f"- source_identity_conflicted_player_count: {funnel.get('source_identity_conflicted_player_count', 0)}",
+            _source_identity_lane_line(source_identity, label="row exposure", suffix="rows"),
+            _source_identity_lane_line(source_identity, label="unique players", suffix="players"),
         ]
     )
     if source_identity.get("source_identity_conflict_count", 0):
@@ -2078,6 +2125,7 @@ def _format_quality_summary_text(payload: dict[str, Any]) -> str:
             f"{source_identity.get('source_identity_conflict_safety_state', 'unknown')} "
             f"({source_identity.get('source_identity_conflict_policy', 'unknown')})"
         )
+        lines.extend(_source_identity_example_lines(source_identity))
     if identity_quarantine_line:
         identity_payload = payload.get("identity_quarantine", {})
         reason = (

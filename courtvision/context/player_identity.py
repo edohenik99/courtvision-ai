@@ -640,6 +640,18 @@ def source_identity_conflicted_row_count(df: pd.DataFrame) -> int:
     return int(values.sum())
 
 
+def _source_identity_player_key(row: pd.Series | Mapping[str, Any]) -> str:
+    for column in ("player_id", "canonical_player_id"):
+        player_id = _player_id_key(row.get(column))
+        if player_id:
+            return player_id
+    for column in ("player_name", "canonical_player_name", "entity_name"):
+        name = " ".join(_text(row.get(column)).lower().split())
+        if name:
+            return f"name:{name}"
+    return ""
+
+
 def source_identity_conflict_exposure_summary(
     *,
     source_identity_payload: Any,
@@ -652,14 +664,60 @@ def source_identity_conflict_exposure_summary(
 ) -> dict[str, Any]:
     lookup = source_identity_conflict_lookup(source_identity_payload)
 
-    def _annotated_count(frame: pd.DataFrame | None) -> int:
+    def _annotated_frame(frame: pd.DataFrame | None) -> pd.DataFrame:
         if not isinstance(frame, pd.DataFrame):
             frame = pd.DataFrame()
         if "source_identity_conflicted" in frame.columns:
-            return source_identity_conflicted_row_count(frame)
-        return source_identity_conflicted_row_count(
-            annotate_source_identity_conflicts(frame, source_identity_payload)
-        )
+            return frame
+        return annotate_source_identity_conflicts(frame, source_identity_payload)
+
+    def _conflicted_frame(frame: pd.DataFrame | None) -> pd.DataFrame:
+        annotated = _annotated_frame(frame)
+        if annotated.empty or "source_identity_conflicted" not in annotated.columns:
+            return annotated.iloc[0:0].copy()
+        mask = annotated["source_identity_conflicted"].map(lambda value: _truthy(value) is True)
+        return annotated.loc[mask].copy()
+
+    def _annotated_count(frame: pd.DataFrame | None) -> int:
+        return int(len(_conflicted_frame(frame)))
+
+    def _player_keys(frame: pd.DataFrame | None) -> set[str]:
+        conflicted = _conflicted_frame(frame)
+        if conflicted.empty:
+            return set()
+        keys = {
+            key
+            for _, row in conflicted.iterrows()
+            if (key := _source_identity_player_key(row))
+        }
+        return keys
+
+    def _example_rows(frame: pd.DataFrame | None, *, lane: str, artifact: str) -> list[dict[str, str]]:
+        conflicted = _conflicted_frame(frame)
+        examples: list[dict[str, str]] = []
+        for _, row in conflicted.iterrows():
+            player_id = _player_id_key(row.get("player_id") or row.get("canonical_player_id"))
+            lookup_meta = lookup.get(player_id, {})
+            examples.append(
+                {
+                    "player_id": player_id,
+                    "player_name": (
+                        _text(row.get("player_name"))
+                        or _text(row.get("canonical_player_name"))
+                        or _text(row.get("entity_name"))
+                    ),
+                    "market_type": _text(row.get("market_type") or row.get("raw_market_type") or row.get("market.type")),
+                    "artifact": artifact,
+                    "lane": lane,
+                    "policy": _text(row.get("source_identity_conflict_policy")),
+                    "conflict_reason": (
+                        _text(row.get("source_identity_conflict_reason"))
+                        or _text(lookup_meta.get("source_identity_conflict_reason"))
+                        or _text(row.get("player_identity_conflict_reason"))
+                    ),
+                }
+            )
+        return examples
 
     full_market_count = _annotated_count(full_market_df)
     elite_count = _annotated_count(elite_df)
@@ -667,9 +725,44 @@ def source_identity_conflict_exposure_summary(
     high_caution_count = _annotated_count(high_caution_watchlist_df)
     combo_under_count = _annotated_count(combo_under_watchlist_df)
     paper_count = _annotated_count(paper_kelly_df)
+    full_market_players = _player_keys(full_market_df)
+    elite_players = _player_keys(elite_df)
+    kelly_players = _player_keys(kelly_df)
+    high_caution_players = _player_keys(high_caution_watchlist_df)
+    combo_under_players = _player_keys(combo_under_watchlist_df)
+    watchlist_players = high_caution_players | combo_under_players
+    paper_players = _player_keys(paper_kelly_df)
+    all_lane_players = full_market_players | elite_players | kelly_players | watchlist_players | paper_players
     watchlist_count = high_caution_count + combo_under_count
     blocking_count = elite_count + kelly_count
     operator_visible_count = full_market_count + watchlist_count + paper_count
+    example_candidates: list[dict[str, str]] = []
+    example_candidates.extend(
+        _example_rows(full_market_df, lane="full_market", artifact="full_market_board")
+    )
+    example_candidates.extend(_example_rows(elite_df, lane="elite", artifact="elite_board"))
+    example_candidates.extend(_example_rows(kelly_df, lane="kelly", artifact="kelly_stakes"))
+    example_candidates.extend(
+        _example_rows(high_caution_watchlist_df, lane="watchlist", artifact="high_caution_over_watchlist")
+    )
+    example_candidates.extend(
+        _example_rows(combo_under_watchlist_df, lane="watchlist", artifact="combo_under_watchlist")
+    )
+    example_candidates.extend(_example_rows(paper_kelly_df, lane="paper", artifact="paper_kelly_simulation"))
+    examples: list[dict[str, str]] = []
+    seen_examples: set[tuple[str, str, str]] = set()
+    for example in example_candidates:
+        player_key = (
+            _player_id_key(example.get("player_id"))
+            or f"name:{' '.join(_text(example.get('player_name')).lower().split())}"
+        )
+        dedupe_key = (player_key, example["artifact"], example["lane"])
+        if not player_key or dedupe_key in seen_examples:
+            continue
+        seen_examples.add(dedupe_key)
+        examples.append(example)
+        if len(examples) >= 5:
+            break
     if blocking_count > 0:
         safety_state = "blocking_manual_review_required"
     elif operator_visible_count > 0:
@@ -678,7 +771,7 @@ def source_identity_conflict_exposure_summary(
         safety_state = "clear"
     return {
         "source_identity_conflict_count": int(source_identity_conflict_diagnostic_count(source_identity_payload)),
-        "source_identity_conflicted_player_count": int(len(lookup)),
+        "source_identity_conflicted_player_count": int(max(len(lookup), len(all_lane_players))),
         "source_identity_conflicted_operator_rows": full_market_count,
         "source_identity_conflicted_full_market_rows": full_market_count,
         "source_identity_conflicted_elite_rows": elite_count,
@@ -687,6 +780,12 @@ def source_identity_conflict_exposure_summary(
         "source_identity_conflicted_high_caution_watchlist_rows": high_caution_count,
         "source_identity_conflicted_combo_under_watchlist_rows": combo_under_count,
         "source_identity_conflicted_paper_rows": paper_count,
+        "source_identity_conflicted_full_market_players": int(len(full_market_players)),
+        "source_identity_conflicted_elite_players": int(len(elite_players)),
+        "source_identity_conflicted_kelly_players": int(len(kelly_players)),
+        "source_identity_conflicted_watchlist_players": int(len(watchlist_players)),
+        "source_identity_conflicted_paper_players": int(len(paper_players)),
+        "source_identity_conflict_examples": examples,
         "source_identity_conflicted_operator_visible_rows": operator_visible_count,
         "source_identity_conflict_blocking_rows": blocking_count,
         "source_identity_conflict_safety_state": safety_state,

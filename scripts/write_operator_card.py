@@ -76,6 +76,29 @@ def _safe_int(value: Any, default: int = 0) -> int:
     return default if number is None else int(number)
 
 
+def _source_identity_example_lines(source_identity: dict[str, Any], *, limit: int = 3) -> list[str]:
+    raw_examples = source_identity.get("source_identity_conflict_examples", [])
+    if not isinstance(raw_examples, list) or not raw_examples:
+        return []
+    lines = ["- source identity examples (non-blocking):"]
+    for raw_example in raw_examples[:limit]:
+        if not isinstance(raw_example, dict):
+            continue
+        player_name = _safe_text(raw_example.get("player_name")) or "Unknown"
+        player_id = _safe_text(raw_example.get("player_id"))
+        identity = f"{player_name} ({player_id})" if player_id else player_name
+        lane = _safe_text(raw_example.get("lane")) or "unknown"
+        artifact = _safe_text(raw_example.get("artifact")) or lane
+        market = _safe_text(raw_example.get("market_type")) or "unknown"
+        policy = _safe_text(raw_example.get("policy")) or "unknown"
+        reason = _safe_text(raw_example.get("conflict_reason")) or "unknown"
+        lines.append(
+            f"  - {identity} | lane={lane} | artifact={artifact} | "
+            f"market={market} | policy={policy} | reason={reason}"
+        )
+    return lines if len(lines) > 1 else []
+
+
 def _is_truthy(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -1197,12 +1220,13 @@ def build_operator_card(
         if source_identity_conflict_diagnostic_count(audit_summary_payload) > 0
         else quality_payload
     )
-    full_market_df = annotate_source_identity_conflicts(full_market_df, source_identity_payload)
-    elite_df = annotate_source_identity_conflicts(elite_df, source_identity_payload)
-    kelly_df = annotate_source_identity_conflicts(kelly_df, source_identity_payload)
-    high_caution_df = annotate_source_identity_conflicts(high_caution_df, source_identity_payload)
-    combo_under_df = annotate_source_identity_conflicts(combo_under_df, source_identity_payload)
-    paper_kelly_df = annotate_source_identity_conflicts(paper_kelly_df, source_identity_payload)
+    if source_identity_conflict_diagnostic_count(source_identity_payload) > 0:
+        full_market_df = annotate_source_identity_conflicts(full_market_df, source_identity_payload)
+        elite_df = annotate_source_identity_conflicts(elite_df, source_identity_payload)
+        kelly_df = annotate_source_identity_conflicts(kelly_df, source_identity_payload)
+        high_caution_df = annotate_source_identity_conflicts(high_caution_df, source_identity_payload)
+        combo_under_df = annotate_source_identity_conflicts(combo_under_df, source_identity_payload)
+        paper_kelly_df = annotate_source_identity_conflicts(paper_kelly_df, source_identity_payload)
     source_identity_summary = source_identity_conflict_exposure_summary(
         source_identity_payload=source_identity_payload,
         full_market_df=full_market_df,
@@ -1297,6 +1321,10 @@ def build_operator_card(
         identity_summary = identity_quarantine_summary(game_payload)
     identity_quarantine_line = format_identity_quarantine_line(identity_summary)
     source_identity_total = _safe_int(source_identity_summary.get("source_identity_conflict_count"), 0)
+    source_identity_player_total = _safe_int(
+        source_identity_summary.get("source_identity_conflicted_player_count"),
+        source_identity_total,
+    )
     source_identity_operator_rows = _safe_int(
         source_identity_summary.get("source_identity_conflicted_operator_rows"),
         0,
@@ -1315,6 +1343,26 @@ def build_operator_card(
     )
     source_identity_paper_rows = _safe_int(
         source_identity_summary.get("source_identity_conflicted_paper_rows"),
+        0,
+    )
+    source_identity_full_market_players = _safe_int(
+        source_identity_summary.get("source_identity_conflicted_full_market_players"),
+        0,
+    )
+    source_identity_elite_players = _safe_int(
+        source_identity_summary.get("source_identity_conflicted_elite_players"),
+        0,
+    )
+    source_identity_kelly_players = _safe_int(
+        source_identity_summary.get("source_identity_conflicted_kelly_players"),
+        0,
+    )
+    source_identity_watchlist_players = _safe_int(
+        source_identity_summary.get("source_identity_conflicted_watchlist_players"),
+        0,
+    )
+    source_identity_paper_players = _safe_int(
+        source_identity_summary.get("source_identity_conflicted_paper_players"),
         0,
     )
     source_identity_safety = _safe_text(
@@ -1393,13 +1441,24 @@ def build_operator_card(
         or source_identity_paper_rows
     ):
         lines.append(
-            "- source identity conflicts: "
-            f"total={source_identity_total}, "
-            f"operator_rows={source_identity_operator_rows}, "
-            f"elite_rows={source_identity_elite_rows}, "
-            f"kelly_rows={source_identity_kelly_rows}, "
-            f"watchlist_rows={source_identity_watchlist_rows}, "
-            f"paper_rows={source_identity_paper_rows}"
+            "- source identity diagnostic conflicts: "
+            f"rows={source_identity_total}, unique_players={source_identity_player_total}"
+        )
+        lines.append(
+            "- source identity operator row exposure: "
+            f"full_market={source_identity_operator_rows}, "
+            f"elite={source_identity_elite_rows}, "
+            f"kelly={source_identity_kelly_rows}, "
+            f"watchlist={source_identity_watchlist_rows}, "
+            f"paper={source_identity_paper_rows}"
+        )
+        lines.append(
+            "- source identity unique-player exposure: "
+            f"full_market={source_identity_full_market_players}, "
+            f"elite={source_identity_elite_players}, "
+            f"kelly={source_identity_kelly_players}, "
+            f"watchlist={source_identity_watchlist_players}, "
+            f"paper={source_identity_paper_players}"
         )
         if source_identity_safety == "blocking_manual_review_required":
             lines.append(
@@ -1411,6 +1470,7 @@ def build_operator_card(
                 "- source identity safety: non-blocking diagnostic warning "
                 "(no Elite/Kelly source-conflict exposure)"
             )
+            lines.extend(_source_identity_example_lines(source_identity_summary, limit=3))
         else:
             lines.append("- source identity safety: clear")
     lines.append(f"- SGP candidates count: {sgp_count}")

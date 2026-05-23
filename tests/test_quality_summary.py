@@ -1507,6 +1507,89 @@ def test_quality_summary_reports_elite_context_safety_gate(tmp_path: Path) -> No
     assert "elite_reject_context_high_caution_over" in text
 
 
+def test_quality_summary_distinguishes_source_identity_rows_from_unique_players(tmp_path: Path) -> None:
+    prediction_date = "2026-05-22"
+    runtime_root = tmp_path / "runtime"
+    operator = runtime_root / "operator"
+    _seed_run_health_artifacts(
+        runtime_root,
+        prediction_date,
+        full_market_count=2,
+        elite_count=0,
+        kelly_eligible_count=0,
+        kelly_rows_count=0,
+    )
+    source_rows = [
+        {
+            "prediction_date": prediction_date,
+            "player_id": "192",
+            "player_name": "James Harden",
+            "team": "BOS",
+            "team_abbr": "BOS",
+            "game_id": "game-source",
+            "market_type": market,
+            "selection": "over",
+            "line": 10.5,
+            "odds": -110,
+            "confidence": 0.75,
+            "quality_score": 80,
+            "edge": 0.12,
+            "context_caution_level": "high",
+            "context_pick_alignment": "conflicted",
+            "final_elite_rejection_reason": "elite_reject_context_high_caution_over",
+            "is_live_market": True,
+            "line_source": "fixture_live_market",
+        }
+        for market in ("player_points", "player_rebounds")
+    ]
+    _write_csv(operator / f"full_market_board_{prediction_date}.csv", source_rows)
+    _write_csv(operator / f"elite_board_{prediction_date}.csv", [])
+    _write_csv(operator / f"kelly_stakes_{prediction_date}.csv", [])
+    _write_csv(operator / f"paper_kelly_simulation_{prediction_date}.csv", [source_rows[0]])
+    _write_json(
+        operator / f"elite_pipeline_audit_summary_{prediction_date}.json",
+        {
+            "conflict_count": 1,
+            "diagnostic_rows": [
+                {
+                    "player_id": "192",
+                    "player_name": "James Harden",
+                    "player_identity_conflict_reason": "player_id_team_conflict",
+                    "player_identity_conflict_details": '{"baseline_team_abbrs":["BOS","LAC"]}',
+                }
+            ],
+            "totals": {"total_candidates": 2, "passed_to_elite": 0, "total_rejections": 2},
+            "rows": [],
+        },
+    )
+
+    text, payload = build_quality_summary(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        out_dir=tmp_path,
+        generated_at="2026-05-22T00:00:00+00:00",
+    )
+
+    source_identity = payload["source_identity_conflict"]
+    assert source_identity["source_identity_conflicted_full_market_rows"] == 2
+    assert source_identity["source_identity_conflicted_full_market_players"] == 1
+    assert source_identity["source_identity_conflicted_watchlist_rows"] == 2
+    assert source_identity["source_identity_conflicted_watchlist_players"] == 1
+    assert source_identity["source_identity_conflicted_paper_rows"] == 1
+    assert source_identity["source_identity_conflicted_paper_players"] == 1
+    assert payload["candidate_funnel"]["source_identity_conflicted_full_market_players"] == 1
+    assert (
+        "- source identity row exposure: full_market=2, elite=0, kelly=0, watchlist=2, paper=1"
+        in text
+    )
+    assert (
+        "- source identity unique players: full_market=1, elite=0, kelly=0, watchlist=1, paper=1"
+        in text
+    )
+    assert "- source identity examples:" in text
+    assert "James Harden (192) | lane=full_market | artifact=full_market_board" in text
+
+
 # ── Phase P0: history_root canonicalisation ───────────────────────────────────
 
 def test_write_quality_summary_uses_explicit_history_root(tmp_path: Path) -> None:
