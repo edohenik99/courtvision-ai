@@ -177,6 +177,7 @@ PENDING_RESULT_STATUS = "pending"
 VOID_RESULT_STATUS = "void"
 UNSUPPORTED_RESULT_STATUS = "unsupported"
 GAME_NOT_FINAL_REASON = "game_not_final"
+PROVIDER_MISSING_FINALITY_REASON = "provider_missing_finality"
 UNSUPPORTED_GRADING_REASONS = {"unsupported_market", "unsupported_selection"}
 MARKET_TYPE_ALIASES = {
     "points": "player_points",
@@ -240,10 +241,12 @@ def _split_grading_reasons(value: Any) -> list[str]:
 
 def _unresolved_result_status(skip_reason: str, prediction_date: str) -> str:
     reasons = set(_split_grading_reasons(skip_reason))
-    if reasons == {GAME_NOT_FINAL_REASON} and _safe_text(prediction_date) >= _today_iso():
-        return PENDING_RESULT_STATUS
     if reasons & UNSUPPORTED_GRADING_REASONS:
         return UNSUPPORTED_RESULT_STATUS
+    if reasons == {GAME_NOT_FINAL_REASON} and _safe_text(prediction_date) >= _today_iso():
+        return PENDING_RESULT_STATUS
+    if PROVIDER_MISSING_FINALITY_REASON in reasons and _safe_text(prediction_date) >= _today_iso():
+        return PENDING_RESULT_STATUS
     return VOID_RESULT_STATUS
 
 
@@ -1242,6 +1245,11 @@ def _game_final_status(row: pd.Series, games_df: pd.DataFrame) -> bool | None:
     return any(_game_row_is_final(match) for match in matches)
 
 
+def _date_is_current_or_future(value: Any) -> bool:
+    prediction_date = _safe_text(value)
+    return bool(prediction_date and prediction_date >= _today_iso())
+
+
 def _line_result(selection: str, actual_value: float, line: float) -> str:
     if selection == "milestone":
         return "hit" if actual_value >= line else "miss"
@@ -1385,6 +1393,8 @@ def _grade_pick_row(
 
     actual_value, reason = _resolve_player_points_actual(row, stats_df)
     if actual_value is None:
+        if final_status is None and _date_is_current_or_future(row.get("prediction_date")):
+            return "pending", None, PROVIDER_MISSING_FINALITY_REASON
         return "pending", None, reason
     return _line_result(selection, actual_value, float(line)), actual_value, ""
 

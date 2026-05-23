@@ -13,6 +13,7 @@ FINAL_STATUSES = {"hit", "miss", "push"}
 PENDING_STATUS = "pending"
 TERMINAL_NON_GRADED_STATUSES = {"void", "unsupported"}
 GAME_NOT_FINAL_REASON = "game_not_final"
+PROVIDER_MISSING_FINALITY_REASON = "provider_missing_finality"
 OPEN_GAME_STATUSES = {"scheduled", "scheduled_future_iso_status", "not_started", "pre_game", "in_progress", "live"}
 TERMINAL_GAME_STATUSES = {"final", "final_status", "completed", "complete", "closed", "post_game"}
 
@@ -184,8 +185,13 @@ def _pending_breakdown(
         else pd.Series("", index=scoped.index)
     )
     today_text = today or _today_iso()
+    provider_missing_finality_open = reasons.eq(PROVIDER_MISSING_FINALITY_REASON) & (
+        game_statuses.isin(OPEN_GAME_STATUSES)
+        | (dates.ge(today_text) & ~game_statuses.isin(TERMINAL_GAME_STATUSES))
+    )
     open_game = pending & (
         reasons.eq(GAME_NOT_FINAL_REASON)
+        | provider_missing_finality_open
         | game_statuses.isin(OPEN_GAME_STATUSES)
         | (dates.ge(today_text) & ~game_statuses.isin(TERMINAL_GAME_STATUSES))
     )

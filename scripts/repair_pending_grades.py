@@ -56,6 +56,8 @@ PENDING_STATUS = "pending"
 VOID_STATUS = "void"
 UNSUPPORTED_STATUS = "unsupported"
 GAME_NOT_FINAL_REASON = "game_not_final"
+PROVIDER_MISSING_FINALITY_REASON = "provider_missing_finality"
+OPEN_PENDING_REASONS = {GAME_NOT_FINAL_REASON, PROVIDER_MISSING_FINALITY_REASON}
 OPEN_GAME_STATUSES = {"scheduled", "scheduled_future_iso_status", "not_started", "pre_game", "in_progress", "live"}
 TERMINAL_GAME_STATUSES = {"final", "final_status", "completed", "complete", "closed", "post_game"}
 DIRECT_RESULT_SOURCES = {
@@ -171,6 +173,10 @@ def _status_from_value(value: Any) -> str:
     if text in {"void", "unsupported"}:
         return text
     return PENDING_STATUS
+
+
+def _reason_tokens(value: Any) -> set[str]:
+    return {reason for reason in _safe_text(value).lower().split(";") if reason}
 
 
 def _row_status(row: pd.Series) -> str:
@@ -480,7 +486,7 @@ def _pending_breakdown(df: pd.DataFrame, *, today: str | None = None) -> dict[st
             game_statuses = game_statuses.mask(game_statuses.eq(""), df[column].map(lambda value: _safe_text(value).lower()))
 
     open_game = pending & (
-        reasons.eq(GAME_NOT_FINAL_REASON)
+        reasons.isin(OPEN_PENDING_REASONS)
         | game_statuses.isin(OPEN_GAME_STATUSES)
         | (dates.ge(today_text) & ~game_statuses.isin(TERMINAL_GAME_STATUSES))
     )
@@ -587,10 +593,17 @@ def _repair_history_df(
             if column in working.columns
         }
         result_status, actual_value, reason = lookup.grade_row(row)
+        old_reason = _safe_text(row.get("grading_skip_reason")).lower()
+        if (
+            result_status == PENDING_STATUS
+            and PROVIDER_MISSING_FINALITY_REASON in (_reason_tokens(old_reason) | _reason_tokens(reason))
+            and _game_not_final(row)
+        ):
+            reason = PROVIDER_MISSING_FINALITY_REASON
         if result_status in FINAL_STATUSES and actual_value is None:
             result_status = VOID_STATUS
             reason = reason or "actual_stats_not_found"
-        if result_status == PENDING_STATUS and reason != "game_not_final":
+        if result_status == PENDING_STATUS and reason not in OPEN_PENDING_REASONS:
             result_status = VOID_STATUS
             reason = reason or "actual_stats_not_found"
 
@@ -626,7 +639,7 @@ def _repair_history_df(
         elif result_status == UNSUPPORTED_STATUS:
             unsupported_rows += 1
             pending_taxonomy["unsupported_terminal"] += 1
-        elif result_status == PENDING_STATUS and reason == GAME_NOT_FINAL_REASON:
+        elif result_status == PENDING_STATUS and reason in OPEN_PENDING_REASONS:
             pending_taxonomy["pending_open_game"] += 1
         if reason:
             skip_reasons[reason] += 1

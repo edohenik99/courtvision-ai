@@ -430,6 +430,71 @@ def test_unfinished_games_remain_pending_with_game_not_final(tmp_path: Path, mon
     assert result["skip_reasons"] == {"game_not_final": 1}
 
 
+def test_current_missing_finality_and_actuals_remains_pending_provider_missing_finality(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runtime_root = tmp_path / "outputs" / "runtime"
+    history_root = tmp_path / "data" / "history"
+    history_root.mkdir(parents=True, exist_ok=True)
+    date = "2026-05-06"
+    row = {
+        **_history_row("Unknown Finality", prediction_date=date, selection="under", result_status="pending"),
+        "team": "NYK",
+        "opponent": "PHI",
+        "game_id": "",
+        "line": 27.5,
+    }
+    pd.DataFrame([row]).to_csv(history_root / "pick_history.csv", index=False)
+
+    import scripts.history_tracking as history_tracking
+
+    monkeypatch.setattr(history_tracking, "_today_iso", lambda: date)
+    monkeypatch.setattr(history_tracking, "_load_actual_results_for_date", lambda *_args, **_kwargs: pd.DataFrame())
+    monkeypatch.setattr(history_tracking, "_load_player_stats_for_date", lambda *_args, **_kwargs: pd.DataFrame())
+    monkeypatch.setattr(history_tracking, "_load_games_for_date", lambda *_args, **_kwargs: pd.DataFrame())
+
+    result = grade_completed_picks(history_root=history_root, runtime_root=runtime_root)
+
+    updated = pd.read_csv(history_root / "pick_history.csv")
+    assert result["updated_rows"] == 0
+    assert result["pending_rows"] == 1
+    assert result["void_rows"] == 0
+    assert updated.iloc[0]["result_status"] == "pending"
+    assert updated.iloc[0]["grading_skip_reason"] == "provider_missing_finality"
+    assert result["skip_reasons"] == {"provider_missing_finality": 1}
+
+
+def test_current_unsupported_market_and_selection_still_become_unsupported(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runtime_root = tmp_path / "outputs" / "runtime"
+    history_root = tmp_path / "data" / "history"
+    history_root.mkdir(parents=True, exist_ok=True)
+    date = "2026-05-06"
+    rows = [
+        _history_row("Unsupported Market", prediction_date=date, market="player_rebounds", result_status="pending"),
+        _history_row("Unsupported Selection", prediction_date=date, selection="sideways", result_status="pending"),
+    ]
+    pd.DataFrame(rows).to_csv(history_root / "pick_history.csv", index=False)
+
+    import scripts.history_tracking as history_tracking
+
+    monkeypatch.setattr(history_tracking, "_today_iso", lambda: date)
+    monkeypatch.setattr(history_tracking, "_load_actual_results_for_date", lambda *_args, **_kwargs: pd.DataFrame())
+    monkeypatch.setattr(history_tracking, "_load_player_stats_for_date", lambda *_args, **_kwargs: pd.DataFrame())
+    monkeypatch.setattr(history_tracking, "_load_games_for_date", lambda *_args, **_kwargs: pd.DataFrame())
+
+    result = grade_completed_picks(history_root=history_root, runtime_root=runtime_root)
+
+    updated = pd.read_csv(history_root / "pick_history.csv")
+    assert result["pending_rows"] == 0
+    assert result["unsupported_rows"] == 2
+    assert set(updated["result_status"]) == {"unsupported"}
+    assert set(updated["grading_skip_reason"]) == {"unsupported_market", "unsupported_selection"}
+
+
 def test_historical_game_not_final_rows_become_void(tmp_path: Path, monkeypatch) -> None:
     runtime_root = tmp_path / "outputs" / "runtime"
     history_root = tmp_path / "data" / "history"

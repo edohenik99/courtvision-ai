@@ -320,6 +320,84 @@ def test_current_date_game_not_final_rows_remain_pending_open_game(tmp_path: Pat
     assert result["summary"]["stale_pending"] == 0
 
 
+def test_current_provider_missing_finality_rows_remain_pending_open_game(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "outputs" / "runtime"
+    history_root = tmp_path / "data" / "history"
+    current_date = repair_module._today_iso()
+    row = {
+        **_shadow_row("Provider Gap Player", prediction_date=current_date),
+        "grading_skip_reason": "provider_missing_finality",
+    }
+    _write_csv(history_root / "market_shadow_history.csv", [row])
+
+    result = repair_all_completed_grades(
+        history_root=history_root,
+        runtime_root=runtime_root,
+        include_current_date=True,
+    )
+
+    shadow = pd.read_csv(history_root / "market_shadow_history.csv", keep_default_na=False)
+    row = shadow.iloc[0]
+    assert row["result_status"] == "pending"
+    assert row["grading_skip_reason"] == "provider_missing_finality"
+    assert result["summary"]["total_pending"] == 1
+    assert result["summary"]["open_game_pending"] == 1
+    assert result["summary"]["stale_pending"] == 0
+
+
+def test_repair_terminal_unsupported_market_remains_unsupported(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "outputs" / "runtime"
+    history_root = tmp_path / "data" / "history"
+    current_date = repair_module._today_iso()
+    _write_csv(
+        history_root / "market_shadow_history.csv",
+        [
+            _shadow_row(
+                "Unsupported Repair Player",
+                prediction_date=current_date,
+                market_type="player_threes",
+            )
+        ],
+    )
+
+    result = repair_all_completed_grades(
+        history_root=history_root,
+        runtime_root=runtime_root,
+        include_current_date=True,
+    )
+
+    shadow = pd.read_csv(history_root / "market_shadow_history.csv", keep_default_na=False)
+    row = shadow.iloc[0]
+    assert row["result_status"] == "unsupported"
+    assert row["grading_skip_reason"] == "unsupported_market"
+    assert result["summary"]["unsupported_rows"] == 1
+    assert result["summary"]["open_game_pending"] == 0
+
+
+def test_old_provider_missing_finality_rows_do_not_remain_open_forever(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "outputs" / "runtime"
+    history_root = tmp_path / "data" / "history"
+    old_date = "2026-05-04"
+    row = {
+        **_shadow_row("Old Provider Gap", prediction_date=old_date),
+        "grading_skip_reason": "provider_missing_finality",
+    }
+    _write_csv(history_root / "market_shadow_history.csv", [row])
+
+    result = repair_all_completed_grades(
+        history_root=history_root,
+        runtime_root=runtime_root,
+        through_date="2026-05-06",
+    )
+
+    shadow = pd.read_csv(history_root / "market_shadow_history.csv", keep_default_na=False)
+    row = shadow.iloc[0]
+    assert row["result_status"] == "void"
+    assert row["grading_skip_reason"] in {"provider_unavailable", "player_stat_match_missing"}
+    assert result["summary"]["open_game_pending"] == 0
+    assert result["summary"]["voided_rows"] == 1
+
+
 def test_completed_rows_cannot_stay_plain_pending_without_reason(tmp_path: Path) -> None:
     runtime_root = tmp_path / "outputs" / "runtime"
     history_root = tmp_path / "data" / "history"

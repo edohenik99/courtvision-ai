@@ -97,6 +97,7 @@ def main(argv: list[str] | None = None) -> int:
         grade_result = grade_completed_picks(
             history_root=args.history_root,
             runtime_root=args.runtime_root,
+            prediction_date=args.prediction_date,
             dry_run=args.dry_run,
         )
         print(f"graded_updates={grade_result['updated_rows']}")
