@@ -99,6 +99,22 @@ def _join_meta_label_rules_score(
 ) -> pd.DataFrame:
     """Safely joins meta_label_rules_score from prediction-time shadow CSVs for forward dates."""
     working = history_df.copy()
+    
+    # Safely pre-populate required columns in working copy to avoid KeyErrors
+    required_cols = [
+        "prediction_date",
+        "player_id",
+        "player_name",
+        "team",
+        "market_type",
+        "selection",
+        "sportsbook_line",
+        "line",
+    ]
+    for col in required_cols:
+        if col not in working.columns:
+            working[col] = None
+
     if working.empty:
         working["meta_label_rules_score"] = pd.Series(dtype=float)
         return working
@@ -229,11 +245,24 @@ def build_feature_completeness_report(
     if full_market_df is not None and not full_market_df.empty:
         working_fm = full_market_df.copy()
         
+        # Safely pre-populate expected columns to prevent KeyErrors
+        required_fm_cols = [
+            "player_id", "market_type", "selection", "sportsbook_line", "line",
+            "context_pick_alignment", "context_caution_level", "fragility_bucket", 
+            "survivability_bucket", "role_stability_bucket"
+        ]
+        for col in required_fm_cols:
+            if col not in working_fm.columns:
+                working_fm[col] = None
+        
         # If we have meta_promo_df, join meta_label_rules_score into working_fm
         if meta_promo_df is not None and not meta_promo_df.empty:
             # Let's perform a merge on player_id, market_type, selection, sportsbook_line/line
             # Normalize column names in both
             fm_merge = working_fm.copy()
+            if "meta_label_rules_score" in fm_merge.columns:
+                fm_merge = fm_merge.drop(columns=["meta_label_rules_score"])
+                
             promo_merge = meta_promo_df.copy()
             if "sportsbook_line" in fm_merge.columns and "line" not in fm_merge.columns:
                 fm_merge["line"] = fm_merge["sportsbook_line"].map(_safe_float)
@@ -254,6 +283,9 @@ def build_feature_completeness_report(
                 how="left",
             )
             working_fm["meta_label_rules_score"] = merged["meta_label_rules_score"].values
+            
+        if "meta_label_rules_score" not in working_fm.columns:
+            working_fm["meta_label_rules_score"] = None
 
         total_fm = len(working_fm)
         current_metrics["full_market_rows"] = total_fm
@@ -302,6 +334,21 @@ def build_feature_completeness_report(
     if not shadow_history_df.empty:
         # Join rules score from promo reports
         enriched_hist = _join_meta_label_rules_score(shadow_history_df, runtime_root)
+        
+        # Safely pre-populate expected columns to prevent KeyErrors
+        required_hist_cols = [
+            "prediction_date",
+            "result_status",
+            "context_pick_alignment",
+            "context_caution_level",
+            "fragility_bucket",
+            "survivability_bucket",
+            "role_stability_bucket",
+            "meta_label_rules_score",
+        ]
+        for col in required_hist_cols:
+            if col not in enriched_hist.columns:
+                enriched_hist[col] = None
         
         # Filter for forward-feature start date
         forward_mask = enriched_hist["prediction_date"].fillna("").astype(str) >= FORWARD_FEATURE_START_DATE
@@ -405,6 +452,7 @@ def build_feature_completeness_report(
         float(graded_cnt) / slates_cnt if slates_cnt > 0 else 0.0
     )
     
+    projection_reason = "sufficient_forward_sample"
     if avg_graded_per_slate > 0.0:
         graded_needed = max(0, min_graded - graded_cnt)
         complete_needed = max(0, min_complete - complete_cnt)
@@ -414,7 +462,8 @@ def build_feature_completeness_report(
             math.ceil(max(slates_needed_graded, slates_needed_complete))
         )
     else:
-        est_slates_needed = 999
+        est_slates_needed = "n/a"
+        projection_reason = "insufficient_forward_sample"
 
     readiness = {
         "minimum_required_graded_rows": min_graded,
@@ -424,6 +473,7 @@ def build_feature_completeness_report(
         "verdict": verdict,
         "recent_average_graded_rows_per_completed_slate": round(avg_graded_per_slate, 2),
         "estimated_additional_slates_needed": est_slates_needed,
+        "projection_reason": projection_reason,
     }
 
     return {
@@ -512,7 +562,8 @@ def render_feature_completeness_report(payload: dict[str, Any]) -> str:
         f"- minimum required completed slates: {readiness.get('minimum_required_completed_slates', 30)}",
         f"- maximum allowed missing rate: {_fmt_pct(readiness.get('maximum_allowed_missing_role_stability_rate'))}",
         f"- recent avg graded rows per slate: {readiness.get('recent_average_graded_rows_per_completed_slate', 0.0)}",
-        f"- estimated additional slates needed: {readiness.get('estimated_additional_slates_needed', 999)}",
+        f"- estimated additional slates needed: {readiness.get('estimated_additional_slates_needed', 'n/a')}",
+        f"- projection_reason: {readiness.get('projection_reason', 'n/a')}",
         f"- Phase 4C readiness verdict: {readiness.get('verdict', 'WAIT_MORE_FORWARD_DATA')}",
         "",
         DIAGNOSTIC_ONLY_NOTE,
@@ -535,9 +586,16 @@ def write_feature_completeness_report(
     history_root = Path(history_root)
 
     if shadow_history_df is None:
-        shadow_history_df = pd.read_csv(
-            history_root / "market_shadow_history.csv", keep_default_na=False, low_memory=False
-        )
+        shadow_path = history_root / "market_shadow_history.csv"
+        if shadow_path.exists():
+            try:
+                shadow_history_df = pd.read_csv(
+                    shadow_path, keep_default_na=False, low_memory=False
+                )
+            except Exception:
+                shadow_history_df = pd.DataFrame()
+        else:
+            shadow_history_df = pd.DataFrame()
 
     if full_market_df is None:
         fm_path = runtime_root / "operator" / f"full_market_board_{prediction_date}.csv"

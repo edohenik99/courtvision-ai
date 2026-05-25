@@ -8,6 +8,8 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Sequence
+import sys
+import traceback
 
 import pandas as pd
 
@@ -2781,7 +2783,9 @@ def write_quality_summary_outputs(
             runtime_root=runtime_root,
             history_root=history_root,
         )
-    except Exception:
+    except Exception as e:
+        print(f"Error in write_feature_completeness_report: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
         _track_json = tracker_json_path_for_date(prediction_date, runtime_root)
         _track_txt = tracker_txt_path_for_date(prediction_date, runtime_root)
         _track_csv = tracker_csv_path_for_date(prediction_date, runtime_root)
@@ -2801,7 +2805,7 @@ def write_quality_summary_outputs(
         "completed_slate_count": _track_hist.get("completed_slate_count", 0),
         "graded_hit_miss_rows": _track_hist.get("graded_hit_miss_rows", 0),
         "feature_complete_graded_rows": _track_hist.get("feature_complete_graded_rows", 0),
-        "estimated_additional_slates_needed": _track_readiness.get("estimated_additional_slates_needed", 999),
+        "estimated_additional_slates_needed": _track_readiness.get("estimated_additional_slates_needed", "n/a"),
         "verdict": _track_readiness.get("verdict", "WAIT_MORE_FORWARD_DATA"),
         "note": "diagnostic_report_only_no_elite_kelly_prediction_or_final_decision_change",
     }

@@ -301,3 +301,118 @@ def test_non_mutation_properties(tmp_path: Path) -> None:
     )
 
     assert shadow_history_path.read_bytes() == history_before_bytes
+
+
+def test_missing_columns_safety_no_crash(tmp_path: Path) -> None:
+    # Proves missing expected columns in full_market_df and shadow_history_df are handled safely.
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    history_root.mkdir(parents=True, exist_ok=True)
+
+    # Empty DataFrame with no columns
+    empty_df = pd.DataFrame()
+
+    # Should not crash and successfully return default payload/write files
+    json_p, txt_p, csv_p, payload = write_feature_completeness_report(
+        prediction_date=DATE,
+        runtime_root=runtime_root,
+        history_root=history_root,
+        shadow_history_df=empty_df,
+        full_market_df=empty_df,
+    )
+    assert json_p.exists()
+    assert payload["historical_coverage"]["graded_hit_miss_rows"] == 0
+    assert payload["readiness"]["estimated_additional_slates_needed"] == "n/a"
+    assert payload["readiness"]["projection_reason"] == "insufficient_forward_sample"
+
+
+def test_zero_sample_projection_is_na(tmp_path: Path) -> None:
+    # Proves that if forward graded rows is 0, estimated additional slates is "n/a" and reason is "insufficient_forward_sample"
+    report = build_feature_completeness_report(
+        prediction_date=DATE,
+        shadow_history_df=pd.DataFrame(),
+        full_market_df=pd.DataFrame(),
+    )
+    readiness = report["readiness"]
+    assert readiness["estimated_additional_slates_needed"] == "n/a"
+    assert readiness["projection_reason"] == "insufficient_forward_sample"
+    assert readiness["verdict"] == "WAIT_MORE_FORWARD_DATA"
+
+    # Verify rendering
+    text = render_feature_completeness_report(report)
+    assert "- estimated additional slates needed: n/a" in text
+    assert "- projection_reason: insufficient_forward_sample" in text
+
+
+def test_operator_card_and_daily_summary_render_na_safely(tmp_path: Path) -> None:
+    # Verify that scripts can safely render "n/a" estimated slates
+    from scripts.write_operator_card import write_operator_card_outputs
+    from scripts.write_daily_summary import write_daily_summary_outputs
+
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+    operator = runtime_root / "operator"
+    diagnostics = runtime_root / "diagnostics"
+    research = runtime_root / "research"
+    model = tmp_path / "model"
+
+    operator.mkdir(parents=True, exist_ok=True)
+    diagnostics.mkdir(parents=True, exist_ok=True)
+    research.mkdir(parents=True, exist_ok=True)
+    model.mkdir(parents=True, exist_ok=True)
+
+    prediction_date = "2026-05-24"
+
+    # Pre-populate required dummy files
+    pd.DataFrame().to_csv(operator / f"elite_board_{prediction_date}.csv", index=False)
+    pd.DataFrame().to_csv(operator / f"kelly_stakes_{prediction_date}.csv", index=False)
+    pd.DataFrame().to_csv(operator / f"full_market_board_{prediction_date}.csv", index=False)
+    pd.DataFrame().to_csv(operator / f"sgp_board_{prediction_date}.csv", index=False)
+    pd.DataFrame().to_csv(research / f"player_predictions_{prediction_date}.csv", index=False)
+    pd.DataFrame().to_csv(model / "player_baselines.csv", index=False)
+    
+    with open(research / f"model_metrics_{prediction_date}.json", "w") as f:
+        json.dump({}, f)
+    with open(diagnostics / f"board_diagnostics_{prediction_date}.json", "w") as f:
+        json.dump({}, f)
+    with open(operator / f"elite_pipeline_audit_summary_{prediction_date}.json", "w") as f:
+        json.dump({}, f)
+    with open(diagnostics / f"market_availability_audit_{prediction_date}.json", "w") as f:
+        json.dump({}, f)
+    with open(diagnostics / f"market_shadow_grading_{prediction_date}.json", "w") as f:
+        json.dump({}, f)
+    with open(diagnostics / f"completion_state_audit_{prediction_date}.json", "w") as f:
+        json.dump({}, f)
+
+    # Write a mock feature completeness with "n/a"
+    with open(diagnostics / f"feature_completeness_tracker_{prediction_date}.json", "w") as f:
+        json.dump({
+            "historical_coverage": {
+                "completed_slate_count": 0,
+                "graded_hit_miss_rows": 0,
+                "feature_complete_graded_rows": 0,
+            },
+            "readiness": {
+                "verdict": "WAIT_MORE_FORWARD_DATA",
+                "estimated_additional_slates_needed": "n/a",
+            }
+        }, f)
+
+    # Calling write_operator_card_outputs should not crash and render safely
+    out_path, payload = write_operator_card_outputs(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+    assert out_path.exists()
+    assert payload["feature_completeness_tracker"]["estimated_additional_slates_needed"] == "n/a"
+
+    # Calling write_daily_summary_outputs should not crash and render safely
+    sum_txt_path, sum_payload = write_daily_summary_outputs(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+    assert sum_txt_path.exists()
+    assert sum_payload["feature_completeness_tracker"]["estimated_additional_slates_needed"] == "n/a"

@@ -879,7 +879,15 @@ def build_daily_summary(
     tracker_graded = int(tracker_hist.get("graded_hit_miss_rows") or 0)
     tracker_slates = int(tracker_hist.get("completed_slate_count") or 0)
     tracker_complete = int(tracker_hist.get("feature_complete_graded_rows") or 0)
-    tracker_est_slates = int(tracker_readiness.get("estimated_additional_slates_needed", 999))
+    
+    tracker_est_val = tracker_readiness.get("estimated_additional_slates_needed")
+    if tracker_est_val in {"n/a", None}:
+        tracker_est_slates = "n/a"
+    else:
+        try:
+            tracker_est_slates = int(tracker_est_val)
+        except (ValueError, TypeError):
+            tracker_est_slates = "n/a"
 
     if not isinstance(calibration_bucket_summary, dict):
         calibration_bucket_summary = {}

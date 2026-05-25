@@ -1460,7 +1460,11 @@ def build_operator_card(
     tracker_graded = _safe_int(tracker_hist.get("graded_hit_miss_rows"), 0)
     tracker_slates = _safe_int(tracker_hist.get("completed_slate_count"), 0)
     tracker_complete = _safe_int(tracker_hist.get("feature_complete_graded_rows"), 0)
-    tracker_est_slates = _safe_int(tracker_readiness.get("estimated_additional_slates_needed"), 999)
+    tracker_est_val = tracker_readiness.get("estimated_additional_slates_needed")
+    if tracker_est_val in {"n/a", None}:
+        tracker_est_slates = "n/a"
+    else:
+        tracker_est_slates = _safe_int(tracker_est_val, 999)
 
     if not isinstance(calibration_bucket_summary, dict):
         calibration_bucket_summary = {}
