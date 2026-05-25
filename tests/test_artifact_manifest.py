@@ -100,6 +100,26 @@ def test_manifest_missing_near_elite_review_is_shadow_only_not_fatal(tmp_path: P
     assert manifest["missing_by_severity"]["fatal"] == 0
 
 
+def test_manifest_missing_clv_market_movement_is_shadow_only_not_fatal(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    _write_core_boards(runtime_root)
+
+    manifest = build_artifact_manifest(
+        prediction_date=PREDICTION_DATE,
+        runtime_root=runtime_root,
+        generated_at="2026-04-10T12:00:00Z",
+    )
+
+    clv_report = _artifact(manifest, "clv_market_movement_report")
+    clv_json = _artifact(manifest, "clv_market_movement_diagnostics")
+    assert clv_report["exists"] is False
+    assert clv_json["exists"] is False
+    assert clv_report["severity"] == SEVERITY_SHADOW_ONLY
+    assert clv_json["severity"] == SEVERITY_SHADOW_ONLY
+    assert "not an Elite, Kelly, SGP, or staking input" in clv_report["notes"]
+    assert manifest["missing_by_severity"]["fatal"] == 0
+
+
 def test_manifest_counts_csv_rows(tmp_path: Path) -> None:
     runtime_root = tmp_path / "runtime"
     _write_text(

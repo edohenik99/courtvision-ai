@@ -338,6 +338,22 @@ def _specs(prediction_date: str) -> tuple[ArtifactSpec, ...]:
         ),
         ArtifactSpec(
             "shadow_only",
+            "clv_market_movement_report",
+            "operator",
+            f"clv_market_movement_{prediction_date}.txt",
+            SEVERITY_SHADOW_ONLY,
+            "Shadow/report-only CLV market movement diagnostic; not an Elite, Kelly, SGP, or staking input.",
+        ),
+        ArtifactSpec(
+            "shadow_only",
+            "clv_market_movement_diagnostics",
+            "diagnostics",
+            f"clv_market_movement_{prediction_date}.json",
+            SEVERITY_SHADOW_ONLY,
+            "Shadow/report-only CLV market movement diagnostic; not an Elite, Kelly, SGP, or staking input.",
+        ),
+        ArtifactSpec(
+            "shadow_only",
             "high_caution_over_watchlist",
             "operator",
             f"high_caution_over_watchlist_{prediction_date}.csv",

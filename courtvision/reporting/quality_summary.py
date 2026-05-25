@@ -54,6 +54,11 @@ from courtvision.reporting.fragility_shadow_policy_simulation import (
     simulation_txt_path_for_date,
     write_policy_simulation_report,
 )
+from courtvision.reporting.clv_market_movement import (
+    clv_market_movement_json_path_for_date,
+    clv_market_movement_txt_path_for_date,
+    write_clv_market_movement_report,
+)
 from courtvision.reporting.projection_calibration_shadow import (
     calibration_json_path_for_date,
     calibration_txt_path_for_date,
@@ -2586,6 +2591,32 @@ def write_quality_summary_outputs(
     # Callers may override for testing; the old runtime_root.parent/"history"
     # derivation pointed at outputs/history which contains only a partial copy.
     history_root = Path(history_root) if history_root is not None else Path("data/history")
+
+    # Phase 1: CLV / market movement shadow report (diagnostics only).
+    try:
+        _clv_json, _clv_txt, _clv_payload = write_clv_market_movement_report(
+            prediction_date=prediction_date,
+            runtime_root=runtime_root,
+        )
+    except Exception:
+        _clv_json = clv_market_movement_json_path_for_date(prediction_date, runtime_root)
+        _clv_txt = clv_market_movement_txt_path_for_date(prediction_date, runtime_root)
+        _clv_payload = {"summary": {}}
+    _clv_summary = _clv_payload.get("summary", {}) if isinstance(_clv_payload, dict) else {}
+    if not isinstance(_clv_summary, dict):
+        _clv_summary = {}
+    payload["clv_market_movement_shadow"] = {
+        "json_path": str(_clv_json),
+        "txt_path": str(_clv_txt),
+        "total_rows": _clv_summary.get("total_rows", 0),
+        "close_coverage_count": _clv_summary.get("close_coverage_count", 0),
+        "positive_clv_count": _clv_summary.get("positive_clv_count", 0),
+        "movement_toward_pick_count": _clv_summary.get("movement_toward_pick_count", 0),
+        "movement_away_from_pick_count": _clv_summary.get("movement_away_from_pick_count", 0),
+        "missing_close_line_count": _clv_summary.get("missing_close_line_count", 0),
+        "note": "shadow_report_only_no_elite_kelly_or_prediction_logic_changed",
+    }
+
     attribution_payload = _build_fragility_attribution_payload(prediction_date, history_root)
     attribution_json = runtime_root / "diagnostics" / f"fragility_survivability_attribution_{prediction_date}.json"
     attribution_txt = runtime_root / "operator" / f"fragility_survivability_attribution_{prediction_date}.txt"

@@ -24,6 +24,10 @@ from courtvision.market_intelligence.clv_tracker import (
     CLVRecord,
     CLVTracker,
 )
+from courtvision.market_intelligence.market_snapshots import (
+    MarketSnapshotIdentity,
+    market_snapshot_key,
+)
 from courtvision.market_intelligence.bias_detection import (
     BiasDetector,
     MarketBias,
@@ -46,6 +50,8 @@ __all__ = [
     # CLV
     "CLVRecord",
     "CLVTracker",
+    "MarketSnapshotIdentity",
+    "market_snapshot_key",
     # Bias Detection
     "BiasDetector",
     "MarketBias",

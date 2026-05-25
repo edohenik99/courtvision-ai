@@ -11,6 +11,7 @@ import pandas as pd
 from courtvision_ai import CourtVisionAI
 from courtvision.calibration.buckets import abs_edge_bucket as _abs_edge_bucket
 from courtvision.context.game_context import is_identity_quarantined
+from courtvision.market_intelligence.market_snapshots import market_snapshot_key
 
 
 PICK_HISTORY_COLUMNS = [
@@ -51,14 +52,28 @@ PICK_HISTORY_COLUMNS = [
 
 MARKET_SHADOW_HISTORY_COLUMNS = [
     "prediction_date",
+    "market_snapshot_key",
     "player_name",
     "player_id",
+    "team",
     "team_abbr",
     "opponent",
     "game_id",
     "market_type",
     "selection",
     "line",
+    "entry_line",
+    "entry_odds",
+    "opening_line_observed",
+    "closing_line_observed",
+    "close_source",
+    "close_coverage_status",
+    "line_move_points",
+    "movement_toward_pick",
+    "clv_line_points",
+    "clv_odds_delta",
+    "clv_grade",
+    "clv_confidence",
     "model_projection",
     "edge",
     "confidence",
@@ -102,6 +117,19 @@ MARKET_SHADOW_PRESERVED_GRADED_COLUMNS = [
     "same_opponent_last_selection",
     "same_opponent_last_result_status",
     "same_opponent_under_warning",
+    "market_snapshot_key",
+    "entry_line",
+    "entry_odds",
+    "opening_line_observed",
+    "closing_line_observed",
+    "close_source",
+    "close_coverage_status",
+    "line_move_points",
+    "movement_toward_pick",
+    "clv_line_points",
+    "clv_odds_delta",
+    "clv_grade",
+    "clv_confidence",
 ]
 MARKET_SHADOW_PRESERVED_RESULT_STATUSES = {"hit", "miss", "push", "void", "unsupported"}
 
@@ -215,6 +243,27 @@ def _safe_text(value: Any, default: str = "") -> str:
 def _safe_non_null_text(value: Any, default: str = "") -> str:
     text = _safe_text(value, default=default)
     return default if text.lower() in {"nan", "none", "null", "<na>"} else text
+
+
+def _optional_float(value: Any) -> float | None:
+    text = _safe_non_null_text(value)
+    if not text:
+        return None
+    try:
+        number = float(text)
+    except (TypeError, ValueError):
+        return None
+    if number != number:
+        return None
+    return float(number)
+
+
+def _first_present(row: pd.Series | dict[str, Any], *columns: str) -> Any:
+    for column in columns:
+        value = row.get(column) if column in row else None
+        if _safe_non_null_text(value):
+            return value
+    return ""
 
 
 def _normalize_market_type_value(value: Any) -> str:
@@ -628,6 +677,107 @@ def migrate_market_shadow_history_schema(
     return {"status": "ok", "added_columns": added, "total_rows": len(df)}
 
 
+def _passive_clv_market_fields(
+    row: pd.Series,
+    *,
+    prediction_date: str,
+    line_value: Any,
+) -> dict[str, Any]:
+    entry_line_raw = _first_present(row, "entry_line") or line_value
+    entry_odds_raw = _first_present(row, "entry_odds") or _first_present(row, "odds", "american_odds")
+    opening_line_raw = _first_present(row, "opening_line_observed", "opening_line", "open_line")
+    closing_line_raw = _first_present(
+        row,
+        "closing_line_observed",
+        "closing_line",
+        "close_line",
+        "market_close_line",
+    )
+    closing_odds_raw = _first_present(
+        row,
+        "closing_odds_observed",
+        "closing_odds",
+        "close_odds",
+        "market_close_odds",
+    )
+
+    entry_line = _optional_float(entry_line_raw)
+    entry_odds = _optional_float(entry_odds_raw)
+    opening_line = _optional_float(opening_line_raw)
+    closing_line = _optional_float(closing_line_raw)
+    closing_odds = _optional_float(closing_odds_raw)
+    close_source = _safe_non_null_text(
+        _first_present(row, "close_source", "closing_line_source", "closing_source")
+    )
+    close_status = _safe_non_null_text(row.get("close_coverage_status"))
+    if not close_status:
+        close_status = "observed" if closing_line is not None else "missing"
+
+    line_move_points = _optional_float(row.get("line_move_points"))
+    if line_move_points is None and opening_line is not None and closing_line is not None:
+        line_move_points = round(closing_line - opening_line, 4)
+
+    selection = _safe_text(row.get("selection")).lower()
+    movement_toward_pick: bool | str = _safe_non_null_text(row.get("movement_toward_pick"))
+    if movement_toward_pick == "" and line_move_points is not None and abs(line_move_points) >= 1e-9:
+        if selection == "over":
+            movement_toward_pick = line_move_points > 0
+        elif selection == "under":
+            movement_toward_pick = line_move_points < 0
+
+    clv_line_points = _optional_float(row.get("clv_line_points"))
+    if clv_line_points is None and entry_line is not None and closing_line is not None:
+        if selection == "over":
+            clv_line_points = round(closing_line - entry_line, 4)
+        elif selection == "under":
+            clv_line_points = round(entry_line - closing_line, 4)
+
+    clv_odds_delta = _optional_float(row.get("clv_odds_delta"))
+    if clv_odds_delta is None and entry_odds is not None and closing_odds is not None:
+        clv_odds_delta = round(closing_odds - entry_odds, 4)
+
+    clv_grade = _safe_non_null_text(row.get("clv_grade"))
+    if not clv_grade:
+        if clv_line_points is None:
+            clv_grade = "missing"
+        elif clv_line_points > 0:
+            clv_grade = "positive"
+        elif clv_line_points < 0:
+            clv_grade = "negative"
+        else:
+            clv_grade = "neutral"
+
+    clv_confidence = _optional_float(row.get("clv_confidence"))
+    if clv_confidence is None:
+        if closing_line is None:
+            clv_confidence = 0.0
+        elif close_source:
+            clv_confidence = 1.0
+        else:
+            clv_confidence = 0.75
+
+    snapshot_key = _safe_non_null_text(row.get("market_snapshot_key"))
+    if not snapshot_key:
+        snapshot_key = market_snapshot_key(row, prediction_date=prediction_date)
+
+    return {
+        "market_snapshot_key": snapshot_key,
+        "team": _safe_text(row.get("team")) or _safe_text(row.get("team_abbr")),
+        "entry_line": entry_line if entry_line is not None else "",
+        "entry_odds": entry_odds if entry_odds is not None else "",
+        "opening_line_observed": opening_line if opening_line is not None else "",
+        "closing_line_observed": closing_line if closing_line is not None else "",
+        "close_source": close_source,
+        "close_coverage_status": close_status,
+        "line_move_points": line_move_points if line_move_points is not None else "",
+        "movement_toward_pick": movement_toward_pick,
+        "clv_line_points": clv_line_points if clv_line_points is not None else "",
+        "clv_odds_delta": clv_odds_delta if clv_odds_delta is not None else "",
+        "clv_grade": clv_grade,
+        "clv_confidence": clv_confidence,
+    }
+
+
 def _normalize_market_shadow_rows(
     full_market_df: pd.DataFrame,
     *,
@@ -660,17 +810,36 @@ def _normalize_market_shadow_rows(
         shadow_roi = row.get("shadow_roi") if "shadow_roi" in row.index else ""
         if _safe_text(shadow_roi) == "":
             shadow_roi = _american_to_shadow_roi(row.get("odds"), status)
+        passive_market_fields = _passive_clv_market_fields(
+            row,
+            prediction_date=prediction_date,
+            line_value=line_value,
+        )
         rows.append(
             {
                 "prediction_date": _safe_text(row.get("prediction_date"), default=prediction_date),
+                "market_snapshot_key": passive_market_fields["market_snapshot_key"],
                 "player_name": _safe_text(row.get("player_name")) or _safe_text(row.get("entity_name")),
                 "player_id": _safe_text(row.get("player_id")),
+                "team": passive_market_fields["team"],
                 "team_abbr": _safe_text(row.get("team_abbr")) or _safe_text(row.get("team")),
                 "opponent": _safe_text(row.get("opponent")),
                 "game_id": _safe_text(row.get("game_id")),
                 "market_type": _market_shadow_market_type(row),
                 "selection": _safe_text(row.get("selection")).lower(),
                 "line": line_value,
+                "entry_line": passive_market_fields["entry_line"],
+                "entry_odds": passive_market_fields["entry_odds"],
+                "opening_line_observed": passive_market_fields["opening_line_observed"],
+                "closing_line_observed": passive_market_fields["closing_line_observed"],
+                "close_source": passive_market_fields["close_source"],
+                "close_coverage_status": passive_market_fields["close_coverage_status"],
+                "line_move_points": passive_market_fields["line_move_points"],
+                "movement_toward_pick": passive_market_fields["movement_toward_pick"],
+                "clv_line_points": passive_market_fields["clv_line_points"],
+                "clv_odds_delta": passive_market_fields["clv_odds_delta"],
+                "clv_grade": passive_market_fields["clv_grade"],
+                "clv_confidence": passive_market_fields["clv_confidence"],
                 "model_projection": model_projection,
                 "edge": row.get("edge"),
                 "confidence": row.get("confidence"),
