@@ -79,6 +79,9 @@ from courtvision.reporting.player_role_stability import (
 from courtvision.reporting.meta_label_promotion import (
     DIAGNOSTIC_ONLY_NOTE as META_LABEL_DIAGNOSTIC_ONLY_NOTE,
 )
+from courtvision.reporting.meta_label_rules_performance import (
+    DIAGNOSTIC_ONLY_NOTE as PERF_DIAGNOSTIC_ONLY_NOTE,
+)
 from courtvision.reporting.team_distribution import (
     OBSERVATION_ONLY_NOTE as TEAM_DISTRIBUTION_OBSERVATION_ONLY_NOTE,
     REPORT_TITLE as TEAM_DISTRIBUTION_TITLE,
@@ -604,6 +607,10 @@ def build_daily_summary(
         diagnostics_dir / f"meta_label_promotion_shadow_{prediction_date}.json",
         [],
     )
+    meta_label_rules_performance_payload = _read_json(
+        diagnostics_dir / f"meta_label_rules_performance_{prediction_date}.json",
+        [],
+    )
     readiness = _read_json(diagnostics_dir / f"market_performance_readiness_{prediction_date}.json", warnings)
     manual_context = _read_json(diagnostics_dir / f"manual_context_{prediction_date}.json", warnings)
     manual_review_history_df = _read_csv(history_root / "manual_review_history.csv", [])
@@ -827,6 +834,21 @@ def build_daily_summary(
     meta_label_weak_count = int(meta_label_promotion_summary.get("shadow_weak_count") or 0)
     meta_label_avoid_count = int(meta_label_promotion_summary.get("shadow_avoid_review_count") or 0)
     meta_label_top_candidates = meta_label_promotion_summary.get("top_strong_candidates") or []
+
+    meta_label_rules_performance_readiness = (
+        meta_label_rules_performance_payload.get("data_readiness", {})
+        if isinstance(meta_label_rules_performance_payload, dict)
+        else {}
+    )
+    if not isinstance(meta_label_rules_performance_readiness, dict):
+        meta_label_rules_performance_readiness = {}
+    perf_verdict = meta_label_rules_performance_readiness.get("verdict", "WAIT_MORE_DATA")
+    perf_graded = int(meta_label_rules_performance_readiness.get("graded_hit_miss_rows") or 0)
+    perf_slates = int(meta_label_rules_performance_readiness.get("completed_slate_count") or 0)
+    perf_min_status = meta_label_rules_performance_readiness.get("minimum_sample_threshold_status", "insufficient")
+    perf_missing_stability = meta_label_rules_performance_readiness.get("missing_role_stability_rate", 0.0)
+    perf_missing_fragility = meta_label_rules_performance_readiness.get("missing_fragility_rate", 0.0)
+
     if not isinstance(calibration_bucket_summary, dict):
         calibration_bucket_summary = {}
     calibration_graded_rows_used = int(calibration_bucket_summary.get("total_graded_rows_used") or 0)
@@ -1027,6 +1049,15 @@ def build_daily_summary(
                 f"bucket={ex.get('meta_label_bucket')} reasons=[{reasons}]"
             )
     lines.append(f"- note: {META_LABEL_DIAGNOSTIC_ONLY_NOTE}")
+
+    lines.extend(["", "Meta-Label Rules Performance - Shadow Only", "-" * 72])
+    lines.append(f"- completed slate count: {perf_slates}")
+    lines.append(f"- graded hit/miss rows: {perf_graded}")
+    lines.append(f"- minimum sample status: {perf_min_status}")
+    lines.append(f"- missing role stability rate: {_format_pct(perf_missing_stability)}")
+    lines.append(f"- missing fragility/survivability rate: {_format_pct(perf_missing_fragility)}")
+    lines.append(f"- Phase 4C readiness verdict: {perf_verdict}")
+    lines.append(f"- note: {PERF_DIAGNOSTIC_ONLY_NOTE}")
 
     lines.extend(["", "Combo UNDER Promotion Watchlist — Observation Only / No Kelly", "-" * 72])
     lines.append(f"- watchlist row count: {int(len(combo_under_watchlist))}")
