@@ -47,8 +47,12 @@ def test_dry_run_prints_expected_commands_and_does_not_execute_subprocesses(
     output = "\n".join(lines)
     assert exit_code == 0
     assert (
+        "would_run py -3.13 scripts/prefill_actual_feedback.py --prediction-date 2026-05-21"
+    ) in output
+    assert (
         "would_run py -3.13 scripts/repair_pending_grades.py --all-completed "
-        "--through-date 2026-05-21 --include-current-date"
+        "--through-date 2026-05-21 --regrade-terminal-player-stat-missing "
+        "--terminal-regrade-date 2026-05-21 --include-current-date"
     ) in output
     assert (
         "would_run py -3.13 scripts/write_daily_summary.py --prediction-date "
@@ -89,6 +93,9 @@ def test_command_sequence_includes_closed_slate_safe_no_annotation_flags() -> No
     commands = wrapper.build_refresh_commands(prediction_date="2026-05-21")
     by_label = {command.label: command.command for command in commands}
 
+    assert by_label["prefill_actual_feedback"][2] == "scripts/prefill_actual_feedback.py"
+    assert by_label["repair_pending_grades"].index("scripts/repair_pending_grades.py") == 2
+    assert "--regrade-terminal-player-stat-missing" in by_label["repair_pending_grades"]
     assert "--closed-slate-safe" in by_label["daily_summary"]
     assert "--no-board-annotation-write" in by_label["daily_summary"]
     assert "--closed-slate-safe" in by_label["quality_summary"]
@@ -130,8 +137,8 @@ def test_subprocess_nonzero_stops_workflow(tmp_path: Path) -> None:
 
     assert exit_code == 7
     assert len(calls) == 2
-    assert calls[0][2] == "scripts/repair_pending_grades.py"
-    assert calls[1][2] == "scripts/write_daily_summary.py"
+    assert calls[0][2] == "scripts/prefill_actual_feedback.py"
+    assert calls[1][2] == "scripts/repair_pending_grades.py"
 
 
 def test_wrapper_itself_does_not_write_prediction_board_or_kelly_outputs(

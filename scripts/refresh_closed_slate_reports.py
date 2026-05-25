@@ -94,11 +94,25 @@ def build_refresh_commands(
 
     commands: list[RefreshCommand] = []
     if not skip_repair:
+        commands.append(
+            RefreshCommand(
+                "prefill_actual_feedback",
+                (
+                    *PYTHON_COMMAND,
+                    "scripts/prefill_actual_feedback.py",
+                    "--prediction-date",
+                    through_date,
+                ),
+            )
+        )
         repair_command = [
             *PYTHON_COMMAND,
             "scripts/repair_pending_grades.py",
             "--all-completed",
             "--through-date",
+            through_date,
+            "--regrade-terminal-player-stat-missing",
+            "--terminal-regrade-date",
             through_date,
         ]
         if include_current_date:

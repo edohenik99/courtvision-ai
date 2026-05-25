@@ -18,9 +18,11 @@ REPORT_TITLE = "Paper Kelly Performance \u2014 Simulation Only"
 REQUIRED_HISTORY_COLUMNS: tuple[str, ...] = (
     "prediction_date",
     "paper_bucket",
+    "player_id",
     "player_name",
     "team_abbr",
     "opponent",
+    "game_id",
     "market_type",
     "selection",
     "line",
@@ -156,6 +158,21 @@ def _line_key(value: Any) -> str:
     return f"{number:.4f}"
 
 
+def _id_key(value: Any) -> str:
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    text = _safe_text(value)
+    if not text:
+        return ""
+    try:
+        return str(int(float(text)))
+    except (TypeError, ValueError):
+        return text.lower()
+
+
 def _identity_fields(row: pd.Series) -> tuple[str, str, str, str, str, str]:
     prediction_date = _safe_text(row.get("prediction_date")).lower()
     player_name = (_safe_text(row.get("player_name")) or _safe_text(row.get("entity_name"))).lower()
@@ -173,6 +190,18 @@ def _lookup_keys(row: pd.Series) -> list[tuple[str, str, str, str, str, str]]:
     keys = [(prediction_date, player_name, team_abbr, market_type, selection, line)]
     if team_abbr:
         keys.append((prediction_date, player_name, "", market_type, selection, line))
+    return keys
+
+
+def _strict_lookup_keys(row: pd.Series) -> list[tuple[str, str, str, str, str, str, str, str]]:
+    prediction_date, _player_name, team_abbr, market_type, selection, line = _identity_fields(row)
+    player_id = _id_key(row.get("player_id"))
+    game_id = _id_key(row.get("game_id"))
+    if not (prediction_date and player_id and game_id and market_type and selection and line):
+        return []
+    keys = [("strict", prediction_date, player_id, game_id, team_abbr, market_type, selection, line)]
+    if team_abbr:
+        keys.append(("strict", prediction_date, player_id, game_id, "", market_type, selection, line))
     return keys
 
 
@@ -212,8 +241,8 @@ def _source_result_payload(row: pd.Series, *, source_name: str) -> dict[str, Any
 
 
 def _merge_lookup_payload(
-    lookup: dict[tuple[str, str, str, str, str, str], dict[str, Any]],
-    key: tuple[str, str, str, str, str, str],
+    lookup: dict[tuple[str, ...], dict[str, Any]],
+    key: tuple[str, ...],
     payload: dict[str, Any],
 ) -> None:
     existing = lookup.get(key)
@@ -225,7 +254,7 @@ def _merge_lookup_payload(
 
 
 def _add_source_to_lookup(
-    lookup: dict[tuple[str, str, str, str, str, str], dict[str, Any]],
+    lookup: dict[tuple[str, ...], dict[str, Any]],
     df: pd.DataFrame,
     *,
     prediction_date: str,
@@ -238,6 +267,8 @@ def _add_source_to_lookup(
         scoped = scoped[scoped["prediction_date"].astype(str) == str(prediction_date)].copy()
     for _, row in scoped.iterrows():
         payload = _source_result_payload(row, source_name=source_name)
+        for key in _strict_lookup_keys(row):
+            _merge_lookup_payload(lookup, key, payload)
         for key in _lookup_keys(row):
             if key[0] and key[1] and key[3] and key[4] and key[5]:
                 _merge_lookup_payload(lookup, key, payload)
@@ -248,8 +279,8 @@ def _result_lookup(
     prediction_date: str,
     runtime_root: Path,
     history_root: Path,
-) -> dict[tuple[str, str, str, str, str, str], dict[str, Any]]:
-    lookup: dict[tuple[str, str, str, str, str, str], dict[str, Any]] = {}
+) -> dict[tuple[str, ...], dict[str, Any]]:
+    lookup: dict[tuple[str, ...], dict[str, Any]] = {}
     sources = [
         (history_root / "market_shadow_history.csv", "market_shadow_history"),
         (runtime_root / "history" / "result_feedback.csv", "result_feedback"),
@@ -269,7 +300,7 @@ def _result_lookup(
 
 def _lookup_result_for_row(
     row: pd.Series,
-    lookup: dict[tuple[str, str, str, str, str, str], dict[str, Any]],
+    lookup: dict[tuple[str, ...], dict[str, Any]],
 ) -> dict[str, Any]:
     missing = []
     prediction_date, player_name, _team_abbr, market_type, selection, line = _identity_fields(row)
@@ -290,7 +321,7 @@ def _lookup_result_for_row(
             "grading_skip_reason": "missing_identity_fields:" + ",".join(missing),
         }
 
-    for key in _lookup_keys(row):
+    for key in [*_strict_lookup_keys(row), *_lookup_keys(row)]:
         payload = lookup.get(key)
         if payload is not None:
             status = _normalize_result_status(payload.get("result_status"))
@@ -334,7 +365,7 @@ def _normalize_paper_rows(
     paper_df: pd.DataFrame,
     *,
     prediction_date: str,
-    result_lookup: dict[tuple[str, str, str, str, str, str], dict[str, Any]],
+    result_lookup: dict[tuple[str, ...], dict[str, Any]],
 ) -> pd.DataFrame:
     if not isinstance(paper_df, pd.DataFrame) or paper_df.empty:
         return pd.DataFrame(columns=list(HISTORY_COLUMNS))

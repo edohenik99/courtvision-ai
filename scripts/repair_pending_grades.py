@@ -57,7 +57,11 @@ VOID_STATUS = "void"
 UNSUPPORTED_STATUS = "unsupported"
 GAME_NOT_FINAL_REASON = "game_not_final"
 PROVIDER_MISSING_FINALITY_REASON = "provider_missing_finality"
+DATE_ACTUAL_FEEDBACK_MISSING_REASON = "date_actual_feedback_missing"
 OPEN_PENDING_REASONS = {GAME_NOT_FINAL_REASON, PROVIDER_MISSING_FINALITY_REASON}
+NONTERMINAL_PENDING_REASONS = OPEN_PENDING_REASONS | {DATE_ACTUAL_FEEDBACK_MISSING_REASON}
+DATE_LEVEL_ACTUAL_GUARD_REASONS = {"player_stat_match_missing", "provider_unavailable"}
+TERMINAL_PLAYER_STAT_MISSING_SOURCES = {"market_shadow_history", "paper_kelly_history"}
 OPEN_GAME_STATUSES = {"scheduled", "scheduled_future_iso_status", "not_started", "pre_game", "in_progress", "live"}
 TERMINAL_GAME_STATUSES = {"final", "final_status", "completed", "complete", "closed", "post_game"}
 DIRECT_RESULT_SOURCES = {
@@ -160,6 +164,21 @@ def _line_key(value: Any) -> str:
     if number is None:
         return _safe_text(value).lower()
     return f"{number:.4f}"
+
+
+def _id_key(value: Any) -> str:
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    text = _safe_text(value)
+    if not text:
+        return ""
+    try:
+        return str(int(float(text)))
+    except (TypeError, ValueError):
+        return text.lower()
 
 
 def _status_from_value(value: Any) -> str:
@@ -302,6 +321,10 @@ class ActualLookup:
         self.direct: dict[tuple[str, str, str, str, str], tuple[str, float]] = {}
         self.direct_no_line: dict[tuple[str, str, str], float] = {}
         self.components: dict[tuple[str, str, str], float] = {}
+        self.strict_direct: dict[tuple[str, str, str, str, str, str, str], tuple[str, float]] = {}
+        self.strict_direct_no_line: dict[tuple[str, str, str, str, str], float] = {}
+        self.strict_components: dict[tuple[str, str, str, str, str], float] = {}
+        self.dates_with_actual_feedback: set[str] = set()
         self.same_opponent_points = self._build_same_opponent_points()
         self._build()
 
@@ -315,6 +338,8 @@ class ActualLookup:
             selection = _selection(row)
             line = _line_value(row)
             status, actual = _actual_status_and_value(row)
+            if prediction_date and actual is not None:
+                self.dates_with_actual_feedback.add(prediction_date)
             if not prediction_date or not player or market not in SUPPORTED_MARKETS or actual is None:
                 continue
             if line is not None and selection:
@@ -322,6 +347,75 @@ class ActualLookup:
             self.direct_no_line[(prediction_date, player, market)] = actual
             if market in {"player_points", "player_rebounds", "player_assists", "player_blocks", "player_steals"}:
                 self.components[(prediction_date, player, market)] = actual
+            player_id = _id_key(row.get("player_id"))
+            game_id = _id_key(row.get("game_id"))
+            team = _team_abbr(row)
+            if player_id and game_id:
+                teams = [team]
+                if team:
+                    teams.append("")
+                for team_key in dict.fromkeys(teams):
+                    if line is not None and selection:
+                        self.strict_direct[
+                            (prediction_date, player_id, game_id, team_key, market, selection, _line_key(line))
+                        ] = (status, actual)
+                    self.strict_direct_no_line[(prediction_date, player_id, game_id, team_key, market)] = actual
+                    if market in {"player_points", "player_rebounds", "player_assists", "player_blocks", "player_steals"}:
+                        self.strict_components[(prediction_date, player_id, game_id, team_key, market)] = actual
+
+    def has_actual_feedback_for_date(self, prediction_date: Any) -> bool:
+        return _safe_text(prediction_date) in self.dates_with_actual_feedback
+
+    def _strict_component_actual(self, row: pd.Series, component: str) -> float | None:
+        prediction_date = _safe_text(row.get("prediction_date"))
+        player_id = _id_key(row.get("player_id"))
+        game_id = _id_key(row.get("game_id"))
+        if not prediction_date or not player_id or not game_id:
+            return None
+        team = _team_abbr(row)
+        for team_key in dict.fromkeys([team, ""]):
+            actual = self.strict_components.get((prediction_date, player_id, game_id, team_key, component))
+            if actual is not None:
+                return float(actual)
+        return None
+
+    def _strict_direct_actual(
+        self,
+        row: pd.Series,
+        *,
+        market: str,
+        selection: str,
+        line: float,
+    ) -> float | None:
+        prediction_date = _safe_text(row.get("prediction_date"))
+        player_id = _id_key(row.get("player_id"))
+        game_id = _id_key(row.get("game_id"))
+        if not prediction_date or not player_id or not game_id:
+            return None
+        team = _team_abbr(row)
+        line_key = _line_key(line)
+        for team_key in dict.fromkeys([team, ""]):
+            exact = self.strict_direct.get((prediction_date, player_id, game_id, team_key, market, selection, line_key))
+            if exact is not None and exact[1] is not None:
+                return float(exact[1])
+            actual = self.strict_direct_no_line.get((prediction_date, player_id, game_id, team_key, market))
+            if actual is not None:
+                return float(actual)
+        return None
+
+    def _direct_actual(self, row: pd.Series, *, market: str, selection: str, line: float) -> float | None:
+        prediction_date = _safe_text(row.get("prediction_date"))
+        player = _player_name(row)
+        strict_actual = self._strict_direct_actual(row, market=market, selection=selection, line=line)
+        if strict_actual is not None:
+            return float(strict_actual)
+        exact = self.direct.get((prediction_date, player, market, selection, _line_key(line)))
+        if exact is not None and exact[1] is not None:
+            return float(exact[1])
+        actual = self.direct_no_line.get((prediction_date, player, market))
+        if actual is not None:
+            return float(actual)
+        return None
 
     def _build_same_opponent_points(self) -> pd.DataFrame:
         if self.feedback.empty:
@@ -366,11 +460,18 @@ class ActualLookup:
         if not prediction_date or not player:
             return VOID_STATUS, None, "player_stat_match_missing"
 
+        direct_actual = self._direct_actual(row, market=market, selection=selection, line=line)
+        if direct_actual is not None:
+            actual_value = float(direct_actual)
+            return _line_result(selection, actual_value, line), actual_value, ""
+
         if market in COMBO_MARKET_COMPONENTS:
             values: list[float] = []
             missing: list[str] = []
             for component in COMBO_MARKET_COMPONENTS[market]:
-                actual = self.components.get((prediction_date, player, component))
+                actual = self._strict_component_actual(row, component)
+                if actual is None:
+                    actual = self.components.get((prediction_date, player, component))
                 if actual is None:
                     missing.append(component)
                 else:
@@ -382,14 +483,6 @@ class ActualLookup:
             actual_value = float(sum(values))
             return _line_result(selection, actual_value, line), actual_value, ""
 
-        exact = self.direct.get((prediction_date, player, market, selection, _line_key(line)))
-        if exact is not None and exact[1] is not None:
-            actual_value = float(exact[1])
-            return _line_result(selection, actual_value, line), actual_value, ""
-        actual = self.direct_no_line.get((prediction_date, player, market))
-        if actual is not None:
-            actual_value = float(actual)
-            return _line_result(selection, actual_value, line), actual_value, ""
         if _game_not_final(row):
             return PENDING_STATUS, None, "game_not_final"
         return VOID_STATUS, None, "player_stat_match_missing" if not self.feedback.empty else "provider_unavailable"
@@ -451,10 +544,33 @@ def _set_cell_value(frame: pd.DataFrame, idx: Any, column: str, value: Any) -> N
     frame.at[idx, column] = value
 
 
-def _needs_repair(row: pd.Series) -> bool:
+def _terminal_player_stat_match_missing(row: pd.Series) -> bool:
+    status = _row_status(row)
+    if status not in {VOID_STATUS, UNSUPPORTED_STATUS}:
+        return False
+    return "player_stat_match_missing" in _reason_tokens(row.get("grading_skip_reason"))
+
+
+def _needs_repair(
+    row: pd.Series,
+    *,
+    source_name: str,
+    regrade_terminal_player_stat_missing: bool = False,
+    terminal_regrade_date: str | None = None,
+) -> bool:
     status = _row_status(row)
     actual_missing = _safe_float(row.get("actual_value")) is None
-    return status == PENDING_STATUS or (status in FINAL_STATUSES and actual_missing)
+    if status == PENDING_STATUS or (status in FINAL_STATUSES and actual_missing):
+        return True
+    if (
+        regrade_terminal_player_stat_missing
+        and source_name in TERMINAL_PLAYER_STAT_MISSING_SOURCES
+        and _terminal_player_stat_match_missing(row)
+    ):
+        if terminal_regrade_date is not None:
+            return _safe_text(row.get("prediction_date")) == terminal_regrade_date
+        return True
+    return False
 
 
 def _final_missing_actual_count(df: pd.DataFrame) -> int:
@@ -545,6 +661,8 @@ def _repair_history_df(
     end_date: str,
     lookup: ActualLookup,
     source_name: str,
+    regrade_terminal_player_stat_missing: bool = False,
+    terminal_regrade_date: str | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     if df.empty:
         return df.copy(), _empty_history_summary()
@@ -571,10 +689,16 @@ def _repair_history_df(
         for column, value in diagnostics.items():
             _set_cell_value(working, idx, column, value)
 
-        if not _needs_repair(row):
+        if not _needs_repair(
+            row,
+            source_name=source_name,
+            regrade_terminal_player_stat_missing=regrade_terminal_player_stat_missing,
+            terminal_regrade_date=terminal_regrade_date,
+        ):
             continue
 
         old_status = _row_status(row)
+        old_terminal_player_stat_missing = _terminal_player_stat_match_missing(row)
         old_values = {
             column: _safe_text(working.at[idx, column])
             for column in (
@@ -600,10 +724,19 @@ def _repair_history_df(
             and _game_not_final(row)
         ):
             reason = PROVIDER_MISSING_FINALITY_REASON
+        if (
+            source_name in TERMINAL_PLAYER_STAT_MISSING_SOURCES
+            and result_status == VOID_STATUS
+            and reason in DATE_LEVEL_ACTUAL_GUARD_REASONS
+            and not lookup.has_actual_feedback_for_date(row.get("prediction_date"))
+        ):
+            result_status = PENDING_STATUS
+            actual_value = None
+            reason = DATE_ACTUAL_FEEDBACK_MISSING_REASON
         if result_status in FINAL_STATUSES and actual_value is None:
             result_status = VOID_STATUS
             reason = reason or "actual_stats_not_found"
-        if result_status == PENDING_STATUS and reason not in OPEN_PENDING_REASONS:
+        if result_status == PENDING_STATUS and reason not in NONTERMINAL_PENDING_REASONS:
             result_status = VOID_STATUS
             reason = reason or "actual_stats_not_found"
 
@@ -630,17 +763,25 @@ def _repair_history_df(
             updated += 1
         if result_status in FINAL_STATUSES:
             repaired_rows += 1
-            taxonomy_key = "stale_pending_repaired" if old_status == PENDING_STATUS else "final_missing_actual_repaired"
+            if old_terminal_player_stat_missing:
+                taxonomy_key = "terminal_player_stat_match_missing_regraded"
+            else:
+                taxonomy_key = "stale_pending_repaired" if old_status == PENDING_STATUS else "final_missing_actual_repaired"
             pending_taxonomy[taxonomy_key] += 1
         elif result_status == VOID_STATUS:
             voided_rows += 1
-            taxonomy_key = "stale_pending_voided" if old_status == PENDING_STATUS else "final_missing_actual_voided"
+            if old_terminal_player_stat_missing:
+                taxonomy_key = "terminal_player_stat_match_missing_still_void"
+            else:
+                taxonomy_key = "stale_pending_voided" if old_status == PENDING_STATUS else "final_missing_actual_voided"
             pending_taxonomy[taxonomy_key] += 1
         elif result_status == UNSUPPORTED_STATUS:
             unsupported_rows += 1
             pending_taxonomy["unsupported_terminal"] += 1
         elif result_status == PENDING_STATUS and reason in OPEN_PENDING_REASONS:
             pending_taxonomy["pending_open_game"] += 1
+        elif result_status == PENDING_STATUS and reason == DATE_ACTUAL_FEEDBACK_MISSING_REASON:
+            pending_taxonomy["pending_date_actual_feedback_missing"] += 1
         if reason:
             skip_reasons[reason] += 1
 
@@ -817,11 +958,17 @@ def repair_pending_grades(
     through_date: str | None = None,
     include_current_date: bool = False,
     available_dates: list[str] | None = None,
+    regrade_terminal_player_stat_missing: bool = False,
+    terminal_regrade_date: str | None = None,
 ) -> dict[str, Any]:
     history_root_path = Path(history_root)
     runtime_root_path = Path(runtime_root)
     feedback = _read_csv(runtime_root_path / "history" / "result_feedback.csv")
     lookup = ActualLookup(feedback)
+
+    if regrade_terminal_player_stat_missing and terminal_regrade_date is None:
+        if mode == "all_completed":
+            terminal_regrade_date = end_date
 
     targets = _history_targets(history_root_path)
     results: dict[str, Any] = {
@@ -832,6 +979,8 @@ def repair_pending_grades(
         "through_date": through_date,
         "include_current_date": include_current_date,
         "available_dates": available_dates or [],
+        "regrade_terminal_player_stat_missing": bool(regrade_terminal_player_stat_missing),
+        "terminal_regrade_date": terminal_regrade_date,
         "result_feedback_rows": int(len(feedback)),
         "histories": {},
     }
@@ -844,6 +993,8 @@ def repair_pending_grades(
             end_date=end_date,
             lookup=lookup,
             source_name=source_name,
+            regrade_terminal_player_stat_missing=regrade_terminal_player_stat_missing,
+            terminal_regrade_date=terminal_regrade_date,
         )
         results["histories"][source_name] = {"path": str(path), **summary}
         repaired_frames[source_name] = repaired
@@ -875,6 +1026,8 @@ def repair_all_completed_grades(
     through_date: str | None = None,
     include_current_date: bool = False,
     dry_run: bool = False,
+    regrade_terminal_player_stat_missing: bool = False,
+    terminal_regrade_date: str | None = None,
 ) -> dict[str, Any]:
     history_root_path = Path(history_root)
     available_dates = _available_history_dates(history_root_path)
@@ -891,6 +1044,8 @@ def repair_all_completed_grades(
         through_date=through_date,
         include_current_date=include_current_date,
         available_dates=available_dates,
+        regrade_terminal_player_stat_missing=regrade_terminal_player_stat_missing,
+        terminal_regrade_date=terminal_regrade_date,
     )
 
 
@@ -904,6 +1059,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--history-root", default="data/history")
     parser.add_argument("--runtime-root", default="outputs/runtime")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--regrade-terminal-player-stat-missing",
+        action="store_true",
+        help=(
+            "Revisit shadow/paper terminal void/unsupported rows whose skip reason was "
+            "player_stat_match_missing for the requested repair range."
+        ),
+    )
+    parser.add_argument(
+        "--terminal-regrade-date",
+        help="Specific date (YYYY-MM-DD) to restrict the terminal player_stat_match_missing regrade.",
+    )
     args = parser.parse_args(argv)
     if args.all_completed:
         if args.start_date or args.end_date:
@@ -925,6 +1092,8 @@ def main(argv: list[str] | None = None) -> int:
             through_date=args.through_date,
             include_current_date=args.include_current_date,
             dry_run=args.dry_run,
+            regrade_terminal_player_stat_missing=args.regrade_terminal_player_stat_missing,
+            terminal_regrade_date=args.terminal_regrade_date,
         )
     else:
         result = repair_pending_grades(
@@ -933,6 +1102,8 @@ def main(argv: list[str] | None = None) -> int:
             history_root=args.history_root,
             runtime_root=args.runtime_root,
             dry_run=args.dry_run,
+            regrade_terminal_player_stat_missing=args.regrade_terminal_player_stat_missing,
+            terminal_regrade_date=args.terminal_regrade_date,
         )
     print(f"mode={result.get('mode', 'date_range')}")
     print(f"repair_range={result['start_date']}..{result['end_date']}")

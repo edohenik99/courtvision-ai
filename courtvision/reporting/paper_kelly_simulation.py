@@ -31,6 +31,7 @@ REPORT_COLUMNS: tuple[str, ...] = (
     "player_name",
     "team_abbr",
     "opponent",
+    "game_id",
     "market_type",
     "selection",
     "line",

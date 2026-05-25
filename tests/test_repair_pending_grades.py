@@ -20,8 +20,10 @@ def _feedback_row(
     player_name: str,
     *,
     prediction_date: str = "2026-05-05",
+    player_id: str = "",
     team: str = "OKC",
     opponent: str = "LAL",
+    game_id: str = "",
     market_type: str = "player_points",
     selection: str = "under",
     line: float = 16.5,
@@ -34,9 +36,11 @@ def _feedback_row(
         "prediction_date": prediction_date,
         "player_name": player_name,
         "entity_name": player_name,
+        "player_id": player_id,
         "team": team,
         "team_abbr": team,
         "opponent": opponent,
+        "game_id": game_id,
         "market_type": market_type,
         "selection": selection,
         "sportsbook_line": line,
@@ -51,8 +55,10 @@ def _shadow_row(
     player_name: str,
     *,
     prediction_date: str = "2026-05-05",
+    player_id: str = "",
     team: str = "OKC",
     opponent: str = "LAL",
+    game_id: str = "",
     market_type: str = "player_points",
     selection: str = "under",
     line: float = 16.5,
@@ -62,9 +68,10 @@ def _shadow_row(
     return {
         "prediction_date": prediction_date,
         "player_name": player_name,
-        "player_id": "",
+        "player_id": player_id,
         "team_abbr": team,
         "opponent": opponent,
+        "game_id": game_id,
         "market_type": market_type,
         "selection": selection,
         "line": line,
@@ -127,6 +134,8 @@ def _paper_row(
     player_name: str,
     *,
     prediction_date: str = "2026-05-05",
+    player_id: str = "",
+    game_id: str = "",
     result_status: str = "pending",
     actual_value: str = "",
     grading_skip_reason: str = "market_shadow_history_result_pending",
@@ -134,9 +143,11 @@ def _paper_row(
     return {
         "prediction_date": prediction_date,
         "paper_bucket": "repair_test",
+        "player_id": player_id,
         "player_name": player_name,
         "team_abbr": "OKC",
         "opponent": "LAL",
+        "game_id": game_id,
         "market_type": "player_points",
         "selection": "under",
         "line": 16.5,
@@ -182,6 +193,157 @@ def test_stale_pending_shadow_rows_are_repaired(tmp_path: Path) -> None:
     assert float(row["actual_value"]) == 14.0
     assert str(row["hit"]).lower() == "true"
     assert float(row["shadow_roi"]) == 0.909091
+
+
+def test_missing_date_actual_feedback_does_not_terminal_void_shadow_or_paper(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "outputs" / "runtime"
+    history_root = tmp_path / "data" / "history"
+    _write_csv(
+        runtime_root / "history" / "result_feedback.csv",
+        [_feedback_row("Prior Player", prediction_date="2026-05-04", actual_value=14.0)],
+    )
+    _write_csv(history_root / "market_shadow_history.csv", [_shadow_row("Ajay Mitchell", prediction_date="2026-05-05")])
+    _write_csv(history_root / "paper_kelly_history.csv", [_paper_row("Ajay Mitchell", prediction_date="2026-05-05")])
+
+    result = repair_pending_grades(
+        start_date="2026-05-05",
+        end_date="2026-05-05",
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+
+    shadow = pd.read_csv(history_root / "market_shadow_history.csv", keep_default_na=False).iloc[0]
+    paper = pd.read_csv(history_root / "paper_kelly_history.csv", keep_default_na=False).iloc[0]
+    assert shadow["result_status"] == "pending"
+    assert paper["result_status"] == "pending"
+    assert shadow["grading_skip_reason"] == "date_actual_feedback_missing"
+    assert paper["grading_skip_reason"] == "date_actual_feedback_missing"
+    assert result["histories"]["market_shadow_history"]["voided_rows"] == 0
+    assert result["histories"]["paper_kelly_history"]["voided_rows"] == 0
+    assert result["summary"]["stale_pending"] == 2
+
+
+def test_date_actual_feedback_grades_shadow_and_paper_hit_miss(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "outputs" / "runtime"
+    history_root = tmp_path / "data" / "history"
+    _write_csv(runtime_root / "history" / "result_feedback.csv", [_feedback_row("Ajay Mitchell", actual_value=18.0)])
+    _write_csv(history_root / "market_shadow_history.csv", [_shadow_row("Ajay Mitchell", result_status="pending")])
+    _write_csv(history_root / "paper_kelly_history.csv", [_paper_row("Ajay Mitchell", result_status="pending")])
+
+    repair_pending_grades(start_date="2026-05-05", end_date="2026-05-05", runtime_root=runtime_root, history_root=history_root)
+
+    shadow = pd.read_csv(history_root / "market_shadow_history.csv", keep_default_na=False).iloc[0]
+    paper = pd.read_csv(history_root / "paper_kelly_history.csv", keep_default_na=False).iloc[0]
+    assert shadow["result_status"] == "miss"
+    assert float(shadow["actual_value"]) == 18.0
+    assert str(shadow["miss"]).lower() == "true"
+    assert paper["result_status"] == "miss"
+    assert float(paper["actual_value"]) == 18.0
+    assert float(paper["paper_profit"]) == -10.0
+    assert float(paper["paper_roi"]) == -1.0
+
+
+def test_terminal_player_stat_match_missing_shadow_and_paper_can_be_regraded(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "outputs" / "runtime"
+    history_root = tmp_path / "data" / "history"
+    _write_csv(runtime_root / "history" / "result_feedback.csv", [_feedback_row("Ajay Mitchell", actual_value=14.0)])
+    _write_csv(
+        history_root / "pick_history.csv",
+        [_pick_row("Ajay Mitchell", result_status="void", actual_value="") | {"grading_skip_reason": "player_stat_match_missing"}],
+    )
+    _write_csv(
+        history_root / "market_shadow_history.csv",
+        [_shadow_row("Ajay Mitchell", result_status="void", actual_value="") | {"grading_skip_reason": "player_stat_match_missing"}],
+    )
+    _write_csv(
+        history_root / "paper_kelly_history.csv",
+        [
+            _paper_row(
+                "Ajay Mitchell",
+                result_status="void",
+                actual_value="",
+                grading_skip_reason="player_stat_match_missing",
+            )
+        ],
+    )
+
+    result = repair_pending_grades(
+        start_date="2026-05-05",
+        end_date="2026-05-05",
+        runtime_root=runtime_root,
+        history_root=history_root,
+        regrade_terminal_player_stat_missing=True,
+    )
+
+    pick = pd.read_csv(history_root / "pick_history.csv", keep_default_na=False).iloc[0]
+    shadow = pd.read_csv(history_root / "market_shadow_history.csv", keep_default_na=False).iloc[0]
+    paper = pd.read_csv(history_root / "paper_kelly_history.csv", keep_default_na=False).iloc[0]
+    assert pick["result_status"] == "void"
+    assert pick["grading_skip_reason"] == "player_stat_match_missing"
+    assert shadow["result_status"] == "hit"
+    assert float(shadow["actual_value"]) == 14.0
+    assert paper["result_status"] == "hit"
+    assert float(paper["actual_value"]) == 14.0
+    assert result["histories"]["pick_history"]["repaired_rows"] == 0
+    assert result["histories"]["market_shadow_history"]["pending_taxonomy"]["terminal_player_stat_match_missing_regraded"] == 1
+    assert result["histories"]["paper_kelly_history"]["pending_taxonomy"]["terminal_player_stat_match_missing_regraded"] == 1
+
+
+def test_actual_lookup_prefers_player_id_game_id_when_available(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "outputs" / "runtime"
+    history_root = tmp_path / "data" / "history"
+    _write_csv(
+        runtime_root / "history" / "result_feedback.csv",
+        [
+            _feedback_row("Same Name", player_id="20", game_id="200", actual_value=20.0),
+            _feedback_row("Same Name", player_id="10", game_id="100", actual_value=14.0),
+        ],
+    )
+    _write_csv(
+        history_root / "market_shadow_history.csv",
+        [_shadow_row("Same Name", player_id="20", game_id="200", result_status="pending")],
+    )
+
+    repair_pending_grades(start_date="2026-05-05", end_date="2026-05-05", runtime_root=runtime_root, history_root=history_root)
+
+    shadow = pd.read_csv(history_root / "market_shadow_history.csv", keep_default_na=False).iloc[0]
+    assert shadow["result_status"] == "miss"
+    assert float(shadow["actual_value"]) == 20.0
+
+
+def test_direct_combo_actual_feedback_grades_combo_shadow_rows(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "outputs" / "runtime"
+    history_root = tmp_path / "data" / "history"
+    _write_csv(
+        runtime_root / "history" / "result_feedback.csv",
+        [
+            _feedback_row(
+                "Combo Player",
+                market_type="player_points_rebounds",
+                selection="under",
+                line=30.5,
+                actual_value=28.0,
+            )
+        ],
+    )
+    _write_csv(
+        history_root / "market_shadow_history.csv",
+        [
+            _shadow_row(
+                "Combo Player",
+                market_type="player_points_rebounds",
+                selection="under",
+                line=30.5,
+                result_status="pending",
+            )
+        ],
+    )
+
+    repair_pending_grades(start_date="2026-05-05", end_date="2026-05-05", runtime_root=runtime_root, history_root=history_root)
+
+    shadow = pd.read_csv(history_root / "market_shadow_history.csv", keep_default_na=False).iloc[0]
+    assert shadow["result_status"] == "hit"
+    assert float(shadow["actual_value"]) == 28.0
 
 
 def test_final_rows_missing_actual_value_are_repaired(tmp_path: Path) -> None:
@@ -374,7 +536,7 @@ def test_repair_terminal_unsupported_market_remains_unsupported(tmp_path: Path) 
     assert result["summary"]["open_game_pending"] == 0
 
 
-def test_old_provider_missing_finality_rows_do_not_remain_open_forever(tmp_path: Path) -> None:
+def test_old_provider_missing_finality_rows_defer_when_date_actuals_are_absent(tmp_path: Path) -> None:
     runtime_root = tmp_path / "outputs" / "runtime"
     history_root = tmp_path / "data" / "history"
     old_date = "2026-05-04"
@@ -392,13 +554,14 @@ def test_old_provider_missing_finality_rows_do_not_remain_open_forever(tmp_path:
 
     shadow = pd.read_csv(history_root / "market_shadow_history.csv", keep_default_na=False)
     row = shadow.iloc[0]
-    assert row["result_status"] == "void"
-    assert row["grading_skip_reason"] in {"provider_unavailable", "player_stat_match_missing"}
+    assert row["result_status"] == "pending"
+    assert row["grading_skip_reason"] == "date_actual_feedback_missing"
     assert result["summary"]["open_game_pending"] == 0
-    assert result["summary"]["voided_rows"] == 1
+    assert result["summary"]["stale_pending"] == 1
+    assert result["summary"]["voided_rows"] == 0
 
 
-def test_completed_rows_cannot_stay_plain_pending_without_reason(tmp_path: Path) -> None:
+def test_completed_rows_do_not_stay_plain_pending_without_reason(tmp_path: Path) -> None:
     runtime_root = tmp_path / "outputs" / "runtime"
     history_root = tmp_path / "data" / "history"
     old_date = "2026-05-04"
@@ -412,11 +575,11 @@ def test_completed_rows_cannot_stay_plain_pending_without_reason(tmp_path: Path)
 
     shadow = pd.read_csv(history_root / "market_shadow_history.csv", keep_default_na=False)
     row = shadow.iloc[0]
-    assert row["result_status"] == "void"
+    assert row["result_status"] == "pending"
     assert row["actual_value"] == ""
-    assert row["grading_skip_reason"] in {"provider_unavailable", "player_stat_match_missing"}
-    assert result["summary"]["stale_pending"] == 0
-    assert result["summary"]["voided_rows"] == 1
+    assert row["grading_skip_reason"] == "date_actual_feedback_missing"
+    assert result["summary"]["stale_pending"] == 1
+    assert result["summary"]["voided_rows"] == 0
 
 
 def test_all_completed_hit_miss_rows_cannot_have_blank_actual_value(tmp_path: Path) -> None:
@@ -519,3 +682,59 @@ def test_repair_history_df_handles_arrow_string_columns() -> None:
     assert row["result_status"] == "hit"
     assert row["actual_value"] == "14.0"
     assert row["same_opponent_recent_games"] in {"", "0"}
+
+
+def test_all_completed_terminal_regrade_only_affects_scoped_date(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "outputs" / "runtime"
+    history_root = tmp_path / "data" / "history"
+    
+    # 1. Write actual feedback for all three test players
+    _write_csv(
+        runtime_root / "history" / "result_feedback.csv",
+        [
+            # Ajay Mitchell: May 23 (target date) terminal player_stat_match_missing
+            _feedback_row("Ajay Mitchell", prediction_date="2026-05-23", actual_value=14.0),
+            # Backlog Player: May 22 (prior date) terminal player_stat_match_missing
+            _feedback_row("Backlog Player", prediction_date="2026-05-22", actual_value=14.0),
+            # Stale Pending Player: May 22 (prior date) stale pending
+            _feedback_row("Stale Pending Player", prediction_date="2026-05-22", actual_value=14.0),
+        ],
+    )
+    
+    # 2. Write market shadow history rows
+    _write_csv(
+        history_root / "market_shadow_history.csv",
+        [
+            # Ajay Mitchell: May 23 terminal player_stat_match_missing
+            _shadow_row("Ajay Mitchell", prediction_date="2026-05-23", result_status="void", actual_value="")
+            | {"grading_skip_reason": "player_stat_match_missing"},
+            # Backlog Player: May 22 terminal player_stat_match_missing
+            _shadow_row("Backlog Player", prediction_date="2026-05-22", result_status="void", actual_value="")
+            | {"grading_skip_reason": "player_stat_match_missing"},
+            # Stale Pending Player: May 22 stale pending row
+            _shadow_row("Stale Pending Player", prediction_date="2026-05-22", result_status="pending", actual_value=""),
+        ],
+    )
+    
+    # 3. Invoke all_completed repair with both regrade flags
+    result = repair_all_completed_grades(
+        history_root=history_root,
+        runtime_root=runtime_root,
+        through_date="2026-05-23",
+        regrade_terminal_player_stat_missing=True,
+        terminal_regrade_date="2026-05-23",
+    )
+    
+    shadow = pd.read_csv(history_root / "market_shadow_history.csv", keep_default_na=False).set_index("player_name")
+    
+    # Prove Ajay Mitchell (scoped date) is regraded to hit
+    assert shadow.loc["Ajay Mitchell", "result_status"] == "hit"
+    assert float(shadow.loc["Ajay Mitchell", "actual_value"]) == 14.0
+    
+    # Prove Backlog Player (prior date) remains void and untouched
+    assert shadow.loc["Backlog Player", "result_status"] == "void"
+    assert shadow.loc["Backlog Player", "grading_skip_reason"] == "player_stat_match_missing"
+    
+    # Prove Stale Pending Player (prior date) is normally repaired to hit
+    assert shadow.loc["Stale Pending Player", "result_status"] == "hit"
+    assert float(shadow.loc["Stale Pending Player", "actual_value"]) == 14.0

@@ -23,6 +23,8 @@ STATUS_PARTIAL = "PARTIAL"
 STATUS_STALE_PENDING_RISK = "STALE_PENDING_RISK"
 STATUS_INCONSISTENT_REPORTING = "INCONSISTENT_REPORTING"
 
+PENDING_REPAIR_AUDIT_RE = re.compile(r"^pending_repair_audit_(\d{4}-\d{2}-\d{2})\.json$")
+
 
 def _safe_text(value: Any, default: str = "") -> str:
     if value is None:
@@ -88,6 +90,83 @@ def _read_json(path: Path, warnings: list[str], *, label: str) -> tuple[dict[str
         warnings.append(f"{label} must contain a JSON object: {path}")
         return {}, record
     return payload, record
+
+
+def _parse_iso_date_text(value: Any) -> str:
+    text = _safe_text(value)
+    if not text:
+        return ""
+    try:
+        return datetime.fromisoformat(text[:10]).date().isoformat()
+    except ValueError:
+        return ""
+
+
+def _pending_repair_audit_file_date(path: Path) -> str:
+    match = PENDING_REPAIR_AUDIT_RE.match(path.name)
+    return match.group(1) if match else ""
+
+
+def _pending_repair_audit_covers_date(payload: dict[str, Any], prediction_date: str, *, file_date: str = "") -> bool:
+    if not isinstance(payload, dict):
+        return False
+    prediction_date = _parse_iso_date_text(prediction_date)
+    if not prediction_date:
+        return False
+    start_date = _parse_iso_date_text(payload.get("start_date"))
+    end_date = _parse_iso_date_text(payload.get("end_date"))
+    if start_date or end_date:
+        if start_date and prediction_date < start_date:
+            return False
+        if end_date and prediction_date > end_date:
+            return False
+        return True
+    through_date = _parse_iso_date_text(payload.get("through_date"))
+    if through_date:
+        return prediction_date <= through_date
+    return bool(file_date and file_date == prediction_date)
+
+
+def _pending_repair_audit_sort_key(item: tuple[Path, dict[str, Any], dict[str, Any]]) -> tuple[str, str, str, float]:
+    path, payload, _record = item
+    return (
+        _parse_iso_date_text(payload.get("end_date")),
+        _parse_iso_date_text(payload.get("through_date")),
+        _pending_repair_audit_file_date(path),
+        path.stat().st_mtime if path.exists() else 0.0,
+    )
+
+
+def _read_pending_repair_audit_for_date(
+    *,
+    runtime_root_path: Path,
+    prediction_date: str,
+    warnings: list[str],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    diagnostics_dir = runtime_root_path / "diagnostics"
+    expected_path = diagnostics_dir / f"pending_repair_audit_{prediction_date}.json"
+    candidates: list[tuple[Path, dict[str, Any], dict[str, Any]]] = []
+    if diagnostics_dir.exists():
+        for path in sorted(diagnostics_dir.glob("pending_repair_audit_*.json")):
+            local_warnings: list[str] = []
+            payload, record = _read_json(path, local_warnings, label="pending repair audit")
+            if not payload:
+                continue
+            file_date = _pending_repair_audit_file_date(path)
+            if _pending_repair_audit_covers_date(payload, prediction_date, file_date=file_date):
+                record = {**record, "coverage_selected": True}
+                candidates.append((path, payload, record))
+    if candidates:
+        _path, payload, record = max(candidates, key=_pending_repair_audit_sort_key)
+        return payload, record
+
+    record = {"path": str(expected_path), "exists": False}
+    if expected_path.exists():
+        record["candidate_exists"] = True
+        warnings.append(f"Pending repair audit does not cover prediction_date {prediction_date}: {expected_path}")
+    else:
+        warnings.append(f"Missing optional pending repair audit: {expected_path}")
+    return {}, record
 
 
 def _read_text(path: Path, warnings: list[str], *, label: str) -> tuple[str, dict[str, Any]]:
@@ -526,10 +605,10 @@ def build_completion_state_audit(
         label="quality summary",
     )
     repair_warnings: list[str] = []
-    repair_payload, repair_record = _read_json(
-        runtime_root_path / "diagnostics" / f"pending_repair_audit_{prediction_date}.json",
-        repair_warnings,
-        label="pending repair audit",
+    repair_payload, repair_record = _read_pending_repair_audit_for_date(
+        runtime_root_path=runtime_root_path,
+        prediction_date=prediction_date,
+        warnings=repair_warnings,
     )
 
     real_counts = _real_pick_counts(pick_history, prediction_date=prediction_date)

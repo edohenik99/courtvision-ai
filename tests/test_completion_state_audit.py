@@ -163,6 +163,55 @@ def test_complete_real_picks_with_shadow_open_game_pending_noise(tmp_path: Path)
     assert payload["details"]["shadow_pending_taxonomy_source"] == "pending_repair_audit"
 
 
+def test_completion_audit_uses_pending_repair_audit_that_covers_prediction_date(tmp_path: Path) -> None:
+    prediction_date = "2026-05-23"
+    history_root = tmp_path / "data" / "history"
+    runtime_root = tmp_path / "outputs" / "runtime"
+    _write_csv(history_root / "pick_history.csv", [_pick_row("Real Pick", prediction_date=prediction_date)])
+    _write_csv(history_root / "market_shadow_history.csv", [_history_row("Pending Shadow", prediction_date=prediction_date)])
+    _write_csv(history_root / "paper_kelly_history.csv", [])
+    _write_json(
+        runtime_root / "diagnostics" / f"pending_repair_audit_{prediction_date}.json",
+        {
+            "mode": "all_completed",
+            "start_date": "2026-04-23",
+            "end_date": "2026-05-22",
+            "through_date": "2026-05-22",
+            "histories": {
+                "market_shadow_history": {"total_pending": 0, "open_game_pending": 0, "stale_pending": 0},
+            },
+        },
+    )
+    covering_path = runtime_root / "diagnostics" / "pending_repair_audit_2026-05-24.json"
+    _write_json(
+        covering_path,
+        {
+            "mode": "all_completed",
+            "start_date": "2026-04-23",
+            "end_date": prediction_date,
+            "through_date": prediction_date,
+            "histories": {
+                "market_shadow_history": {"total_pending": 1, "open_game_pending": 1, "stale_pending": 0},
+            },
+        },
+    )
+    _write_daily_summary(runtime_root, prediction_date, pending=0)
+    _write_quality_summary(runtime_root, prediction_date, elite=1, kelly=1)
+
+    payload = build_completion_state_audit(
+        prediction_date=prediction_date,
+        history_root=history_root,
+        runtime_root=runtime_root,
+    )
+
+    assert payload["repair_audit"]["available"] is True
+    assert payload["repair_audit"]["path"] == str(covering_path)
+    assert payload["repair_audit"]["through_date"] == prediction_date
+    assert payload["shadow_open_game_pending_count"] == 1
+    assert payload["shadow_stale_pending_count"] == 0
+    assert payload["details"]["shadow_pending_taxonomy_source"] == "pending_repair_audit"
+
+
 def test_stale_pending_risk(tmp_path: Path) -> None:
     prediction_date = "2026-01-20"
     history_root = tmp_path / "data" / "history"
