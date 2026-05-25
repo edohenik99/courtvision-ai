@@ -611,6 +611,10 @@ def build_daily_summary(
         diagnostics_dir / f"meta_label_rules_performance_{prediction_date}.json",
         [],
     )
+    feature_completeness_payload = _read_json(
+        diagnostics_dir / f"feature_completeness_tracker_{prediction_date}.json",
+        [],
+    )
     readiness = _read_json(diagnostics_dir / f"market_performance_readiness_{prediction_date}.json", warnings)
     manual_context = _read_json(diagnostics_dir / f"manual_context_{prediction_date}.json", warnings)
     manual_review_history_df = _read_csv(history_root / "manual_review_history.csv", [])
@@ -849,6 +853,34 @@ def build_daily_summary(
     perf_missing_stability = meta_label_rules_performance_readiness.get("missing_role_stability_rate", 0.0)
     perf_missing_fragility = meta_label_rules_performance_readiness.get("missing_fragility_rate", 0.0)
 
+    tracker_current = (
+        feature_completeness_payload.get("current_coverage", {})
+        if isinstance(feature_completeness_payload, dict)
+        else {}
+    )
+    tracker_hist = (
+        feature_completeness_payload.get("historical_coverage", {})
+        if isinstance(feature_completeness_payload, dict)
+        else {}
+    )
+    tracker_readiness = (
+        feature_completeness_payload.get("readiness", {})
+        if isinstance(feature_completeness_payload, dict)
+        else {}
+    )
+    if not isinstance(tracker_current, dict):
+        tracker_current = {}
+    if not isinstance(tracker_hist, dict):
+        tracker_hist = {}
+    if not isinstance(tracker_readiness, dict):
+        tracker_readiness = {}
+
+    tracker_verdict = tracker_readiness.get("verdict", "WAIT_MORE_FORWARD_DATA")
+    tracker_graded = int(tracker_hist.get("graded_hit_miss_rows") or 0)
+    tracker_slates = int(tracker_hist.get("completed_slate_count") or 0)
+    tracker_complete = int(tracker_hist.get("feature_complete_graded_rows") or 0)
+    tracker_est_slates = int(tracker_readiness.get("estimated_additional_slates_needed", 999))
+
     if not isinstance(calibration_bucket_summary, dict):
         calibration_bucket_summary = {}
     calibration_graded_rows_used = int(calibration_bucket_summary.get("total_graded_rows_used") or 0)
@@ -1058,6 +1090,14 @@ def build_daily_summary(
     lines.append(f"- missing fragility/survivability rate: {_format_pct(perf_missing_fragility)}")
     lines.append(f"- Phase 4C readiness verdict: {perf_verdict}")
     lines.append(f"- note: {PERF_DIAGNOSTIC_ONLY_NOTE}")
+
+    lines.extend(["", "Feature Completeness Tracker - Shadow Only", "-" * 72])
+    lines.append(f"- completed slate count: {tracker_slates}")
+    lines.append(f"- graded hit/miss rows: {tracker_graded}")
+    lines.append(f"- feature-complete graded rows: {tracker_complete}")
+    lines.append(f"- estimated additional slates needed: {tracker_est_slates}")
+    lines.append(f"- Phase 4C readiness verdict: {tracker_verdict}")
+    lines.append("- note: Feature Completeness Tracker is shadow-only and is not an Elite/Kelly input.")
 
     lines.extend(["", "Combo UNDER Promotion Watchlist — Observation Only / No Kelly", "-" * 72])
     lines.append(f"- watchlist row count: {int(len(combo_under_watchlist))}")
@@ -1394,6 +1434,13 @@ def build_daily_summary(
         "calibration_bucket_report": calibration_bucket_summary,
         "player_role_stability_report": player_role_stability_summary,
         "meta_label_promotion_report": meta_label_promotion_summary,
+        "feature_completeness_tracker": {
+            "completed_slate_count": tracker_slates,
+            "graded_hit_miss_rows": tracker_graded,
+            "feature_complete_graded_rows": tracker_complete,
+            "estimated_additional_slates_needed": tracker_est_slates,
+            "verdict": tracker_verdict,
+        },
         "full_market_context_conflict_cause_counts": full_market_context_conflict_causes,
         "stale_team_not_in_game_count": int(full_market_context_conflict_causes.get("stale_team_not_in_game", 0)),
         "run_health": run_health,

@@ -162,6 +162,33 @@ def test_operator_card_includes_clv_market_movement_shadow_section(tmp_path: Pat
         history_root / "pick_history.csv",
         [{"prediction_date": "2026-05-01", "result_status": "hit"}],
     )
+    _write_json(
+        diagnostics / f"meta_label_rules_performance_{prediction_date}.json",
+        {
+            "data_readiness": {
+                "verdict": "WAIT_MORE_DATA",
+                "graded_hit_miss_rows": 10,
+                "completed_slate_count": 2,
+                "minimum_sample_threshold_status": "insufficient",
+                "missing_role_stability_rate": 0.5,
+                "missing_fragility_rate": 0.2,
+            }
+        },
+    )
+    _write_json(
+        diagnostics / f"feature_completeness_tracker_{prediction_date}.json",
+        {
+            "historical_coverage": {
+                "completed_slate_count": 5,
+                "graded_hit_miss_rows": 150,
+                "feature_complete_graded_rows": 120,
+            },
+            "readiness": {
+                "verdict": "FEATURE_COLLECTION_HEALTHY_BUT_SAMPLE_SMALL",
+                "estimated_additional_slates_needed": 25,
+            }
+        },
+    )
 
     output_path, payload = write_operator_card_outputs(
         prediction_date=prediction_date,
@@ -200,6 +227,15 @@ def test_operator_card_includes_clv_market_movement_shadow_section(tmp_path: Pat
     assert "- Elite Candidate (BOS): score=95.0 bucket=shadow_strong_review_candidate reasons=[high_quality_score; strong_confidence]" in text
     assert "- Meta-Label Promotion is shadow-only and is not an Elite/Kelly input." in text
     assert payload["meta_label_promotion_report"]["total_rows_evaluated"] == 12
+
+    assert "Feature Completeness Tracker - Shadow Only" in text
+    assert "- completed slate count: 5" in text
+    assert "- graded hit/miss rows: 150" in text
+    assert "- feature-complete graded rows: 120" in text
+    assert "- estimated additional slates needed: 25" in text
+    assert "- Phase 4C readiness verdict: FEATURE_COLLECTION_HEALTHY_BUT_SAMPLE_SMALL" in text
+    assert "- Feature Completeness Tracker is shadow-only and is not an Elite/Kelly input." in text
+    assert payload["feature_completeness_tracker"]["completed_slate_count"] == 5
 
     assert payload["final_decision"] == "BETTABLE"
 
@@ -280,6 +316,33 @@ def test_operator_card_grading_snapshot_zero_on_complete_closed_slate(tmp_path: 
         history_root / "pick_history.csv",
         [],
         columns=["prediction_date", "result_status"],
+    )
+    _write_json(
+        diagnostics / f"meta_label_rules_performance_{prediction_date}.json",
+        {
+            "data_readiness": {
+                "verdict": "WAIT_MORE_DATA",
+                "graded_hit_miss_rows": 10,
+                "completed_slate_count": 2,
+                "minimum_sample_threshold_status": "insufficient",
+                "missing_role_stability_rate": 0.5,
+                "missing_fragility_rate": 0.2,
+            }
+        },
+    )
+    _write_json(
+        diagnostics / f"feature_completeness_tracker_{prediction_date}.json",
+        {
+            "historical_coverage": {
+                "completed_slate_count": 5,
+                "graded_hit_miss_rows": 150,
+                "feature_complete_graded_rows": 120,
+            },
+            "readiness": {
+                "verdict": "FEATURE_COLLECTION_HEALTHY_BUT_SAMPLE_SMALL",
+                "estimated_additional_slates_needed": 25,
+            }
+        },
     )
 
     output_path, payload = write_operator_card_outputs(

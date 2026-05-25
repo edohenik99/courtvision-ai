@@ -81,6 +81,12 @@ from courtvision.reporting.meta_label_rules_performance import (
     performance_txt_path_for_date,
     performance_csv_path_for_date,
 )
+from courtvision.reporting.feature_completeness_tracker import (
+    write_feature_completeness_report,
+    performance_json_path_for_date as tracker_json_path_for_date,
+    performance_txt_path_for_date as tracker_txt_path_for_date,
+    performance_csv_path_for_date as tracker_csv_path_for_date,
+)
 from courtvision.reporting.projection_calibration_shadow import (
     calibration_json_path_for_date,
     calibration_txt_path_for_date,
@@ -2421,6 +2427,18 @@ def _format_quality_summary_text(payload: dict[str, Any]) -> str:
     else:
         lines.append("- not available")
 
+    track = payload.get("feature_completeness_tracker_shadow", {}) if isinstance(payload.get("feature_completeness_tracker_shadow"), dict) else {}
+    lines.extend(["", "Feature Completeness Tracker - Shadow Only", "-" * 72])
+    if track:
+        lines.append(f"- completed_slate_count: {track.get('completed_slate_count', 0)}")
+        lines.append(f"- graded_hit_miss_rows: {track.get('graded_hit_miss_rows', 0)}")
+        lines.append(f"- feature_complete_graded_rows: {track.get('feature_complete_graded_rows', 0)}")
+        lines.append(f"- estimated_additional_slates_needed: {track.get('estimated_additional_slates_needed', 999)}")
+        lines.append(f"- verdict: {track.get('verdict', 'WAIT_MORE_FORWARD_DATA')}")
+        lines.append("- note: Feature Completeness Tracker is shadow-only and is not an Elite/Kelly input.")
+    else:
+        lines.append("- not available")
+
     lines.extend(["", "Warnings", "-" * 72])
     if warnings:
         for warning in warnings:
@@ -2753,6 +2771,38 @@ def write_quality_summary_outputs(
         "missing_role_stability_rate": _perf_readiness.get("missing_role_stability_rate", 0.0),
         "missing_fragility_rate": _perf_readiness.get("missing_fragility_rate", 0.0),
         "verdict": _perf_readiness.get("verdict", "WAIT_MORE_DATA"),
+        "note": "diagnostic_report_only_no_elite_kelly_prediction_or_final_decision_change",
+    }
+
+    # Phase 4B.3: Forward Feature Completeness Tracker shadow report (diagnostics only)
+    try:
+        _track_json, _track_txt, _track_csv, _track_payload = write_feature_completeness_report(
+            prediction_date=prediction_date,
+            runtime_root=runtime_root,
+            history_root=history_root,
+        )
+    except Exception:
+        _track_json = tracker_json_path_for_date(prediction_date, runtime_root)
+        _track_txt = tracker_txt_path_for_date(prediction_date, runtime_root)
+        _track_csv = tracker_csv_path_for_date(prediction_date, runtime_root)
+        _track_payload = {}
+
+    _track_readiness = _track_payload.get("readiness", {}) if isinstance(_track_payload, dict) else {}
+    _track_hist = _track_payload.get("historical_coverage", {}) if isinstance(_track_payload, dict) else {}
+    if not isinstance(_track_readiness, dict):
+        _track_readiness = {}
+    if not isinstance(_track_hist, dict):
+        _track_hist = {}
+        
+    payload["feature_completeness_tracker_shadow"] = {
+        "json_path": str(_track_json),
+        "txt_path": str(_track_txt),
+        "csv_path": str(_track_csv),
+        "completed_slate_count": _track_hist.get("completed_slate_count", 0),
+        "graded_hit_miss_rows": _track_hist.get("graded_hit_miss_rows", 0),
+        "feature_complete_graded_rows": _track_hist.get("feature_complete_graded_rows", 0),
+        "estimated_additional_slates_needed": _track_readiness.get("estimated_additional_slates_needed", 999),
+        "verdict": _track_readiness.get("verdict", "WAIT_MORE_FORWARD_DATA"),
         "note": "diagnostic_report_only_no_elite_kelly_prediction_or_final_decision_change",
     }
 

@@ -183,6 +183,29 @@ def test_manifest_missing_meta_label_promotion_is_shadow_only_not_fatal(tmp_path
     assert manifest["missing_by_severity"]["fatal"] == 0
 
 
+def test_manifest_missing_feature_completeness_tracker_is_shadow_only_not_fatal(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    _write_core_boards(runtime_root)
+
+    manifest = build_artifact_manifest(
+        prediction_date=PREDICTION_DATE,
+        runtime_root=runtime_root,
+        generated_at="2026-04-10T12:00:00Z",
+    )
+
+    txt_art = _artifact(manifest, "feature_completeness_tracker_txt")
+    json_art = _artifact(manifest, "feature_completeness_tracker_json")
+    csv_art = _artifact(manifest, "feature_completeness_tracker_csv")
+    assert txt_art["exists"] is False
+    assert json_art["exists"] is False
+    assert csv_art["exists"] is False
+    assert txt_art["severity"] == SEVERITY_SHADOW_ONLY
+    assert json_art["severity"] == SEVERITY_SHADOW_ONLY
+    assert csv_art["severity"] == SEVERITY_SHADOW_ONLY
+    assert "not a betting input" in txt_art["notes"]
+    assert manifest["missing_by_severity"]["fatal"] == 0
+
+
 def test_manifest_counts_csv_rows(tmp_path: Path) -> None:
     runtime_root = tmp_path / "runtime"
     _write_text(

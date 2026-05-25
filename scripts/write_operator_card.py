@@ -200,6 +200,9 @@ def _artifact_paths(runtime_root: Path, prediction_date: str) -> dict[str, Path]
         "meta_label_rules_performance_report": operator / f"meta_label_rules_performance_{prediction_date}.txt",
         "meta_label_rules_performance_diagnostics": diagnostics / f"meta_label_rules_performance_{prediction_date}.json",
         "meta_label_rules_performance_csv": operator / f"meta_label_rules_performance_{prediction_date}.csv",
+        "feature_completeness_tracker_txt": operator / f"feature_completeness_tracker_{prediction_date}.txt",
+        "feature_completeness_tracker_json": diagnostics / f"feature_completeness_tracker_{prediction_date}.json",
+        "feature_completeness_tracker_csv": operator / f"feature_completeness_tracker_{prediction_date}.csv",
         "high_caution_over_watchlist": operator / f"high_caution_over_watchlist_{prediction_date}.csv",
         "combo_under_watchlist": operator / f"combo_under_watchlist_{prediction_date}.csv",
         "paper_kelly_simulation": operator / f"paper_kelly_simulation_{prediction_date}.csv",
@@ -1106,6 +1109,9 @@ def _files_written_lines(paths: dict[str, Path]) -> list[str]:
         "meta_label_rules_performance_report",
         "meta_label_rules_performance_diagnostics",
         "meta_label_rules_performance_csv",
+        "feature_completeness_tracker_txt",
+        "feature_completeness_tracker_json",
+        "feature_completeness_tracker_csv",
     )
     lines: list[str] = []
     for key in keys:
@@ -1200,6 +1206,7 @@ def build_operator_card(
     player_role_stability_payload = _read_json(paths["player_role_stability_report_diagnostics"], warnings)
     meta_label_promotion_payload = _read_json(paths["meta_label_promotion_shadow_diagnostics"], warnings)
     meta_label_rules_performance_payload = _read_json(paths["meta_label_rules_performance_diagnostics"], warnings)
+    feature_completeness_payload = _read_json(paths["feature_completeness_tracker_json"], warnings)
     injury_payload = _read_json(runtime_root / "diagnostics" / f"injury_context_diagnostics_{prediction_date}.json", warnings)
     game_payload = _read_json(runtime_root / "diagnostics" / f"game_context_{prediction_date}.json", warnings)
     high_caution_df = _read_csv(paths["high_caution_over_watchlist"], warnings)
@@ -1433,6 +1440,27 @@ def build_operator_card(
     perf_min_status = meta_label_rules_performance_readiness.get("minimum_sample_threshold_status", "insufficient")
     perf_missing_stability = _safe_float(meta_label_rules_performance_readiness.get("missing_role_stability_rate"))
     perf_missing_fragility = _safe_float(meta_label_rules_performance_readiness.get("missing_fragility_rate"))
+
+    tracker_hist = (
+        feature_completeness_payload.get("historical_coverage", {})
+        if isinstance(feature_completeness_payload, dict)
+        else {}
+    )
+    tracker_readiness = (
+        feature_completeness_payload.get("readiness", {})
+        if isinstance(feature_completeness_payload, dict)
+        else {}
+    )
+    if not isinstance(tracker_hist, dict):
+        tracker_hist = {}
+    if not isinstance(tracker_readiness, dict):
+        tracker_readiness = {}
+
+    tracker_verdict = tracker_readiness.get("verdict", "WAIT_MORE_FORWARD_DATA")
+    tracker_graded = _safe_int(tracker_hist.get("graded_hit_miss_rows"), 0)
+    tracker_slates = _safe_int(tracker_hist.get("completed_slate_count"), 0)
+    tracker_complete = _safe_int(tracker_hist.get("feature_complete_graded_rows"), 0)
+    tracker_est_slates = _safe_int(tracker_readiness.get("estimated_additional_slates_needed"), 999)
 
     if not isinstance(calibration_bucket_summary, dict):
         calibration_bucket_summary = {}
@@ -1822,6 +1850,16 @@ def build_operator_card(
     lines.append(f"- {PERF_DIAGNOSTIC_ONLY_NOTE}")
     lines.append("")
 
+    lines.append("Feature Completeness Tracker - Shadow Only")
+    lines.append("-" * 40)
+    lines.append(f"- completed slate count: {tracker_slates}")
+    lines.append(f"- graded hit/miss rows: {tracker_graded}")
+    lines.append(f"- feature-complete graded rows: {tracker_complete}")
+    lines.append(f"- estimated additional slates needed: {tracker_est_slates}")
+    lines.append(f"- Phase 4C readiness verdict: {tracker_verdict}")
+    lines.append("- Feature Completeness Tracker is shadow-only and is not an Elite/Kelly input.")
+    lines.append("")
+
     lines.extend(_completion_state_lines(completion_state_payload, paths["completion_state_audit_json"], prediction_date))
     lines.append("")
 
@@ -1904,6 +1942,13 @@ def build_operator_card(
         "calibration_bucket_report": calibration_bucket_summary,
         "player_role_stability_report": player_role_stability_summary,
         "meta_label_promotion_report": meta_label_promotion_summary,
+        "feature_completeness_tracker": {
+            "completed_slate_count": tracker_slates,
+            "graded_hit_miss_rows": tracker_graded,
+            "feature_complete_graded_rows": tracker_complete,
+            "estimated_additional_slates_needed": tracker_est_slates,
+            "verdict": tracker_verdict,
+        },
         "missing_required": missing_required,
         "completion_state_audit_status": _safe_text(completion_state_payload.get("report_agreement_status")) if completion_state_payload else "missing",
         "warnings": warnings,

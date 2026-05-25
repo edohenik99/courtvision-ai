@@ -456,6 +456,30 @@ def _specs(prediction_date: str) -> tuple[ArtifactSpec, ...]:
             SEVERITY_SHADOW_ONLY,
             "Watchlist/reporting artifact; not a betting input.",
         ),
+        ArtifactSpec(
+            "shadow_only",
+            "feature_completeness_tracker_txt",
+            "operator",
+            f"feature_completeness_tracker_{prediction_date}.txt",
+            SEVERITY_SHADOW_ONLY,
+            "Shadow/report-only forward feature completeness tracker; not a betting input.",
+        ),
+        ArtifactSpec(
+            "shadow_only",
+            "feature_completeness_tracker_json",
+            "diagnostics",
+            f"feature_completeness_tracker_{prediction_date}.json",
+            SEVERITY_SHADOW_ONLY,
+            "Shadow/report-only forward feature completeness tracker; not a betting input.",
+        ),
+        ArtifactSpec(
+            "shadow_only",
+            "feature_completeness_tracker_csv",
+            "operator",
+            f"feature_completeness_tracker_{prediction_date}.csv",
+            SEVERITY_SHADOW_ONLY,
+            "Shadow/report-only forward feature completeness tracker; not a betting input.",
+        ),
     )
 
 
