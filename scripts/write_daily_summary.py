@@ -556,6 +556,7 @@ def build_daily_summary(
     prediction_date: str,
     runtime_root: str | Path = "outputs/runtime",
     history_root: str | Path = "data/history",
+    closed_slate_safe: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     runtime_root = Path(runtime_root)
     history_root = Path(history_root)
@@ -836,11 +837,14 @@ def build_daily_summary(
         market_shadow_history_path,
         prediction_date,
     )
-    pending_grading = (
-        history_pending_grading
-        if history_pending_grading is not None
-        else int(shadow_totals.get("pending_picks") or 0)
-    )
+    if closed_slate_safe:
+        pending_grading = history_pending_grading if history_pending_grading is not None else 0
+    else:
+        pending_grading = (
+            history_pending_grading
+            if history_pending_grading is not None
+            else int(shadow_totals.get("pending_picks") or 0)
+        )
     shadow_totals["pending_picks"] = pending_grading
 
     readiness_markets = readiness.get("markets", []) if isinstance(readiness, dict) else []
@@ -1518,10 +1522,16 @@ def write_daily_summary_outputs(
             runtime_root=runtime_root,
         )
     )
+    closed_slate_safe = bool(
+        not write_board_annotations
+        and not persist_shadow_history
+        and not persist_paper_kelly_history
+    )
     summary, metadata = build_daily_summary(
         prediction_date=prediction_date,
         runtime_root=runtime_root,
         history_root=history_root,
+        closed_slate_safe=closed_slate_safe,
     )
     metadata["high_caution_over_watchlist_path"] = str(watchlist_path)
     metadata["high_caution_over_watchlist_count"] = int(len(watchlist_df))

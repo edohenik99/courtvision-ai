@@ -2658,8 +2658,6 @@ def write_quality_summary_outputs(
             prediction_date=prediction_date,
             runtime_root=runtime_root,
             history_root=history_root,
-            full_market_df=full_market_df,
-            baseline_df=player_baselines_df,
         )
     except Exception:
         _stability_json = player_role_stability_json_path_for_date(prediction_date, runtime_root)
