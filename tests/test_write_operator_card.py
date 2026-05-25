@@ -202,3 +202,94 @@ def test_operator_card_includes_clv_market_movement_shadow_section(tmp_path: Pat
     assert payload["meta_label_promotion_report"]["total_rows_evaluated"] == 12
 
     assert payload["final_decision"] == "BETTABLE"
+
+
+def test_operator_card_grading_snapshot_zero_on_complete_closed_slate(tmp_path: Path) -> None:
+    prediction_date = "2026-05-24"
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+    operator = runtime_root / "operator"
+    diagnostics = runtime_root / "diagnostics"
+    row = {
+        "prediction_date": prediction_date,
+        "player_name": "Fixture Player",
+        "player_id": "player-1",
+        "team_abbr": "BOS",
+        "opponent": "NYK",
+        "game_id": "game-1",
+        "market_type": "player_points",
+        "selection": "over",
+        "line": 20.5,
+        "sportsbook_line": 20.5,
+        "odds": -110,
+        "edge": 2.0,
+        "confidence": 0.72,
+        "quality_score": 80.0,
+    }
+
+    _write_csv(operator / f"elite_board_{prediction_date}.csv", [row])
+    _write_csv(operator / f"full_market_board_{prediction_date}.csv", [row])
+    _write_csv(operator / f"sgp_board_{prediction_date}.csv", [], columns=["prediction_date"])
+    _write_json(
+        operator / f"quality_summary_{prediction_date}.json",
+        {
+            "run_health_status": "HEALTHY",
+            "run_health_reason": "fixture",
+            "slate_provider_counts": {
+                "games_count": 1,
+                "normalized_odds_rows_count": 1,
+                "stale_odds_count": 0,
+                "provider_breakdown": {"line_source": {"fixture": 1}},
+            },
+            "candidate_funnel": {
+                "elite_board_count": 1,
+                "full_market_board_count": 1,
+                "sgp_board_count": 0,
+            },
+            "kelly_safety_summary": {
+                "total_rows": 0,
+                "kelly_eligible_count": 0,
+                "review_before_bet_count": 0,
+                "review_policy_hold_count": 0,
+            },
+            "manual_review_required_count": 0,
+            "same_opponent_under_warning_count": 0,
+            "date_isolation_check": {"status": "ok"},
+        },
+    )
+    _write_json(diagnostics / f"board_diagnostics_{prediction_date}.json", {"board_counts": {}})
+    _write_json(
+        diagnostics / f"market_shadow_grading_{prediction_date}.json",
+        {
+            "totals": {"total_picks": 53, "graded_picks": 0, "pending_picks": 53},
+            "kelly_decision_performance": {"status": "insufficient_sample"},
+        },
+    )
+    _write_json(
+        diagnostics / f"completion_state_audit_{prediction_date}.json",
+        {
+            "report_agreement_status": "COMPLETE",
+            "agreement_issues": [],
+            "real_pick_pending_count": 0,
+            "shadow_pending_count": 0,
+            "paper_pending_count": 0,
+            "daily_summary_pending_grading": 0,
+        },
+    )
+    _write_csv(
+        history_root / "pick_history.csv",
+        [],
+        columns=["prediction_date", "result_status"],
+    )
+
+    output_path, payload = write_operator_card_outputs(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+
+    text = output_path.read_text(encoding="utf-8")
+    assert "Grading Snapshot" in text
+    assert "- market shadow rows: 53" in text
+    assert "- graded rows: 0" in text
+    assert "- pending grading: 0" in text

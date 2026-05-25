@@ -1339,11 +1339,27 @@ def build_operator_card(
         history_root / "market_shadow_history.csv",
         prediction_date,
     )
-    pending_count = (
-        history_pending_count
-        if history_pending_count is not None
-        else _safe_int(market_shadow_totals.get("pending_picks"), 0)
-    )
+    
+    # Prefer completion_state_audit or pending_repair_audit taxonomy when available
+    if completion_state_payload:
+        audit_status = _safe_text(completion_state_payload.get("report_agreement_status")).upper()
+        real_p = _safe_int(completion_state_payload.get("real_pick_pending_count"), 0)
+        shadow_p = _safe_int(completion_state_payload.get("shadow_pending_count"), 0)
+        paper_p = _safe_int(completion_state_payload.get("paper_pending_count"), 0)
+        daily_p = _safe_int(completion_state_payload.get("daily_summary_pending_grading"), 0)
+        
+        # If completion state audit is COMPLETE and all pending counts are 0, pending grading is 0
+        if audit_status == "COMPLETE" and real_p == 0 and shadow_p == 0 and paper_p == 0 and daily_p == 0:
+            pending_count = 0
+        else:
+            # Otherwise prefer shadow_pending_count from completion state audit
+            pending_count = shadow_p
+    else:
+        pending_count = (
+            history_pending_count
+            if history_pending_count is not None
+            else _safe_int(market_shadow_totals.get("pending_picks"), 0)
+        )
     market_shadow_rows = _safe_int(market_shadow_totals.get("total_picks"), len(full_market_df))
     kelly_performance = market_shadow_payload.get("kelly_decision_performance", {}) if isinstance(market_shadow_payload, dict) else {}
     kelly_performance_status = (
