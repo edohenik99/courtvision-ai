@@ -140,6 +140,26 @@ def test_manifest_missing_calibration_bucket_report_is_shadow_only_not_fatal(tmp
     assert manifest["missing_by_severity"]["fatal"] == 0
 
 
+def test_manifest_missing_player_role_stability_is_shadow_only_not_fatal(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    _write_core_boards(runtime_root)
+
+    manifest = build_artifact_manifest(
+        prediction_date=PREDICTION_DATE,
+        runtime_root=runtime_root,
+        generated_at="2026-04-10T12:00:00Z",
+    )
+
+    report = _artifact(manifest, "player_role_stability_report")
+    diagnostics = _artifact(manifest, "player_role_stability_report_diagnostics")
+    assert report["exists"] is False
+    assert diagnostics["exists"] is False
+    assert report["severity"] == SEVERITY_SHADOW_ONLY
+    assert diagnostics["severity"] == SEVERITY_SHADOW_ONLY
+    assert "not an Elite, Kelly, SGP, final decision, or staking input" in report["notes"]
+    assert manifest["missing_by_severity"]["fatal"] == 0
+
+
 def test_manifest_counts_csv_rows(tmp_path: Path) -> None:
     runtime_root = tmp_path / "runtime"
     _write_text(

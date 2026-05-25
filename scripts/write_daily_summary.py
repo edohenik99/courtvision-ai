@@ -73,6 +73,9 @@ from courtvision.reporting.completion_state_audit import history_pending_grading
 from courtvision.reporting.calibration_bucket_report import (
     DIAGNOSTIC_ONLY_NOTE as CALIBRATION_BUCKET_DIAGNOSTIC_ONLY_NOTE,
 )
+from courtvision.reporting.player_role_stability import (
+    DIAGNOSTIC_ONLY_NOTE as PLAYER_ROLE_STABILITY_DIAGNOSTIC_ONLY_NOTE,
+)
 from courtvision.reporting.team_distribution import (
     OBSERVATION_ONLY_NOTE as TEAM_DISTRIBUTION_OBSERVATION_ONLY_NOTE,
     REPORT_TITLE as TEAM_DISTRIBUTION_TITLE,
@@ -589,6 +592,10 @@ def build_daily_summary(
         diagnostics_dir / f"calibration_bucket_report_{prediction_date}.json",
         [],
     )
+    player_role_stability_payload = _read_json(
+        diagnostics_dir / f"player_role_stability_{prediction_date}.json",
+        [],
+    )
     readiness = _read_json(diagnostics_dir / f"market_performance_readiness_{prediction_date}.json", warnings)
     manual_context = _read_json(diagnostics_dir / f"manual_context_{prediction_date}.json", warnings)
     manual_review_history_df = _read_csv(history_root / "manual_review_history.csv", [])
@@ -782,6 +789,21 @@ def build_daily_summary(
         if isinstance(calibration_bucket_payload, dict)
         else {}
     )
+    player_role_stability_summary = (
+        player_role_stability_payload.get("summary", {})
+        if isinstance(player_role_stability_payload, dict)
+        else {}
+    )
+    if not isinstance(player_role_stability_summary, dict):
+        player_role_stability_summary = {}
+    stability_total_evaluated = int(player_role_stability_summary.get("total_rows_evaluated") or 0)
+    stability_stable_count = int(player_role_stability_summary.get("stable_count") or 0)
+    stability_mostly_stable_count = int(player_role_stability_summary.get("mostly_stable_count") or 0)
+    stability_mixed_count = int(player_role_stability_summary.get("mixed_count") or 0)
+    stability_volatile_count = int(player_role_stability_summary.get("volatile_count") or 0)
+    stability_highly_volatile_count = int(player_role_stability_summary.get("highly_volatile_count") or 0)
+    stability_unknown_count = int(player_role_stability_summary.get("unknown_count") or 0)
+    stability_top_examples = player_role_stability_summary.get("top_volatile_examples") or []
     if not isinstance(calibration_bucket_summary, dict):
         calibration_bucket_summary = {}
     calibration_graded_rows_used = int(calibration_bucket_summary.get("total_graded_rows_used") or 0)
@@ -940,6 +962,26 @@ def build_daily_summary(
     lines.append(f"- best calibrated bucket: {calibration_best_calibrated}")
     lines.append(f"- tiny/small sample warning count: {calibration_tiny_small_count}")
     lines.append(f"- note: {CALIBRATION_BUCKET_DIAGNOSTIC_ONLY_NOTE}")
+
+    lines.extend(["", "Player Role Stability - Shadow Only", "-" * 72])
+    lines.append(f"- total rows evaluated: {stability_total_evaluated}")
+    lines.append(f"- stable count: {stability_stable_count}")
+    lines.append(f"- mostly stable count: {stability_mostly_stable_count}")
+    lines.append(f"- mixed count: {stability_mixed_count}")
+    lines.append(f"- volatile count: {stability_volatile_count}")
+    lines.append(f"- highly volatile count: {stability_highly_volatile_count}")
+    lines.append(f"- unknown count: {stability_unknown_count}")
+    lines.append("- top volatile examples:")
+    if not stability_top_examples:
+        lines.append("  - none")
+    else:
+        for ex in stability_top_examples:
+            reasons = "; ".join(ex.get("role_stability_reasons", []))
+            lines.append(
+                f"  - {ex.get('player_name')} ({ex.get('team')}): score={ex.get('role_stability_score')} "
+                f"bucket={ex.get('role_stability_bucket')} reasons=[{reasons}]"
+            )
+    lines.append(f"- note: {PLAYER_ROLE_STABILITY_DIAGNOSTIC_ONLY_NOTE}")
 
     lines.extend(["", "Combo UNDER Promotion Watchlist — Observation Only / No Kelly", "-" * 72])
     lines.append(f"- watchlist row count: {int(len(combo_under_watchlist))}")
@@ -1274,6 +1316,7 @@ def build_daily_summary(
         "market_shadow_non_points_rows": market_shadow_non_points_rows,
         "market_shadow_top_markets": dict(market_shadow_counts.most_common(5)),
         "calibration_bucket_report": calibration_bucket_summary,
+        "player_role_stability_report": player_role_stability_summary,
         "full_market_context_conflict_cause_counts": full_market_context_conflict_causes,
         "stale_team_not_in_game_count": int(full_market_context_conflict_causes.get("stale_team_not_in_game", 0)),
         "run_health": run_health,

@@ -31,6 +31,9 @@ from courtvision.reporting.clv_market_movement import (  # noqa: E402
 from courtvision.reporting.calibration_bucket_report import (  # noqa: E402
     DIAGNOSTIC_ONLY_NOTE as CALIBRATION_BUCKET_DIAGNOSTIC_ONLY_NOTE,
 )
+from courtvision.reporting.player_role_stability import (  # noqa: E402
+    DIAGNOSTIC_ONLY_NOTE as PLAYER_ROLE_STABILITY_DIAGNOSTIC_ONLY_NOTE,
+)
 from courtvision.reporting.completion_state_audit import history_pending_grading_count  # noqa: E402
 from courtvision.reporting.near_elite_review import (  # noqa: E402
     REVIEW_ONLY_NOTE as NEAR_ELITE_REVIEW_ONLY_NOTE,
@@ -183,6 +186,8 @@ def _artifact_paths(runtime_root: Path, prediction_date: str) -> dict[str, Path]
         "clv_market_movement_diagnostics": diagnostics / f"clv_market_movement_{prediction_date}.json",
         "calibration_bucket_report": operator / f"calibration_bucket_report_{prediction_date}.txt",
         "calibration_bucket_report_diagnostics": diagnostics / f"calibration_bucket_report_{prediction_date}.json",
+        "player_role_stability_report": operator / f"player_role_stability_{prediction_date}.txt",
+        "player_role_stability_report_diagnostics": diagnostics / f"player_role_stability_{prediction_date}.json",
         "high_caution_over_watchlist": operator / f"high_caution_over_watchlist_{prediction_date}.csv",
         "combo_under_watchlist": operator / f"combo_under_watchlist_{prediction_date}.csv",
         "paper_kelly_simulation": operator / f"paper_kelly_simulation_{prediction_date}.csv",
@@ -1081,6 +1086,8 @@ def _files_written_lines(paths: dict[str, Path]) -> list[str]:
         "clv_market_movement_diagnostics",
         "calibration_bucket_report",
         "calibration_bucket_report_diagnostics",
+        "player_role_stability_report",
+        "player_role_stability_report_diagnostics",
     )
     lines: list[str] = []
     for key in keys:
@@ -1172,6 +1179,7 @@ def build_operator_card(
     market_shadow_payload = _read_json(paths["market_shadow_grading"], warnings)
     clv_market_payload = _read_json(paths["clv_market_movement_diagnostics"], warnings)
     calibration_bucket_payload = _read_json(paths["calibration_bucket_report_diagnostics"], warnings)
+    player_role_stability_payload = _read_json(paths["player_role_stability_report_diagnostics"], warnings)
     injury_payload = _read_json(runtime_root / "diagnostics" / f"injury_context_diagnostics_{prediction_date}.json", warnings)
     game_payload = _read_json(runtime_root / "diagnostics" / f"game_context_{prediction_date}.json", warnings)
     high_caution_df = _read_csv(paths["high_caution_over_watchlist"], warnings)
@@ -1346,6 +1354,21 @@ def build_operator_card(
         if isinstance(calibration_bucket_payload, dict)
         else {}
     )
+    player_role_stability_summary = (
+        player_role_stability_payload.get("summary", {})
+        if isinstance(player_role_stability_payload, dict)
+        else {}
+    )
+    if not isinstance(player_role_stability_summary, dict):
+        player_role_stability_summary = {}
+    stability_total_evaluated = _safe_int(player_role_stability_summary.get("total_rows_evaluated"), 0)
+    stability_stable_count = _safe_int(player_role_stability_summary.get("stable_count"), 0)
+    stability_mostly_stable_count = _safe_int(player_role_stability_summary.get("mostly_stable_count"), 0)
+    stability_mixed_count = _safe_int(player_role_stability_summary.get("mixed_count"), 0)
+    stability_volatile_count = _safe_int(player_role_stability_summary.get("volatile_count"), 0)
+    stability_highly_volatile_count = _safe_int(player_role_stability_summary.get("highly_volatile_count"), 0)
+    stability_unknown_count = _safe_int(player_role_stability_summary.get("unknown_count"), 0)
+    stability_top_examples = player_role_stability_summary.get("top_volatile_examples") or []
     if not isinstance(calibration_bucket_summary, dict):
         calibration_bucket_summary = {}
     calibration_graded_rows_used = _safe_int(calibration_bucket_summary.get("total_graded_rows_used"), 0)
@@ -1680,6 +1703,28 @@ def build_operator_card(
     lines.append(f"- {CALIBRATION_BUCKET_DIAGNOSTIC_ONLY_NOTE}")
     lines.append("")
 
+    lines.append("Player Role Stability - Shadow Only")
+    lines.append("-" * 40)
+    lines.append(f"- total rows evaluated: {stability_total_evaluated}")
+    lines.append(f"- stable count: {stability_stable_count}")
+    lines.append(f"- mostly stable count: {stability_mostly_stable_count}")
+    lines.append(f"- mixed count: {stability_mixed_count}")
+    lines.append(f"- volatile count: {stability_volatile_count}")
+    lines.append(f"- highly volatile count: {stability_highly_volatile_count}")
+    lines.append(f"- unknown count: {stability_unknown_count}")
+    lines.append("- top volatile examples:")
+    if not stability_top_examples:
+        lines.append("  - none")
+    else:
+        for ex in stability_top_examples:
+            reasons = "; ".join(ex.get("role_stability_reasons", []))
+            lines.append(
+                f"  - {ex.get('player_name')} ({ex.get('team')}): score={ex.get('role_stability_score')} "
+                f"bucket={ex.get('role_stability_bucket')} reasons=[{reasons}]"
+            )
+    lines.append(f"- {PLAYER_ROLE_STABILITY_DIAGNOSTIC_ONLY_NOTE}")
+    lines.append("")
+
     lines.extend(_completion_state_lines(completion_state_payload, paths["completion_state_audit_json"], prediction_date))
     lines.append("")
 
@@ -1760,6 +1805,7 @@ def build_operator_card(
         "runtime_safety": runtime_safety,
         "clv_market_movement": clv_market_summary,
         "calibration_bucket_report": calibration_bucket_summary,
+        "player_role_stability_report": player_role_stability_summary,
         "missing_required": missing_required,
         "completion_state_audit_status": _safe_text(completion_state_payload.get("report_agreement_status")) if completion_state_payload else "missing",
         "warnings": warnings,

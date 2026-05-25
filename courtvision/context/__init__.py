@@ -38,6 +38,10 @@ from .game_strength import (
     get_matchup_context,
     get_matchup_context_batch,
 )
+from .player_role_stability import (
+    apply_player_role_stability,
+    calculate_player_role_stability_row,
+)
 
 __all__ = [
     "MANUAL_CONTEXT_COLUMNS",
@@ -70,4 +74,6 @@ __all__ = [
     "player_identity_reason_counts",
     "source_identity_conflict_exposure_summary",
     "source_identity_conflicted_row_count",
+    "apply_player_role_stability",
+    "calculate_player_role_stability_row",
 ]

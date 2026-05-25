@@ -111,6 +111,29 @@ def test_operator_card_includes_clv_market_movement_shadow_section(tmp_path: Pat
             }
         },
     )
+    _write_json(
+        diagnostics / f"player_role_stability_{prediction_date}.json",
+        {
+            "summary": {
+                "total_rows_evaluated": 50,
+                "stable_count": 40,
+                "mostly_stable_count": 5,
+                "mixed_count": 3,
+                "volatile_count": 1,
+                "highly_volatile_count": 1,
+                "unknown_count": 0,
+                "top_volatile_examples": [
+                    {
+                        "player_name": "Volatile Player",
+                        "team": "BOS",
+                        "role_stability_score": 15.0,
+                        "role_stability_bucket": "highly_volatile",
+                        "role_stability_reasons": ["high_recent_avg_delta"],
+                    }
+                ],
+            }
+        },
+    )
     _write_csv(
         history_root / "pick_history.csv",
         [{"prediction_date": "2026-05-01", "result_status": "hit"}],
@@ -138,4 +161,12 @@ def test_operator_card_includes_clv_market_movement_shadow_section(tmp_path: Pat
     assert "- tiny/small sample warning count: 7" in text
     assert "- Calibration Bucket Report is diagnostic only and is not an Elite/Kelly input." in text
     assert payload["calibration_bucket_report"]["total_graded_rows_used"] == 42
+    
+    assert "Player Role Stability - Shadow Only" in text
+    assert "- total rows evaluated: 50" in text
+    assert "- stable count: 40" in text
+    assert "- volatile count: 1" in text
+    assert "- Volatile Player (BOS): score=15.0 bucket=highly_volatile reasons=[high_recent_avg_delta]" in text
+    assert "- Player Role Stability is diagnostic only and is not an Elite/Kelly input." in text
+    assert payload["player_role_stability_report"]["total_rows_evaluated"] == 50
     assert payload["final_decision"] == "BETTABLE"

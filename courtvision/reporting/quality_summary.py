@@ -64,6 +64,11 @@ from courtvision.reporting.calibration_bucket_report import (
     calibration_bucket_txt_path_for_date,
     write_calibration_bucket_report,
 )
+from courtvision.reporting.player_role_stability import (
+    player_role_stability_json_path_for_date,
+    player_role_stability_txt_path_for_date,
+    write_player_role_stability_report,
+)
 from courtvision.reporting.projection_calibration_shadow import (
     calibration_json_path_for_date,
     calibration_txt_path_for_date,
@@ -2644,6 +2649,37 @@ def write_quality_summary_outputs(
         "best_calibrated_bucket": _bucket_summary.get("best_calibrated_bucket_label", "n/a"),
         "tiny_small_sample_warning_count": _bucket_summary.get("tiny_small_sample_warning_count", 0),
         "readiness": _bucket_summary.get("readiness", "review_only"),
+        "note": "diagnostic_report_only_no_elite_kelly_prediction_or_final_decision_change",
+    }
+
+    # Phase 3: player role stability report (diagnostics/report-only).
+    try:
+        _stability_json, _stability_txt, _stability_payload = write_player_role_stability_report(
+            prediction_date=prediction_date,
+            runtime_root=runtime_root,
+            history_root=history_root,
+            full_market_df=full_market_df,
+            baseline_df=player_baselines_df,
+        )
+    except Exception:
+        _stability_json = player_role_stability_json_path_for_date(prediction_date, runtime_root)
+        _stability_txt = player_role_stability_txt_path_for_date(prediction_date, runtime_root)
+        _stability_payload = {"summary": {}}
+    _stability_summary = _stability_payload.get("summary", {}) if isinstance(_stability_payload, dict) else {}
+    if not isinstance(_stability_summary, dict):
+        _stability_summary = {}
+    payload["player_role_stability_shadow"] = {
+        "json_path": str(_stability_json),
+        "txt_path": str(_stability_txt),
+        "total_rows_evaluated": _stability_summary.get("total_rows_evaluated", 0),
+        "stable_count": _stability_summary.get("stable_count", 0),
+        "mostly_stable_count": _stability_summary.get("mostly_stable_count", 0),
+        "mixed_count": _stability_summary.get("mixed_count", 0),
+        "volatile_count": _stability_summary.get("volatile_count", 0),
+        "highly_volatile_count": _stability_summary.get("highly_volatile_count", 0),
+        "unknown_count": _stability_summary.get("unknown_count", 0),
+        "top_volatile_examples": _stability_summary.get("top_volatile_examples", []),
+        "readiness": _stability_summary.get("readiness", "review_only"),
         "note": "diagnostic_report_only_no_elite_kelly_prediction_or_final_decision_change",
     }
 
