@@ -76,6 +76,9 @@ from courtvision.reporting.calibration_bucket_report import (
 from courtvision.reporting.player_role_stability import (
     DIAGNOSTIC_ONLY_NOTE as PLAYER_ROLE_STABILITY_DIAGNOSTIC_ONLY_NOTE,
 )
+from courtvision.reporting.meta_label_promotion import (
+    DIAGNOSTIC_ONLY_NOTE as META_LABEL_DIAGNOSTIC_ONLY_NOTE,
+)
 from courtvision.reporting.team_distribution import (
     OBSERVATION_ONLY_NOTE as TEAM_DISTRIBUTION_OBSERVATION_ONLY_NOTE,
     REPORT_TITLE as TEAM_DISTRIBUTION_TITLE,
@@ -597,6 +600,10 @@ def build_daily_summary(
         diagnostics_dir / f"player_role_stability_{prediction_date}.json",
         [],
     )
+    meta_label_promotion_payload = _read_json(
+        diagnostics_dir / f"meta_label_promotion_shadow_{prediction_date}.json",
+        [],
+    )
     readiness = _read_json(diagnostics_dir / f"market_performance_readiness_{prediction_date}.json", warnings)
     manual_context = _read_json(diagnostics_dir / f"manual_context_{prediction_date}.json", warnings)
     manual_review_history_df = _read_csv(history_root / "manual_review_history.csv", [])
@@ -795,8 +802,15 @@ def build_daily_summary(
         if isinstance(player_role_stability_payload, dict)
         else {}
     )
+    meta_label_promotion_summary = (
+        meta_label_promotion_payload.get("summary", {})
+        if isinstance(meta_label_promotion_payload, dict)
+        else {}
+    )
     if not isinstance(player_role_stability_summary, dict):
         player_role_stability_summary = {}
+    if not isinstance(meta_label_promotion_summary, dict):
+        meta_label_promotion_summary = {}
     stability_total_evaluated = int(player_role_stability_summary.get("total_rows_evaluated") or 0)
     stability_stable_count = int(player_role_stability_summary.get("stable_count") or 0)
     stability_mostly_stable_count = int(player_role_stability_summary.get("mostly_stable_count") or 0)
@@ -805,6 +819,14 @@ def build_daily_summary(
     stability_highly_volatile_count = int(player_role_stability_summary.get("highly_volatile_count") or 0)
     stability_unknown_count = int(player_role_stability_summary.get("unknown_count") or 0)
     stability_top_examples = player_role_stability_summary.get("top_volatile_examples") or []
+
+    meta_label_total_evaluated = int(meta_label_promotion_summary.get("total_rows_evaluated") or 0)
+    meta_label_strong_count = int(meta_label_promotion_summary.get("shadow_strong_review_candidate_count") or 0)
+    meta_label_watch_count = int(meta_label_promotion_summary.get("shadow_watch_candidate_count") or 0)
+    meta_label_neutral_count = int(meta_label_promotion_summary.get("shadow_neutral_count") or 0)
+    meta_label_weak_count = int(meta_label_promotion_summary.get("shadow_weak_count") or 0)
+    meta_label_avoid_count = int(meta_label_promotion_summary.get("shadow_avoid_review_count") or 0)
+    meta_label_top_candidates = meta_label_promotion_summary.get("top_strong_candidates") or []
     if not isinstance(calibration_bucket_summary, dict):
         calibration_bucket_summary = {}
     calibration_graded_rows_used = int(calibration_bucket_summary.get("total_graded_rows_used") or 0)
@@ -986,6 +1008,25 @@ def build_daily_summary(
                 f"bucket={ex.get('role_stability_bucket')} reasons=[{reasons}]"
             )
     lines.append(f"- note: {PLAYER_ROLE_STABILITY_DIAGNOSTIC_ONLY_NOTE}")
+
+    lines.extend(["", "Meta-Label Promotion - Shadow Only", "-" * 72])
+    lines.append(f"- total rows evaluated: {meta_label_total_evaluated}")
+    lines.append(f"- shadow strong review candidate count: {meta_label_strong_count}")
+    lines.append(f"- shadow watch candidate count: {meta_label_watch_count}")
+    lines.append(f"- shadow neutral count: {meta_label_neutral_count}")
+    lines.append(f"- shadow weak count: {meta_label_weak_count}")
+    lines.append(f"- shadow avoid review count: {meta_label_avoid_count}")
+    lines.append("- top strong candidates:")
+    if not meta_label_top_candidates:
+        lines.append("  - none")
+    else:
+        for ex in meta_label_top_candidates:
+            reasons = "; ".join(ex.get("reason_codes", []))
+            lines.append(
+                f"  - {ex.get('player_name')} ({ex.get('team')}): score={ex.get('meta_label_rules_score')} "
+                f"bucket={ex.get('meta_label_bucket')} reasons=[{reasons}]"
+            )
+    lines.append(f"- note: {META_LABEL_DIAGNOSTIC_ONLY_NOTE}")
 
     lines.extend(["", "Combo UNDER Promotion Watchlist — Observation Only / No Kelly", "-" * 72])
     lines.append(f"- watchlist row count: {int(len(combo_under_watchlist))}")
@@ -1321,6 +1362,7 @@ def build_daily_summary(
         "market_shadow_top_markets": dict(market_shadow_counts.most_common(5)),
         "calibration_bucket_report": calibration_bucket_summary,
         "player_role_stability_report": player_role_stability_summary,
+        "meta_label_promotion_report": meta_label_promotion_summary,
         "full_market_context_conflict_cause_counts": full_market_context_conflict_causes,
         "stale_team_not_in_game_count": int(full_market_context_conflict_causes.get("stale_team_not_in_game", 0)),
         "run_health": run_health,

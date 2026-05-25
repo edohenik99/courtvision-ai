@@ -134,6 +134,30 @@ def test_operator_card_includes_clv_market_movement_shadow_section(tmp_path: Pat
             }
         },
     )
+    _write_json(
+        diagnostics / f"meta_label_promotion_shadow_{prediction_date}.json",
+        {
+            "summary": {
+                "total_rows_evaluated": 12,
+                "shadow_strong_review_candidate_count": 2,
+                "shadow_watch_candidate_count": 3,
+                "shadow_neutral_count": 4,
+                "shadow_weak_count": 2,
+                "shadow_avoid_review_count": 1,
+                "top_strong_candidates": [
+                    {
+                        "player_name": "Elite Candidate",
+                        "team": "BOS",
+                        "market_type": "player_points",
+                        "selection": "over",
+                        "meta_label_rules_score": 95.0,
+                        "meta_label_bucket": "shadow_strong_review_candidate",
+                        "reason_codes": ["high_quality_score", "strong_confidence"],
+                    }
+                ],
+            }
+        },
+    )
     _write_csv(
         history_root / "pick_history.csv",
         [{"prediction_date": "2026-05-01", "result_status": "hit"}],
@@ -169,4 +193,12 @@ def test_operator_card_includes_clv_market_movement_shadow_section(tmp_path: Pat
     assert "- Volatile Player (BOS): score=15.0 bucket=highly_volatile reasons=[high_recent_avg_delta]" in text
     assert "- Player Role Stability is diagnostic only and is not an Elite/Kelly input." in text
     assert payload["player_role_stability_report"]["total_rows_evaluated"] == 50
+
+    assert "Meta-Label Promotion - Shadow Only" in text
+    assert "- total rows evaluated: 12" in text
+    assert "- shadow strong review candidate count: 2" in text
+    assert "- Elite Candidate (BOS): score=95.0 bucket=shadow_strong_review_candidate reasons=[high_quality_score; strong_confidence]" in text
+    assert "- Meta-Label Promotion is shadow-only and is not an Elite/Kelly input." in text
+    assert payload["meta_label_promotion_report"]["total_rows_evaluated"] == 12
+
     assert payload["final_decision"] == "BETTABLE"

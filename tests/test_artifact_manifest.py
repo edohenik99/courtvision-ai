@@ -160,6 +160,29 @@ def test_manifest_missing_player_role_stability_is_shadow_only_not_fatal(tmp_pat
     assert manifest["missing_by_severity"]["fatal"] == 0
 
 
+def test_manifest_missing_meta_label_promotion_is_shadow_only_not_fatal(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    _write_core_boards(runtime_root)
+
+    manifest = build_artifact_manifest(
+        prediction_date=PREDICTION_DATE,
+        runtime_root=runtime_root,
+        generated_at="2026-04-10T12:00:00Z",
+    )
+
+    report = _artifact(manifest, "meta_label_promotion_shadow_report")
+    diagnostics = _artifact(manifest, "meta_label_promotion_shadow_diagnostics")
+    csv_art = _artifact(manifest, "meta_label_promotion_shadow_csv")
+    assert report["exists"] is False
+    assert diagnostics["exists"] is False
+    assert csv_art["exists"] is False
+    assert report["severity"] == SEVERITY_SHADOW_ONLY
+    assert diagnostics["severity"] == SEVERITY_SHADOW_ONLY
+    assert csv_art["severity"] == SEVERITY_SHADOW_ONLY
+    assert "not an Elite, Kelly, SGP, final decision, or staking input" in report["notes"]
+    assert manifest["missing_by_severity"]["fatal"] == 0
+
+
 def test_manifest_counts_csv_rows(tmp_path: Path) -> None:
     runtime_root = tmp_path / "runtime"
     _write_text(

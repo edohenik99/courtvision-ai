@@ -34,6 +34,9 @@ from courtvision.reporting.calibration_bucket_report import (  # noqa: E402
 from courtvision.reporting.player_role_stability import (  # noqa: E402
     DIAGNOSTIC_ONLY_NOTE as PLAYER_ROLE_STABILITY_DIAGNOSTIC_ONLY_NOTE,
 )
+from courtvision.reporting.meta_label_promotion import (  # noqa: E402
+    DIAGNOSTIC_ONLY_NOTE as META_LABEL_DIAGNOSTIC_ONLY_NOTE,
+)
 from courtvision.reporting.completion_state_audit import history_pending_grading_count  # noqa: E402
 from courtvision.reporting.near_elite_review import (  # noqa: E402
     REVIEW_ONLY_NOTE as NEAR_ELITE_REVIEW_ONLY_NOTE,
@@ -188,6 +191,9 @@ def _artifact_paths(runtime_root: Path, prediction_date: str) -> dict[str, Path]
         "calibration_bucket_report_diagnostics": diagnostics / f"calibration_bucket_report_{prediction_date}.json",
         "player_role_stability_report": operator / f"player_role_stability_{prediction_date}.txt",
         "player_role_stability_report_diagnostics": diagnostics / f"player_role_stability_{prediction_date}.json",
+        "meta_label_promotion_shadow_report": operator / f"meta_label_promotion_shadow_{prediction_date}.txt",
+        "meta_label_promotion_shadow_diagnostics": diagnostics / f"meta_label_promotion_shadow_{prediction_date}.json",
+        "meta_label_promotion_shadow_csv": operator / f"meta_label_promotion_shadow_{prediction_date}.csv",
         "high_caution_over_watchlist": operator / f"high_caution_over_watchlist_{prediction_date}.csv",
         "combo_under_watchlist": operator / f"combo_under_watchlist_{prediction_date}.csv",
         "paper_kelly_simulation": operator / f"paper_kelly_simulation_{prediction_date}.csv",
@@ -1088,6 +1094,9 @@ def _files_written_lines(paths: dict[str, Path]) -> list[str]:
         "calibration_bucket_report_diagnostics",
         "player_role_stability_report",
         "player_role_stability_report_diagnostics",
+        "meta_label_promotion_shadow_report",
+        "meta_label_promotion_shadow_diagnostics",
+        "meta_label_promotion_shadow_csv",
     )
     lines: list[str] = []
     for key in keys:
@@ -1180,6 +1189,7 @@ def build_operator_card(
     clv_market_payload = _read_json(paths["clv_market_movement_diagnostics"], warnings)
     calibration_bucket_payload = _read_json(paths["calibration_bucket_report_diagnostics"], warnings)
     player_role_stability_payload = _read_json(paths["player_role_stability_report_diagnostics"], warnings)
+    meta_label_promotion_payload = _read_json(paths["meta_label_promotion_shadow_diagnostics"], warnings)
     injury_payload = _read_json(runtime_root / "diagnostics" / f"injury_context_diagnostics_{prediction_date}.json", warnings)
     game_payload = _read_json(runtime_root / "diagnostics" / f"game_context_{prediction_date}.json", warnings)
     high_caution_df = _read_csv(paths["high_caution_over_watchlist"], warnings)
@@ -1369,6 +1379,20 @@ def build_operator_card(
     stability_highly_volatile_count = _safe_int(player_role_stability_summary.get("highly_volatile_count"), 0)
     stability_unknown_count = _safe_int(player_role_stability_summary.get("unknown_count"), 0)
     stability_top_examples = player_role_stability_summary.get("top_volatile_examples") or []
+    meta_label_promotion_summary = (
+        meta_label_promotion_payload.get("summary", {})
+        if isinstance(meta_label_promotion_payload, dict)
+        else {}
+    )
+    if not isinstance(meta_label_promotion_summary, dict):
+        meta_label_promotion_summary = {}
+    meta_label_total_evaluated = _safe_int(meta_label_promotion_summary.get("total_rows_evaluated"), 0)
+    meta_label_strong_count = _safe_int(meta_label_promotion_summary.get("shadow_strong_review_candidate_count"), 0)
+    meta_label_watch_count = _safe_int(meta_label_promotion_summary.get("shadow_watch_candidate_count"), 0)
+    meta_label_neutral_count = _safe_int(meta_label_promotion_summary.get("shadow_neutral_count"), 0)
+    meta_label_weak_count = _safe_int(meta_label_promotion_summary.get("shadow_weak_count"), 0)
+    meta_label_avoid_count = _safe_int(meta_label_promotion_summary.get("shadow_avoid_review_count"), 0)
+    meta_label_top_candidates = meta_label_promotion_summary.get("top_strong_candidates") or []
     if not isinstance(calibration_bucket_summary, dict):
         calibration_bucket_summary = {}
     calibration_graded_rows_used = _safe_int(calibration_bucket_summary.get("total_graded_rows_used"), 0)
@@ -1725,6 +1749,27 @@ def build_operator_card(
     lines.append(f"- {PLAYER_ROLE_STABILITY_DIAGNOSTIC_ONLY_NOTE}")
     lines.append("")
 
+    lines.append("Meta-Label Promotion - Shadow Only")
+    lines.append("-" * 40)
+    lines.append(f"- total rows evaluated: {meta_label_total_evaluated}")
+    lines.append(f"- shadow strong review candidate count: {meta_label_strong_count}")
+    lines.append(f"- shadow watch candidate count: {meta_label_watch_count}")
+    lines.append(f"- shadow neutral count: {meta_label_neutral_count}")
+    lines.append(f"- shadow weak count: {meta_label_weak_count}")
+    lines.append(f"- shadow avoid review count: {meta_label_avoid_count}")
+    lines.append("- top strong candidates:")
+    if not meta_label_top_candidates:
+        lines.append("  - none")
+    else:
+        for ex in meta_label_top_candidates:
+            reasons = "; ".join(ex.get("reason_codes", []))
+            lines.append(
+                f"  - {ex.get('player_name')} ({ex.get('team')}): score={ex.get('meta_label_rules_score')} "
+                f"bucket={ex.get('meta_label_bucket')} reasons=[{reasons}]"
+            )
+    lines.append(f"- {META_LABEL_DIAGNOSTIC_ONLY_NOTE}")
+    lines.append("")
+
     lines.extend(_completion_state_lines(completion_state_payload, paths["completion_state_audit_json"], prediction_date))
     lines.append("")
 
@@ -1806,6 +1851,7 @@ def build_operator_card(
         "clv_market_movement": clv_market_summary,
         "calibration_bucket_report": calibration_bucket_summary,
         "player_role_stability_report": player_role_stability_summary,
+        "meta_label_promotion_report": meta_label_promotion_summary,
         "missing_required": missing_required,
         "completion_state_audit_status": _safe_text(completion_state_payload.get("report_agreement_status")) if completion_state_payload else "missing",
         "warnings": warnings,

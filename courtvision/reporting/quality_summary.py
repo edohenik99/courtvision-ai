@@ -69,6 +69,12 @@ from courtvision.reporting.player_role_stability import (
     player_role_stability_txt_path_for_date,
     write_player_role_stability_report,
 )
+from courtvision.reporting.meta_label_promotion import (
+    meta_label_promotion_json_path_for_date,
+    meta_label_promotion_txt_path_for_date,
+    meta_label_promotion_csv_path_for_date,
+    write_meta_label_promotion_report,
+)
 from courtvision.reporting.projection_calibration_shadow import (
     calibration_json_path_for_date,
     calibration_txt_path_for_date,
@@ -2678,6 +2684,40 @@ def write_quality_summary_outputs(
         "unknown_count": _stability_summary.get("unknown_count", 0),
         "top_volatile_examples": _stability_summary.get("top_volatile_examples", []),
         "readiness": _stability_summary.get("readiness", "review_only"),
+        "note": "diagnostic_report_only_no_elite_kelly_prediction_or_final_decision_change",
+    }
+
+    # Phase 4B: Meta-Label Promotion rules-baseline shadow report
+    try:
+        _meta_json, _meta_txt, _meta_csv, _meta_payload = write_meta_label_promotion_report(
+            prediction_date=prediction_date,
+            runtime_root=runtime_root,
+            history_root=history_root,
+            role_payload=_stability_payload,
+            cal_payload=_bucket_payload,
+        )
+    except Exception:
+        _meta_json = meta_label_promotion_json_path_for_date(prediction_date, runtime_root)
+        _meta_txt = meta_label_promotion_txt_path_for_date(prediction_date, runtime_root)
+        _meta_csv = meta_label_promotion_csv_path_for_date(prediction_date, runtime_root)
+        _meta_payload = {"summary": {}}
+
+    _meta_summary = _meta_payload.get("summary", {}) if isinstance(_meta_payload, dict) else {}
+    if not isinstance(_meta_summary, dict):
+        _meta_summary = {}
+
+    payload["meta_label_promotion_shadow"] = {
+        "json_path": str(_meta_json),
+        "txt_path": str(_meta_txt),
+        "csv_path": str(_meta_csv),
+        "total_rows_evaluated": _meta_summary.get("total_rows_evaluated", 0),
+        "shadow_strong_review_candidate_count": _meta_summary.get("shadow_strong_review_candidate_count", 0),
+        "shadow_watch_candidate_count": _meta_summary.get("shadow_watch_candidate_count", 0),
+        "shadow_neutral_count": _meta_summary.get("shadow_neutral_count", 0),
+        "shadow_weak_count": _meta_summary.get("shadow_weak_count", 0),
+        "shadow_avoid_review_count": _meta_summary.get("shadow_avoid_review_count", 0),
+        "top_strong_candidates": _meta_summary.get("top_strong_candidates", []),
+        "readiness": _meta_summary.get("readiness", "review_only"),
         "note": "diagnostic_report_only_no_elite_kelly_prediction_or_final_decision_change",
     }
 
