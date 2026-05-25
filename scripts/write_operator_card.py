@@ -37,6 +37,9 @@ from courtvision.reporting.player_role_stability import (  # noqa: E402
 from courtvision.reporting.meta_label_promotion import (  # noqa: E402
     DIAGNOSTIC_ONLY_NOTE as META_LABEL_DIAGNOSTIC_ONLY_NOTE,
 )
+from courtvision.reporting.meta_label_rules_performance import (  # noqa: E402
+    DIAGNOSTIC_ONLY_NOTE as PERF_DIAGNOSTIC_ONLY_NOTE,
+)
 from courtvision.reporting.completion_state_audit import history_pending_grading_count  # noqa: E402
 from courtvision.reporting.near_elite_review import (  # noqa: E402
     REVIEW_ONLY_NOTE as NEAR_ELITE_REVIEW_ONLY_NOTE,
@@ -194,6 +197,9 @@ def _artifact_paths(runtime_root: Path, prediction_date: str) -> dict[str, Path]
         "meta_label_promotion_shadow_report": operator / f"meta_label_promotion_shadow_{prediction_date}.txt",
         "meta_label_promotion_shadow_diagnostics": diagnostics / f"meta_label_promotion_shadow_{prediction_date}.json",
         "meta_label_promotion_shadow_csv": operator / f"meta_label_promotion_shadow_{prediction_date}.csv",
+        "meta_label_rules_performance_report": operator / f"meta_label_rules_performance_{prediction_date}.txt",
+        "meta_label_rules_performance_diagnostics": diagnostics / f"meta_label_rules_performance_{prediction_date}.json",
+        "meta_label_rules_performance_csv": operator / f"meta_label_rules_performance_{prediction_date}.csv",
         "high_caution_over_watchlist": operator / f"high_caution_over_watchlist_{prediction_date}.csv",
         "combo_under_watchlist": operator / f"combo_under_watchlist_{prediction_date}.csv",
         "paper_kelly_simulation": operator / f"paper_kelly_simulation_{prediction_date}.csv",
@@ -1097,6 +1103,9 @@ def _files_written_lines(paths: dict[str, Path]) -> list[str]:
         "meta_label_promotion_shadow_report",
         "meta_label_promotion_shadow_diagnostics",
         "meta_label_promotion_shadow_csv",
+        "meta_label_rules_performance_report",
+        "meta_label_rules_performance_diagnostics",
+        "meta_label_rules_performance_csv",
     )
     lines: list[str] = []
     for key in keys:
@@ -1190,6 +1199,7 @@ def build_operator_card(
     calibration_bucket_payload = _read_json(paths["calibration_bucket_report_diagnostics"], warnings)
     player_role_stability_payload = _read_json(paths["player_role_stability_report_diagnostics"], warnings)
     meta_label_promotion_payload = _read_json(paths["meta_label_promotion_shadow_diagnostics"], warnings)
+    meta_label_rules_performance_payload = _read_json(paths["meta_label_rules_performance_diagnostics"], warnings)
     injury_payload = _read_json(runtime_root / "diagnostics" / f"injury_context_diagnostics_{prediction_date}.json", warnings)
     game_payload = _read_json(runtime_root / "diagnostics" / f"game_context_{prediction_date}.json", warnings)
     high_caution_df = _read_csv(paths["high_caution_over_watchlist"], warnings)
@@ -1409,6 +1419,21 @@ def build_operator_card(
     meta_label_weak_count = _safe_int(meta_label_promotion_summary.get("shadow_weak_count"), 0)
     meta_label_avoid_count = _safe_int(meta_label_promotion_summary.get("shadow_avoid_review_count"), 0)
     meta_label_top_candidates = meta_label_promotion_summary.get("top_strong_candidates") or []
+
+    meta_label_rules_performance_readiness = (
+        meta_label_rules_performance_payload.get("data_readiness", {})
+        if isinstance(meta_label_rules_performance_payload, dict)
+        else {}
+    )
+    if not isinstance(meta_label_rules_performance_readiness, dict):
+        meta_label_rules_performance_readiness = {}
+    perf_verdict = meta_label_rules_performance_readiness.get("verdict", "WAIT_MORE_DATA")
+    perf_graded = _safe_int(meta_label_rules_performance_readiness.get("graded_hit_miss_rows"), 0)
+    perf_slates = _safe_int(meta_label_rules_performance_readiness.get("completed_slate_count"), 0)
+    perf_min_status = meta_label_rules_performance_readiness.get("minimum_sample_threshold_status", "insufficient")
+    perf_missing_stability = _safe_float(meta_label_rules_performance_readiness.get("missing_role_stability_rate"))
+    perf_missing_fragility = _safe_float(meta_label_rules_performance_readiness.get("missing_fragility_rate"))
+
     if not isinstance(calibration_bucket_summary, dict):
         calibration_bucket_summary = {}
     calibration_graded_rows_used = _safe_int(calibration_bucket_summary.get("total_graded_rows_used"), 0)
@@ -1784,6 +1809,17 @@ def build_operator_card(
                 f"bucket={ex.get('meta_label_bucket')} reasons=[{reasons}]"
             )
     lines.append(f"- {META_LABEL_DIAGNOSTIC_ONLY_NOTE}")
+    lines.append("")
+
+    lines.append("Meta-Label Rules Performance - Shadow Only")
+    lines.append("-" * 40)
+    lines.append(f"- completed slate count: {perf_slates}")
+    lines.append(f"- graded hit/miss rows: {perf_graded}")
+    lines.append(f"- minimum sample status: {perf_min_status}")
+    lines.append(f"- missing role stability rate: {_format_rate(perf_missing_stability)}")
+    lines.append(f"- missing fragility/survivability rate: {_format_rate(perf_missing_fragility)}")
+    lines.append(f"- Phase 4C readiness verdict: {perf_verdict}")
+    lines.append(f"- {PERF_DIAGNOSTIC_ONLY_NOTE}")
     lines.append("")
 
     lines.extend(_completion_state_lines(completion_state_payload, paths["completion_state_audit_json"], prediction_date))
