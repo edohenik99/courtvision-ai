@@ -43,3 +43,7 @@ build/
 # Local generated design previews / font-link scratch
 preview/
 fonts/
+
+# Root-level generated logs and run outputs
+*.log
+run_output.txt

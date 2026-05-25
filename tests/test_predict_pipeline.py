@@ -1108,9 +1108,10 @@ class TestPredictionPipeline:
         assert alignment_perf["by_alignment_and_selection_side"]["aligned"]["under"]["hit_rate"] == 0.0
         assert alignment_perf["by_alignment_and_market_type"]["aligned"]["player_rebounds"]["roi"] == -1.0
 
-    def test_daily_summary_includes_operator_sections(self):
-        runtime_root = Path("test_outputs") / "daily_summary_runtime"
-        shutil.rmtree(runtime_root, ignore_errors=True)
+    def test_daily_summary_includes_operator_sections(self, tmp_path):
+        runtime_root = tmp_path / "outputs"
+        history_root = tmp_path / "history"
+        history_root.mkdir(parents=True, exist_ok=True)
         (runtime_root / "operator").mkdir(parents=True, exist_ok=True)
         (runtime_root / "diagnostics").mkdir(parents=True, exist_ok=True)
 
@@ -1308,6 +1309,9 @@ class TestPredictionPipeline:
         output_path, metadata = write_daily_summary_outputs(
             prediction_date="2024-01-15",
             runtime_root=runtime_root,
+            history_root=history_root,
+            persist_shadow_history=False,
+            persist_paper_kelly_history=False,
         )
 
         text = output_path.read_text(encoding="utf-8")
