@@ -59,6 +59,11 @@ from courtvision.reporting.clv_market_movement import (
     clv_market_movement_txt_path_for_date,
     write_clv_market_movement_report,
 )
+from courtvision.reporting.calibration_bucket_report import (
+    calibration_bucket_json_path_for_date,
+    calibration_bucket_txt_path_for_date,
+    write_calibration_bucket_report,
+)
 from courtvision.reporting.projection_calibration_shadow import (
     calibration_json_path_for_date,
     calibration_txt_path_for_date,
@@ -2615,6 +2620,31 @@ def write_quality_summary_outputs(
         "movement_away_from_pick_count": _clv_summary.get("movement_away_from_pick_count", 0),
         "missing_close_line_count": _clv_summary.get("missing_close_line_count", 0),
         "note": "shadow_report_only_no_elite_kelly_or_prediction_logic_changed",
+    }
+
+    # Phase 2: calibration bucket report (diagnostics/report-only).
+    try:
+        _bucket_json, _bucket_txt, _bucket_payload = write_calibration_bucket_report(
+            prediction_date=prediction_date,
+            runtime_root=runtime_root,
+            history_root=history_root,
+        )
+    except Exception:
+        _bucket_json = calibration_bucket_json_path_for_date(prediction_date, runtime_root)
+        _bucket_txt = calibration_bucket_txt_path_for_date(prediction_date, runtime_root)
+        _bucket_payload = {"summary": {}}
+    _bucket_summary = _bucket_payload.get("summary", {}) if isinstance(_bucket_payload, dict) else {}
+    if not isinstance(_bucket_summary, dict):
+        _bucket_summary = {}
+    payload["calibration_bucket_report_shadow"] = {
+        "json_path": str(_bucket_json),
+        "txt_path": str(_bucket_txt),
+        "total_graded_rows_used": _bucket_summary.get("total_graded_rows_used", 0),
+        "worst_overconfident_bucket": _bucket_summary.get("worst_overconfident_bucket_label", "n/a"),
+        "best_calibrated_bucket": _bucket_summary.get("best_calibrated_bucket_label", "n/a"),
+        "tiny_small_sample_warning_count": _bucket_summary.get("tiny_small_sample_warning_count", 0),
+        "readiness": _bucket_summary.get("readiness", "review_only"),
+        "note": "diagnostic_report_only_no_elite_kelly_prediction_or_final_decision_change",
     }
 
     attribution_payload = _build_fragility_attribution_payload(prediction_date, history_root)

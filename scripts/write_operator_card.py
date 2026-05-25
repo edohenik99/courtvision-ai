@@ -28,6 +28,9 @@ from courtvision.context.player_identity import (  # noqa: E402
 from courtvision.reporting.clv_market_movement import (  # noqa: E402
     DIAGNOSTIC_ONLY_NOTE as CLV_DIAGNOSTIC_ONLY_NOTE,
 )
+from courtvision.reporting.calibration_bucket_report import (  # noqa: E402
+    DIAGNOSTIC_ONLY_NOTE as CALIBRATION_BUCKET_DIAGNOSTIC_ONLY_NOTE,
+)
 from courtvision.reporting.completion_state_audit import history_pending_grading_count  # noqa: E402
 from courtvision.reporting.near_elite_review import (  # noqa: E402
     REVIEW_ONLY_NOTE as NEAR_ELITE_REVIEW_ONLY_NOTE,
@@ -178,6 +181,8 @@ def _artifact_paths(runtime_root: Path, prediction_date: str) -> dict[str, Path]
         "market_shadow_grading": diagnostics / f"market_shadow_grading_{prediction_date}.json",
         "clv_market_movement_report": operator / f"clv_market_movement_{prediction_date}.txt",
         "clv_market_movement_diagnostics": diagnostics / f"clv_market_movement_{prediction_date}.json",
+        "calibration_bucket_report": operator / f"calibration_bucket_report_{prediction_date}.txt",
+        "calibration_bucket_report_diagnostics": diagnostics / f"calibration_bucket_report_{prediction_date}.json",
         "high_caution_over_watchlist": operator / f"high_caution_over_watchlist_{prediction_date}.csv",
         "combo_under_watchlist": operator / f"combo_under_watchlist_{prediction_date}.csv",
         "paper_kelly_simulation": operator / f"paper_kelly_simulation_{prediction_date}.csv",
@@ -1074,6 +1079,8 @@ def _files_written_lines(paths: dict[str, Path]) -> list[str]:
         "market_shadow_report",
         "clv_market_movement_report",
         "clv_market_movement_diagnostics",
+        "calibration_bucket_report",
+        "calibration_bucket_report_diagnostics",
     )
     lines: list[str] = []
     for key in keys:
@@ -1164,6 +1171,7 @@ def build_operator_card(
     completion_state_payload = _read_json(paths["completion_state_audit_json"], warnings)
     market_shadow_payload = _read_json(paths["market_shadow_grading"], warnings)
     clv_market_payload = _read_json(paths["clv_market_movement_diagnostics"], warnings)
+    calibration_bucket_payload = _read_json(paths["calibration_bucket_report_diagnostics"], warnings)
     injury_payload = _read_json(runtime_root / "diagnostics" / f"injury_context_diagnostics_{prediction_date}.json", warnings)
     game_payload = _read_json(runtime_root / "diagnostics" / f"game_context_{prediction_date}.json", warnings)
     high_caution_df = _read_csv(paths["high_caution_over_watchlist"], warnings)
@@ -1333,6 +1341,26 @@ def build_operator_card(
     clv_movement_toward_count = _safe_int(clv_market_summary.get("movement_toward_pick_count"), 0)
     clv_movement_away_count = _safe_int(clv_market_summary.get("movement_away_from_pick_count"), 0)
     clv_missing_close_count = _safe_int(clv_market_summary.get("missing_close_line_count"), 0)
+    calibration_bucket_summary = (
+        calibration_bucket_payload.get("summary", {})
+        if isinstance(calibration_bucket_payload, dict)
+        else {}
+    )
+    if not isinstance(calibration_bucket_summary, dict):
+        calibration_bucket_summary = {}
+    calibration_graded_rows_used = _safe_int(calibration_bucket_summary.get("total_graded_rows_used"), 0)
+    calibration_worst_overconfident = (
+        _safe_text(calibration_bucket_summary.get("worst_overconfident_bucket_label"))
+        or "n/a"
+    )
+    calibration_best_calibrated = (
+        _safe_text(calibration_bucket_summary.get("best_calibrated_bucket_label"))
+        or "n/a"
+    )
+    calibration_tiny_small_count = _safe_int(
+        calibration_bucket_summary.get("tiny_small_sample_warning_count"),
+        0,
+    )
 
     board_counts = board_diagnostics.get("board_counts", {}) if isinstance(board_diagnostics, dict) else {}
     board_count_note = ""
@@ -1643,6 +1671,15 @@ def build_operator_card(
     lines.append(f"- {CLV_DIAGNOSTIC_ONLY_NOTE}")
     lines.append("")
 
+    lines.append("Calibration Health - Shadow Only")
+    lines.append("-" * 40)
+    lines.append(f"- total graded rows used: {calibration_graded_rows_used}")
+    lines.append(f"- worst overconfident bucket: {calibration_worst_overconfident}")
+    lines.append(f"- best calibrated bucket: {calibration_best_calibrated}")
+    lines.append(f"- tiny/small sample warning count: {calibration_tiny_small_count}")
+    lines.append(f"- {CALIBRATION_BUCKET_DIAGNOSTIC_ONLY_NOTE}")
+    lines.append("")
+
     lines.extend(_completion_state_lines(completion_state_payload, paths["completion_state_audit_json"], prediction_date))
     lines.append("")
 
@@ -1722,6 +1759,7 @@ def build_operator_card(
         "provider_status": provider_status,
         "runtime_safety": runtime_safety,
         "clv_market_movement": clv_market_summary,
+        "calibration_bucket_report": calibration_bucket_summary,
         "missing_required": missing_required,
         "completion_state_audit_status": _safe_text(completion_state_payload.get("report_agreement_status")) if completion_state_payload else "missing",
         "warnings": warnings,

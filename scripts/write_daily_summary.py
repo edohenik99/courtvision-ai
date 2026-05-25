@@ -70,6 +70,9 @@ from courtvision.reporting.correlation_exposure import (
     write_correlation_exposure_report,
 )
 from courtvision.reporting.completion_state_audit import history_pending_grading_count
+from courtvision.reporting.calibration_bucket_report import (
+    DIAGNOSTIC_ONLY_NOTE as CALIBRATION_BUCKET_DIAGNOSTIC_ONLY_NOTE,
+)
 from courtvision.reporting.team_distribution import (
     OBSERVATION_ONLY_NOTE as TEAM_DISTRIBUTION_OBSERVATION_ONLY_NOTE,
     REPORT_TITLE as TEAM_DISTRIBUTION_TITLE,
@@ -582,6 +585,10 @@ def build_daily_summary(
         warnings=warnings,
     )
     shadow = _read_json(diagnostics_dir / f"market_shadow_grading_{prediction_date}.json", warnings)
+    calibration_bucket_payload = _read_json(
+        diagnostics_dir / f"calibration_bucket_report_{prediction_date}.json",
+        [],
+    )
     readiness = _read_json(diagnostics_dir / f"market_performance_readiness_{prediction_date}.json", warnings)
     manual_context = _read_json(diagnostics_dir / f"manual_context_{prediction_date}.json", warnings)
     manual_review_history_df = _read_csv(history_root / "manual_review_history.csv", [])
@@ -770,6 +777,25 @@ def build_daily_summary(
         warnings=warnings,
     )
     shadow_totals = dict(shadow.get("totals", {}) if isinstance(shadow, dict) else {})
+    calibration_bucket_summary = (
+        calibration_bucket_payload.get("summary", {})
+        if isinstance(calibration_bucket_payload, dict)
+        else {}
+    )
+    if not isinstance(calibration_bucket_summary, dict):
+        calibration_bucket_summary = {}
+    calibration_graded_rows_used = int(calibration_bucket_summary.get("total_graded_rows_used") or 0)
+    calibration_worst_overconfident = (
+        _safe_text(calibration_bucket_summary.get("worst_overconfident_bucket_label"))
+        or "n/a"
+    )
+    calibration_best_calibrated = (
+        _safe_text(calibration_bucket_summary.get("best_calibrated_bucket_label"))
+        or "n/a"
+    )
+    calibration_tiny_small_count = int(
+        calibration_bucket_summary.get("tiny_small_sample_warning_count") or 0
+    )
     context_alignment_performance = (
         shadow.get("context_alignment_performance", {})
         if isinstance(shadow, dict)
@@ -907,6 +933,13 @@ def build_daily_summary(
     else:
         lines.append("  - None")
     lines.append("- warning: Observation only; not Kelly eligible.")
+
+    lines.extend(["", "Calibration Health - Shadow Only", "-" * 72])
+    lines.append(f"- total graded rows used: {calibration_graded_rows_used}")
+    lines.append(f"- worst overconfident bucket: {calibration_worst_overconfident}")
+    lines.append(f"- best calibrated bucket: {calibration_best_calibrated}")
+    lines.append(f"- tiny/small sample warning count: {calibration_tiny_small_count}")
+    lines.append(f"- note: {CALIBRATION_BUCKET_DIAGNOSTIC_ONLY_NOTE}")
 
     lines.extend(["", "Combo UNDER Promotion Watchlist — Observation Only / No Kelly", "-" * 72])
     lines.append(f"- watchlist row count: {int(len(combo_under_watchlist))}")
@@ -1240,6 +1273,7 @@ def build_daily_summary(
         "market_shadow_rows": market_shadow_rows,
         "market_shadow_non_points_rows": market_shadow_non_points_rows,
         "market_shadow_top_markets": dict(market_shadow_counts.most_common(5)),
+        "calibration_bucket_report": calibration_bucket_summary,
         "full_market_context_conflict_cause_counts": full_market_context_conflict_causes,
         "stale_team_not_in_game_count": int(full_market_context_conflict_causes.get("stale_team_not_in_game", 0)),
         "run_health": run_health,

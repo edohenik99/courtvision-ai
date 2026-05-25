@@ -93,6 +93,24 @@ def test_operator_card_includes_clv_market_movement_shadow_section(tmp_path: Pat
             }
         },
     )
+    _write_json(
+        diagnostics / f"calibration_bucket_report_{prediction_date}.json",
+        {
+            "summary": {
+                "total_graded_rows_used": 42,
+                "worst_overconfident_bucket_label": (
+                    "confidence_bucket=0.80+ market=player_points side=over "
+                    "graded_n=12 gap=-0.2500"
+                ),
+                "best_calibrated_bucket_label": (
+                    "market_type=player_points market=player_points side=over "
+                    "graded_n=30 gap=0.0100"
+                ),
+                "tiny_small_sample_warning_count": 7,
+                "readiness": "review_only",
+            }
+        },
+    )
     _write_csv(
         history_root / "pick_history.csv",
         [{"prediction_date": "2026-05-01", "result_status": "hit"}],
@@ -113,3 +131,11 @@ def test_operator_card_includes_clv_market_movement_shadow_section(tmp_path: Pat
     assert "- missing close-line count: 1" in text
     assert "- CLV is diagnostic only and is not an Elite/Kelly input." in text
     assert payload["clv_market_movement"]["positive_clv_count"] == 2
+    assert "Calibration Health - Shadow Only" in text
+    assert "- total graded rows used: 42" in text
+    assert "- worst overconfident bucket: confidence_bucket=0.80+ market=player_points side=over graded_n=12 gap=-0.2500" in text
+    assert "- best calibrated bucket: market_type=player_points market=player_points side=over graded_n=30 gap=0.0100" in text
+    assert "- tiny/small sample warning count: 7" in text
+    assert "- Calibration Bucket Report is diagnostic only and is not an Elite/Kelly input." in text
+    assert payload["calibration_bucket_report"]["total_graded_rows_used"] == 42
+    assert payload["final_decision"] == "BETTABLE"

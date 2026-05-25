@@ -354,6 +354,22 @@ def _specs(prediction_date: str) -> tuple[ArtifactSpec, ...]:
         ),
         ArtifactSpec(
             "shadow_only",
+            "calibration_bucket_report",
+            "operator",
+            f"calibration_bucket_report_{prediction_date}.txt",
+            SEVERITY_SHADOW_ONLY,
+            "Shadow/report-only calibration bucket diagnostic; not an Elite, Kelly, SGP, final decision, or staking input.",
+        ),
+        ArtifactSpec(
+            "shadow_only",
+            "calibration_bucket_report_diagnostics",
+            "diagnostics",
+            f"calibration_bucket_report_{prediction_date}.json",
+            SEVERITY_SHADOW_ONLY,
+            "Shadow/report-only calibration bucket diagnostic; not an Elite, Kelly, SGP, final decision, or staking input.",
+        ),
+        ArtifactSpec(
+            "shadow_only",
             "high_caution_over_watchlist",
             "operator",
             f"high_caution_over_watchlist_{prediction_date}.csv",
