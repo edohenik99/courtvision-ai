@@ -92,6 +92,7 @@ if ($existingPredictionArtifacts.Count -gt 0 -and -not $ForceOutputs) {
     }
     Write-Host ""
     Write-Host "Use reporting-only refresh commands for summaries/cards; do not rerun the prediction pipeline." -ForegroundColor Cyan
+    Write-Host "  py -3.13 scripts\write_shadow_artifacts.py --prediction-date $Date --closed-slate-safe" -ForegroundColor Cyan
     Write-Host "  py -3.13 scripts\write_daily_summary.py --prediction-date $Date --no-board-annotation-write" -ForegroundColor Cyan
     Write-Host "  py -3.13 scripts\write_quality_summary.py --prediction-date $Date --no-board-annotation-write" -ForegroundColor Cyan
     Write-Host "  py -3.13 scripts\write_operator_card.py --prediction-date $Date --force" -ForegroundColor Cyan
@@ -129,6 +130,7 @@ $GradeCompletedScript = Join-Path $ScriptRoot "scripts\grade_completed_picks.py"
 $MarketShadowScript = Join-Path $ScriptRoot "scripts\market_shadow_grading.py"
 $FullMarketSanityAuditScript = Join-Path $ScriptRoot "scripts\audit_full_market_sanity.py"
 $CandidateQualityDriftAuditScript = Join-Path $ScriptRoot "scripts\audit_candidate_quality_drift.py"
+$ShadowArtifactsScript = Join-Path $ScriptRoot "scripts\write_shadow_artifacts.py"
 $DailySummaryScript = Join-Path $ScriptRoot "scripts\write_daily_summary.py"
 $QualitySummaryScript = Join-Path $ScriptRoot "scripts\write_quality_summary.py"
 $CompletionStateAuditScript = Join-Path $ScriptRoot "scripts\write_completion_state_audit.py"
@@ -551,6 +553,27 @@ if ($totalPicks -eq 0) {
         Write-Host "[WARN] Grading completed with warnings. Full log saved to $GradeLog" -ForegroundColor Yellow
     } else {
         Write-Host "[OK] Grading complete. Full log saved to $GradeLog" -ForegroundColor Green
+    }
+}
+
+Write-Host ""
+Write-Host "[START] Phase 4B Shadow Artifacts" -ForegroundColor Yellow
+if (-not (Test-Path $ShadowArtifactsScript)) {
+    Write-LogLine -Path $GradeLog -Message "[WARNING] Phase 4B shadow artifact script not found: $ShadowArtifactsScript" -AlsoConsole:$VerboseMode
+    Write-Host "[WARN] Phase 4B shadow artifacts skipped; script not found: $ShadowArtifactsScript" -ForegroundColor Yellow
+} else {
+    "`n--- Phase 4B shadow artifacts ---" | Out-File $GradeLog -Append
+    $shadowArtifactsExitCode = Invoke-LoggedCommand `
+        -LogPath $GradeLog `
+        -Exe $PyExe `
+        -Arguments ($PyArgsPrefix + @($ShadowArtifactsScript, "--prediction-date", $Date)) `
+        -StreamToConsole:$VerboseMode
+    if ($shadowArtifactsExitCode -ne 0) {
+        Write-LogLine -Path $GradeLog -Message "[WARNING] Phase 4B shadow artifact writer failed or exited nonzero (exit code: $shadowArtifactsExitCode). Continuing daily run because these artifacts are shadow-only." -AlsoConsole:$VerboseMode
+        Write-Host "[WARN] Phase 4B shadow artifact writer failed; continuing daily run." -ForegroundColor Yellow
+    } else {
+        Write-LogLine -Path $GradeLog -Message "[OK] Phase 4B shadow artifact step completed." -AlsoConsole:$VerboseMode
+        Write-Host "[OK] Phase 4B shadow artifact step completed." -ForegroundColor Green
     }
 }
 

@@ -595,26 +595,28 @@ def build_daily_summary(
         warnings=warnings,
     )
     shadow = _read_json(diagnostics_dir / f"market_shadow_grading_{prediction_date}.json", warnings)
-    calibration_bucket_payload = _read_json(
-        diagnostics_dir / f"calibration_bucket_report_{prediction_date}.json",
-        [],
+    calibration_bucket_json_path = diagnostics_dir / f"calibration_bucket_report_{prediction_date}.json"
+    player_role_stability_json_path = diagnostics_dir / f"player_role_stability_{prediction_date}.json"
+    meta_label_promotion_json_path = diagnostics_dir / f"meta_label_promotion_shadow_{prediction_date}.json"
+    meta_label_rules_performance_json_path = diagnostics_dir / f"meta_label_rules_performance_{prediction_date}.json"
+    feature_completeness_json_path = diagnostics_dir / f"feature_completeness_tracker_{prediction_date}.json"
+    calibration_bucket_available = calibration_bucket_json_path.exists()
+    player_role_stability_available = player_role_stability_json_path.exists()
+    meta_label_promotion_available = meta_label_promotion_json_path.exists()
+    meta_label_rules_performance_available = meta_label_rules_performance_json_path.exists()
+    feature_completeness_available = feature_completeness_json_path.exists()
+    calibration_bucket_payload = _read_json(calibration_bucket_json_path, [])
+    player_role_stability_payload = _read_json(player_role_stability_json_path, [])
+    meta_label_promotion_payload = _read_json(meta_label_promotion_json_path, [])
+    meta_label_rules_performance_payload = _read_json(meta_label_rules_performance_json_path, [])
+    feature_completeness_payload = _read_json(feature_completeness_json_path, [])
+    calibration_bucket_available = calibration_bucket_available and bool(calibration_bucket_payload)
+    player_role_stability_available = player_role_stability_available and bool(player_role_stability_payload)
+    meta_label_promotion_available = meta_label_promotion_available and bool(meta_label_promotion_payload)
+    meta_label_rules_performance_available = (
+        meta_label_rules_performance_available and bool(meta_label_rules_performance_payload)
     )
-    player_role_stability_payload = _read_json(
-        diagnostics_dir / f"player_role_stability_{prediction_date}.json",
-        [],
-    )
-    meta_label_promotion_payload = _read_json(
-        diagnostics_dir / f"meta_label_promotion_shadow_{prediction_date}.json",
-        [],
-    )
-    meta_label_rules_performance_payload = _read_json(
-        diagnostics_dir / f"meta_label_rules_performance_{prediction_date}.json",
-        [],
-    )
-    feature_completeness_payload = _read_json(
-        diagnostics_dir / f"feature_completeness_tracker_{prediction_date}.json",
-        [],
-    )
+    feature_completeness_available = feature_completeness_available and bool(feature_completeness_payload)
     readiness = _read_json(diagnostics_dir / f"market_performance_readiness_{prediction_date}.json", warnings)
     manual_context = _read_json(diagnostics_dir / f"manual_context_{prediction_date}.json", warnings)
     manual_review_history_df = _read_csv(history_root / "manual_review_history.csv", [])
@@ -1045,66 +1047,86 @@ def build_daily_summary(
     lines.append("- warning: Observation only; not Kelly eligible.")
 
     lines.extend(["", "Calibration Health - Shadow Only", "-" * 72])
-    lines.append(f"- total graded rows used: {calibration_graded_rows_used}")
-    lines.append(f"- worst overconfident bucket: {calibration_worst_overconfident}")
-    lines.append(f"- best calibrated bucket: {calibration_best_calibrated}")
-    lines.append(f"- tiny/small sample warning count: {calibration_tiny_small_count}")
+    if not calibration_bucket_available:
+        lines.append("- status: unavailable/stale")
+        lines.append(f"- missing artifact: {calibration_bucket_json_path}")
+    else:
+        lines.append(f"- total graded rows used: {calibration_graded_rows_used}")
+        lines.append(f"- worst overconfident bucket: {calibration_worst_overconfident}")
+        lines.append(f"- best calibrated bucket: {calibration_best_calibrated}")
+        lines.append(f"- tiny/small sample warning count: {calibration_tiny_small_count}")
     lines.append(f"- note: {CALIBRATION_BUCKET_DIAGNOSTIC_ONLY_NOTE}")
 
     lines.extend(["", "Player Role Stability - Shadow Only", "-" * 72])
-    lines.append(f"- total rows evaluated: {stability_total_evaluated}")
-    lines.append(f"- stable count: {stability_stable_count}")
-    lines.append(f"- mostly stable count: {stability_mostly_stable_count}")
-    lines.append(f"- mixed count: {stability_mixed_count}")
-    lines.append(f"- volatile count: {stability_volatile_count}")
-    lines.append(f"- highly volatile count: {stability_highly_volatile_count}")
-    lines.append(f"- unknown count: {stability_unknown_count}")
-    lines.append("- top volatile examples:")
-    if not stability_top_examples:
-        lines.append("  - none")
+    if not player_role_stability_available:
+        lines.append("- status: unavailable/stale")
+        lines.append(f"- missing artifact: {player_role_stability_json_path}")
     else:
-        for ex in stability_top_examples:
-            reasons = "; ".join(ex.get("role_stability_reasons", []))
-            lines.append(
-                f"  - {ex.get('player_name')} ({ex.get('team')}): score={ex.get('role_stability_score')} "
-                f"bucket={ex.get('role_stability_bucket')} reasons=[{reasons}]"
-            )
+        lines.append(f"- total rows evaluated: {stability_total_evaluated}")
+        lines.append(f"- stable count: {stability_stable_count}")
+        lines.append(f"- mostly stable count: {stability_mostly_stable_count}")
+        lines.append(f"- mixed count: {stability_mixed_count}")
+        lines.append(f"- volatile count: {stability_volatile_count}")
+        lines.append(f"- highly volatile count: {stability_highly_volatile_count}")
+        lines.append(f"- unknown count: {stability_unknown_count}")
+        lines.append("- top volatile examples:")
+        if not stability_top_examples:
+            lines.append("  - none")
+        else:
+            for ex in stability_top_examples:
+                reasons = "; ".join(ex.get("role_stability_reasons", []))
+                lines.append(
+                    f"  - {ex.get('player_name')} ({ex.get('team')}): score={ex.get('role_stability_score')} "
+                    f"bucket={ex.get('role_stability_bucket')} reasons=[{reasons}]"
+                )
     lines.append(f"- note: {PLAYER_ROLE_STABILITY_DIAGNOSTIC_ONLY_NOTE}")
 
     lines.extend(["", "Meta-Label Promotion - Shadow Only", "-" * 72])
-    lines.append(f"- total rows evaluated: {meta_label_total_evaluated}")
-    lines.append(f"- shadow strong review candidate count: {meta_label_strong_count}")
-    lines.append(f"- shadow watch candidate count: {meta_label_watch_count}")
-    lines.append(f"- shadow neutral count: {meta_label_neutral_count}")
-    lines.append(f"- shadow weak count: {meta_label_weak_count}")
-    lines.append(f"- shadow avoid review count: {meta_label_avoid_count}")
-    lines.append("- top strong candidates:")
-    if not meta_label_top_candidates:
-        lines.append("  - none")
+    if not meta_label_promotion_available:
+        lines.append("- status: unavailable/stale")
+        lines.append(f"- missing artifact: {meta_label_promotion_json_path}")
     else:
-        for ex in meta_label_top_candidates:
-            reasons = "; ".join(ex.get("reason_codes", []))
-            lines.append(
-                f"  - {ex.get('player_name')} ({ex.get('team')}): score={ex.get('meta_label_rules_score')} "
-                f"bucket={ex.get('meta_label_bucket')} reasons=[{reasons}]"
-            )
+        lines.append(f"- total rows evaluated: {meta_label_total_evaluated}")
+        lines.append(f"- shadow strong review candidate count: {meta_label_strong_count}")
+        lines.append(f"- shadow watch candidate count: {meta_label_watch_count}")
+        lines.append(f"- shadow neutral count: {meta_label_neutral_count}")
+        lines.append(f"- shadow weak count: {meta_label_weak_count}")
+        lines.append(f"- shadow avoid review count: {meta_label_avoid_count}")
+        lines.append("- top strong candidates:")
+        if not meta_label_top_candidates:
+            lines.append("  - none")
+        else:
+            for ex in meta_label_top_candidates:
+                reasons = "; ".join(ex.get("reason_codes", []))
+                lines.append(
+                    f"  - {ex.get('player_name')} ({ex.get('team')}): score={ex.get('meta_label_rules_score')} "
+                    f"bucket={ex.get('meta_label_bucket')} reasons=[{reasons}]"
+                )
     lines.append(f"- note: {META_LABEL_DIAGNOSTIC_ONLY_NOTE}")
 
     lines.extend(["", "Meta-Label Rules Performance - Shadow Only", "-" * 72])
-    lines.append(f"- completed slate count: {perf_slates}")
-    lines.append(f"- graded hit/miss rows: {perf_graded}")
-    lines.append(f"- minimum sample status: {perf_min_status}")
-    lines.append(f"- missing role stability rate: {_format_pct(perf_missing_stability)}")
-    lines.append(f"- missing fragility/survivability rate: {_format_pct(perf_missing_fragility)}")
-    lines.append(f"- Phase 4C readiness verdict: {perf_verdict}")
+    if not meta_label_rules_performance_available:
+        lines.append("- status: unavailable/stale")
+        lines.append(f"- missing artifact: {meta_label_rules_performance_json_path}")
+    else:
+        lines.append(f"- completed slate count: {perf_slates}")
+        lines.append(f"- graded hit/miss rows: {perf_graded}")
+        lines.append(f"- minimum sample status: {perf_min_status}")
+        lines.append(f"- missing role stability rate: {_format_pct(perf_missing_stability)}")
+        lines.append(f"- missing fragility/survivability rate: {_format_pct(perf_missing_fragility)}")
+        lines.append(f"- Phase 4C readiness verdict: {perf_verdict}")
     lines.append(f"- note: {PERF_DIAGNOSTIC_ONLY_NOTE}")
 
     lines.extend(["", "Feature Completeness Tracker - Shadow Only", "-" * 72])
-    lines.append(f"- completed slate count: {tracker_slates}")
-    lines.append(f"- graded hit/miss rows: {tracker_graded}")
-    lines.append(f"- feature-complete graded rows: {tracker_complete}")
-    lines.append(f"- estimated additional slates needed: {tracker_est_slates}")
-    lines.append(f"- Phase 4C readiness verdict: {tracker_verdict}")
+    if not feature_completeness_available:
+        lines.append("- status: unavailable/stale")
+        lines.append(f"- missing artifact: {feature_completeness_json_path}")
+    else:
+        lines.append(f"- completed slate count: {tracker_slates}")
+        lines.append(f"- graded hit/miss rows: {tracker_graded}")
+        lines.append(f"- feature-complete graded rows: {tracker_complete}")
+        lines.append(f"- estimated additional slates needed: {tracker_est_slates}")
+        lines.append(f"- Phase 4C readiness verdict: {tracker_verdict}")
     lines.append("- note: Feature Completeness Tracker is shadow-only and is not an Elite/Kelly input.")
 
     lines.extend(["", "Combo UNDER Promotion Watchlist — Observation Only / No Kelly", "-" * 72])

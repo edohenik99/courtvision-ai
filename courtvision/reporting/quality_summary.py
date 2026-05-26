@@ -8,8 +8,6 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Sequence
-import sys
-import traceback
 
 import pandas as pd
 
@@ -56,39 +54,7 @@ from courtvision.reporting.fragility_shadow_policy_simulation import (
     simulation_txt_path_for_date,
     write_policy_simulation_report,
 )
-from courtvision.reporting.clv_market_movement import (
-    clv_market_movement_json_path_for_date,
-    clv_market_movement_txt_path_for_date,
-    write_clv_market_movement_report,
-)
-from courtvision.reporting.calibration_bucket_report import (
-    calibration_bucket_json_path_for_date,
-    calibration_bucket_txt_path_for_date,
-    write_calibration_bucket_report,
-)
-from courtvision.reporting.player_role_stability import (
-    player_role_stability_json_path_for_date,
-    player_role_stability_txt_path_for_date,
-    write_player_role_stability_report,
-)
-from courtvision.reporting.meta_label_promotion import (
-    meta_label_promotion_json_path_for_date,
-    meta_label_promotion_txt_path_for_date,
-    meta_label_promotion_csv_path_for_date,
-    write_meta_label_promotion_report,
-)
-from courtvision.reporting.meta_label_rules_performance import (
-    write_rules_performance_report,
-    performance_json_path_for_date,
-    performance_txt_path_for_date,
-    performance_csv_path_for_date,
-)
-from courtvision.reporting.feature_completeness_tracker import (
-    write_feature_completeness_report,
-    performance_json_path_for_date as tracker_json_path_for_date,
-    performance_txt_path_for_date as tracker_txt_path_for_date,
-    performance_csv_path_for_date as tracker_csv_path_for_date,
-)
+from courtvision.reporting.shadow_artifact_orchestrator import shadow_artifact_paths
 from courtvision.reporting.projection_calibration_shadow import (
     calibration_json_path_for_date,
     calibration_txt_path_for_date,
@@ -371,6 +337,155 @@ def _read_json(path: Path, warnings: list[str], *, optional: bool = True) -> dic
         warnings.append(f"Could not read JSON {path}: {exc}")
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _read_shadow_json(path: Path) -> tuple[dict[str, Any], str, str]:
+    if not path.exists():
+        return {}, "unavailable_or_stale", f"missing shadow artifact: {path}"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {}, "unavailable_or_stale", f"unreadable shadow artifact: {path} ({exc})"
+    if not isinstance(payload, dict):
+        return {}, "unavailable_or_stale", f"invalid shadow artifact payload: {path}"
+    return payload, "written", ""
+
+
+def _phase4b_shadow_payload_summary(
+    *,
+    prediction_date: str,
+    runtime_root: Path,
+) -> dict[str, Any]:
+    paths = shadow_artifact_paths(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+    )
+
+    clv_payload, clv_status, clv_error = _read_shadow_json(paths["clv_market_movement"].json_path)
+    clv_summary = clv_payload.get("summary", {}) if isinstance(clv_payload.get("summary"), dict) else {}
+
+    bucket_payload, bucket_status, bucket_error = _read_shadow_json(paths["calibration_bucket_report"].json_path)
+    bucket_summary = bucket_payload.get("summary", {}) if isinstance(bucket_payload.get("summary"), dict) else {}
+
+    stability_payload, stability_status, stability_error = _read_shadow_json(paths["player_role_stability"].json_path)
+    stability_summary = (
+        stability_payload.get("summary", {}) if isinstance(stability_payload.get("summary"), dict) else {}
+    )
+
+    meta_payload, meta_status, meta_error = _read_shadow_json(paths["meta_label_promotion"].json_path)
+    meta_summary = meta_payload.get("summary", {}) if isinstance(meta_payload.get("summary"), dict) else {}
+
+    perf_payload, perf_status, perf_error = _read_shadow_json(paths["meta_label_rules_performance"].json_path)
+    perf_readiness = (
+        perf_payload.get("data_readiness", {})
+        if isinstance(perf_payload.get("data_readiness"), dict)
+        else {}
+    )
+
+    tracker_payload, tracker_status, tracker_error = _read_shadow_json(
+        paths["feature_completeness_tracker"].json_path
+    )
+    tracker_hist = (
+        tracker_payload.get("historical_coverage", {})
+        if isinstance(tracker_payload.get("historical_coverage"), dict)
+        else {}
+    )
+    tracker_readiness = (
+        tracker_payload.get("readiness", {})
+        if isinstance(tracker_payload.get("readiness"), dict)
+        else {}
+    )
+
+    return {
+        "clv_market_movement_shadow": {
+            "status": clv_status,
+            "json_path": str(paths["clv_market_movement"].json_path),
+            "txt_path": str(paths["clv_market_movement"].txt_path),
+            "error_message": clv_error,
+            "total_rows": clv_summary.get("total_rows", 0),
+            "close_coverage_count": clv_summary.get("close_coverage_count", 0),
+            "positive_clv_count": clv_summary.get("positive_clv_count", 0),
+            "movement_toward_pick_count": clv_summary.get("movement_toward_pick_count", 0),
+            "movement_away_from_pick_count": clv_summary.get("movement_away_from_pick_count", 0),
+            "missing_close_line_count": clv_summary.get("missing_close_line_count", 0),
+            "note": "shadow_report_only_no_elite_kelly_or_prediction_logic_changed",
+        },
+        "calibration_bucket_report_shadow": {
+            "status": bucket_status,
+            "json_path": str(paths["calibration_bucket_report"].json_path),
+            "txt_path": str(paths["calibration_bucket_report"].txt_path),
+            "error_message": bucket_error,
+            "total_graded_rows_used": bucket_summary.get("total_graded_rows_used", 0),
+            "worst_overconfident_bucket": bucket_summary.get("worst_overconfident_bucket_label", "n/a"),
+            "best_calibrated_bucket": bucket_summary.get("best_calibrated_bucket_label", "n/a"),
+            "tiny_small_sample_warning_count": bucket_summary.get("tiny_small_sample_warning_count", 0),
+            "readiness": bucket_summary.get("readiness", "review_only"),
+            "note": "diagnostic_report_only_no_elite_kelly_prediction_or_final_decision_change",
+        },
+        "player_role_stability_shadow": {
+            "status": stability_status,
+            "json_path": str(paths["player_role_stability"].json_path),
+            "txt_path": str(paths["player_role_stability"].txt_path),
+            "error_message": stability_error,
+            "total_rows_evaluated": stability_summary.get("total_rows_evaluated", 0),
+            "stable_count": stability_summary.get("stable_count", 0),
+            "mostly_stable_count": stability_summary.get("mostly_stable_count", 0),
+            "mixed_count": stability_summary.get("mixed_count", 0),
+            "volatile_count": stability_summary.get("volatile_count", 0),
+            "highly_volatile_count": stability_summary.get("highly_volatile_count", 0),
+            "unknown_count": stability_summary.get("unknown_count", 0),
+            "top_volatile_examples": stability_summary.get("top_volatile_examples", []),
+            "readiness": stability_summary.get("readiness", "review_only"),
+            "note": "diagnostic_report_only_no_elite_kelly_prediction_or_final_decision_change",
+        },
+        "meta_label_promotion_shadow": {
+            "status": meta_status,
+            "json_path": str(paths["meta_label_promotion"].json_path),
+            "txt_path": str(paths["meta_label_promotion"].txt_path),
+            "csv_path": str(paths["meta_label_promotion"].csv_path),
+            "error_message": meta_error,
+            "total_rows_evaluated": meta_summary.get("total_rows_evaluated", 0),
+            "shadow_strong_review_candidate_count": meta_summary.get("shadow_strong_review_candidate_count", 0),
+            "shadow_watch_candidate_count": meta_summary.get("shadow_watch_candidate_count", 0),
+            "shadow_neutral_count": meta_summary.get("shadow_neutral_count", 0),
+            "shadow_weak_count": meta_summary.get("shadow_weak_count", 0),
+            "shadow_avoid_review_count": meta_summary.get("shadow_avoid_review_count", 0),
+            "top_strong_candidates": meta_summary.get("top_strong_candidates", []),
+            "readiness": meta_summary.get("readiness", "review_only"),
+            "note": "diagnostic_report_only_no_elite_kelly_prediction_or_final_decision_change",
+        },
+        "meta_label_rules_performance_shadow": {
+            "status": perf_status,
+            "json_path": str(paths["meta_label_rules_performance"].json_path),
+            "txt_path": str(paths["meta_label_rules_performance"].txt_path),
+            "csv_path": str(paths["meta_label_rules_performance"].csv_path),
+            "error_message": perf_error,
+            "completed_slate_count": perf_readiness.get("completed_slate_count", 0),
+            "graded_hit_miss_rows": perf_readiness.get("graded_hit_miss_rows", 0),
+            "minimum_sample_threshold_status": perf_readiness.get(
+                "minimum_sample_threshold_status", "insufficient"
+            ),
+            "missing_role_stability_rate": perf_readiness.get("missing_role_stability_rate", 0.0),
+            "missing_fragility_rate": perf_readiness.get("missing_fragility_rate", 0.0),
+            "verdict": perf_readiness.get("verdict", "WAIT_MORE_DATA"),
+            "note": "diagnostic_report_only_no_elite_kelly_prediction_or_final_decision_change",
+        },
+        "feature_completeness_tracker_shadow": {
+            "status": tracker_status,
+            "json_path": str(paths["feature_completeness_tracker"].json_path),
+            "txt_path": str(paths["feature_completeness_tracker"].txt_path),
+            "csv_path": str(paths["feature_completeness_tracker"].csv_path),
+            "error_message": tracker_error,
+            "completed_slate_count": tracker_hist.get("completed_slate_count", 0),
+            "graded_hit_miss_rows": tracker_hist.get("graded_hit_miss_rows", 0),
+            "feature_complete_graded_rows": tracker_hist.get("feature_complete_graded_rows", 0),
+            "estimated_additional_slates_needed": tracker_readiness.get(
+                "estimated_additional_slates_needed", "n/a"
+            ),
+            "verdict": tracker_readiness.get("verdict", "WAIT_MORE_FORWARD_DATA"),
+            "note": "diagnostic_report_only_no_elite_kelly_prediction_or_final_decision_change",
+        },
+    }
 
 
 def _git_commit_hash() -> str:
@@ -2018,6 +2133,12 @@ def build_quality_summary(
         "power_rating_context": power_rating_context,
         "warnings": final_warnings,
     }
+    payload.update(
+        _phase4b_shadow_payload_summary(
+            prediction_date=prediction_date,
+            runtime_root=runtime_root,
+        )
+    )
     payload = _json_safe(payload)
     return _format_quality_summary_text(payload), payload
 
@@ -2432,12 +2553,21 @@ def _format_quality_summary_text(payload: dict[str, Any]) -> str:
     track = payload.get("feature_completeness_tracker_shadow", {}) if isinstance(payload.get("feature_completeness_tracker_shadow"), dict) else {}
     lines.extend(["", "Feature Completeness Tracker - Shadow Only", "-" * 72])
     if track:
-        lines.append(f"- completed_slate_count: {track.get('completed_slate_count', 0)}")
-        lines.append(f"- graded_hit_miss_rows: {track.get('graded_hit_miss_rows', 0)}")
-        lines.append(f"- feature_complete_graded_rows: {track.get('feature_complete_graded_rows', 0)}")
-        lines.append(f"- estimated_additional_slates_needed: {track.get('estimated_additional_slates_needed', 999)}")
-        lines.append(f"- verdict: {track.get('verdict', 'WAIT_MORE_FORWARD_DATA')}")
-        lines.append("- note: Feature Completeness Tracker is shadow-only and is not an Elite/Kelly input.")
+        status = _safe_text(track.get("status")) or "written"
+        if status != "written":
+            lines.append(f"- status: unavailable/stale ({status})")
+            lines.append(f"- json_artifact: {track.get('json_path', 'unavailable')}")
+            error_message = _safe_text(track.get("error_message"))
+            if error_message:
+                lines.append(f"- reason: {error_message}")
+            lines.append("- note: Feature Completeness Tracker is shadow-only and is not an Elite/Kelly input.")
+        else:
+            lines.append(f"- completed_slate_count: {track.get('completed_slate_count', 0)}")
+            lines.append(f"- graded_hit_miss_rows: {track.get('graded_hit_miss_rows', 0)}")
+            lines.append(f"- feature_complete_graded_rows: {track.get('feature_complete_graded_rows', 0)}")
+            lines.append(f"- estimated_additional_slates_needed: {track.get('estimated_additional_slates_needed', 999)}")
+            lines.append(f"- verdict: {track.get('verdict', 'WAIT_MORE_FORWARD_DATA')}")
+            lines.append("- note: Feature Completeness Tracker is shadow-only and is not an Elite/Kelly input.")
     else:
         lines.append("- not available")
 
@@ -2634,181 +2764,8 @@ def write_quality_summary_outputs(
     # derivation pointed at outputs/history which contains only a partial copy.
     history_root = Path(history_root) if history_root is not None else Path("data/history")
 
-    # Phase 1: CLV / market movement shadow report (diagnostics only).
-    try:
-        _clv_json, _clv_txt, _clv_payload = write_clv_market_movement_report(
-            prediction_date=prediction_date,
-            runtime_root=runtime_root,
-        )
-    except Exception:
-        _clv_json = clv_market_movement_json_path_for_date(prediction_date, runtime_root)
-        _clv_txt = clv_market_movement_txt_path_for_date(prediction_date, runtime_root)
-        _clv_payload = {"summary": {}}
-    _clv_summary = _clv_payload.get("summary", {}) if isinstance(_clv_payload, dict) else {}
-    if not isinstance(_clv_summary, dict):
-        _clv_summary = {}
-    payload["clv_market_movement_shadow"] = {
-        "json_path": str(_clv_json),
-        "txt_path": str(_clv_txt),
-        "total_rows": _clv_summary.get("total_rows", 0),
-        "close_coverage_count": _clv_summary.get("close_coverage_count", 0),
-        "positive_clv_count": _clv_summary.get("positive_clv_count", 0),
-        "movement_toward_pick_count": _clv_summary.get("movement_toward_pick_count", 0),
-        "movement_away_from_pick_count": _clv_summary.get("movement_away_from_pick_count", 0),
-        "missing_close_line_count": _clv_summary.get("missing_close_line_count", 0),
-        "note": "shadow_report_only_no_elite_kelly_or_prediction_logic_changed",
-    }
-
-    # Phase 2: calibration bucket report (diagnostics/report-only).
-    try:
-        _bucket_json, _bucket_txt, _bucket_payload = write_calibration_bucket_report(
-            prediction_date=prediction_date,
-            runtime_root=runtime_root,
-            history_root=history_root,
-        )
-    except Exception:
-        _bucket_json = calibration_bucket_json_path_for_date(prediction_date, runtime_root)
-        _bucket_txt = calibration_bucket_txt_path_for_date(prediction_date, runtime_root)
-        _bucket_payload = {"summary": {}}
-    _bucket_summary = _bucket_payload.get("summary", {}) if isinstance(_bucket_payload, dict) else {}
-    if not isinstance(_bucket_summary, dict):
-        _bucket_summary = {}
-    payload["calibration_bucket_report_shadow"] = {
-        "json_path": str(_bucket_json),
-        "txt_path": str(_bucket_txt),
-        "total_graded_rows_used": _bucket_summary.get("total_graded_rows_used", 0),
-        "worst_overconfident_bucket": _bucket_summary.get("worst_overconfident_bucket_label", "n/a"),
-        "best_calibrated_bucket": _bucket_summary.get("best_calibrated_bucket_label", "n/a"),
-        "tiny_small_sample_warning_count": _bucket_summary.get("tiny_small_sample_warning_count", 0),
-        "readiness": _bucket_summary.get("readiness", "review_only"),
-        "note": "diagnostic_report_only_no_elite_kelly_prediction_or_final_decision_change",
-    }
-
-    # Phase 3: player role stability report (diagnostics/report-only).
-    try:
-        _stability_json, _stability_txt, _stability_payload = write_player_role_stability_report(
-            prediction_date=prediction_date,
-            runtime_root=runtime_root,
-            history_root=history_root,
-        )
-    except Exception:
-        _stability_json = player_role_stability_json_path_for_date(prediction_date, runtime_root)
-        _stability_txt = player_role_stability_txt_path_for_date(prediction_date, runtime_root)
-        _stability_payload = {"summary": {}}
-    _stability_summary = _stability_payload.get("summary", {}) if isinstance(_stability_payload, dict) else {}
-    if not isinstance(_stability_summary, dict):
-        _stability_summary = {}
-    payload["player_role_stability_shadow"] = {
-        "json_path": str(_stability_json),
-        "txt_path": str(_stability_txt),
-        "total_rows_evaluated": _stability_summary.get("total_rows_evaluated", 0),
-        "stable_count": _stability_summary.get("stable_count", 0),
-        "mostly_stable_count": _stability_summary.get("mostly_stable_count", 0),
-        "mixed_count": _stability_summary.get("mixed_count", 0),
-        "volatile_count": _stability_summary.get("volatile_count", 0),
-        "highly_volatile_count": _stability_summary.get("highly_volatile_count", 0),
-        "unknown_count": _stability_summary.get("unknown_count", 0),
-        "top_volatile_examples": _stability_summary.get("top_volatile_examples", []),
-        "readiness": _stability_summary.get("readiness", "review_only"),
-        "note": "diagnostic_report_only_no_elite_kelly_prediction_or_final_decision_change",
-    }
-
-    # Phase 4B: Meta-Label Promotion rules-baseline shadow report
-    try:
-        _meta_json, _meta_txt, _meta_csv, _meta_payload = write_meta_label_promotion_report(
-            prediction_date=prediction_date,
-            runtime_root=runtime_root,
-            history_root=history_root,
-            role_payload=_stability_payload,
-            cal_payload=_bucket_payload,
-        )
-    except Exception:
-        _meta_json = meta_label_promotion_json_path_for_date(prediction_date, runtime_root)
-        _meta_txt = meta_label_promotion_txt_path_for_date(prediction_date, runtime_root)
-        _meta_csv = meta_label_promotion_csv_path_for_date(prediction_date, runtime_root)
-        _meta_payload = {"summary": {}}
-
-    _meta_summary = _meta_payload.get("summary", {}) if isinstance(_meta_payload, dict) else {}
-    if not isinstance(_meta_summary, dict):
-        _meta_summary = {}
-
-    payload["meta_label_promotion_shadow"] = {
-        "json_path": str(_meta_json),
-        "txt_path": str(_meta_txt),
-        "csv_path": str(_meta_csv),
-        "total_rows_evaluated": _meta_summary.get("total_rows_evaluated", 0),
-        "shadow_strong_review_candidate_count": _meta_summary.get("shadow_strong_review_candidate_count", 0),
-        "shadow_watch_candidate_count": _meta_summary.get("shadow_watch_candidate_count", 0),
-        "shadow_neutral_count": _meta_summary.get("shadow_neutral_count", 0),
-        "shadow_weak_count": _meta_summary.get("shadow_weak_count", 0),
-        "shadow_avoid_review_count": _meta_summary.get("shadow_avoid_review_count", 0),
-        "top_strong_candidates": _meta_summary.get("top_strong_candidates", []),
-        "readiness": _meta_summary.get("readiness", "review_only"),
-        "note": "diagnostic_report_only_no_elite_kelly_prediction_or_final_decision_change",
-    }
-
-    # Phase 4B.1: Meta-Label Rules Performance Tracking shadow report (diagnostics only)
-    try:
-        _perf_json, _perf_txt, _perf_csv, _perf_payload = write_rules_performance_report(
-            prediction_date=prediction_date,
-            runtime_root=runtime_root,
-            history_root=history_root,
-        )
-    except Exception:
-        _perf_json = performance_json_path_for_date(prediction_date, runtime_root)
-        _perf_txt = performance_txt_path_for_date(prediction_date, runtime_root)
-        _perf_csv = performance_csv_path_for_date(prediction_date, runtime_root)
-        _perf_payload = {}
-
-    _perf_readiness = _perf_payload.get("data_readiness", {}) if isinstance(_perf_payload, dict) else {}
-    if not isinstance(_perf_readiness, dict):
-        _perf_readiness = {}
-    payload["meta_label_rules_performance_shadow"] = {
-        "json_path": str(_perf_json),
-        "txt_path": str(_perf_txt),
-        "csv_path": str(_perf_csv),
-        "completed_slate_count": _perf_readiness.get("completed_slate_count", 0),
-        "graded_hit_miss_rows": _perf_readiness.get("graded_hit_miss_rows", 0),
-        "minimum_sample_threshold_status": _perf_readiness.get("minimum_sample_threshold_status", "insufficient"),
-        "missing_role_stability_rate": _perf_readiness.get("missing_role_stability_rate", 0.0),
-        "missing_fragility_rate": _perf_readiness.get("missing_fragility_rate", 0.0),
-        "verdict": _perf_readiness.get("verdict", "WAIT_MORE_DATA"),
-        "note": "diagnostic_report_only_no_elite_kelly_prediction_or_final_decision_change",
-    }
-
-    # Phase 4B.3: Forward Feature Completeness Tracker shadow report (diagnostics only)
-    try:
-        _track_json, _track_txt, _track_csv, _track_payload = write_feature_completeness_report(
-            prediction_date=prediction_date,
-            runtime_root=runtime_root,
-            history_root=history_root,
-        )
-    except Exception as e:
-        print(f"Error in write_feature_completeness_report: {e}", file=sys.stderr)
-        traceback.print_exc(file=sys.stderr)
-        _track_json = tracker_json_path_for_date(prediction_date, runtime_root)
-        _track_txt = tracker_txt_path_for_date(prediction_date, runtime_root)
-        _track_csv = tracker_csv_path_for_date(prediction_date, runtime_root)
-        _track_payload = {}
-
-    _track_readiness = _track_payload.get("readiness", {}) if isinstance(_track_payload, dict) else {}
-    _track_hist = _track_payload.get("historical_coverage", {}) if isinstance(_track_payload, dict) else {}
-    if not isinstance(_track_readiness, dict):
-        _track_readiness = {}
-    if not isinstance(_track_hist, dict):
-        _track_hist = {}
-        
-    payload["feature_completeness_tracker_shadow"] = {
-        "json_path": str(_track_json),
-        "txt_path": str(_track_txt),
-        "csv_path": str(_track_csv),
-        "completed_slate_count": _track_hist.get("completed_slate_count", 0),
-        "graded_hit_miss_rows": _track_hist.get("graded_hit_miss_rows", 0),
-        "feature_complete_graded_rows": _track_hist.get("feature_complete_graded_rows", 0),
-        "estimated_additional_slates_needed": _track_readiness.get("estimated_additional_slates_needed", "n/a"),
-        "verdict": _track_readiness.get("verdict", "WAIT_MORE_FORWARD_DATA"),
-        "note": "diagnostic_report_only_no_elite_kelly_prediction_or_final_decision_change",
-    }
+    # Phase 4B shadow artifacts are generated by write_shadow_artifacts.py before
+    # summaries consume them. Quality summary only reads their existing status.
 
     attribution_payload = _build_fragility_attribution_payload(prediction_date, history_root)
     attribution_json = runtime_root / "diagnostics" / f"fragility_survivability_attribution_{prediction_date}.json"

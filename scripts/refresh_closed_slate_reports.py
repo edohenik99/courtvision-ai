@@ -122,6 +122,16 @@ def build_refresh_commands(
     commands.extend(
         [
             RefreshCommand(
+                "shadow_artifacts",
+                (
+                    *PYTHON_COMMAND,
+                    "scripts/write_shadow_artifacts.py",
+                    "--prediction-date",
+                    prediction_date,
+                    "--closed-slate-safe",
+                ),
+            ),
+            RefreshCommand(
                 "daily_summary",
                 (
                     *PYTHON_COMMAND,
@@ -212,6 +222,7 @@ def _print_success_summary(
     printer(f"prediction_date: {prediction_date}")
     printer(f"through_date: {through_date}")
     printer(f"repair: {repair_status}")
+    printer(f"shadow artifacts {action_word}: yes")
     printer(f"daily summary {action_word}: yes")
     printer(f"quality summary {action_word}: yes")
     printer(f"completion audit {action_word}: yes")
