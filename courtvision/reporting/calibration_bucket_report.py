@@ -15,9 +15,11 @@ from typing import Any
 import pandas as pd
 
 from courtvision.calibration.buckets import abs_edge_bucket, odds_bucket, quality_band
+from courtvision.reporting.shadow_artifact_metadata import apply_shadow_report_metadata
 
 
 REPORT_VERSION = "1.0"
+GENERATED_BY = "courtvision.reporting.calibration_bucket_report.write_calibration_bucket_report"
 DIAGNOSTIC_ONLY_NOTE = (
     "Calibration Bucket Report is diagnostic only and is not an Elite/Kelly input."
 )
@@ -643,6 +645,12 @@ def write_calibration_bucket_report(
     history_root: str | Path = "data/history",
     shadow_history_df: pd.DataFrame | None = None,
     pick_history_df: pd.DataFrame | None = None,
+    generated_at_utc: str | None = None,
+    generated_by: str = GENERATED_BY,
+    source_runtime_root: str | Path | None = None,
+    source_history_root: str | Path | None = None,
+    report_name: str = "calibration_bucket_report",
+    orchestrator_run_id: str | None = None,
 ) -> tuple[Path, Path, dict[str, Any]]:
     """Write JSON and operator TXT diagnostics."""
     runtime_root = Path(runtime_root)
@@ -656,6 +664,16 @@ def write_calibration_bucket_report(
         prediction_date=prediction_date,
         shadow_history_df=shadow_history_df,
         pick_history_df=pick_history_df,
+    )
+    payload = apply_shadow_report_metadata(
+        payload,
+        prediction_date=prediction_date,
+        generated_at_utc=generated_at_utc,
+        generated_by=generated_by,
+        source_runtime_root=source_runtime_root or runtime_root,
+        source_history_root=source_history_root or history_root,
+        report_name=report_name,
+        orchestrator_run_id=orchestrator_run_id,
     )
     json_path = calibration_bucket_json_path_for_date(prediction_date, runtime_root)
     txt_path = calibration_bucket_txt_path_for_date(prediction_date, runtime_root)

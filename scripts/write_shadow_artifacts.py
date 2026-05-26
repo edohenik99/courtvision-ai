@@ -34,7 +34,8 @@ def main(argv: list[str] | None = None) -> int:
     print(
         "shadow_artifacts_status "
         f"status={summary['status']} "
-        f"failed_count={summary['failed_count']}"
+        f"failed_count={summary['failed_count']} "
+        f"orchestrator_run_id={summary.get('orchestrator_run_id', '')}"
     )
     for report in summary["reports"]:
         line = (

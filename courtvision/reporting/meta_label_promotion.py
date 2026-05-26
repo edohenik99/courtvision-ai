@@ -19,8 +19,10 @@ from courtvision.context.meta_label_promotion import (
     MODEL_VERSION,
     apply_meta_label_promotion,
 )
+from courtvision.reporting.shadow_artifact_metadata import apply_shadow_report_metadata
 
 REPORT_VERSION = "1.0"
+GENERATED_BY = "courtvision.reporting.meta_label_promotion.write_meta_label_promotion_report"
 
 REPORT_FIELDS: tuple[str, ...] = (
     "prediction_date",
@@ -307,6 +309,12 @@ def write_meta_label_promotion_report(
     full_market_df: pd.DataFrame | None = None,
     role_payload: dict[str, Any] | None = None,
     cal_payload: dict[str, Any] | None = None,
+    generated_at_utc: str | None = None,
+    generated_by: str = GENERATED_BY,
+    source_runtime_root: str | Path | None = None,
+    source_history_root: str | Path | None = None,
+    report_name: str = "meta_label_promotion",
+    orchestrator_run_id: str | None = None,
 ) -> tuple[Path, Path, Path, dict[str, Any]]:
     """Write meta-label promotion JSON, operator TXT, and operator CSV."""
     runtime_root = Path(runtime_root)
@@ -334,6 +342,16 @@ def write_meta_label_promotion_report(
         full_market_df=full_market_df,
         role_payload=role_payload,
         cal_payload=cal_payload,
+    )
+    payload = apply_shadow_report_metadata(
+        payload,
+        prediction_date=prediction_date,
+        generated_at_utc=generated_at_utc,
+        generated_by=generated_by,
+        source_runtime_root=source_runtime_root or runtime_root,
+        source_history_root=source_history_root or history_root,
+        report_name=report_name,
+        orchestrator_run_id=orchestrator_run_id,
     )
 
     json_path = meta_label_promotion_json_path_for_date(prediction_date, runtime_root)

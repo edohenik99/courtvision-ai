@@ -39,8 +39,13 @@ from courtvision.reporting.player_role_stability import (
     player_role_stability_txt_path_for_date,
     write_player_role_stability_report,
 )
+from courtvision.reporting.shadow_artifact_metadata import (
+    shadow_orchestrator_run_id,
+    utc_now_iso,
+)
 
 
+GENERATED_BY = "courtvision.reporting.shadow_artifact_orchestrator.write_shadow_artifacts"
 PHASE4B_SHADOW_REPORT_ORDER: tuple[str, ...] = (
     "clv_market_movement",
     "calibration_bucket_report",
@@ -182,6 +187,11 @@ def write_shadow_artifacts(
         prediction_date=prediction_date,
         runtime_root=runtime_root,
     )
+    generated_at_utc = utc_now_iso()
+    orchestrator_run_id = shadow_orchestrator_run_id(
+        prediction_date=prediction_date,
+        generated_at_utc=generated_at_utc,
+    )
 
     results: list[ShadowArtifactResult] = []
     payloads: dict[str, dict[str, Any]] = {}
@@ -192,6 +202,11 @@ def write_shadow_artifacts(
         writer=lambda: write_clv_market_movement_report(
             prediction_date=prediction_date,
             runtime_root=runtime_root,
+            generated_at_utc=generated_at_utc,
+            generated_by=GENERATED_BY,
+            source_runtime_root=runtime_root,
+            report_name="clv_market_movement",
+            orchestrator_run_id=orchestrator_run_id,
         ),
         stderr=stderr,
     )
@@ -205,6 +220,12 @@ def write_shadow_artifacts(
             prediction_date=prediction_date,
             runtime_root=runtime_root,
             history_root=history_root,
+            generated_at_utc=generated_at_utc,
+            generated_by=GENERATED_BY,
+            source_runtime_root=runtime_root,
+            source_history_root=history_root,
+            report_name="calibration_bucket_report",
+            orchestrator_run_id=orchestrator_run_id,
         ),
         stderr=stderr,
     )
@@ -218,6 +239,12 @@ def write_shadow_artifacts(
             prediction_date=prediction_date,
             runtime_root=runtime_root,
             history_root=history_root,
+            generated_at_utc=generated_at_utc,
+            generated_by=GENERATED_BY,
+            source_runtime_root=runtime_root,
+            source_history_root=history_root,
+            report_name="player_role_stability",
+            orchestrator_run_id=orchestrator_run_id,
         ),
         stderr=stderr,
     )
@@ -233,6 +260,12 @@ def write_shadow_artifacts(
             history_root=history_root,
             role_payload=payloads.get("player_role_stability") or None,
             cal_payload=payloads.get("calibration_bucket_report") or None,
+            generated_at_utc=generated_at_utc,
+            generated_by=GENERATED_BY,
+            source_runtime_root=runtime_root,
+            source_history_root=history_root,
+            report_name="meta_label_promotion",
+            orchestrator_run_id=orchestrator_run_id,
         ),
         stderr=stderr,
     )
@@ -246,6 +279,12 @@ def write_shadow_artifacts(
             prediction_date=prediction_date,
             runtime_root=runtime_root,
             history_root=history_root,
+            generated_at_utc=generated_at_utc,
+            generated_by=GENERATED_BY,
+            source_runtime_root=runtime_root,
+            source_history_root=history_root,
+            report_name="meta_label_rules_performance",
+            orchestrator_run_id=orchestrator_run_id,
         ),
         stderr=stderr,
     )
@@ -259,6 +298,12 @@ def write_shadow_artifacts(
             prediction_date=prediction_date,
             runtime_root=runtime_root,
             history_root=history_root,
+            generated_at_utc=generated_at_utc,
+            generated_by=GENERATED_BY,
+            source_runtime_root=runtime_root,
+            source_history_root=history_root,
+            report_name="feature_completeness_tracker",
+            orchestrator_run_id=orchestrator_run_id,
         ),
         stderr=stderr,
     )
@@ -272,6 +317,9 @@ def write_shadow_artifacts(
         "runtime_root": str(runtime_root),
         "history_root": str(history_root),
         "closed_slate_safe": bool(closed_slate_safe),
+        "generated_at_utc": generated_at_utc,
+        "generated_by": GENERATED_BY,
+        "orchestrator_run_id": orchestrator_run_id,
         "status": "completed_with_failures" if failed_count else "completed",
         "failed_count": failed_count,
         "reports": reports,

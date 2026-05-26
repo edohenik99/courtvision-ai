@@ -15,9 +15,11 @@ from typing import Any, Mapping
 import pandas as pd
 
 from courtvision.market_intelligence.market_snapshots import market_snapshot_key
+from courtvision.reporting.shadow_artifact_metadata import apply_shadow_report_metadata
 
 
 REPORT_VERSION = "1.0"
+GENERATED_BY = "courtvision.reporting.clv_market_movement.write_clv_market_movement_report"
 DIAGNOSTIC_ONLY_NOTE = "CLV is diagnostic only and is not an Elite/Kelly input."
 
 REPORT_COLUMNS: tuple[str, ...] = (
@@ -373,6 +375,11 @@ def write_clv_market_movement_report(
     runtime_root: str | Path = "outputs/runtime",
     entry_df: pd.DataFrame | None = None,
     close_snapshots_df: pd.DataFrame | None = None,
+    generated_at_utc: str | None = None,
+    generated_by: str = GENERATED_BY,
+    source_runtime_root: str | Path | None = None,
+    report_name: str = "clv_market_movement",
+    orchestrator_run_id: str | None = None,
 ) -> tuple[Path, Path, dict[str, Any]]:
     """Write JSON and operator TXT CLV/movement diagnostics.
 
@@ -388,6 +395,15 @@ def write_clv_market_movement_report(
         entry_df,
         prediction_date=prediction_date,
         close_snapshots_df=close_snapshots_df,
+    )
+    payload = apply_shadow_report_metadata(
+        payload,
+        prediction_date=prediction_date,
+        generated_at_utc=generated_at_utc,
+        generated_by=generated_by,
+        source_runtime_root=source_runtime_root or runtime_root,
+        report_name=report_name,
+        orchestrator_run_id=orchestrator_run_id,
     )
     json_path = clv_market_movement_json_path_for_date(prediction_date, runtime_root)
     txt_path = clv_market_movement_txt_path_for_date(prediction_date, runtime_root)

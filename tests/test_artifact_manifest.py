@@ -23,6 +23,29 @@ def _write_text(path: Path, text: str = "ok\n") -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def _write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _shadow_payload(
+    *,
+    prediction_date: str = PREDICTION_DATE,
+    runtime_root: Path,
+    report_name: str = "clv_market_movement",
+) -> dict:
+    return {
+        "prediction_date": prediction_date,
+        "generated_at_utc": "2026-04-10T12:00:00Z",
+        "generated_by": "test",
+        "source_runtime_root": str(runtime_root),
+        "report_name": report_name,
+        "report_version": "1.0",
+        "orchestrator_run_id": f"shadow_artifacts_{prediction_date}_20260410T120000Z",
+        "summary": {},
+    }
+
+
 def _write_core_boards(runtime_root: Path) -> None:
     for name in ("elite_board", "full_market_board", "sgp_board"):
         _write_text(
@@ -204,6 +227,92 @@ def test_manifest_missing_feature_completeness_tracker_is_shadow_only_not_fatal(
     assert csv_art["severity"] == SEVERITY_SHADOW_ONLY
     assert "not a betting input" in txt_art["notes"]
     assert manifest["missing_by_severity"]["fatal"] == 0
+
+
+def test_manifest_marks_current_date_phase4b_shadow_json_as_fresh(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    _write_core_boards(runtime_root)
+    _write_json(
+        runtime_root / "diagnostics" / f"clv_market_movement_{PREDICTION_DATE}.json",
+        _shadow_payload(runtime_root=runtime_root),
+    )
+
+    manifest = build_artifact_manifest(
+        prediction_date=PREDICTION_DATE,
+        runtime_root=runtime_root,
+        generated_at="2026-04-10T12:00:00Z",
+    )
+
+    item = _artifact(manifest, "clv_market_movement_diagnostics")
+    assert item["exists"] is True
+    assert item["severity"] == SEVERITY_SHADOW_ONLY
+    assert item["freshness_status"] == "fresh"
+    assert item["prediction_date_match"] is True
+    assert item["generated_at_utc"] == "2026-04-10T12:00:00Z"
+    assert item["generated_by"] == "test"
+    assert item["orchestrator_run_id"] == f"shadow_artifacts_{PREDICTION_DATE}_20260410T120000Z"
+
+
+def test_manifest_marks_mismatched_phase4b_shadow_json_as_stale_date(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    _write_core_boards(runtime_root)
+    _write_json(
+        runtime_root / "diagnostics" / f"clv_market_movement_{PREDICTION_DATE}.json",
+        _shadow_payload(prediction_date="2026-04-09", runtime_root=runtime_root),
+    )
+
+    manifest = build_artifact_manifest(
+        prediction_date=PREDICTION_DATE,
+        runtime_root=runtime_root,
+        generated_at="2026-04-10T12:00:00Z",
+    )
+
+    item = _artifact(manifest, "clv_market_movement_diagnostics")
+    assert item["exists"] is True
+    assert item["freshness_status"] == "stale_date"
+    assert item["prediction_date_match"] is False
+    assert manifest["missing_by_severity"]["fatal"] == 0
+
+
+def test_manifest_marks_phase4b_shadow_json_missing_metadata_not_fresh(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    _write_core_boards(runtime_root)
+    _write_json(
+        runtime_root / "diagnostics" / f"clv_market_movement_{PREDICTION_DATE}.json",
+        {"prediction_date": PREDICTION_DATE, "summary": {}},
+    )
+
+    manifest = build_artifact_manifest(
+        prediction_date=PREDICTION_DATE,
+        runtime_root=runtime_root,
+        generated_at="2026-04-10T12:00:00Z",
+    )
+
+    item = _artifact(manifest, "clv_market_movement_diagnostics")
+    assert item["exists"] is True
+    assert item["prediction_date_match"] is True
+    assert item["freshness_status"] == "missing_metadata"
+    assert "generated_at_utc" in item["missing_metadata_fields"]
+
+
+def test_shadow_freshness_warnings_remain_nonfatal(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    _write_core_boards(runtime_root)
+    _write_json(
+        runtime_root / "diagnostics" / f"clv_market_movement_{PREDICTION_DATE}.json",
+        _shadow_payload(prediction_date="2026-04-09", runtime_root=runtime_root),
+    )
+
+    manifest = build_artifact_manifest(
+        prediction_date=PREDICTION_DATE,
+        runtime_root=runtime_root,
+        generated_at="2026-04-10T12:00:00Z",
+    )
+
+    assert _artifact(manifest, "clv_market_movement_diagnostics")["freshness_status"] == "stale_date"
+    assert manifest["shadow_freshness_counts"]["stale_date"] == 1
+    assert manifest["missing_by_severity"]["fatal"] == 0
+    assert manifest["status"] != "fatal_missing"
 
 
 def test_manifest_counts_csv_rows(tmp_path: Path) -> None:

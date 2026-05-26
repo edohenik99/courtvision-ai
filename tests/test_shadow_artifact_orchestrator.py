@@ -29,6 +29,29 @@ def _write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def _shadow_json_payload(
+    *,
+    prediction_date: str,
+    report_name: str,
+    runtime_root: Path,
+    history_root: Path | None = None,
+    extra: dict | None = None,
+) -> dict:
+    payload = {
+        "prediction_date": prediction_date,
+        "generated_at_utc": "2026-05-24T12:00:00Z",
+        "generated_by": "test",
+        "source_runtime_root": str(runtime_root),
+        "report_name": report_name,
+        "report_version": "1.0",
+    }
+    if history_root is not None:
+        payload["source_history_root"] = str(history_root)
+    if extra:
+        payload.update(extra)
+    return payload
+
+
 def _market_row() -> dict:
     return {
         "prediction_date": PREDICTION_DATE,
@@ -185,6 +208,37 @@ def test_orchestrator_calls_all_writers_in_order_and_continues_after_failure(
     assert "Traceback" in captured.err
 
 
+def test_orchestrator_creates_one_run_id_and_writes_report_metadata(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+    _seed_core_operator_inputs(runtime_root, history_root)
+
+    summary = orchestrator.write_shadow_artifacts(
+        prediction_date=PREDICTION_DATE,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+
+    run_id = summary["orchestrator_run_id"]
+    assert run_id.startswith(f"shadow_artifacts_{PREDICTION_DATE}_")
+    assert summary["failed_count"] == 0
+
+    paths = orchestrator.shadow_artifact_paths(
+        prediction_date=PREDICTION_DATE,
+        runtime_root=runtime_root,
+    )
+    for report_name in orchestrator.PHASE4B_SHADOW_REPORT_ORDER:
+        payload = json.loads(paths[report_name].json_path.read_text(encoding="utf-8"))
+        assert payload["prediction_date"] == PREDICTION_DATE
+        assert payload["generated_at_utc"] == summary["generated_at_utc"]
+        assert payload["generated_by"] == orchestrator.GENERATED_BY
+        assert payload["source_runtime_root"] == str(runtime_root)
+        assert payload["report_name"] == report_name
+        assert payload["orchestrator_run_id"] == run_id
+        if report_name != "clv_market_movement":
+            assert payload["source_history_root"] == str(history_root)
+
+
 def test_closed_slate_refresh_runs_shadow_artifacts_before_daily_summary() -> None:
     commands = refresh_closed_slate_reports.build_refresh_commands(
         prediction_date=PREDICTION_DATE
@@ -214,6 +268,36 @@ def test_daily_summary_missing_shadow_artifacts_are_unavailable_not_clean_zero(
     assert "- status: unavailable/stale" in text
     assert f"calibration_bucket_report_{PREDICTION_DATE}.json" in text
     assert "- total graded rows used: 0" not in text
+
+
+def test_daily_summary_stale_shadow_artifact_is_unavailable_not_clean_zero(
+    tmp_path: Path,
+) -> None:
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+    _seed_core_operator_inputs(runtime_root, history_root)
+    _write_json(
+        runtime_root / "diagnostics" / f"calibration_bucket_report_{PREDICTION_DATE}.json",
+        _shadow_json_payload(
+            prediction_date="2026-05-23",
+            report_name="calibration_bucket_report",
+            runtime_root=runtime_root,
+            history_root=history_root,
+            extra={"summary": {"total_graded_rows_used": 99}},
+        ),
+    )
+
+    text, _payload = build_daily_summary(
+        prediction_date=PREDICTION_DATE,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+
+    assert "Calibration Health - Shadow Only" in text
+    assert "- status: unavailable/stale" in text
+    assert "- freshness_status: stale_date" in text
+    assert "- prediction_date_match: false" in text
+    assert "- total graded rows used: 99" not in text
 
 
 def test_operator_card_missing_shadow_artifacts_are_unavailable_not_clean_zero(

@@ -16,9 +16,11 @@ import pandas as pd
 from courtvision.context.player_role_stability import (
     apply_player_role_stability,
 )
+from courtvision.reporting.shadow_artifact_metadata import apply_shadow_report_metadata
 
 
 REPORT_VERSION = "1.0"
+GENERATED_BY = "courtvision.reporting.player_role_stability.write_player_role_stability_report"
 DIAGNOSTIC_ONLY_NOTE = (
     "Player Role Stability is diagnostic only and is not an Elite/Kelly input."
 )
@@ -284,6 +286,12 @@ def write_player_role_stability_report(
     history_root: str | Path = "data/history",
     full_market_df: pd.DataFrame | None = None,
     baseline_df: pd.DataFrame | None = None,
+    generated_at_utc: str | None = None,
+    generated_by: str = GENERATED_BY,
+    source_runtime_root: str | Path | None = None,
+    source_history_root: str | Path | None = None,
+    report_name: str = "player_role_stability",
+    orchestrator_run_id: str | None = None,
 ) -> tuple[Path, Path, dict[str, Any]]:
     """Write player role stability diagnostics JSON and operator TXT."""
     runtime_root = Path(runtime_root)
@@ -298,6 +306,16 @@ def write_player_role_stability_report(
         prediction_date=prediction_date,
         full_market_df=full_market_df,
         baseline_df=baseline_df,
+    )
+    payload = apply_shadow_report_metadata(
+        payload,
+        prediction_date=prediction_date,
+        generated_at_utc=generated_at_utc,
+        generated_by=generated_by,
+        source_runtime_root=source_runtime_root or runtime_root,
+        source_history_root=source_history_root or history_root,
+        report_name=report_name,
+        orchestrator_run_id=orchestrator_run_id,
     )
     
     json_path = player_role_stability_json_path_for_date(prediction_date, runtime_root)

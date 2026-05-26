@@ -40,6 +40,10 @@ from courtvision.reporting.meta_label_promotion import (  # noqa: E402
 from courtvision.reporting.meta_label_rules_performance import (  # noqa: E402
     DIAGNOSTIC_ONLY_NOTE as PERF_DIAGNOSTIC_ONLY_NOTE,
 )
+from courtvision.reporting.shadow_artifact_metadata import (  # noqa: E402
+    inspect_shadow_json_freshness,
+    shadow_json_unavailable_or_stale,
+)
 from courtvision.reporting.completion_state_audit import history_pending_grading_count  # noqa: E402
 from courtvision.reporting.near_elite_review import (  # noqa: E402
     REVIEW_ONLY_NOTE as NEAR_ELITE_REVIEW_ONLY_NOTE,
@@ -165,6 +169,16 @@ def _read_json(path: Path, warnings: list[str], *, required: bool = False) -> di
     except Exception as exc:
         warnings.append(f"Could not read JSON {path}: {exc}")
         return {}
+
+
+def _shadow_artifact_unavailable_lines(path: Path, freshness: dict[str, Any]) -> list[str]:
+    status = _safe_text(freshness.get("freshness_status")) or "unknown"
+    if status == "missing":
+        return [f"- missing artifact: {path}"]
+    lines = [f"- artifact: {path}", f"- freshness_status: {status}"]
+    if freshness.get("prediction_date_match") is False:
+        lines.append("- prediction_date_match: false")
+    return lines
 
 
 def _artifact_paths(runtime_root: Path, prediction_date: str) -> dict[str, Path]:
@@ -1201,6 +1215,30 @@ def build_operator_card(
     )
     completion_state_payload = _read_json(paths["completion_state_audit_json"], warnings)
     market_shadow_payload = _read_json(paths["market_shadow_grading"], warnings)
+    clv_market_freshness = inspect_shadow_json_freshness(
+        paths["clv_market_movement_diagnostics"],
+        prediction_date=prediction_date,
+    )
+    calibration_bucket_freshness = inspect_shadow_json_freshness(
+        paths["calibration_bucket_report_diagnostics"],
+        prediction_date=prediction_date,
+    )
+    player_role_stability_freshness = inspect_shadow_json_freshness(
+        paths["player_role_stability_report_diagnostics"],
+        prediction_date=prediction_date,
+    )
+    meta_label_promotion_freshness = inspect_shadow_json_freshness(
+        paths["meta_label_promotion_shadow_diagnostics"],
+        prediction_date=prediction_date,
+    )
+    meta_label_rules_performance_freshness = inspect_shadow_json_freshness(
+        paths["meta_label_rules_performance_diagnostics"],
+        prediction_date=prediction_date,
+    )
+    feature_completeness_freshness = inspect_shadow_json_freshness(
+        paths["feature_completeness_tracker_json"],
+        prediction_date=prediction_date,
+    )
     clv_market_available = paths["clv_market_movement_diagnostics"].exists()
     calibration_bucket_available = paths["calibration_bucket_report_diagnostics"].exists()
     player_role_stability_available = paths["player_role_stability_report_diagnostics"].exists()
@@ -1213,14 +1251,35 @@ def build_operator_card(
     meta_label_promotion_payload = _read_json(paths["meta_label_promotion_shadow_diagnostics"], warnings)
     meta_label_rules_performance_payload = _read_json(paths["meta_label_rules_performance_diagnostics"], warnings)
     feature_completeness_payload = _read_json(paths["feature_completeness_tracker_json"], warnings)
-    clv_market_available = clv_market_available and bool(clv_market_payload)
-    calibration_bucket_available = calibration_bucket_available and bool(calibration_bucket_payload)
-    player_role_stability_available = player_role_stability_available and bool(player_role_stability_payload)
-    meta_label_promotion_available = meta_label_promotion_available and bool(meta_label_promotion_payload)
+    clv_market_available = (
+        clv_market_available
+        and bool(clv_market_payload)
+        and not shadow_json_unavailable_or_stale(clv_market_freshness)
+    )
+    calibration_bucket_available = (
+        calibration_bucket_available
+        and bool(calibration_bucket_payload)
+        and not shadow_json_unavailable_or_stale(calibration_bucket_freshness)
+    )
+    player_role_stability_available = (
+        player_role_stability_available
+        and bool(player_role_stability_payload)
+        and not shadow_json_unavailable_or_stale(player_role_stability_freshness)
+    )
+    meta_label_promotion_available = (
+        meta_label_promotion_available
+        and bool(meta_label_promotion_payload)
+        and not shadow_json_unavailable_or_stale(meta_label_promotion_freshness)
+    )
     meta_label_rules_performance_available = (
         meta_label_rules_performance_available and bool(meta_label_rules_performance_payload)
+        and not shadow_json_unavailable_or_stale(meta_label_rules_performance_freshness)
     )
-    feature_completeness_available = feature_completeness_available and bool(feature_completeness_payload)
+    feature_completeness_available = (
+        feature_completeness_available
+        and bool(feature_completeness_payload)
+        and not shadow_json_unavailable_or_stale(feature_completeness_freshness)
+    )
     injury_payload = _read_json(runtime_root / "diagnostics" / f"injury_context_diagnostics_{prediction_date}.json", warnings)
     game_payload = _read_json(runtime_root / "diagnostics" / f"game_context_{prediction_date}.json", warnings)
     high_caution_df = _read_csv(paths["high_caution_over_watchlist"], warnings)
@@ -1799,7 +1858,12 @@ def build_operator_card(
     lines.append("-" * 40)
     if not clv_market_available:
         lines.append("- status: unavailable/stale")
-        lines.append(f"- missing artifact: {paths['clv_market_movement_diagnostics']}")
+        lines.extend(
+            _shadow_artifact_unavailable_lines(
+                paths["clv_market_movement_diagnostics"],
+                clv_market_freshness,
+            )
+        )
     else:
         lines.append(f"- close coverage count: {clv_close_coverage_count} / {clv_total_rows}")
         lines.append(f"- positive CLV count/rate: {clv_positive_count} / {_format_rate(clv_positive_rate)}")
@@ -1813,7 +1877,12 @@ def build_operator_card(
     lines.append("-" * 40)
     if not calibration_bucket_available:
         lines.append("- status: unavailable/stale")
-        lines.append(f"- missing artifact: {paths['calibration_bucket_report_diagnostics']}")
+        lines.extend(
+            _shadow_artifact_unavailable_lines(
+                paths["calibration_bucket_report_diagnostics"],
+                calibration_bucket_freshness,
+            )
+        )
     else:
         lines.append(f"- total graded rows used: {calibration_graded_rows_used}")
         lines.append(f"- worst overconfident bucket: {calibration_worst_overconfident}")
@@ -1826,7 +1895,12 @@ def build_operator_card(
     lines.append("-" * 40)
     if not player_role_stability_available:
         lines.append("- status: unavailable/stale")
-        lines.append(f"- missing artifact: {paths['player_role_stability_report_diagnostics']}")
+        lines.extend(
+            _shadow_artifact_unavailable_lines(
+                paths["player_role_stability_report_diagnostics"],
+                player_role_stability_freshness,
+            )
+        )
     else:
         lines.append(f"- total rows evaluated: {stability_total_evaluated}")
         lines.append(f"- stable count: {stability_stable_count}")
@@ -1852,7 +1926,12 @@ def build_operator_card(
     lines.append("-" * 40)
     if not meta_label_promotion_available:
         lines.append("- status: unavailable/stale")
-        lines.append(f"- missing artifact: {paths['meta_label_promotion_shadow_diagnostics']}")
+        lines.extend(
+            _shadow_artifact_unavailable_lines(
+                paths["meta_label_promotion_shadow_diagnostics"],
+                meta_label_promotion_freshness,
+            )
+        )
     else:
         lines.append(f"- total rows evaluated: {meta_label_total_evaluated}")
         lines.append(f"- shadow strong review candidate count: {meta_label_strong_count}")
@@ -1877,7 +1956,12 @@ def build_operator_card(
     lines.append("-" * 40)
     if not meta_label_rules_performance_available:
         lines.append("- status: unavailable/stale")
-        lines.append(f"- missing artifact: {paths['meta_label_rules_performance_diagnostics']}")
+        lines.extend(
+            _shadow_artifact_unavailable_lines(
+                paths["meta_label_rules_performance_diagnostics"],
+                meta_label_rules_performance_freshness,
+            )
+        )
     else:
         lines.append(f"- completed slate count: {perf_slates}")
         lines.append(f"- graded hit/miss rows: {perf_graded}")
@@ -1892,7 +1976,12 @@ def build_operator_card(
     lines.append("-" * 40)
     if not feature_completeness_available:
         lines.append("- status: unavailable/stale")
-        lines.append(f"- missing artifact: {paths['feature_completeness_tracker_json']}")
+        lines.extend(
+            _shadow_artifact_unavailable_lines(
+                paths["feature_completeness_tracker_json"],
+                feature_completeness_freshness,
+            )
+        )
     else:
         lines.append(f"- completed slate count: {tracker_slates}")
         lines.append(f"- graded hit/miss rows: {tracker_graded}")
@@ -1984,6 +2073,14 @@ def build_operator_card(
         "calibration_bucket_report": calibration_bucket_summary,
         "player_role_stability_report": player_role_stability_summary,
         "meta_label_promotion_report": meta_label_promotion_summary,
+        "phase4b_shadow_artifact_freshness": {
+            "clv_market_movement": clv_market_freshness,
+            "calibration_bucket_report": calibration_bucket_freshness,
+            "player_role_stability": player_role_stability_freshness,
+            "meta_label_promotion": meta_label_promotion_freshness,
+            "meta_label_rules_performance": meta_label_rules_performance_freshness,
+            "feature_completeness_tracker": feature_completeness_freshness,
+        },
         "feature_completeness_tracker": {
             "completed_slate_count": tracker_slates,
             "graded_hit_miss_rows": tracker_graded,

@@ -55,6 +55,10 @@ from courtvision.reporting.fragility_shadow_policy_simulation import (
     write_policy_simulation_report,
 )
 from courtvision.reporting.shadow_artifact_orchestrator import shadow_artifact_paths
+from courtvision.reporting.shadow_artifact_metadata import (
+    inspect_shadow_json_freshness,
+    shadow_json_unavailable_or_stale,
+)
 from courtvision.reporting.projection_calibration_shadow import (
     calibration_json_path_for_date,
     calibration_txt_path_for_date,
@@ -339,7 +343,8 @@ def _read_json(path: Path, warnings: list[str], *, optional: bool = True) -> dic
     return payload if isinstance(payload, dict) else {}
 
 
-def _read_shadow_json(path: Path) -> tuple[dict[str, Any], str, str]:
+def _read_shadow_json(path: Path, *, prediction_date: str) -> tuple[dict[str, Any], str, str]:
+    freshness = inspect_shadow_json_freshness(path, prediction_date=prediction_date)
     if not path.exists():
         return {}, "unavailable_or_stale", f"missing shadow artifact: {path}"
     try:
@@ -348,6 +353,12 @@ def _read_shadow_json(path: Path) -> tuple[dict[str, Any], str, str]:
         return {}, "unavailable_or_stale", f"unreadable shadow artifact: {path} ({exc})"
     if not isinstance(payload, dict):
         return {}, "unavailable_or_stale", f"invalid shadow artifact payload: {path}"
+    if shadow_json_unavailable_or_stale(freshness):
+        return {}, "unavailable_or_stale", (
+            f"stale shadow artifact: {path} "
+            f"(freshness_status={freshness.get('freshness_status')}, "
+            f"prediction_date_match={freshness.get('prediction_date_match')})"
+        )
     return payload, "written", ""
 
 
@@ -361,21 +372,36 @@ def _phase4b_shadow_payload_summary(
         runtime_root=runtime_root,
     )
 
-    clv_payload, clv_status, clv_error = _read_shadow_json(paths["clv_market_movement"].json_path)
+    clv_payload, clv_status, clv_error = _read_shadow_json(
+        paths["clv_market_movement"].json_path,
+        prediction_date=prediction_date,
+    )
     clv_summary = clv_payload.get("summary", {}) if isinstance(clv_payload.get("summary"), dict) else {}
 
-    bucket_payload, bucket_status, bucket_error = _read_shadow_json(paths["calibration_bucket_report"].json_path)
+    bucket_payload, bucket_status, bucket_error = _read_shadow_json(
+        paths["calibration_bucket_report"].json_path,
+        prediction_date=prediction_date,
+    )
     bucket_summary = bucket_payload.get("summary", {}) if isinstance(bucket_payload.get("summary"), dict) else {}
 
-    stability_payload, stability_status, stability_error = _read_shadow_json(paths["player_role_stability"].json_path)
+    stability_payload, stability_status, stability_error = _read_shadow_json(
+        paths["player_role_stability"].json_path,
+        prediction_date=prediction_date,
+    )
     stability_summary = (
         stability_payload.get("summary", {}) if isinstance(stability_payload.get("summary"), dict) else {}
     )
 
-    meta_payload, meta_status, meta_error = _read_shadow_json(paths["meta_label_promotion"].json_path)
+    meta_payload, meta_status, meta_error = _read_shadow_json(
+        paths["meta_label_promotion"].json_path,
+        prediction_date=prediction_date,
+    )
     meta_summary = meta_payload.get("summary", {}) if isinstance(meta_payload.get("summary"), dict) else {}
 
-    perf_payload, perf_status, perf_error = _read_shadow_json(paths["meta_label_rules_performance"].json_path)
+    perf_payload, perf_status, perf_error = _read_shadow_json(
+        paths["meta_label_rules_performance"].json_path,
+        prediction_date=prediction_date,
+    )
     perf_readiness = (
         perf_payload.get("data_readiness", {})
         if isinstance(perf_payload.get("data_readiness"), dict)
@@ -383,7 +409,8 @@ def _phase4b_shadow_payload_summary(
     )
 
     tracker_payload, tracker_status, tracker_error = _read_shadow_json(
-        paths["feature_completeness_tracker"].json_path
+        paths["feature_completeness_tracker"].json_path,
+        prediction_date=prediction_date,
     )
     tracker_hist = (
         tracker_payload.get("historical_coverage", {})

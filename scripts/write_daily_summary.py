@@ -82,6 +82,10 @@ from courtvision.reporting.meta_label_promotion import (
 from courtvision.reporting.meta_label_rules_performance import (
     DIAGNOSTIC_ONLY_NOTE as PERF_DIAGNOSTIC_ONLY_NOTE,
 )
+from courtvision.reporting.shadow_artifact_metadata import (
+    inspect_shadow_json_freshness,
+    shadow_json_unavailable_or_stale,
+)
 from courtvision.reporting.team_distribution import (
     OBSERVATION_ONLY_NOTE as TEAM_DISTRIBUTION_OBSERVATION_ONLY_NOTE,
     REPORT_TITLE as TEAM_DISTRIBUTION_TITLE,
@@ -163,6 +167,16 @@ def _read_json(path: Path, warnings: list[str]) -> dict[str, Any]:
     except Exception as exc:
         warnings.append(f"Could not read JSON {path}: {exc}")
         return {}
+
+
+def _shadow_artifact_unavailable_lines(path: Path, freshness: dict[str, Any]) -> list[str]:
+    status = _safe_text(freshness.get("freshness_status")) or "unknown"
+    if status == "missing":
+        return [f"- missing artifact: {path}"]
+    lines = [f"- artifact: {path}", f"- freshness_status: {status}"]
+    if freshness.get("prediction_date_match") is False:
+        lines.append("- prediction_date_match: false")
+    return lines
 
 
 def _format_money(value: float | None) -> str:
@@ -600,6 +614,26 @@ def build_daily_summary(
     meta_label_promotion_json_path = diagnostics_dir / f"meta_label_promotion_shadow_{prediction_date}.json"
     meta_label_rules_performance_json_path = diagnostics_dir / f"meta_label_rules_performance_{prediction_date}.json"
     feature_completeness_json_path = diagnostics_dir / f"feature_completeness_tracker_{prediction_date}.json"
+    calibration_bucket_freshness = inspect_shadow_json_freshness(
+        calibration_bucket_json_path,
+        prediction_date=prediction_date,
+    )
+    player_role_stability_freshness = inspect_shadow_json_freshness(
+        player_role_stability_json_path,
+        prediction_date=prediction_date,
+    )
+    meta_label_promotion_freshness = inspect_shadow_json_freshness(
+        meta_label_promotion_json_path,
+        prediction_date=prediction_date,
+    )
+    meta_label_rules_performance_freshness = inspect_shadow_json_freshness(
+        meta_label_rules_performance_json_path,
+        prediction_date=prediction_date,
+    )
+    feature_completeness_freshness = inspect_shadow_json_freshness(
+        feature_completeness_json_path,
+        prediction_date=prediction_date,
+    )
     calibration_bucket_available = calibration_bucket_json_path.exists()
     player_role_stability_available = player_role_stability_json_path.exists()
     meta_label_promotion_available = meta_label_promotion_json_path.exists()
@@ -610,13 +644,30 @@ def build_daily_summary(
     meta_label_promotion_payload = _read_json(meta_label_promotion_json_path, [])
     meta_label_rules_performance_payload = _read_json(meta_label_rules_performance_json_path, [])
     feature_completeness_payload = _read_json(feature_completeness_json_path, [])
-    calibration_bucket_available = calibration_bucket_available and bool(calibration_bucket_payload)
-    player_role_stability_available = player_role_stability_available and bool(player_role_stability_payload)
-    meta_label_promotion_available = meta_label_promotion_available and bool(meta_label_promotion_payload)
+    calibration_bucket_available = (
+        calibration_bucket_available
+        and bool(calibration_bucket_payload)
+        and not shadow_json_unavailable_or_stale(calibration_bucket_freshness)
+    )
+    player_role_stability_available = (
+        player_role_stability_available
+        and bool(player_role_stability_payload)
+        and not shadow_json_unavailable_or_stale(player_role_stability_freshness)
+    )
+    meta_label_promotion_available = (
+        meta_label_promotion_available
+        and bool(meta_label_promotion_payload)
+        and not shadow_json_unavailable_or_stale(meta_label_promotion_freshness)
+    )
     meta_label_rules_performance_available = (
         meta_label_rules_performance_available and bool(meta_label_rules_performance_payload)
+        and not shadow_json_unavailable_or_stale(meta_label_rules_performance_freshness)
     )
-    feature_completeness_available = feature_completeness_available and bool(feature_completeness_payload)
+    feature_completeness_available = (
+        feature_completeness_available
+        and bool(feature_completeness_payload)
+        and not shadow_json_unavailable_or_stale(feature_completeness_freshness)
+    )
     readiness = _read_json(diagnostics_dir / f"market_performance_readiness_{prediction_date}.json", warnings)
     manual_context = _read_json(diagnostics_dir / f"manual_context_{prediction_date}.json", warnings)
     manual_review_history_df = _read_csv(history_root / "manual_review_history.csv", [])
@@ -1049,7 +1100,7 @@ def build_daily_summary(
     lines.extend(["", "Calibration Health - Shadow Only", "-" * 72])
     if not calibration_bucket_available:
         lines.append("- status: unavailable/stale")
-        lines.append(f"- missing artifact: {calibration_bucket_json_path}")
+        lines.extend(_shadow_artifact_unavailable_lines(calibration_bucket_json_path, calibration_bucket_freshness))
     else:
         lines.append(f"- total graded rows used: {calibration_graded_rows_used}")
         lines.append(f"- worst overconfident bucket: {calibration_worst_overconfident}")
@@ -1060,7 +1111,7 @@ def build_daily_summary(
     lines.extend(["", "Player Role Stability - Shadow Only", "-" * 72])
     if not player_role_stability_available:
         lines.append("- status: unavailable/stale")
-        lines.append(f"- missing artifact: {player_role_stability_json_path}")
+        lines.extend(_shadow_artifact_unavailable_lines(player_role_stability_json_path, player_role_stability_freshness))
     else:
         lines.append(f"- total rows evaluated: {stability_total_evaluated}")
         lines.append(f"- stable count: {stability_stable_count}")
@@ -1084,7 +1135,7 @@ def build_daily_summary(
     lines.extend(["", "Meta-Label Promotion - Shadow Only", "-" * 72])
     if not meta_label_promotion_available:
         lines.append("- status: unavailable/stale")
-        lines.append(f"- missing artifact: {meta_label_promotion_json_path}")
+        lines.extend(_shadow_artifact_unavailable_lines(meta_label_promotion_json_path, meta_label_promotion_freshness))
     else:
         lines.append(f"- total rows evaluated: {meta_label_total_evaluated}")
         lines.append(f"- shadow strong review candidate count: {meta_label_strong_count}")
@@ -1107,7 +1158,12 @@ def build_daily_summary(
     lines.extend(["", "Meta-Label Rules Performance - Shadow Only", "-" * 72])
     if not meta_label_rules_performance_available:
         lines.append("- status: unavailable/stale")
-        lines.append(f"- missing artifact: {meta_label_rules_performance_json_path}")
+        lines.extend(
+            _shadow_artifact_unavailable_lines(
+                meta_label_rules_performance_json_path,
+                meta_label_rules_performance_freshness,
+            )
+        )
     else:
         lines.append(f"- completed slate count: {perf_slates}")
         lines.append(f"- graded hit/miss rows: {perf_graded}")
@@ -1120,7 +1176,7 @@ def build_daily_summary(
     lines.extend(["", "Feature Completeness Tracker - Shadow Only", "-" * 72])
     if not feature_completeness_available:
         lines.append("- status: unavailable/stale")
-        lines.append(f"- missing artifact: {feature_completeness_json_path}")
+        lines.extend(_shadow_artifact_unavailable_lines(feature_completeness_json_path, feature_completeness_freshness))
     else:
         lines.append(f"- completed slate count: {tracker_slates}")
         lines.append(f"- graded hit/miss rows: {tracker_graded}")
@@ -1470,6 +1526,13 @@ def build_daily_summary(
             "feature_complete_graded_rows": tracker_complete,
             "estimated_additional_slates_needed": tracker_est_slates,
             "verdict": tracker_verdict,
+        },
+        "phase4b_shadow_artifact_freshness": {
+            "calibration_bucket_report": calibration_bucket_freshness,
+            "player_role_stability": player_role_stability_freshness,
+            "meta_label_promotion": meta_label_promotion_freshness,
+            "meta_label_rules_performance": meta_label_rules_performance_freshness,
+            "feature_completeness_tracker": feature_completeness_freshness,
         },
         "full_market_context_conflict_cause_counts": full_market_context_conflict_causes,
         "stale_team_not_in_game_count": int(full_market_context_conflict_causes.get("stale_team_not_in_game", 0)),

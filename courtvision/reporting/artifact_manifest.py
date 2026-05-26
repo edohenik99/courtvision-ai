@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from courtvision.reporting.shadow_artifact_metadata import inspect_shadow_json_freshness
+
 
 SEVERITY_FATAL = "fatal"
 SEVERITY_WARNING = "warning"
@@ -17,6 +19,16 @@ SEVERITIES = (
     SEVERITY_WARNING,
     SEVERITY_INFORMATIONAL,
     SEVERITY_SHADOW_ONLY,
+)
+PHASE4B_SHADOW_DIAGNOSTIC_NAMES = frozenset(
+    {
+        "clv_market_movement_diagnostics",
+        "calibration_bucket_report_diagnostics",
+        "player_role_stability_report_diagnostics",
+        "meta_label_promotion_shadow_diagnostics",
+        "meta_label_rules_performance_json",
+        "feature_completeness_tracker_json",
+    }
 )
 
 
@@ -500,7 +512,7 @@ def _csv_row_count(path: Path) -> tuple[int | None, str]:
         return None, f"row_count_error:{exc}"
 
 
-def _artifact_row(runtime_root: Path, spec: ArtifactSpec) -> dict[str, Any]:
+def _artifact_row(runtime_root: Path, spec: ArtifactSpec, *, prediction_date: str) -> dict[str, Any]:
     path = runtime_root / spec.lane / spec.filename
     exists = path.exists()
     notes: list[str] = [spec.notes]
@@ -519,7 +531,7 @@ def _artifact_row(runtime_root: Path, spec: ArtifactSpec) -> dict[str, Any]:
     else:
         notes.append("missing")
 
-    return {
+    row: dict[str, Any] = {
         "category": spec.category,
         "name": spec.name,
         "expected_path": str(path),
@@ -529,6 +541,9 @@ def _artifact_row(runtime_root: Path, spec: ArtifactSpec) -> dict[str, Any]:
         "severity": spec.severity,
         "notes": "; ".join(note for note in notes if note),
     }
+    if spec.name in PHASE4B_SHADOW_DIAGNOSTIC_NAMES:
+        row.update(inspect_shadow_json_freshness(path, prediction_date=prediction_date))
+    return row
 
 
 def build_artifact_manifest(
@@ -539,14 +554,22 @@ def build_artifact_manifest(
 ) -> dict[str, Any]:
     """Build a read-only artifact manifest for a prediction date."""
     runtime_root_path = Path(runtime_root)
-    artifacts = [_artifact_row(runtime_root_path, spec) for spec in _specs(prediction_date)]
+    artifacts = [
+        _artifact_row(runtime_root_path, spec, prediction_date=prediction_date)
+        for spec in _specs(prediction_date)
+    ]
     severity_counts = {severity: 0 for severity in SEVERITIES}
     missing_by_severity = {severity: 0 for severity in SEVERITIES}
+    shadow_freshness_counts: dict[str, int] = {}
     for item in artifacts:
         severity = str(item["severity"])
         severity_counts[severity] = severity_counts.get(severity, 0) + 1
         if not item["exists"]:
             missing_by_severity[severity] = missing_by_severity.get(severity, 0) + 1
+        freshness_status = item.get("freshness_status")
+        if freshness_status:
+            key = str(freshness_status)
+            shadow_freshness_counts[key] = shadow_freshness_counts.get(key, 0) + 1
 
     if missing_by_severity.get(SEVERITY_FATAL, 0) > 0:
         status = "fatal_missing"
@@ -563,6 +586,7 @@ def build_artifact_manifest(
         "artifact_count": len(artifacts),
         "severity_counts": severity_counts,
         "missing_by_severity": missing_by_severity,
+        "shadow_freshness_counts": shadow_freshness_counts,
         "artifacts": artifacts,
     }
 
@@ -606,6 +630,18 @@ def render_artifact_manifest_text(manifest: dict[str, Any]) -> str:
         notes = str(item.get("notes", "")).strip()
         if notes:
             lines.append(f"  notes: {notes}")
+        if item.get("freshness_status"):
+            lines.append(
+                "  freshness: "
+                f"status={item.get('freshness_status')} "
+                f"prediction_date_match={item.get('prediction_date_match')} "
+                f"mtime_utc={item.get('mtime_utc') or 'n/a'} "
+                f"generated_at_utc={item.get('generated_at_utc') or 'n/a'} "
+                f"generated_by={item.get('generated_by') or 'n/a'} "
+                f"orchestrator_run_id={item.get('orchestrator_run_id') or 'n/a'}"
+            )
+            if item.get("missing_metadata_fields"):
+                lines.append(f"  missing_metadata_fields: {item.get('missing_metadata_fields')}")
     return "\n".join(lines) + "\n"
 
 
@@ -636,6 +672,7 @@ __all__ = [
     "SEVERITY_INFORMATIONAL",
     "SEVERITY_SHADOW_ONLY",
     "SEVERITIES",
+    "PHASE4B_SHADOW_DIAGNOSTIC_NAMES",
     "build_artifact_manifest",
     "render_artifact_manifest_text",
     "write_artifact_manifest_outputs",

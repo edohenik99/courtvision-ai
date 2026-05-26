@@ -18,6 +18,72 @@ def _write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def _shadow_json_payload(
+    *,
+    prediction_date: str,
+    report_name: str,
+    runtime_root: Path,
+    extra: dict | None = None,
+) -> dict:
+    payload = {
+        "prediction_date": prediction_date,
+        "generated_at_utc": "2026-05-24T12:00:00Z",
+        "generated_by": "test",
+        "source_runtime_root": str(runtime_root),
+        "report_name": report_name,
+        "report_version": "1.0",
+    }
+    if extra:
+        payload.update(extra)
+    return payload
+
+
+def _operator_row(prediction_date: str) -> dict:
+    return {
+        "prediction_date": prediction_date,
+        "player_name": "Fixture Player",
+        "player_id": "player-1",
+        "team_abbr": "BOS",
+        "opponent": "NYK",
+        "game_id": "game-1",
+        "market_type": "player_points",
+        "selection": "over",
+        "line": 20.5,
+        "sportsbook_line": 20.5,
+        "odds": -110,
+        "edge": 2.0,
+        "confidence": 0.72,
+        "quality_score": 80.0,
+    }
+
+
+def _quality_payload() -> dict:
+    return {
+        "run_health_status": "HEALTHY",
+        "run_health_reason": "fixture",
+        "slate_provider_counts": {
+            "games_count": 1,
+            "normalized_odds_rows_count": 1,
+            "stale_odds_count": 0,
+            "provider_breakdown": {"line_source": {"fixture": 1}},
+        },
+        "candidate_funnel": {
+            "elite_board_count": 1,
+            "full_market_board_count": 1,
+            "sgp_board_count": 0,
+        },
+        "kelly_safety_summary": {
+            "total_rows": 0,
+            "kelly_eligible_count": 0,
+            "review_before_bet_count": 0,
+            "review_policy_hold_count": 0,
+        },
+        "manual_review_required_count": 0,
+        "same_opponent_under_warning_count": 0,
+        "date_isolation_check": {"status": "ok"},
+    }
+
+
 def test_operator_card_includes_clv_market_movement_shadow_section(tmp_path: Path) -> None:
     prediction_date = "2026-05-24"
     runtime_root = tmp_path / "runtime"
@@ -238,6 +304,62 @@ def test_operator_card_includes_clv_market_movement_shadow_section(tmp_path: Pat
     assert payload["feature_completeness_tracker"]["completed_slate_count"] == 5
 
     assert payload["final_decision"] == "BETTABLE"
+
+
+def test_operator_card_stale_shadow_artifact_is_unavailable_not_clean_zero(tmp_path: Path) -> None:
+    prediction_date = "2026-05-24"
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+    operator = runtime_root / "operator"
+    diagnostics = runtime_root / "diagnostics"
+    row = _operator_row(prediction_date)
+
+    _write_csv(operator / f"elite_board_{prediction_date}.csv", [row])
+    _write_csv(operator / f"full_market_board_{prediction_date}.csv", [row])
+    _write_csv(operator / f"sgp_board_{prediction_date}.csv", [], columns=["prediction_date"])
+    _write_json(operator / f"quality_summary_{prediction_date}.json", _quality_payload())
+    _write_json(diagnostics / f"board_diagnostics_{prediction_date}.json", {"board_counts": {}})
+    _write_json(
+        diagnostics / f"market_shadow_grading_{prediction_date}.json",
+        {
+            "totals": {"total_picks": 1, "graded_picks": 0, "pending_picks": 1},
+            "kelly_decision_performance": {"status": "insufficient_sample"},
+        },
+    )
+    _write_json(
+        diagnostics / f"clv_market_movement_{prediction_date}.json",
+        _shadow_json_payload(
+            prediction_date="2026-05-23",
+            report_name="clv_market_movement",
+            runtime_root=runtime_root,
+            extra={
+                "summary": {
+                    "total_rows": 10,
+                    "close_coverage_count": 8,
+                    "positive_clv_count": 7,
+                }
+            },
+        ),
+    )
+    _write_csv(
+        history_root / "pick_history.csv",
+        [],
+        columns=["prediction_date", "result_status"],
+    )
+
+    output_path, payload = write_operator_card_outputs(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+
+    text = output_path.read_text(encoding="utf-8")
+    assert "CLV / Market Movement - Shadow Only" in text
+    assert "- status: unavailable/stale" in text
+    assert "- freshness_status: stale_date" in text
+    assert "- prediction_date_match: false" in text
+    assert "- close coverage count: 8 / 10" not in text
+    assert payload["phase4b_shadow_artifact_freshness"]["clv_market_movement"]["freshness_status"] == "stale_date"
 
 
 def test_operator_card_grading_snapshot_zero_on_complete_closed_slate(tmp_path: Path) -> None:

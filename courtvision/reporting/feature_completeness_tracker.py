@@ -15,7 +15,10 @@ from typing import Any
 
 import pandas as pd
 
+from courtvision.reporting.shadow_artifact_metadata import apply_shadow_report_metadata
+
 REPORT_VERSION = "1.0"
+GENERATED_BY = "courtvision.reporting.feature_completeness_tracker.write_feature_completeness_report"
 DIAGNOSTIC_ONLY_NOTE = (
     "Feature Completeness Tracker is shadow-only and is not an Elite/Kelly input."
 )
@@ -580,6 +583,12 @@ def write_feature_completeness_report(
     shadow_history_df: pd.DataFrame | None = None,
     full_market_df: pd.DataFrame | None = None,
     meta_promo_df: pd.DataFrame | None = None,
+    generated_at_utc: str | None = None,
+    generated_by: str = GENERATED_BY,
+    source_runtime_root: str | Path | None = None,
+    source_history_root: str | Path | None = None,
+    report_name: str = "feature_completeness_tracker",
+    orchestrator_run_id: str | None = None,
 ) -> tuple[Path, Path, Path, dict[str, Any]]:
     """Write forward feature completeness JSON, operator TXT, and operator CSV."""
     runtime_root = Path(runtime_root)
@@ -618,6 +627,16 @@ def write_feature_completeness_report(
         meta_promo_df=meta_promo_df,
         runtime_root=runtime_root,
         history_root=history_root,
+    )
+    payload = apply_shadow_report_metadata(
+        payload,
+        prediction_date=prediction_date,
+        generated_at_utc=generated_at_utc,
+        generated_by=generated_by,
+        source_runtime_root=source_runtime_root or runtime_root,
+        source_history_root=source_history_root or history_root,
+        report_name=report_name,
+        orchestrator_run_id=orchestrator_run_id,
     )
 
     json_path = performance_json_path_for_date(prediction_date, runtime_root)

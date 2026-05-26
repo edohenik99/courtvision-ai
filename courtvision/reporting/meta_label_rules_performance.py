@@ -18,8 +18,10 @@ from courtvision.context.meta_label_promotion import (
     DIAGNOSTIC_ONLY_NOTE as META_LABEL_DIAGNOSTIC_ONLY_NOTE,
     apply_meta_label_promotion,
 )
+from courtvision.reporting.shadow_artifact_metadata import apply_shadow_report_metadata
 
 REPORT_VERSION = "1.0"
+GENERATED_BY = "courtvision.reporting.meta_label_rules_performance.write_rules_performance_report"
 DIAGNOSTIC_ONLY_NOTE = (
     "Meta-Label Rules Performance is shadow-only and is not an Elite/Kelly input."
 )
@@ -460,6 +462,12 @@ def write_rules_performance_report(
     shadow_history_df: pd.DataFrame | None = None,
     pick_history_df: pd.DataFrame | None = None,
     current_meta_df: pd.DataFrame | None = None,
+    generated_at_utc: str | None = None,
+    generated_by: str = GENERATED_BY,
+    source_runtime_root: str | Path | None = None,
+    source_history_root: str | Path | None = None,
+    report_name: str = "meta_label_rules_performance",
+    orchestrator_run_id: str | None = None,
 ) -> tuple[Path, Path, Path, dict[str, Any]]:
     """Write rules performanceJSON, operator TXT, and operator CSV."""
     runtime_root = Path(runtime_root)
@@ -476,6 +484,16 @@ def write_rules_performance_report(
         shadow_history_df=shadow_history_df,
         pick_history_df=pick_history_df,
         current_meta_df=current_meta_df,
+    )
+    payload = apply_shadow_report_metadata(
+        payload,
+        prediction_date=prediction_date,
+        generated_at_utc=generated_at_utc,
+        generated_by=generated_by,
+        source_runtime_root=source_runtime_root or runtime_root,
+        source_history_root=source_history_root or history_root,
+        report_name=report_name,
+        orchestrator_run_id=orchestrator_run_id,
     )
 
     json_path = performance_json_path_for_date(prediction_date, runtime_root)
