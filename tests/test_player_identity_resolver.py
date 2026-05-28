@@ -136,9 +136,9 @@ def test_source_identity_annotation_preserves_row_valid_alignment() -> None:
     assert bool(out["player_identity_valid"]) is True
     assert bool(out["row_identity_valid"]) is True
     assert bool(out["row_identity_quarantined"]) is False
-    assert bool(out["source_identity_conflicted"]) is True
-    assert out["source_identity_conflict_reason"] == PLAYER_ID_TEAM_CONFLICT_REASON
-    assert out["source_identity_conflict_policy"] == SOURCE_IDENTITY_CONFLICT_POLICY_ROW_VALID
+    assert bool(out["source_identity_conflicted"]) is False
+    assert out["source_identity_conflict_reason"] == ""
+    assert out["source_identity_conflict_policy"] == ""
 
 
 def test_source_identity_exposure_counts_rows_and_unique_players_by_lane() -> None:

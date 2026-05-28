@@ -24,6 +24,8 @@ from courtvision.context.game_context import (
     mark_identity_quarantine_fields,
 )
 from courtvision.context.player_identity import (
+    _player_id_key,
+    _baseline_team,
     annotate_source_identity_conflicts,
     build_canonical_player_identity_resolver,
     player_identity_reason_counts,
@@ -961,6 +963,22 @@ class PredictionPipeline:
             odds=odds,
             games=games,
         )
+
+        # Create a runtime-resolved baseline view selecting the correct active stint team.
+        # This resolves duplicate/stale baseline rows at runtime without altering the CSV file at rest.
+        if player_baselines is not None and not player_baselines.empty:
+            keep_mask = []
+            for _, row in player_baselines.iterrows():
+                pid = _player_id_key(row.get("player_id"))
+                if pid:
+                    resolved_team = player_identity_resolver.canonical_team(pid)
+                    if resolved_team:
+                        row_team = _baseline_team(row)
+                        if row_team != resolved_team:
+                            keep_mask.append(False)
+                            continue
+                keep_mask.append(True)
+            player_baselines = player_baselines[keep_mask].copy()
 
         # Fully modeled markets (real projections)
         FULLY_MODELED_MARKETS = {

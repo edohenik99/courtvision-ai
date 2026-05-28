@@ -799,19 +799,14 @@ class TestPredictionPipeline:
         assert result.summary["player_identity"]["counts_by_reason"] == {
             PLAYER_ID_TEAM_CONFLICT_REASON: 1
         }
-        assert result.summary["player_identity_invalid_candidate_counts_by_reason"] == {
-            PLAYER_ID_TEAM_CONFLICT_REASON: 1
-        }
-        assert result.summary["identity_quarantine_count"] == 1
-        assert result.summary["identity_quarantine_reason_counts"] == {"outside_team_identity": 1}
+        assert result.summary["player_identity_invalid_candidate_counts_by_reason"] == {}
+        assert result.summary["identity_quarantine_count"] == 0
+        assert result.summary["identity_quarantine_reason_counts"] == {}
         rejected = result.rejected_candidate_diagnostics
         stale = rejected[
             rejected["player_name"].eq("James Harden")
-            & rejected["team"].eq("LAC")
-            & rejected["identity_quarantine_reason"].eq("outside_team_identity")
+            & rejected["player_identity_conflict_reason"].eq(PLAYER_ID_TEAM_CONFLICT_REASON)
         ].iloc[0]
-        assert stale["selection_rejection_reason"] == "identity_quarantine"
-        assert stale["identity_quarantine_reason"] == "outside_team_identity"
         assert stale["player_identity_conflict_reason"] == PLAYER_ID_TEAM_CONFLICT_REASON
 
     def test_mixed_slate_preserves_identity_quarantine_diagnostics(self, tmp_path):

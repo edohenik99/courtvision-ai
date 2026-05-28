@@ -31,6 +31,7 @@ PLAYER_IDENTITY_COLUMNS: tuple[str, ...] = (
     "player_identity_conflict_reason",
     "player_identity_conflict_details",
     "identity_roster_date",
+    "identity_resolution_category",
 )
 SOURCE_IDENTITY_CONFLICT_COLUMNS: tuple[str, ...] = (
     "row_identity_valid",
@@ -238,6 +239,13 @@ class CanonicalPlayerIdentityResolver:
         self.identities = self._build_identities()
         self._diagnostic_rows = self._build_source_diagnostics()
 
+    def canonical_team(self, player_id: Any) -> str:
+        key = _player_id_key(player_id)
+        if not key:
+            return ""
+        identity = self.identities.get(key)
+        return identity.team_abbr if identity else ""
+
     def _build_identities(self) -> dict[str, CanonicalPlayerIdentity]:
         identities: dict[str, CanonicalPlayerIdentity] = {}
         for player_id in sorted(set(self.baseline_records) | set(self.provider_records)):
@@ -398,25 +406,37 @@ class CanonicalPlayerIdentityResolver:
             details["canonical_source"] = identity.source
 
         reason = ""
-        if (
-            identity
-            and (len(identity.baseline_team_abbrs) > 1 or len(identity.provider_team_abbrs) > 1)
-            and canonical_team
-            and candidate_team
-            and candidate_team != canonical_team
-        ):
-            reason = PLAYER_ID_TEAM_CONFLICT_REASON
-        elif baseline_team and provider_team and baseline_team != provider_team:
-            reason = BASELINE_PROVIDER_TEAM_CONFLICT_REASON
-        elif baseline_team and source_team and source_team != baseline_team:
-            reason = BASELINE_PROVIDER_TEAM_CONFLICT_REASON
-        elif candidate_team and game_teams and candidate_team not in game_teams:
-            reason = PLAYER_TEAM_NOT_IN_ACTIVE_GAME_REASON
+        category = ""
+
+        if not player_id or not candidate_team or not baseline_team:
+            category = "missing_team"
+            reason = PLAYER_IDENTITY_REJECTION_REASON
+        else:
+            is_multi_stint = identity and (len(identity.baseline_team_abbrs) > 1 or len(identity.provider_team_abbrs) > 1)
+            
+            if is_multi_stint:
+                if candidate_team == canonical_team:
+                    category = "valid_current_team_override"
+                else:
+                    category = "historical_stint_mismatch"
+                    reason = PLAYER_ID_TEAM_CONFLICT_REASON
+            elif (baseline_team and provider_team and baseline_team != provider_team) or (baseline_team and source_team and source_team != baseline_team):
+                if provider_team == canonical_team and provider_team in game_teams:
+                    category = "valid_current_team_override"
+                else:
+                    category = "stale_baseline_team"
+                    reason = BASELINE_PROVIDER_TEAM_CONFLICT_REASON
+            elif candidate_team and game_teams and candidate_team not in game_teams:
+                category = "true_identity_conflict"
+                reason = PLAYER_TEAM_NOT_IN_ACTIVE_GAME_REASON
+            else:
+                category = ""
 
         out["canonical_player_id"] = player_id
         out["canonical_player_name"] = identity.player_name if identity else _player_name(out)
         out["canonical_team_abbr"] = canonical_team
         out["identity_roster_date"] = self.prediction_date
+        out["identity_resolution_category"] = category
 
         if not reason:
             out["player_identity_valid"] = True
@@ -603,7 +623,12 @@ def annotate_source_identity_conflicts(
         explicit_valid = _truthy(row.get("player_identity_valid"))
         row_conflict_reason = _text(row.get("player_identity_conflict_reason"))
         row_valid = explicit_valid if explicit_valid is not None else not row_quarantined and not bool(row_conflict_reason)
-        source_conflicted = source_meta is not None
+        
+        resolution_cat = _text(row.get("identity_resolution_category"))
+        if resolution_cat == "valid_current_team_override":
+            source_conflicted = False
+        else:
+            source_conflicted = source_meta is not None
 
         if source_conflicted:
             if row_quarantined:
@@ -619,8 +644,8 @@ def annotate_source_identity_conflicts(
         row_quarantined_values.append(row_quarantined)
         row_quarantine_reasons.append(quarantine_reason)
         source_conflicted_values.append(source_conflicted)
-        source_reasons.append(source_meta.get("source_identity_conflict_reason", "") if source_meta else "")
-        source_details.append(source_meta.get("source_identity_conflict_details", "") if source_meta else "")
+        source_reasons.append(source_meta.get("source_identity_conflict_reason", "") if source_meta and source_conflicted else "")
+        source_details.append(source_meta.get("source_identity_conflict_details", "") if source_meta and source_conflicted else "")
         source_policies.append(policy)
 
     out["row_identity_valid"] = row_valid_values
