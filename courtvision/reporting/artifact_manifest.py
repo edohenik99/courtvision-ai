@@ -28,6 +28,7 @@ PHASE4B_SHADOW_DIAGNOSTIC_NAMES = frozenset(
         "meta_label_promotion_shadow_diagnostics",
         "meta_label_rules_performance_json",
         "feature_completeness_tracker_json",
+        "incubator_performance_report_json",
     }
 )
 
@@ -499,6 +500,30 @@ def _specs(prediction_date: str) -> tuple[ArtifactSpec, ...]:
             f"feature_completeness_tracker_{prediction_date}.csv",
             SEVERITY_SHADOW_ONLY,
             "Shadow/report-only forward feature completeness tracker; not a betting input.",
+        ),
+        ArtifactSpec(
+            "shadow_only",
+            "incubator_performance_report_txt",
+            "operator",
+            f"incubator_performance_report_{prediction_date}.txt",
+            SEVERITY_SHADOW_ONLY,
+            "Shadow/report-only incubator performance report text; not a betting input.",
+        ),
+        ArtifactSpec(
+            "shadow_only",
+            "incubator_performance_report_json",
+            "diagnostics",
+            f"incubator_performance_report_{prediction_date}.json",
+            SEVERITY_SHADOW_ONLY,
+            "Shadow/report-only incubator performance report diagnostics; not a betting input.",
+        ),
+        ArtifactSpec(
+            "shadow_only",
+            "incubator_performance_report_csv",
+            "operator",
+            f"incubator_performance_report_{prediction_date}.csv",
+            SEVERITY_SHADOW_ONLY,
+            "Shadow/report-only incubator performance report CSV; not a betting input.",
         ),
     )
 

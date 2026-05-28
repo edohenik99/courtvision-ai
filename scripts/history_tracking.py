@@ -1828,6 +1828,29 @@ def grade_completed_picks(
     if not dry_run:
         _write_csv(pick_history_path, pick_history_df[PICK_HISTORY_COLUMNS])
         update_performance_summaries(history_root=history_root_path, runtime_root=runtime_root_path)
+
+        # Grade incubator picks and write their reports
+        try:
+            from courtvision.reporting.incubator_performance import (
+                grade_incubator_picks,
+                write_incubator_performance_report,
+            )
+            grade_incubator_picks(
+                history_root=history_root_path,
+                runtime_root=runtime_root_path,
+                prediction_date=prediction_date,
+                dry_run=dry_run,
+            )
+            report_date = prediction_date or _today_iso()
+            write_incubator_performance_report(
+                prediction_date=report_date,
+                runtime_root=runtime_root_path,
+                history_root=history_root_path,
+                dry_run=dry_run,
+            )
+        except Exception as exc:
+            print(f"[history_tracking] WARNING: Incubator grading/reporting failed: {exc}")
+
     pending_rows = int((pick_history_df["result_status"].astype(str).str.lower() == "pending").sum())
     unsupported_rows = int((pick_history_df["result_status"].astype(str).str.lower() == UNSUPPORTED_RESULT_STATUS).sum())
     void_rows = int((pick_history_df["result_status"].astype(str).str.lower() == VOID_RESULT_STATUS).sum())

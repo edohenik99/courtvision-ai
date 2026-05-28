@@ -81,6 +81,20 @@ def main(argv: list[str] | None = None) -> int:
     print(f"persisted_today_rows={persist_result['appended_rows']}")
     print(f"today_elite_count={persist_result['appended_rows']}")
 
+    # Persist daily incubator board rows
+    try:
+        from courtvision.reporting.incubator_performance import persist_daily_incubator_board
+        incubator_persist_result = persist_daily_incubator_board(
+            prediction_date=args.prediction_date,
+            runtime_root=args.runtime_root,
+            history_root=args.history_root,
+            result_status=args.result_status,
+            dry_run=args.dry_run,
+        )
+        print(f"persisted_incubator_today_rows={incubator_persist_result['appended_rows']}")
+    except Exception as exc:
+        print(f"[post_run_tracking] WARNING: Incubator daily persistence failed: {exc}")
+
     shadow_result = persist_market_shadow_history(
         prediction_date=args.prediction_date,
         runtime_root=args.runtime_root,
@@ -106,6 +120,16 @@ def main(argv: list[str] | None = None) -> int:
             print("performance_summary_update_skipped=true")
         else:
             update_performance_summaries(history_root=args.history_root, runtime_root=args.runtime_root)
+            try:
+                from courtvision.reporting.incubator_performance import write_incubator_performance_report
+                write_incubator_performance_report(
+                    prediction_date=args.prediction_date,
+                    runtime_root=args.runtime_root,
+                    history_root=args.history_root,
+                    dry_run=args.dry_run,
+                )
+            except Exception as exc:
+                print(f"[post_run_tracking] WARNING: Incubator reporting failed: {exc}")
 
     metrics = _recent_metrics(history_root)
     print(f"all_time_graded_hit_rate={metrics['all_time_graded_hit_rate']:.4f}")

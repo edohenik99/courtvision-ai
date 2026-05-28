@@ -222,6 +222,9 @@ def _artifact_paths(runtime_root: Path, prediction_date: str) -> dict[str, Path]
         "combo_under_watchlist": operator / f"combo_under_watchlist_{prediction_date}.csv",
         "paper_kelly_simulation": operator / f"paper_kelly_simulation_{prediction_date}.csv",
         "same_opponent_under_warnings": operator / f"same_opponent_under_warnings_{prediction_date}.csv",
+        "incubator_performance_report_txt": operator / f"incubator_performance_report_{prediction_date}.txt",
+        "incubator_performance_report_json": diagnostics / f"incubator_performance_report_{prediction_date}.json",
+        "incubator_performance_report_csv": operator / f"incubator_performance_report_{prediction_date}.csv",
     }
 
 
@@ -1128,6 +1131,9 @@ def _files_written_lines(paths: dict[str, Path]) -> list[str]:
         "feature_completeness_tracker_txt",
         "feature_completeness_tracker_json",
         "feature_completeness_tracker_csv",
+        "incubator_performance_report_txt",
+        "incubator_performance_report_json",
+        "incubator_performance_report_csv",
     )
     lines: list[str] = []
     for key in keys:
@@ -1241,18 +1247,24 @@ def build_operator_card(
         paths["feature_completeness_tracker_json"],
         prediction_date=prediction_date,
     )
+    incubator_performance_freshness = inspect_shadow_json_freshness(
+        paths["incubator_performance_report_json"],
+        prediction_date=prediction_date,
+    )
     clv_market_available = paths["clv_market_movement_diagnostics"].exists()
     calibration_bucket_available = paths["calibration_bucket_report_diagnostics"].exists()
     player_role_stability_available = paths["player_role_stability_report_diagnostics"].exists()
     meta_label_promotion_available = paths["meta_label_promotion_shadow_diagnostics"].exists()
     meta_label_rules_performance_available = paths["meta_label_rules_performance_diagnostics"].exists()
     feature_completeness_available = paths["feature_completeness_tracker_json"].exists()
+    incubator_performance_available = paths["incubator_performance_report_json"].exists()
     clv_market_payload = _read_json(paths["clv_market_movement_diagnostics"], warnings)
     calibration_bucket_payload = _read_json(paths["calibration_bucket_report_diagnostics"], warnings)
     player_role_stability_payload = _read_json(paths["player_role_stability_report_diagnostics"], warnings)
     meta_label_promotion_payload = _read_json(paths["meta_label_promotion_shadow_diagnostics"], warnings)
     meta_label_rules_performance_payload = _read_json(paths["meta_label_rules_performance_diagnostics"], warnings)
     feature_completeness_payload = _read_json(paths["feature_completeness_tracker_json"], warnings)
+    incubator_performance_payload = _read_json(paths["incubator_performance_report_json"], warnings)
     clv_market_available = (
         clv_market_available
         and bool(clv_market_payload)
@@ -1281,6 +1293,11 @@ def build_operator_card(
         feature_completeness_available
         and bool(feature_completeness_payload)
         and not shadow_json_unavailable_or_stale(feature_completeness_freshness)
+    )
+    incubator_performance_available = (
+        incubator_performance_available
+        and bool(incubator_performance_payload)
+        and not shadow_json_unavailable_or_stale(incubator_performance_freshness)
     )
     injury_payload = _read_json(runtime_root / "diagnostics" / f"injury_context_diagnostics_{prediction_date}.json", warnings)
     game_payload = _read_json(runtime_root / "diagnostics" / f"game_context_{prediction_date}.json", warnings)
@@ -1507,6 +1524,14 @@ def build_operator_card(
     meta_label_weak_count = _safe_int(meta_label_promotion_summary.get("shadow_weak_count"), 0)
     meta_label_avoid_count = _safe_int(meta_label_promotion_summary.get("shadow_avoid_review_count"), 0)
     meta_label_top_candidates = meta_label_promotion_summary.get("top_strong_candidates") or []
+
+    incubator_overall = incubator_performance_payload.get("overall", {}) if isinstance(incubator_performance_payload, dict) else {}
+    if not isinstance(incubator_overall, dict):
+        incubator_overall = {}
+    incubator_total_picks = _safe_int(incubator_overall.get("total_picks"), 0)
+    incubator_graded_count = _safe_int(incubator_overall.get("graded_count"), 0)
+    incubator_pending_count = _safe_int(incubator_overall.get("pending_count"), 0)
+    incubator_win_rate = _safe_float(incubator_overall.get("win_rate"))
 
     meta_label_rules_performance_readiness = (
         meta_label_rules_performance_payload.get("data_readiness", {})
@@ -1874,6 +1899,27 @@ def build_operator_card(
     lines.append(f"- Kelly performance status: {kelly_performance_status}")
     lines.append("")
 
+    lines.append("Incubator Performance - Paper Only")
+    lines.append("-" * 40)
+    if not incubator_performance_available:
+        lines.append("- status: unavailable/stale")
+        lines.extend(
+            _shadow_artifact_unavailable_lines(
+                paths["incubator_performance_report_json"],
+                incubator_performance_freshness,
+            )
+        )
+    else:
+        lines.append(f"- daily count: {incubator_count}")
+        lines.append(f"- graded count: {incubator_graded_count}")
+        lines.append(f"- pending count: {incubator_pending_count}")
+        if incubator_graded_count > 0 and incubator_win_rate is not None:
+            lines.append(f"- hit rate: {_format_rate(incubator_win_rate)}")
+        else:
+            lines.append("- hit rate: n/a")
+    lines.append("- disclaimer: Incubator rows are paper-only candidates for model learning and are not staking inputs.")
+    lines.append("")
+
     lines.append("CLV / Market Movement - Shadow Only")
     lines.append("-" * 40)
     if not clv_market_available:
@@ -2102,6 +2148,7 @@ def build_operator_card(
             "meta_label_promotion": meta_label_promotion_freshness,
             "meta_label_rules_performance": meta_label_rules_performance_freshness,
             "feature_completeness_tracker": feature_completeness_freshness,
+            "incubator_performance": incubator_performance_freshness,
         },
         "feature_completeness_tracker": {
             "completed_slate_count": tracker_slates,
@@ -2109,6 +2156,12 @@ def build_operator_card(
             "feature_complete_graded_rows": tracker_complete,
             "estimated_additional_slates_needed": tracker_est_slates,
             "verdict": tracker_verdict,
+        },
+        "incubator_performance": {
+            "total_picks": incubator_total_picks,
+            "graded_count": incubator_graded_count,
+            "pending_count": incubator_pending_count,
+            "win_rate": incubator_win_rate,
         },
         "missing_required": missing_required,
         "completion_state_audit_status": _safe_text(completion_state_payload.get("report_agreement_status")) if completion_state_payload else "missing",
