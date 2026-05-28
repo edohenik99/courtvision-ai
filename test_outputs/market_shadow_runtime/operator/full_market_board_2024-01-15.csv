@@ -1,0 +1,5 @@
+prediction_date,player_name,market_type,selection,sportsbook_line,edge,confidence,quality_score,odds,context_pick_alignment,team_abbr,game_home_team_abbr,game_away_team_abbr
+2024-01-15,Points Star,player_points,over,20.5,2.5,0.8,90.0,-110,aligned,,,
+2024-01-15,Rebound Star,player_rebounds,under,9.5,1.0,0.7,75.0,120,aligned,,,
+2024-01-15,Pending Assist,player_assists,over,5.5,0.8,0.65,70.0,-105,conflicted,,,
+2024-01-15,Dennis Schroder,player_points,over,10.5,12.0,0.99,99.0,-110,aligned,SAC,CLE,DET

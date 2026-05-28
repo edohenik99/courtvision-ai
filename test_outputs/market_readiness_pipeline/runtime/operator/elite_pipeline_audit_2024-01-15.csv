@@ -1,0 +1,5 @@
+timestamp,slate_date,market,selection_side,rejection_reason,count
+2026-05-28T13:09:25,2024-01-15,player_points,under,passed_to_elite,1
+2026-05-28T13:09:25,2024-01-15,player_points,under,total_candidates,1
+2026-05-28T13:09:25,2024-01-15,player_points_rebounds,over,market_filtered_by_elite_policy,1
+2026-05-28T13:09:25,2024-01-15,player_points_rebounds,over,total_candidates,1

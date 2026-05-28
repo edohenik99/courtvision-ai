@@ -1532,6 +1532,9 @@ def build_operator_card(
     incubator_graded_count = _safe_int(incubator_overall.get("graded_count"), 0)
     incubator_pending_count = _safe_int(incubator_overall.get("pending_count"), 0)
     incubator_win_rate = _safe_float(incubator_overall.get("win_rate"))
+    
+    # Include incubator pending count in general pending count
+    pending_count += incubator_pending_count
 
     meta_label_rules_performance_readiness = (
         meta_label_rules_performance_payload.get("data_readiness", {})
@@ -2120,6 +2123,7 @@ def build_operator_card(
     payload = {
         "prediction_date": prediction_date,
         "final_decision": final_decision,
+        "pending_count": pending_count,
         "elite_count": elite_count,
         "full_market_count": full_market_count,
         "near_elite_review_count": near_elite_count,

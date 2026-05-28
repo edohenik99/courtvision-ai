@@ -1760,6 +1760,31 @@ def grade_completed_picks(
 ) -> dict[str, Any]:
     history_root_path = Path(history_root)
     runtime_root_path = Path(runtime_root)
+    # Store the input prediction date to avoid variable overshadowing in loops
+    input_prediction_date = prediction_date
+    
+    # Grade incubator picks and write their reports first regardless of pick_history being empty
+    try:
+        from courtvision.reporting.incubator_performance import (
+            grade_incubator_picks,
+            write_incubator_performance_report,
+        )
+        grade_incubator_picks(
+            history_root=history_root_path,
+            runtime_root=runtime_root_path,
+            prediction_date=input_prediction_date,
+            dry_run=dry_run,
+        )
+        report_date = input_prediction_date or _today_iso()
+        write_incubator_performance_report(
+            prediction_date=report_date,
+            runtime_root=runtime_root_path,
+            history_root=history_root_path,
+            dry_run=dry_run,
+        )
+    except Exception as exc:
+        print(f"[history_tracking] WARNING: Incubator grading/reporting failed: {exc}")
+
     pick_history_path = history_root_path / "pick_history.csv"
     pick_history_df = _load_csv(pick_history_path, columns=PICK_HISTORY_COLUMNS)
     if pick_history_df.empty:
@@ -1828,28 +1853,6 @@ def grade_completed_picks(
     if not dry_run:
         _write_csv(pick_history_path, pick_history_df[PICK_HISTORY_COLUMNS])
         update_performance_summaries(history_root=history_root_path, runtime_root=runtime_root_path)
-
-        # Grade incubator picks and write their reports
-        try:
-            from courtvision.reporting.incubator_performance import (
-                grade_incubator_picks,
-                write_incubator_performance_report,
-            )
-            grade_incubator_picks(
-                history_root=history_root_path,
-                runtime_root=runtime_root_path,
-                prediction_date=prediction_date,
-                dry_run=dry_run,
-            )
-            report_date = prediction_date or _today_iso()
-            write_incubator_performance_report(
-                prediction_date=report_date,
-                runtime_root=runtime_root_path,
-                history_root=history_root_path,
-                dry_run=dry_run,
-            )
-        except Exception as exc:
-            print(f"[history_tracking] WARNING: Incubator grading/reporting failed: {exc}")
 
     pending_rows = int((pick_history_df["result_status"].astype(str).str.lower() == "pending").sum())
     unsupported_rows = int((pick_history_df["result_status"].astype(str).str.lower() == UNSUPPORTED_RESULT_STATUS).sum())

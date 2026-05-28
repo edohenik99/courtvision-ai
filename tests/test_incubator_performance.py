@@ -446,3 +446,116 @@ def test_rule10_empty_incubator_board_handling(tmp_path: Path) -> None:
         history_root=history_root,
     )
     assert report["overall"]["total_picks"] == 0
+
+
+def test_phase_4b_patch_requirements(tmp_path: Path, monkeypatch) -> None:
+    # 1. Missing data/history directory is created.
+    # 2. Missing incubator_history.csv is created.
+    prediction_date = "2026-05-28"
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history_missing_dir"  # Missing directory
+    
+    clean_row = _incubator_row("Jalen Williams")
+    _write_csv(
+        runtime_root / "operator" / f"incubator_board_{prediction_date}.csv",
+        [clean_row],
+    )
+    
+    assert not history_root.exists()
+    
+    res = persist_daily_incubator_board(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+    
+    # Prove history directory was created
+    assert history_root.exists()
+    
+    # Prove incubator_history.csv was created
+    incubator_history_file = history_root / "incubator_history.csv"
+    assert incubator_history_file.exists()
+    
+    # 3. Daily incubator row is persisted even when game is open.
+    # 4. Open-game row has pending/open_game_pending status.
+    history_df = pd.read_csv(incubator_history_file, keep_default_na=False)
+    assert len(history_df) == 1
+    assert history_df.iloc[0]["player"] == "Jalen Williams"
+    assert history_df.iloc[0]["result_status"] == "pending"
+    assert history_df.iloc[0]["grading_status"] == "open_game_pending"
+    assert history_df.iloc[0]["grading_reason"] == "game_not_final"
+    
+    # 5. Performance report total count includes pending rows.
+    # 6. Performance report pending count includes open-game pending rows.
+    txt_p, json_p, csv_p, report = write_incubator_performance_report(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+    assert report["overall"]["total_picks"] == 1
+    assert report["overall"]["pending_count"] == 1
+    assert report["overall"]["graded_count"] == 0
+    
+    # 7. Operator card pending count includes open-game pending rows.
+    operator = runtime_root / "operator"
+    diagnostics = runtime_root / "diagnostics"
+    
+    # Mock files to build operator card
+    _write_csv(operator / f"full_market_board_{prediction_date}.csv", [clean_row])
+    _write_csv(operator / f"elite_board_{prediction_date}.csv", [], columns=list(clean_row.keys()))
+    _write_csv(operator / f"near_elite_review_{prediction_date}.csv", [], columns=list(clean_row.keys()))
+    _write_csv(operator / f"sgp_board_{prediction_date}.csv", [], columns=["prediction_date"])
+    _write_csv(operator / f"kelly_stakes_{prediction_date}.csv", [], columns=["kelly_eligible", "stake_amount"])
+    
+    # Write quality summary
+    _write_json(
+        operator / f"quality_summary_{prediction_date}.json",
+        _quality_payload(prediction_date, full_market_count=1, incubator_count=1),
+    )
+    _write_json(diagnostics / f"board_diagnostics_{prediction_date}.json", {"board_counts": {"qualified_pool": 1}})
+    _write_json(diagnostics / f"market_shadow_grading_{prediction_date}.json", {})
+    _write_json(diagnostics / f"injury_context_diagnostics_{prediction_date}.json", {})
+    _write_json(diagnostics / f"game_context_{prediction_date}.json", {})
+    
+    # Mock other report JSONs
+    for report_name in ("clv_market_movement", "calibration_bucket_report", "player_role_stability",
+                        "meta_label_promotion_shadow", "meta_label_rules_performance", "feature_completeness_tracker"):
+        _write_json(diagnostics / f"{report_name}_{prediction_date}.json", {"summary": {}})
+    
+    # Operator card
+    text, card_payload = build_operator_card(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+    # The general pending count (under Grading Snapshot) must include the 1 pending incubator row
+    assert card_payload["pending_count"] == 1
+    
+    # 8. Incubator row does not enter pick_history.csv.
+    pick_history_file = history_root / "pick_history.csv"
+    assert not pick_history_file.exists() or pd.read_csv(pick_history_file).empty
+    
+    # 9. Re-running same date does not duplicate the row.
+    res_rerun = persist_daily_incubator_board(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+    assert res_rerun["total_rows"] == 1
+    history_df_rerun = pd.read_csv(incubator_history_file, keep_default_na=False)
+    assert len(history_df_rerun) == 1
+    
+    # 10. Empty incubator board does not crash.
+    empty_board_path = runtime_root / "operator" / f"incubator_board_empty.csv"
+    _write_csv(empty_board_path, [])
+    res_empty = persist_daily_incubator_board(
+        prediction_date="empty",
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+    assert res_empty["appended_rows"] == 0
+    
+    # 11. Elite/Kelly/final_decision are unaffected.
+    assert card_payload["final_decision"] == "NO BET"
+    assert card_payload["elite_count"] == 0
+    assert card_payload["kelly_eligible_count"] == 0

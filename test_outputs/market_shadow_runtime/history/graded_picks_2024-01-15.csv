@@ -1,0 +1,3 @@
+prediction_date,player_name,market_type,selection,sportsbook_line,result_status
+2024-01-15,Points Star,player_points,over,20.5,hit
+2024-01-15,Rebound Star,player_rebounds,under,9.5,miss

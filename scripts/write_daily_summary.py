@@ -1739,6 +1739,26 @@ def write_daily_summary_outputs(
         prediction_date=prediction_date,
         runtime_root=runtime_root,
     )
+    try:
+        from courtvision.reporting.incubator_performance import (
+            persist_daily_incubator_board,
+            write_incubator_performance_report,
+        )
+        history_root_path = Path(history_root)
+        history_root_path.mkdir(parents=True, exist_ok=True)
+        persist_daily_incubator_board(
+            prediction_date=prediction_date,
+            runtime_root=runtime_root,
+            history_root=history_root,
+            result_status="pending",
+        )
+        write_incubator_performance_report(
+            prediction_date=prediction_date,
+            runtime_root=runtime_root,
+            history_root=history_root,
+        )
+    except Exception as exc:
+        print(f"[daily_summary] WARNING: Incubator persistence or reporting failed: {exc}")
     combo_under_path, combo_under_df = write_combo_under_watchlist(
         prediction_date=prediction_date,
         runtime_root=runtime_root,

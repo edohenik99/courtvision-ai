@@ -1,0 +1,8 @@
+market,count_before_normalization,count_after_normalization,count_after_candidate_generation,count_after_scoring,count_after_elite_filtering,count_in_final_elite_board,rejection_reason_counts
+player_3pt_made,0,0,0,0,0,0,"{""unsupported_projection_market"": 3}"
+player_assists,0,0,0,0,0,0,"{""market_gate_minutes_lt_24"": 1, ""reject_negative_edge_direction"": 2}"
+player_blocks,0,0,0,0,0,0,"{""unsupported_projection_market"": 3}"
+player_points,1,1,1,1,1,1,"{""reject_negative_edge_direction"": 2}"
+player_points_rebounds,1,1,1,1,0,0,{}
+player_rebounds,1,1,0,0,0,0,"{""market_gate_minutes_lt_24"": 1, ""reject_negative_edge_direction"": 2}"
+player_steals,0,0,0,0,0,0,"{""unsupported_projection_market"": 3}"

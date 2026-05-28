@@ -178,13 +178,13 @@ def persist_daily_incubator_board(
             "source_rejection_reason": _safe_text(row.get("source_rejection_reason")),
             "incubator_status": INCUBATOR_STATUS_PAPER,
             "real_money_eligible": False,
-            "result_status": result_status,
+            "result_status": "pending",
             "actual_value": "",
             "closing_line": "",
             "clv": "",
             "graded_at": "",
-            "grading_status": "pending",
-            "grading_reason": "",
+            "grading_status": "open_game_pending",
+            "grading_reason": "game_not_final",
         }
         normalized_rows.append(history_row)
 
@@ -330,23 +330,17 @@ def grade_incubator_picks(
                 games_df=games_df,
             )
 
-            if result_status == "pending":
-                # Check for open game
-                if "game_not_final" in skip_reason:
-                    result_status = "open_game_pending"
-                else:
-                    result_status = "pending"
-
-            date_rows.at[idx, "result_status"] = result_status
             if result_status in {"hit", "miss", "push"}:
                 updated += 1
+                date_rows.at[idx, "result_status"] = result_status
                 date_rows.at[idx, "actual_value"] = actual_value if actual_value is not None else ""
                 date_rows.at[idx, "graded_at"] = datetime.now(timezone.utc).isoformat()
                 date_rows.at[idx, "grading_status"] = "graded"
                 date_rows.at[idx, "grading_reason"] = ""
             else:
-                date_rows.at[idx, "grading_status"] = "pending"
-                date_rows.at[idx, "grading_reason"] = skip_reason
+                date_rows.at[idx, "result_status"] = "pending"
+                date_rows.at[idx, "grading_status"] = "open_game_pending"
+                date_rows.at[idx, "grading_reason"] = "game_not_final"
 
         history_df.loc[date_rows.index, "result_status"] = date_rows["result_status"]
         history_df.loc[date_rows.index, "actual_value"] = date_rows["actual_value"]
