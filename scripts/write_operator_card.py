@@ -218,6 +218,7 @@ def _artifact_paths(runtime_root: Path, prediction_date: str) -> dict[str, Path]
         "feature_completeness_tracker_json": diagnostics / f"feature_completeness_tracker_{prediction_date}.json",
         "feature_completeness_tracker_csv": operator / f"feature_completeness_tracker_{prediction_date}.csv",
         "high_caution_over_watchlist": operator / f"high_caution_over_watchlist_{prediction_date}.csv",
+        "incubator_board": operator / f"incubator_board_{prediction_date}.csv",
         "combo_under_watchlist": operator / f"combo_under_watchlist_{prediction_date}.csv",
         "paper_kelly_simulation": operator / f"paper_kelly_simulation_{prediction_date}.csv",
         "same_opponent_under_warnings": operator / f"same_opponent_under_warnings_{prediction_date}.csv",
@@ -1106,6 +1107,7 @@ def _files_written_lines(paths: dict[str, Path]) -> list[str]:
         "elite_board",
         "full_market_board",
         "near_elite_review",
+        "incubator_board",
         "daily_summary",
         "quality_summary",
         "operator_card",
@@ -1283,6 +1285,7 @@ def build_operator_card(
     injury_payload = _read_json(runtime_root / "diagnostics" / f"injury_context_diagnostics_{prediction_date}.json", warnings)
     game_payload = _read_json(runtime_root / "diagnostics" / f"game_context_{prediction_date}.json", warnings)
     high_caution_df = _read_csv(paths["high_caution_over_watchlist"], warnings)
+    incubator_df = _read_csv(paths["incubator_board"], warnings)
     combo_under_df = _read_csv(paths["combo_under_watchlist"], warnings)
     paper_kelly_df = _read_csv(paths["paper_kelly_simulation"], warnings)
     same_opponent_file_df = _read_csv(paths["same_opponent_under_warnings"], warnings)
@@ -1331,6 +1334,11 @@ def build_operator_card(
         quality_payload,
         ("high_caution_over_watchlist", "row_count"),
         len(high_caution_df),
+    )
+    incubator_count = _quality_count(
+        quality_payload,
+        ("incubator_board", "row_count"),
+        len(incubator_df),
     )
     combo_under_count = len(combo_under_df)
     same_opponent_warning_count = _quality_count(
@@ -1682,6 +1690,7 @@ def build_operator_card(
     lines.append(f"- full market candidates count: {full_market_count}")
     lines.append(f"- near-elite review count: {near_elite_count}")
     lines.append(f"- near-elite policy: {NEAR_ELITE_REVIEW_ONLY_NOTE}")
+    lines.append(f"- incubator board count: {incubator_count}")
     if unsupported_active_line:
         lines.append(f"- {unsupported_active_line}")
     if identity_quarantine_line:
@@ -2026,6 +2035,7 @@ def build_operator_card(
                 completion_state_payload=completion_state_payload,
             )
         )
+        lines.append("- Incubator rows are paper-only candidates for model learning and are not staking inputs.")
         lines.append("")
 
         lines.append("Elite Rejection Summary")
@@ -2070,6 +2080,7 @@ def build_operator_card(
         "sgp_count": sgp_count,
         "kelly_rows_count": kelly_rows_count,
         "kelly_eligible_count": kelly_eligible_count,
+        "incubator_board_count": incubator_count,
         "identity_quarantine": identity_summary,
         "source_identity_conflict": source_identity_summary,
         "manual_review_count": manual_review_count,

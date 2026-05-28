@@ -454,6 +454,14 @@ def _specs(prediction_date: str) -> tuple[ArtifactSpec, ...]:
         ),
         ArtifactSpec(
             "shadow_only",
+            "incubator_board",
+            "operator",
+            f"incubator_board_{prediction_date}.csv",
+            SEVERITY_SHADOW_ONLY,
+            "Incubator/reporting artifact; not a betting input.",
+        ),
+        ArtifactSpec(
+            "shadow_only",
             "combo_under_watchlist",
             "operator",
             f"combo_under_watchlist_{prediction_date}.csv",

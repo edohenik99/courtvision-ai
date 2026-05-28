@@ -37,6 +37,11 @@ from courtvision.reporting.near_elite_review import (
     review_path_for_date as near_elite_review_path_for_date,
     write_near_elite_review,
 )
+from courtvision.reporting.incubator_board import (
+    build_incubator_board,
+    read_incubator_board,
+    write_incubator_board,
+)
 from courtvision.reporting.promotion_readiness import (
     OBSERVATION_ONLY_NOTE as PROMOTION_READINESS_OBSERVATION_ONLY_NOTE,
     build_promotion_readiness_report,
@@ -602,6 +607,12 @@ def build_daily_summary(
         if near_elite_review_path.exists()
         else build_near_elite_review(full_market_df, elite_df)
     )
+    incubator_path = operator_dir / f"incubator_board_{prediction_date}.csv"
+    incubator_df = (
+        read_incubator_board(incubator_path)
+        if incubator_path.exists()
+        else build_incubator_board(full_market_df, elite_df)
+    )
     kelly_df = _kelly_df_for_reporting(
         elite_path=elite_path,
         elite_df=elite_df,
@@ -1046,6 +1057,30 @@ def build_daily_summary(
     else:
         for _, row in near_elite_review_df.head(5).iterrows():
             lines.append(f"  - {near_elite_row_line(row)}")
+
+    lines.extend(["", "Incubator Board - Paper Only", "-" * 72])
+    lines.append(f"- incubator row count: {int(len(incubator_df))}")
+    lines.append(f"- artifact: {incubator_path}")
+    lines.append("- note: Incubator rows are paper-only candidates for model learning and are not staking inputs.")
+    lines.append("- top 3 incubator candidates:")
+    if incubator_df.empty:
+        lines.append("  - None")
+    else:
+        for _, row in incubator_df.head(3).iterrows():
+            player_val = _safe_text(row.get("player")) or "Unknown"
+            market_val = _safe_text(row.get("market_type")) or "unknown"
+            sel_val = _safe_text(row.get("selection")) or "n/a"
+            line_val = _safe_text(row.get("line")) or "n/a"
+            edge_val = _safe_text(row.get("edge")) or "n/a"
+            conf_val = _safe_text(row.get("confidence")) or "n/a"
+            qual_val = _safe_text(row.get("quality_score")) or "n/a"
+            blocked_reason = _safe_text(row.get("source_rejection_reason")) or "n/a"
+            admit_reason = _safe_text(row.get("incubator_reason")) or "n/a"
+            lines.append(
+                f"  - {player_val}: {market_val} {sel_val} {line_val} "
+                f"(edge={edge_val}, confidence={conf_val}, quality={qual_val}; "
+                f"blocked_reason={blocked_reason}; incubator_reason={admit_reason})"
+            )
 
     lines.extend(["", "Context-Pick Alignment", "-" * 72])
     lines.append(
@@ -1700,6 +1735,10 @@ def write_daily_summary_outputs(
         prediction_date=prediction_date,
         runtime_root=runtime_root,
     )
+    incubator_path, incubator_df = write_incubator_board(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+    )
     combo_under_path, combo_under_df = write_combo_under_watchlist(
         prediction_date=prediction_date,
         runtime_root=runtime_root,
@@ -1750,6 +1789,8 @@ def write_daily_summary_outputs(
     metadata["high_caution_over_watchlist_count"] = int(len(watchlist_df))
     metadata["near_elite_review_path"] = str(near_elite_path)
     metadata["near_elite_review_count"] = int(len(near_elite_df))
+    metadata["incubator_board_path"] = str(incubator_path)
+    metadata["incubator_board_count"] = int(len(incubator_df))
     metadata["combo_under_watchlist_path"] = str(combo_under_path)
     metadata["combo_under_watchlist_count"] = int(len(combo_under_df))
     metadata["board_annotation_write_enabled"] = bool(write_board_annotations)

@@ -24,6 +24,10 @@ from courtvision.reporting.near_elite_review import (
     review_path_for_date as near_elite_review_path_for_date,
     write_near_elite_review,
 )
+from courtvision.reporting.incubator_board import (
+    build_incubator_board,
+    read_incubator_board,
+)
 from courtvision.context.game_strength import (
     POWER_RATING_CONTEXT_COLUMNS,
     apply_power_rating_context_to_df,
@@ -1967,6 +1971,13 @@ def build_quality_summary(
         else build_near_elite_review(full_market_df, elite_df)
     )
     candidate_funnel["near_elite_review_count"] = int(len(near_elite_review_df))
+    incubator_path = operator_dir / f"incubator_board_{prediction_date}.csv"
+    incubator_df = (
+        read_incubator_board(incubator_path)
+        if incubator_path.exists()
+        else build_incubator_board(full_market_df, elite_df)
+    )
+    candidate_funnel["incubator_board_count"] = int(len(incubator_df))
     high_caution_over_watchlist = build_high_caution_over_watchlist(full_market_df)
     high_caution_over_watchlist_path = watchlist_path_for_date(
         prediction_date=prediction_date,
@@ -2154,6 +2165,15 @@ def build_quality_summary(
             "note": NEAR_ELITE_REVIEW_ONLY_NOTE,
             "source": str(operator_dir / f"full_market_board_{prediction_date}.csv"),
         },
+        "incubator_board": {
+            "path": str(incubator_path),
+            "row_count": int(len(incubator_df)),
+            "shadow_only": True,
+            "paper_only": True,
+            "real_money_eligible": False,
+            "note": "Incubator rows are paper-only candidates for model learning and are not staking inputs.",
+            "source": str(operator_dir / f"full_market_board_{prediction_date}.csv"),
+        },
         "risk_exposure_summary": risk_exposure,
         "board_movement_summary": board_movement,
         "date_isolation_check": date_isolation,
@@ -2324,6 +2344,7 @@ def _format_quality_summary_text(payload: dict[str, Any]) -> str:
             f"- sgp_board_count: {funnel['sgp_board_count']}",
             f"- kelly_rows_count: {funnel['kelly_rows_count']}",
             f"- near_elite_review_count: {funnel.get('near_elite_review_count', 0)}",
+            f"- incubator_board_count: {funnel.get('incubator_board_count', 0)}",
             f"- identity_quarantine_count: {funnel.get('identity_quarantine_count', 0)}",
             f"- source_identity_conflict_count: {funnel.get('source_identity_conflict_count', 0)} diagnostic row(s)",
             f"- source_identity_conflicted_player_count: {funnel.get('source_identity_conflicted_player_count', 0)}",
