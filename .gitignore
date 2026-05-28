@@ -47,3 +47,5 @@ fonts/
 # Root-level generated logs and run outputs
 *.log
 run_output.txt
+
+test_outputs/
