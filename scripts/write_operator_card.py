@@ -1699,6 +1699,17 @@ def build_operator_card(
             f"rows={source_identity_total}, unique_players={source_identity_player_total}"
         )
         lines.append(
+            "  (Note: These are global baseline historical stint/team conflicts, not active slate blocks)"
+        )
+        active_true_conflicts = source_identity_summary.get("active_candidate_true_conflicts", 0)
+        resolved_overrides = source_identity_summary.get("resolved_current_team_overrides", 0)
+        lines.append(
+            f"- active candidate true conflicts: rows={active_true_conflicts}"
+        )
+        lines.append(
+            f"- resolved current-team overrides: rows={resolved_overrides}"
+        )
+        lines.append(
             "- source identity operator row exposure: "
             f"full_market={source_identity_operator_rows}, "
             f"elite={source_identity_elite_rows}, "

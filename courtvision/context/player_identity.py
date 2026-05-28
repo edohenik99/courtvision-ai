@@ -717,6 +717,14 @@ def source_identity_conflict_exposure_summary(
         }
         return keys
 
+    def _resolved_override_count(frame: pd.DataFrame | None) -> int:
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return 0
+        cat_col = "identity_resolution_category"
+        if cat_col not in frame.columns:
+            return 0
+        return int((frame[cat_col] == "valid_current_team_override").sum())
+
     def _example_rows(frame: pd.DataFrame | None, *, lane: str, artifact: str) -> list[dict[str, str]]:
         conflicted = _conflicted_frame(frame)
         examples: list[dict[str, str]] = []
@@ -797,6 +805,12 @@ def source_identity_conflict_exposure_summary(
     return {
         "source_identity_conflict_count": int(source_identity_conflict_diagnostic_count(source_identity_payload)),
         "source_identity_conflicted_player_count": int(max(len(lookup), len(all_lane_players))),
+        "global_baseline_historical_conflicts": int(source_identity_conflict_diagnostic_count(source_identity_payload)),
+        "global_baseline_historical_players": int(len(lookup)),
+        "active_candidate_true_conflicts": full_market_count,
+        "resolved_current_team_overrides": _resolved_override_count(full_market_df),
+        "downstream_watchlist_exposure": watchlist_count,
+        "downstream_paper_exposure": paper_count,
         "source_identity_conflicted_operator_rows": full_market_count,
         "source_identity_conflicted_full_market_rows": full_market_count,
         "source_identity_conflicted_elite_rows": elite_count,

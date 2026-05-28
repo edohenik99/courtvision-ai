@@ -55,6 +55,7 @@ REPORT_COLUMNS: tuple[str, ...] = (
     "real_kelly_eligible",
     "simulation_only",
     "reason_not_real_kelly",
+    "identity_resolution_category",
     *SOURCE_IDENTITY_CONFLICT_COLUMNS,
 )
 

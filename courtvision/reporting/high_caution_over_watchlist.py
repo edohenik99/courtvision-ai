@@ -34,6 +34,7 @@ WATCHLIST_COLUMNS: tuple[str, ...] = (
     "context_conflict_cause",
     "kelly_projected_skip_reason",
     "final_elite_rejection_reason",
+    "identity_resolution_category",
     *SOURCE_IDENTITY_CONFLICT_COLUMNS,
 )
 

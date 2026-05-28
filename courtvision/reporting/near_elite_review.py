@@ -52,6 +52,7 @@ NEAR_ELITE_REVIEW_COLUMNS: tuple[str, ...] = (
     "elite_rejection_reason",
     "selection_rejection_reason",
     "kelly_projected_skip_reason",
+    "identity_resolution_category",
     *SOURCE_IDENTITY_CONFLICT_COLUMNS,
     "operator_action",
     "stake_policy",
