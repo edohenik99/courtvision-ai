@@ -136,6 +136,7 @@ $QualitySummaryScript = Join-Path $ScriptRoot "scripts\write_quality_summary.py"
 $CompletionStateAuditScript = Join-Path $ScriptRoot "scripts\write_completion_state_audit.py"
 $OperatorCardScript = Join-Path $ScriptRoot "scripts\write_operator_card.py"
 $ArtifactManifestScript = Join-Path $ScriptRoot "scripts\write_artifact_manifest.py"
+$ResearchArtifactsScript = Join-Path $ScriptRoot "scripts\write_research_artifacts.py"
 
 # Bankroll override: read $env:COURTVISION_BANKROLL when set, else default.
 $KellyBankroll = if ($env:COURTVISION_BANKROLL) { $env:COURTVISION_BANKROLL } else { "1000" }
@@ -630,6 +631,27 @@ if (-not (Test-Path $completionAuditJsonPath)) {
     Stop-StageFailure -Stage "Completion State Audit" -ExitCode 1 -LogPath $GradeLog
 }
 Write-Host "[OK] Summaries written." -ForegroundColor Green
+
+Write-Host ""
+Write-Host "[START] Phase 5 Research Artifacts" -ForegroundColor Yellow
+if (-not (Test-Path $ResearchArtifactsScript)) {
+    Write-LogLine -Path $GradeLog -Message "[WARNING] Phase 5 Research Artifacts script not found: $ResearchArtifactsScript" -AlsoConsole:$VerboseMode
+    Write-Host "[WARN] Phase 5 Research Artifacts script not found; continuing daily run." -ForegroundColor Yellow
+} else {
+    "`n--- Phase 5 Research Artifacts ---" | Out-File $GradeLog -Append
+    $researchExitCode = Invoke-LoggedCommand `
+        -LogPath $GradeLog `
+        -Exe $PyExe `
+        -Arguments ($PyArgsPrefix + @($ResearchArtifactsScript, "--prediction-date", $Date)) `
+        -StreamToConsole:$VerboseMode
+    if ($researchExitCode -ne 0) {
+        Write-LogLine -Path $GradeLog -Message "[WARNING] Phase 5 Research Artifacts orchestrator failed (exit code: $researchExitCode). Continuing daily run because research artifacts are shadow-only." -AlsoConsole:$VerboseMode
+        Write-Host "[WARN] Phase 5 Research Artifacts orchestrator failed; continuing daily run." -ForegroundColor Yellow
+    } else {
+        Write-LogLine -Path $GradeLog -Message "[OK] Phase 5 Research Artifacts completed." -AlsoConsole:$VerboseMode
+        Write-Host "[OK] Phase 5 Research Artifacts completed." -ForegroundColor Green
+    }
+}
 
 Write-Host ""
 Write-Host "[START] Operator Card" -ForegroundColor Yellow
