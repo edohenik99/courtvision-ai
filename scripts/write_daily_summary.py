@@ -14,6 +14,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from courtvision.reporting.under_research_snapshot import get_under_research_snapshot_text
 from courtvision.reporting.kelly_performance import build_kelly_decision_performance
 from courtvision.reporting.combo_under_watchlist import (
     OBSERVATION_ONLY_NOTE as COMBO_UNDER_OBSERVATION_ONLY_NOTE,
@@ -1057,6 +1058,14 @@ def build_daily_summary(
     else:
         for _, row in near_elite_review_df.head(5).iterrows():
             lines.append(f"  - {near_elite_row_line(row)}")
+
+    snapshot_text = get_under_research_snapshot_text(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+    lines.append("")
+    lines.extend(snapshot_text.split("\n"))
 
     lines.extend(["", "Incubator Board - Paper Only", "-" * 72])
     lines.append(f"- incubator row count: {int(len(incubator_df))}")

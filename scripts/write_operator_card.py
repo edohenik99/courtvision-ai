@@ -15,6 +15,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from courtvision.reporting.under_research_snapshot import get_under_research_snapshot_text
 from courtvision.artifact_guard import guard_no_existing_artifact  # noqa: E402
 from courtvision.context.game_context import (  # noqa: E402
     format_identity_quarantine_line,
@@ -1849,6 +1850,14 @@ def build_operator_card(
     else:
         for _, row in _sort_candidates(near_elite_df, 5).iterrows():
             lines.append(f"  - {near_elite_row_line(row)}")
+    lines.append("")
+
+    snapshot_text = get_under_research_snapshot_text(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+    lines.append(snapshot_text)
     lines.append("")
 
     if final_decision == "REVIEW REQUIRED":

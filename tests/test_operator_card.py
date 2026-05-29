@@ -1385,3 +1385,84 @@ def test_operator_card_audit_warning_summary_classifies_pass_with_warnings_as_no
     assert "- operator action: continue only if final_decision rules remain clean." in text
     assert "- operator action: inspect audit before trusting results." not in text
 
+
+def test_operator_card_renders_under_research_snapshot(tmp_path: Path) -> None:
+    prediction_date = "2026-05-30"
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+    operator = runtime_root / "operator"
+    diagnostics = runtime_root / "diagnostics"
+
+    _seed_basic_operator_card_artifacts(runtime_root, history_root, prediction_date)
+
+    # 1. Seed under_visibility_audit json
+    audit_payload = {
+        "funnel_stages": {
+            "full_market": {"under": 11, "total": 51},
+            "near_elite": {"under": 0, "total": 7},
+            "incubator": {"under": 0, "total": 2},
+            "shadow_candidate_lane": {"under": 4, "total": 25},
+        },
+        "historical_comparison": {
+            "under": {"hit_rate": 0.585, "roi": 0.045, "count": 183},
+            "over": {"hit_rate": 0.447, "roi": -0.184, "count": 626},
+        },
+        "current_slate_candidates": [
+            {
+                "player_name": "Victor Wembanyama",
+                "market_type": "player_points_rebounds_assists",
+                "selection": "under",
+                "line": 42.5,
+                "model_projection": 39.44,
+                "edge": -3.06,
+                "confidence": 0.78,
+                "quality_score": 47.5,
+                "rejection_reason": "combo_market_not_real_kelly_eligible"
+            }
+        ]
+    }
+    _write_json(diagnostics / f"under_visibility_audit_{prediction_date}.json", audit_payload)
+
+    # 2. Seed shadow_candidate_lane CSV
+    shadow_rows = [
+        {
+            "rank": 1,
+            "prediction_date": prediction_date,
+            "research_lane": "UNDER_ALIGNED_RESEARCH",
+            "player_name": "Victor Wembanyama",
+            "market_type": "player_points_rebounds_assists",
+            "selection": "under",
+            "line": 42.5,
+            "historical_graded_rows": 15,
+            "historical_hit_rate": 0.6667,
+            "historical_roi": 0.197,
+        }
+    ]
+    _write_csv(operator / f"shadow_candidate_lane_{prediction_date}.csv", shadow_rows)
+
+    output_path, payload = write_operator_card_outputs(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+
+    text = output_path.read_text(encoding="utf-8")
+
+    assert "UNDER Research Snapshot - Shadow Only" in text
+    assert "- full-market UNDER count: 11 / 51 (21.6%)" in text
+    assert "- near-elite UNDER count: 0" in text
+    assert "- incubator UNDER count: 0" in text
+    assert "- shadow-lane UNDER count: 4 / 25 (16.0%)" in text
+    assert "- historical shadow UNDER: 58.5% hit, 4.5% ROI, n=183" in text
+    assert "- historical shadow OVER: 44.7% hit, -18.4% ROI, n=626" in text
+    assert "- recommended action: improve visibility / continue shadow tracking / no staking" in text
+    assert "Top Current UNDER Candidates:" in text
+    assert "- Victor Wembanyama: player_points_rebounds_assists under 42.5, proj=39.44, edge=-3.06, conf=0.78, quality=47.5, reason=combo_market_not_real_kelly_eligible" in text
+    assert "Top UNDER_ALIGNED_RESEARCH Candidates:" in text
+    assert "- Victor Wembanyama: player_points_rebounds_assists under 42.5, hist_n=15, hit=66.7%, ROI=19.7%" in text
+    assert "Disclaimer:" in text
+    assert "- UNDER Research Snapshot is shadow-only." in text
+    assert "- It is not an Elite board." in text
+    assert "- It is not a Kelly input." in text
+    assert "- It is not a betting recommendation." in text
+    assert "- No real-money promotion is allowed." in text
