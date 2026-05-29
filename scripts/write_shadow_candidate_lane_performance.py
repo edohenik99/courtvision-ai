@@ -30,6 +30,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Calculate persist, grade, and report results without writing history or report artifacts.",
     )
+    parser.add_argument(
+        "--override-date-integrity",
+        action="store_true",
+        help="Force history persistence even when a source date mismatch is detected.",
+    )
     return parser.parse_args(argv)
 
 
@@ -41,6 +46,7 @@ def main(argv: list[str] | None = None) -> int:
         history_root=args.history_root,
         grade_pending=not args.skip_grading,
         dry_run=args.dry_run,
+        override_date_integrity=args.override_date_integrity,
     )
     persist_result = payload.get("persist_result", {})
     grade_result = payload.get("grade_result", {})

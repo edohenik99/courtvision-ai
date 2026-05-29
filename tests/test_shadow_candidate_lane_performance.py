@@ -22,6 +22,7 @@ def _shadow_row(
     player: str,
     *,
     prediction_date: str = "2026-05-29",
+    source_artifact_date: str | None = None,
     lane: str = UNDER_ALIGNED_RESEARCH,
     player_id: str | None = None,
     market_type: str = "player_points",
@@ -37,7 +38,7 @@ def _shadow_row(
     return {
         "rank": 1,
         "prediction_date": prediction_date,
-        "source_artifact_date": "2026-05-28",
+        "source_artifact_date": source_artifact_date or prediction_date,
         "source_board": "full_market_board",
         "research_lane": lane,
         "rank_score": 612.0,
@@ -260,3 +261,121 @@ def test_missing_shadow_lane_artifacts_do_not_crash_report(tmp_path: Path) -> No
     assert payload["overall"]["total_rows"] == 0
     assert payload["overall"]["graded_rows"] == 0
     assert payload["all_rows_real_money_eligible_false"] is True
+
+
+def test_date_integrity_mismatch_skips_persistence(tmp_path: Path) -> None:
+    prediction_date = "2026-05-29"
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+    row = _shadow_row("Mismatch Candidate", prediction_date=prediction_date, source_artifact_date="2026-05-28")
+    _write_csv(runtime_root / "operator" / f"shadow_candidate_lane_{prediction_date}.csv", [row])
+    
+    result = persist_daily_shadow_candidate_lane(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+    
+    assert result["source_date_mismatch"] is True
+    assert result["history_persistence_status"] == "skipped_source_date_mismatch"
+    assert result["persisted_rows"] == 0
+    
+    history_path = history_root / "shadow_candidate_lane_history.csv"
+    assert not history_path.exists()
+
+
+def test_date_integrity_override_persists(tmp_path: Path) -> None:
+    prediction_date = "2026-05-29"
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+    row = _shadow_row("Override Candidate", prediction_date=prediction_date, source_artifact_date="2026-05-28")
+    _write_csv(runtime_root / "operator" / f"shadow_candidate_lane_{prediction_date}.csv", [row])
+    
+    result = persist_daily_shadow_candidate_lane(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+        override_date_integrity=True,
+    )
+    
+    assert result["source_date_mismatch"] is True
+    assert result["history_persistence_status"] == "persisted_with_override"
+    assert result["persisted_rows"] == 1
+    
+    history_path = history_root / "shadow_candidate_lane_history.csv"
+    assert history_path.exists()
+
+
+def test_date_integrity_missing_source_date_skips(tmp_path: Path) -> None:
+    prediction_date = "2026-05-29"
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+    row = _shadow_row("Missing Candidate", prediction_date=prediction_date)
+    del row["source_artifact_date"]
+    _write_csv(runtime_root / "operator" / f"shadow_candidate_lane_{prediction_date}.csv", [row])
+    
+    result = persist_daily_shadow_candidate_lane(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+    
+    assert result["source_date_mismatch"] is True
+    assert result["history_persistence_status"] == "skipped_source_date_mismatch"
+    assert result["persisted_rows"] == 0
+    
+    history_path = history_root / "shadow_candidate_lane_history.csv"
+    assert not history_path.exists()
+
+
+def test_date_integrity_report_written_even_when_skipped(tmp_path: Path) -> None:
+    prediction_date = "2026-05-29"
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+    
+    row = _shadow_row("Report Candidate", prediction_date=prediction_date, source_artifact_date="2026-05-28")
+    _write_csv(runtime_root / "operator" / f"shadow_candidate_lane_{prediction_date}.csv", [row])
+    
+    txt_path, csv_path, json_path, payload = write_shadow_candidate_lane_performance_outputs(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+        grade_pending=False,
+    )
+    
+    assert txt_path.exists()
+    assert csv_path.exists()
+    assert json_path.exists()
+    
+    assert payload["source_date_mismatch"] is True
+    assert payload["history_persistence_status"] == "skipped_source_date_mismatch"
+    assert payload["warning"] == "SOURCE_DATE_MISMATCH"
+    assert payload["report_date"] == prediction_date
+    assert payload["prediction_date"] == prediction_date
+    assert payload["source_artifact_date"] == "2026-05-28"
+    
+    txt_content = txt_path.read_text(encoding="utf-8")
+    assert "!!! WARNING: SOURCE_DATE_MISMATCH !!!" in txt_content
+    assert f"Report Date ({prediction_date}) does not match Source Artifact Date (2026-05-28)" in txt_content
+
+
+def test_date_integrity_pick_history_untouched(tmp_path: Path) -> None:
+    prediction_date = "2026-05-29"
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+    
+    pick_history = history_root / "pick_history.csv"
+    pick_rows = [{"prediction_date": "2026-05-28", "player_name": "Elite Player", "result_status": "hit"}]
+    _write_csv(pick_history, pick_rows)
+    pick_before = pick_history.read_bytes()
+    
+    row = _shadow_row("Mismatched Candidate", prediction_date=prediction_date, source_artifact_date="2026-05-28")
+    _write_csv(runtime_root / "operator" / f"shadow_candidate_lane_{prediction_date}.csv", [row])
+    
+    write_shadow_candidate_lane_performance_outputs(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+    
+    assert pick_history.read_bytes() == pick_before

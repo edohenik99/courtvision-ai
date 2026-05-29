@@ -415,12 +415,15 @@ def persist_daily_shadow_candidate_lane(
     runtime_root: str | Path = "outputs/runtime",
     history_root: str | Path = "data/history",
     dry_run: bool = False,
+    override_date_integrity: bool = False,
 ) -> dict[str, Any]:
     runtime_root_path = Path(runtime_root)
     history_path = history_path_for_root(history_root)
     board_path = runtime_root_path / "operator" / f"shadow_candidate_lane_{prediction_date}.csv"
     existing = _read_history(history_path)
     board_df = _read_csv(board_path)
+
+    report_date = str(prediction_date).strip()
 
     if board_df.empty:
         return {
@@ -431,37 +434,89 @@ def persist_daily_shadow_candidate_lane(
             "total_rows": int(len(existing)),
             "dry_run": bool(dry_run),
             "note": "Shadow candidate lane CSV is missing or empty.",
+            "report_date": report_date,
+            "prediction_date": report_date,
+            "source_artifact_date": "",
+            "source_date_mismatch": False,
+            "history_persistence_status": "skipped_empty_board",
         }
 
-    normalized_rows = [_normalize_shadow_board_row(row, prediction_date) for _, row in board_df.iterrows()]
-    incoming = pd.DataFrame(normalized_rows, columns=HISTORY_COLUMNS)
-    incoming = _preserve_existing_grades(incoming, existing)
-    combined = incoming if existing.empty else pd.concat([existing, incoming], ignore_index=True)
-    combined = combined.reindex(columns=HISTORY_COLUMNS)
-    working = _with_dedupe_columns(combined)
-    dedupe_columns = [f"_dedupe_{position}" for position in range(9)]
-    working = working.drop_duplicates(subset=dedupe_columns, keep="last")
-    combined = (
-        working.drop(columns=dedupe_columns)
-        .sort_values(["prediction_date", "lane", "player", "market_type", "selection", "line"])
-        .reset_index(drop=True)
-    )
+    # Date Integrity Checks
+    source_date_mismatch = False
+    source_artifact_date = ""
 
-    if not dry_run:
-        _write_csv(history_path, combined[list(HISTORY_COLUMNS)])
+    if "source_artifact_date" not in board_df.columns:
+        source_date_mismatch = True
+    else:
+        unique_sources = [str(x).strip() for x in board_df["source_artifact_date"].dropna().unique() if str(x).strip()]
+        if not unique_sources:
+            source_date_mismatch = True
+        else:
+            source_artifact_date = unique_sources[0]
+            # Mismatch cases:
+            # 1. Multiple unique source dates on the board
+            # 2. Source artifact date does not match report_date (requested report/script date)
+            # 3. Any individual row's prediction_date (true candidate/slate date) does not match source_artifact_date
+            if len(unique_sources) > 1 or source_artifact_date != report_date:
+                source_date_mismatch = True
+            
+            if "prediction_date" in board_df.columns:
+                row_prediction_dates = board_df["prediction_date"].astype(str).str.strip()
+                row_source_dates = board_df["source_artifact_date"].astype(str).str.strip()
+                if not (row_prediction_dates == row_source_dates).all():
+                    source_date_mismatch = True
+
+    if source_date_mismatch:
+        if override_date_integrity:
+            history_persistence_status = "persisted_with_override"
+        else:
+            history_persistence_status = "skipped_source_date_mismatch"
+    else:
+        history_persistence_status = "persisted"
+
+    if source_date_mismatch:
+        print(f"!!! WARNING: SOURCE_DATE_MISMATCH !!! report_date={report_date} != source_artifact_date={source_artifact_date}")
+
+    should_persist = not history_persistence_status.startswith("skipped")
+
+    if should_persist:
+        normalized_rows = [_normalize_shadow_board_row(row, prediction_date) for _, row in board_df.iterrows()]
+        incoming = pd.DataFrame(normalized_rows, columns=HISTORY_COLUMNS)
+        incoming = _preserve_existing_grades(incoming, existing)
+        combined = incoming if existing.empty else pd.concat([existing, incoming], ignore_index=True)
+        combined = combined.reindex(columns=HISTORY_COLUMNS)
+        working = _with_dedupe_columns(combined)
+        dedupe_columns = [f"_dedupe_{position}" for position in range(9)]
+        working = working.drop_duplicates(subset=dedupe_columns, keep="last")
+        combined = (
+            working.drop(columns=dedupe_columns)
+            .sort_values(["prediction_date", "lane", "player", "market_type", "selection", "line"])
+            .reset_index(drop=True)
+        )
+
+        if not dry_run:
+            _write_csv(history_path, combined[list(HISTORY_COLUMNS)])
+    else:
+        combined = existing
+        incoming = pd.DataFrame(columns=HISTORY_COLUMNS)
 
     same_date = combined[combined["prediction_date"].astype(str).eq(str(prediction_date))]
     return {
         "shadow_candidate_lane_path": str(board_path),
         "shadow_candidate_lane_history_path": str(history_path),
         "incoming_rows": int(len(incoming)),
-        "persisted_rows": int(len(same_date)),
+        "persisted_rows": int(len(same_date)) if should_persist else 0,
         "total_rows": int(len(combined)),
         "dry_run": bool(dry_run),
         "all_rows_real_money_eligible_false": _all_false(combined, "real_money_eligible"),
         "all_rows_kelly_eligible_false": _all_false(combined, "kelly_eligible"),
         "all_rows_elite_eligible_false": _all_false(combined, "elite_eligible"),
         "all_rows_shadow_only_true": _all_true(combined, "shadow_only"),
+        "report_date": report_date,
+        "prediction_date": report_date,
+        "source_artifact_date": source_artifact_date,
+        "source_date_mismatch": source_date_mismatch,
+        "history_persistence_status": history_persistence_status,
     }
 
 
@@ -998,6 +1053,15 @@ def render_shadow_candidate_lane_performance_text(payload: dict[str, Any], histo
     lines = [
         f"CourtVision Shadow Candidate Lane Performance - {payload.get('generated_for_date', '')}",
         "=" * 78,
+    ]
+    if payload.get("source_date_mismatch", False):
+        lines.extend([
+            "!!! WARNING: SOURCE_DATE_MISMATCH !!!",
+            f"Report Date ({payload.get('report_date')}) does not match Source Artifact Date ({payload.get('source_artifact_date')}).",
+            f"History persistence status: {payload.get('history_persistence_status')}",
+            "",
+        ])
+    lines.extend([
         PAPER_ONLY_DISCLAIMER,
         "This report does not affect Elite, Kelly, final_decision, staking, or bankroll.",
         f"History CSV: {history_path}",
@@ -1014,7 +1078,7 @@ def render_shadow_candidate_lane_performance_text(payload: dict[str, Any], histo
         "- 50-99 graded rows = moderate evidence",
         "- 100+ graded rows = stronger evidence",
         "",
-    ]
+    ])
     by_dimension = payload.get("by_dimension", {})
     titles = {
         "lane": "Performance by Lane",
@@ -1108,6 +1172,7 @@ def write_shadow_candidate_lane_performance_outputs(
     history_root: str | Path = "data/history",
     grade_pending: bool = True,
     dry_run: bool = False,
+    override_date_integrity: bool = False,
 ) -> tuple[Path, Path, Path, dict[str, Any]]:
     history_path = history_path_for_root(history_root)
     persist_result = persist_daily_shadow_candidate_lane(
@@ -1115,6 +1180,7 @@ def write_shadow_candidate_lane_performance_outputs(
         runtime_root=runtime_root,
         history_root=history_root,
         dry_run=dry_run,
+        override_date_integrity=override_date_integrity,
     )
     grade_result: dict[str, Any] = {
         "skipped": True,
@@ -1135,6 +1201,15 @@ def write_shadow_candidate_lane_performance_outputs(
     payload["history_path"] = str(history_path)
     payload["persist_result"] = persist_result
     payload["grade_result"] = grade_result
+
+    payload["report_date"] = prediction_date
+    payload["prediction_date"] = prediction_date
+    payload["source_artifact_date"] = persist_result.get("source_artifact_date", "")
+    payload["source_date_mismatch"] = persist_result.get("source_date_mismatch", False)
+    payload["history_persistence_status"] = persist_result.get("history_persistence_status", "")
+    if persist_result.get("source_date_mismatch", False):
+        payload["warning"] = "SOURCE_DATE_MISMATCH"
+
     txt_path, csv_path, json_path = performance_paths_for_date(
         prediction_date=prediction_date,
         runtime_root=runtime_root,
