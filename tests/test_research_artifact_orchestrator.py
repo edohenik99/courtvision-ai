@@ -196,3 +196,57 @@ def test_orchestrator_no_pick_history_access(tmp_path: Path) -> None:
     df = pd.read_csv(pick_history_path)
     assert len(df) == 1
     assert df.loc[0, "pick"] == "over"
+
+
+def test_orchestrator_dry_run_missing_board(tmp_path: Path, capsys) -> None:
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+
+    # Do not seed the operator inputs! The board is missing.
+    # Seed pick_history.csv to verify it is untouched.
+    pick_history_path = history_root / "pick_history.csv"
+    _write_csv(pick_history_path, [{"prediction_date": PREDICTION_DATE, "pick": "over"}])
+
+    runner_called = False
+
+    def mock_runner(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
+        nonlocal runner_called
+        runner_called = True
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    exit_code = orchestrate_research_artifacts(
+        prediction_date=PREDICTION_DATE,
+        runtime_root=runtime_root,
+        history_root=history_root,
+        runner=mock_runner,
+        dry_run=True,
+    )
+
+    # 1. dry-run with missing full_market_board exits successfully
+    assert exit_code == 0
+
+    # 2. dry-run invokes no subprocesses
+    assert not runner_called
+
+    # 3. dry-run prints a warning and planned command order
+    captured = capsys.readouterr()
+    expected_warn = f"[DRY-RUN][WARN] Required source artifact is missing: {runtime_root / 'operator' / f'full_market_board_{PREDICTION_DATE}.csv'}"
+    assert expected_warn in captured.out
+    assert "Would run command:" in captured.out
+    assert "write_under_visibility_audit.py" in captured.out
+    assert "write_daily_summary.py" in captured.out
+    assert "write_operator_card.py" in captured.out
+
+    # 4. pick_history.csv untouched
+    df = pd.read_csv(pick_history_path)
+    assert len(df) == 1
+    assert df.loc[0, "pick"] == "over"
+
+    # 5. Confirm dry-run with missing full_market_board does not create any runtime output files/directories or report files
+    # runtime_root should not exist or be empty
+    assert not runtime_root.exists() or len(list(runtime_root.rglob("*"))) == 0
+    # The only file in history_root should be pick_history.csv
+    history_files = [f for f in history_root.rglob("*") if f.is_file()]
+    assert len(history_files) == 1
+    assert history_files[0] == pick_history_path
+

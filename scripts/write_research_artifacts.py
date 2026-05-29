@@ -34,8 +34,11 @@ def orchestrate_research_artifacts(
     # 1. Required source check
     required_board = runtime_root / "operator" / f"full_market_board_{prediction_date}.csv"
     if not required_board.exists():
-        printer(f"[ERROR] Required minimum source artifact is missing: {required_board}")
-        return 1
+        if dry_run:
+            printer(f"[DRY-RUN][WARN] Required source artifact is missing: {required_board}")
+        else:
+            printer(f"[ERROR] Required minimum source artifact is missing: {required_board}")
+            return 1
 
     # Define steps to execute
     steps = [
