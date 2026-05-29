@@ -642,7 +642,7 @@ if (-not (Test-Path $ResearchArtifactsScript)) {
     $researchExitCode = Invoke-LoggedCommand `
         -LogPath $GradeLog `
         -Exe $PyExe `
-        -Arguments ($PyArgsPrefix + @($ResearchArtifactsScript, "--prediction-date", $Date)) `
+        -Arguments ($PyArgsPrefix + @($ResearchArtifactsScript, "--prediction-date", $Date, "--skip-operator-card")) `
         -StreamToConsole:$VerboseMode
     if ($researchExitCode -ne 0) {
         Write-LogLine -Path $GradeLog -Message "[WARNING] Phase 5 Research Artifacts orchestrator failed (exit code: $researchExitCode). Continuing daily run because research artifacts are shadow-only." -AlsoConsole:$VerboseMode

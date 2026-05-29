@@ -347,3 +347,54 @@ def test_no_betting_logic_modules_modified() -> None:
     # This is a static test verifying that the script doesn't modify external betting models.
     # It just loads the data reporting module.
     assert True
+
+
+def test_bet_readiness_display_names_resolution(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+
+    _seed_required_artifacts(runtime_root)
+    _seed_optional_artifacts(runtime_root)
+
+    # 1. Row with player only (e.g. from incubator board)
+    _write_csv(runtime_root / "operator" / f"incubator_board_{PREDICTION_DATE}.csv", [
+        {"player": "Jalen Williams", "market_type": "player_points", "selection": "over", "line": 7.5}
+    ])
+
+    # 2. Row with player_name only (e.g. from shadow candidate lane)
+    _write_csv(runtime_root / "operator" / f"shadow_candidate_lane_{PREDICTION_DATE}.csv", [
+        {"player_name": "Victor Wembanyama", "market_type": "player_points_rebounds_assists", "selection": "under", "line": 42.5, "research_lane": "UNDER_ALIGNED_RESEARCH", "shadow_only": True}
+    ])
+
+    # 3. Row with no supported display fields (Unknown)
+    _write_csv(runtime_root / "operator" / f"near_elite_review_{PREDICTION_DATE}.csv", [
+        {"market_type": "player_points", "selection": "over", "line": 13.5}
+    ])
+
+    exit_code, payload, report = run_bet_readiness_report(
+        prediction_date=PREDICTION_DATE,
+        runtime_root=runtime_root,
+        history_root=history_root,
+        strict=False,
+    )
+
+    # Verify display name resolution
+    research_candidates = payload["lanes"]["research_only_candidates"]
+    
+    # 1. check that Jalen Williams (seeded under player) is formatted with his name, not Unknown
+    assert any("Jalen Williams" in item for item in research_candidates)
+    assert not any("Unknown: player_points over 7.5" in item for item in research_candidates)
+
+    # 2. check that Victor Wembanyama (seeded under player_name) is formatted with his name
+    assert any("Victor Wembanyama" in item for item in research_candidates)
+
+    # 3. check that the row with no supported display fields displays "Unknown"
+    manual_candidates = payload["lanes"]["manual_review_candidates"]
+    assert any("Unknown: player_points" in item for item in manual_candidates)
+
+    # 4. Check JSON unknown display name counts and examples
+    assert "unknown_display_name_count" in payload
+    assert "unknown_display_name_examples" in payload
+    assert payload["unknown_display_name_count"] == 1
+    assert "player_points over 13.5" in payload["unknown_display_name_examples"]
+

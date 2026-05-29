@@ -250,3 +250,71 @@ def test_orchestrator_dry_run_missing_board(tmp_path: Path, capsys) -> None:
     assert len(history_files) == 1
     assert history_files[0] == pick_history_path
 
+
+def test_orchestrator_skip_operator_card(tmp_path: Path, capsys) -> None:
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+    _seed_operator_inputs(runtime_root)
+
+    commands_run = []
+
+    def mock_runner(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
+        commands_run.append(cmd)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    exit_code = orchestrate_research_artifacts(
+        prediction_date=PREDICTION_DATE,
+        runtime_root=runtime_root,
+        history_root=history_root,
+        runner=mock_runner,
+        skip_operator_card=True,
+    )
+
+    assert exit_code == 0
+    assert len(commands_run) == 4
+    
+    for cmd in commands_run:
+        assert "write_operator_card.py" not in cmd[1]
+
+    captured = capsys.readouterr()
+    assert "[SKIP] Operator card refresh skipped by caller" in captured.out
+
+
+def test_orchestrator_dry_run_skip_operator_card(tmp_path: Path, capsys) -> None:
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+    _seed_operator_inputs(runtime_root)
+
+    runner_called = False
+
+    def mock_runner(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
+        nonlocal runner_called
+        runner_called = True
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    exit_code = orchestrate_research_artifacts(
+        prediction_date=PREDICTION_DATE,
+        runtime_root=runtime_root,
+        history_root=history_root,
+        runner=mock_runner,
+        dry_run=True,
+        skip_operator_card=True,
+    )
+
+    assert exit_code == 0
+    assert not runner_called
+    
+    captured = capsys.readouterr()
+    assert "[SKIP] Operator card refresh skipped by caller" in captured.out
+    assert "Would run command:" in captured.out
+    assert "write_operator_card.py" not in captured.out
+
+
+def test_run_today_integration_assert_skip_operator_card() -> None:
+    ps1_path = Path(__file__).resolve().parents[1] / "run_today.ps1"
+    assert ps1_path.exists()
+    content = ps1_path.read_text(encoding="utf-8")
+    assert "write_research_artifacts.py" in content or "ResearchArtifactsScript" in content
+    assert "--skip-operator-card" in content
+
+

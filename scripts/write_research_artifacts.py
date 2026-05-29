@@ -24,6 +24,7 @@ def orchestrate_research_artifacts(
     history_root: str | Path = "data/history",
     runner: Callable[..., subprocess.CompletedProcess] | None = None,
     printer: Callable[[str], None] = print,
+    skip_operator_card: bool = False,
 ) -> int:
     runtime_root = Path(runtime_root)
     history_root = Path(history_root)
@@ -82,6 +83,10 @@ def orchestrate_research_artifacts(
         script_args = step["args"]
         optional = step["optional"]
 
+        if name == "Operator card refresh" and skip_operator_card:
+            printer("[SKIP] Operator card refresh skipped by caller")
+            continue
+
         command = [sys.executable, script_relative] + script_args
 
         printer(f"[START] {name}")
@@ -138,6 +143,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Do not execute file-writing subprocesses; only print planned command order.",
     )
+    parser.add_argument(
+        "--skip-operator-card",
+        action="store_true",
+        help="Skip the operator card refresh step.",
+    )
     parser.add_argument("--runtime-root", default="outputs/runtime")
     parser.add_argument("--history-root", default="data/history")
     
@@ -149,6 +159,7 @@ def main(argv: list[str] | None = None) -> int:
         dry_run=args.dry_run,
         runtime_root=args.runtime_root,
         history_root=args.history_root,
+        skip_operator_card=args.skip_operator_card,
     )
 
 

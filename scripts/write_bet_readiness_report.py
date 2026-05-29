@@ -349,9 +349,29 @@ def run_bet_readiness_report(
         "research_only_candidates": [],
     }
 
+    unknown_players_list = []
+
+    def _get_display_name(row) -> str:
+        for field in ["player", "player_name", "athlete", "participant", "name"]:
+            val = row.get(field)
+            if val is not None and not pd.isna(val) and str(val).strip() != "" and str(val).strip().lower() != "nan":
+                return str(val).strip()
+        
+        desc = row.get("description")
+        if desc is not None and not pd.isna(desc) and str(desc).strip() != "":
+            return str(desc).strip()
+            
+        return "Unknown"
+
     # Helper function to format candidate row
     def _format_candidate(row) -> str:
-        player = row.get("player_name", "Unknown")
+        player = _get_display_name(row)
+        if player == "Unknown":
+            mkt = row.get("market_type", "unknown")
+            sel = row.get("selection", "unknown")
+            line = row.get("line", "n/a")
+            unknown_players_list.append(f"{mkt} {sel} {line}")
+
         mkt = row.get("market_type", "unknown")
         sel = row.get("selection", "unknown")
         line = row.get("line", "n/a")
@@ -499,6 +519,9 @@ Strict Safety Declarations:
     for dec in safety_declarations:
         txt_report += f"- {dec}\n"
 
+    unknown_display_name_examples = list(dict.fromkeys(unknown_players_list))
+    unknown_display_name_count = len(unknown_display_name_examples)
+
     # Build JSON diagnostics payload
     diagnostics_payload = {
         "prediction_date": prediction_date,
@@ -509,6 +532,8 @@ Strict Safety Declarations:
         "lanes": lanes,
         "do_not_promote": list(dict.fromkeys(do_not_promote)),
         "safety_declarations": safety_declarations,
+        "unknown_display_name_count": unknown_display_name_count,
+        "unknown_display_name_examples": unknown_display_name_examples,
         "metrics": {
             "has_elite_rows": has_elite_rows,
             "has_kelly_rows": has_kelly_rows,
