@@ -124,5 +124,10 @@ COURTVISION_ENABLE_LEGACY_PIPELINE=true
 - May produce different elite board outputs; use only for regression testing
 - better repo hygiene
 
+## Documentation
+
+- **[System Architecture Map](file:///c:/dev/Sport_Project1/docs/architecture/courtvision_system_architecture.md)** — Comprehensive architecture, layer-by-layer details, artifact inventory, canonical workflows, and safety invariants.
+- **[Pre-Lock Deep Audit Report](file:///c:/dev/Sport_Project1/docs/audits/pre_lock_deep_audit_2026-05-30.md)** — Safety, test health, and readiness audit for the 2026-05-30 pre-game lock.
+
 ## Still needs real work
 Read `HARSH_AUDIT.md` and `courtvision/CLEANUP_NOTES.md`.
