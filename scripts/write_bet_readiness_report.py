@@ -343,12 +343,6 @@ def run_bet_readiness_report(
         blockers.append("same-opponent warnings")
 
     # Separate candidates into lanes
-    lanes = {
-        "real_money_eligible": [],
-        "manual_review_candidates": [],
-        "research_only_candidates": [],
-    }
-
     unknown_players_list = []
 
     def _get_display_name(row) -> str:
@@ -379,46 +373,115 @@ def run_bet_readiness_report(
         conf = row.get("confidence", "n/a")
         return f"{player}: {mkt} {sel} {line} (edge={edge}, confidence={conf})"
 
+    # Helper to construct raw candidate entries before formatting/deduping
+    def _create_candidate_entry(row, category_prefix: str = "") -> dict:
+        player = _get_display_name(row)
+        mkt = row.get("market_type", "unknown")
+        sel = row.get("selection", "unknown")
+        line = row.get("line", "n/a")
+        formatted = _format_candidate(row)
+        
+        # Prepend category prefix if any
+        full_formatted = f"{category_prefix}{formatted}" if category_prefix else formatted
+        
+        return {
+            "category": category_prefix,
+            "player": player,
+            "market_type": mkt,
+            "selection": sel,
+            "line": line,
+            "formatted": full_formatted
+        }
+
+    def _get_dedupe_key(entry: dict) -> tuple[str, str, str, str, str]:
+        category = entry.get("category", "")
+        player = entry.get("player", "")
+        market_type = entry.get("market_type", "")
+        selection = entry.get("selection", "")
+        line = entry.get("line", "")
+
+        # Normalize
+        norm_category = str(category).lower().strip()
+        norm_player = str(player).lower().strip()
+        norm_market = str(market_type).lower().strip()
+        norm_selection = str(selection).lower().strip()
+        
+        try:
+            norm_line = str(float(line))
+        except (ValueError, TypeError):
+            norm_line = str(line).lower().strip()
+
+        return (
+            norm_category,
+            norm_player,
+            norm_market,
+            norm_selection,
+            norm_line
+        )
+
+    def _deduplicate_lane_entries(entries: list[dict]) -> tuple[list[dict], int, list[str]]:
+        seen_keys = set()
+        deduped = []
+        num_removed = 0
+        removed_examples = []
+        
+        for entry in entries:
+            key = _get_dedupe_key(entry)
+            if key in seen_keys:
+                num_removed += 1
+                ex = entry["formatted"]
+                if ex not in removed_examples:
+                    removed_examples.append(ex)
+            else:
+                seen_keys.add(key)
+                deduped.append(entry)
+                
+        return deduped, num_removed, removed_examples
+
+    lane_a_entries = []
+    lane_b_entries = []
+    lane_c_entries = []
+    do_not_promote_entries = []
+
     # A. Real-money eligible
     for row in kelly_stakeable:
-        lanes["real_money_eligible"].append(_format_candidate(row))
+        lane_a_entries.append(_create_candidate_entry(row))
 
     # B. Manual review candidates
     # Near elite
     if not near_elite_df.empty:
         for _, row in near_elite_df.iterrows():
-            lanes["manual_review_candidates"].append(f"[Near-Elite] {_format_candidate(row)}")
+            lane_b_entries.append(_create_candidate_entry(row, "[Near-Elite] "))
     # Same-opponent warnings
     for df in (full_market_df, elite_df):
         if not df.empty and "same_opponent_under_warning" in df.columns:
             for _, row in df.iterrows():
                 if _is_truthy(row.get("same_opponent_under_warning")):
-                    lanes["manual_review_candidates"].append(f"[Same-Opponent] {_format_candidate(row)}")
+                    lane_b_entries.append(_create_candidate_entry(row, "[Same-Opponent] "))
 
     # C. Research-only candidates
     if not shadow_lane_df.empty:
         for _, row in shadow_lane_df.iterrows():
             lane = _clean_str(row.get("research_lane"))
             if lane in ("UNDER_ALIGNED_RESEARCH", "COMBO_OVER_WEAK_POSITIVE_RESEARCH", "INCUBATOR_RESEARCH", "HIGH_CAUTION_OVER_DO_NOT_PROMOTE"):
-                lanes["research_only_candidates"].append(f"[{lane}] {_format_candidate(row)}")
+                lane_c_entries.append(_create_candidate_entry(row, f"[{lane}] "))
     if not incubator_df.empty:
         for _, row in incubator_df.iterrows():
-            lanes["research_only_candidates"].append(f"[INCUBATOR_RESEARCH] {_format_candidate(row)}")
+            lane_c_entries.append(_create_candidate_entry(row, "[INCUBATOR_RESEARCH] "))
 
     # Do Not Promote Section
-    do_not_promote = []
     # High-caution OVERs
     for df in (full_market_df, elite_df):
         if not df.empty and "selection" in df.columns and "context_caution_level" in df.columns:
             for _, row in df.iterrows():
                 if _clean_str(row.get("selection")).lower() == "over" and _clean_str(row.get("context_caution_level")).lower() == "high":
-                    do_not_promote.append(f"High-caution OVER: {_format_candidate(row)}")
+                    do_not_promote_entries.append(_create_candidate_entry(row, "High-caution OVER: "))
 
     # Shadow-only rows
     if not shadow_lane_df.empty:
         for _, row in shadow_lane_df.iterrows():
             if _is_true(row.get("shadow_only", True)):
-                do_not_promote.append(f"Shadow-only row: {_format_candidate(row)}")
+                do_not_promote_entries.append(_create_candidate_entry(row, "Shadow-only row: "))
 
     # Source date mismatch rows
     if not shadow_lane_df.empty:
@@ -426,7 +489,7 @@ def run_bet_readiness_report(
             row_pred_date = _clean_str(row.get("prediction_date", ""))
             row_source_date = _clean_str(row.get("source_artifact_date", ""))
             if row_pred_date != prediction_date or row_source_date != prediction_date:
-                do_not_promote.append(f"Date Mismatch row (pred={row_pred_date}, source={row_source_date}): {_format_candidate(row)}")
+                do_not_promote_entries.append(_create_candidate_entry(row, f"Date Mismatch row (pred={row_pred_date}, source={row_source_date}): "))
 
     # Candidates with real_money_eligible=False, kelly_eligible=False, elite_eligible=False
     if not shadow_lane_df.empty:
@@ -435,12 +498,47 @@ def run_bet_readiness_report(
             kelly = row.get("kelly_eligible", False)
             elite = row.get("elite_eligible", False)
             if _is_false(real_money) and _is_false(kelly) and _is_false(elite):
-                do_not_promote.append(f"Research-only Flags: {_format_candidate(row)}")
+                do_not_promote_entries.append(_create_candidate_entry(row, "Research-only Flags: "))
 
     # Candidates from paper-only histories (e.g. from incubator_board / shadow candidate lane)
     if not incubator_df.empty:
         for _, row in incubator_df.iterrows():
-            do_not_promote.append(f"Paper-only Incubator Candidate: {_format_candidate(row)}")
+            do_not_promote_entries.append(_create_candidate_entry(row, "Paper-only Incubator Candidate: "))
+
+    # Deduplicate within each lane
+    lane_counts_before_dedupe = {
+        "real_money_eligible": len(lane_a_entries),
+        "manual_review_candidates": len(lane_b_entries),
+        "research_only_candidates": len(lane_c_entries),
+        "do_not_promote": len(do_not_promote_entries),
+    }
+
+    deduped_a, removed_a, examples_a = _deduplicate_lane_entries(lane_a_entries)
+    deduped_b, removed_b, examples_b = _deduplicate_lane_entries(lane_b_entries)
+    deduped_c, removed_c, examples_c = _deduplicate_lane_entries(lane_c_entries)
+    deduped_dnp, removed_dnp, examples_dnp = _deduplicate_lane_entries(do_not_promote_entries)
+
+    lane_counts_after_dedupe = {
+        "real_money_eligible": len(deduped_a),
+        "manual_review_candidates": len(deduped_b),
+        "research_only_candidates": len(deduped_c),
+        "do_not_promote": len(deduped_dnp),
+    }
+
+    total_removed = removed_a + removed_b + removed_c + removed_dnp
+    
+    duplicate_candidate_examples = []
+    for ex in (examples_a + examples_b + examples_c + examples_dnp):
+        if ex not in duplicate_candidate_examples:
+            duplicate_candidate_examples.append(ex)
+
+    # Format final lists of strings
+    lanes = {
+        "real_money_eligible": [e["formatted"] for e in deduped_a],
+        "manual_review_candidates": [e["formatted"] for e in deduped_b],
+        "research_only_candidates": [e["formatted"] for e in deduped_c],
+    }
+    do_not_promote = [e["formatted"] for e in deduped_dnp]
 
     # Strict Safety Declarations
     safety_declarations = [
@@ -507,7 +605,7 @@ Do Not Promote Section:
 --------------------------------------------
 """
     if do_not_promote:
-        for item in list(dict.fromkeys(do_not_promote))[:20]:
+        for item in do_not_promote[:20]:
             txt_report += f"- {item}\n"
     else:
         txt_report += "- None\n"
@@ -530,10 +628,14 @@ Strict Safety Declarations:
         "recommended_action": recommended_action,
         "blockers": blockers,
         "lanes": lanes,
-        "do_not_promote": list(dict.fromkeys(do_not_promote)),
+        "do_not_promote": do_not_promote,
         "safety_declarations": safety_declarations,
         "unknown_display_name_count": unknown_display_name_count,
         "unknown_display_name_examples": unknown_display_name_examples,
+        "duplicate_candidate_rows_removed": total_removed,
+        "duplicate_candidate_examples": duplicate_candidate_examples,
+        "lane_counts_before_dedupe": lane_counts_before_dedupe,
+        "lane_counts_after_dedupe": lane_counts_after_dedupe,
         "metrics": {
             "has_elite_rows": has_elite_rows,
             "has_kelly_rows": has_kelly_rows,

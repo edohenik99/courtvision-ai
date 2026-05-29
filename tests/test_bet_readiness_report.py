@@ -398,3 +398,90 @@ def test_bet_readiness_display_names_resolution(tmp_path: Path) -> None:
     assert payload["unknown_display_name_count"] == 1
     assert "player_points over 13.5" in payload["unknown_display_name_examples"]
 
+
+def test_candidate_deduplication(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+
+    _seed_required_artifacts(runtime_root)
+    _seed_optional_artifacts(runtime_root)
+
+    # We will seed duplicates to verify deduplication.
+    # 1. Seed two duplicate incubator research candidates in incubator_board.
+    # This simulates duplicates within the same lane C.
+    _write_csv(runtime_root / "operator" / f"incubator_board_{PREDICTION_DATE}.csv", [
+        {"player": "Jalen Williams", "market_type": "player_points", "selection": "over", "line": 7.5, "edge": 5.0, "confidence": 0.8},
+        {"player": "Jalen Williams", "market_type": "player_points", "selection": "over", "line": 7.5, "edge": 5.0, "confidence": 0.8},
+    ])
+
+    # 2. Seed a candidate in shadow candidate lane as INCUBATOR_RESEARCH as well.
+    # Also seed a different incubator candidate first to test ordering preservation.
+    _write_csv(runtime_root / "operator" / f"shadow_candidate_lane_{PREDICTION_DATE}.csv", [
+        {"player_name": "De'Aaron Fox", "market_type": "player_points", "selection": "over", "line": 13.5, "research_lane": "INCUBATOR_RESEARCH", "edge": 6.0, "confidence": 0.7, "shadow_only": True},
+        {"player_name": "Jalen Williams", "market_type": "player_points", "selection": "over", "line": 7.5, "research_lane": "INCUBATOR_RESEARCH", "edge": 5.0, "confidence": 0.8, "shadow_only": True},
+    ])
+
+    # 3. Seed Jalen Williams as Near-Elite in Lane B to test that they are NOT deduped across lanes.
+    _write_csv(runtime_root / "operator" / f"near_elite_review_{PREDICTION_DATE}.csv", [
+        {"player": "Jalen Williams", "market_type": "player_points", "selection": "over", "line": 7.5, "edge": 5.0, "confidence": 0.8}
+    ])
+
+    # Run the bet readiness report
+    exit_code, payload, report = run_bet_readiness_report(
+        prediction_date=PREDICTION_DATE,
+        runtime_root=runtime_root,
+        history_root=history_root,
+        strict=False,
+    )
+
+    # 1. Duplicate incubator research rows are shown only once.
+    # We should have exactly one Jalen Williams incubator row in Lane C, and exactly one De'Aaron Fox incubator row.
+    research_candidates = payload["lanes"]["research_only_candidates"]
+    jalen_incubator_rows = [r for r in research_candidates if "Jalen Williams" in r and "INCUBATOR_RESEARCH" in r]
+    assert len(jalen_incubator_rows) == 1, f"Expected 1 Jalen Williams incubator row, found: {jalen_incubator_rows}"
+
+    fox_incubator_rows = [r for r in research_candidates if "De'Aaron Fox" in r and "INCUBATOR_RESEARCH" in r]
+    assert len(fox_incubator_rows) == 1, f"Expected 1 De'Aaron Fox incubator row, found: {fox_incubator_rows}"
+
+    # 2. Duplicate rows inside the same lane are deduped.
+    # Total candidates in Lane C before dedupe should have been:
+    # - shadow_candidate_lane De'Aaron Fox (1)
+    # - shadow_candidate_lane Jalen Williams (2)
+    # - incubator_board Jalen Williams first copy (3)
+    # - incubator_board Jalen Williams second copy (4)
+    # After dedupe, it should be exactly 2 (De'Aaron Fox and Jalen Williams).
+    assert len(research_candidates) == 2
+
+    # 3. Same candidate appearing in different lanes is not removed across lanes.
+    # Jalen Williams appears in Lane B as [Near-Elite] and Lane C as [INCUBATOR_RESEARCH].
+    manual_candidates = payload["lanes"]["manual_review_candidates"]
+    assert any("Jalen Williams" in r and "Near-Elite" in r for r in manual_candidates)
+    assert any("Jalen Williams" in r and "INCUBATOR_RESEARCH" in r for r in research_candidates)
+
+    # 4. First occurrence order is preserved.
+    # De'Aaron Fox was seeded first in shadow_candidate_lane. Jalen Williams second.
+    # So De'Aaron Fox should be before Jalen Williams in Lane C.
+    assert "De'Aaron Fox" in research_candidates[0]
+    assert "Jalen Williams" in research_candidates[1]
+
+    # 5. JSON includes duplicate_candidate_rows_removed.
+    assert "duplicate_candidate_rows_removed" in payload
+    assert payload["duplicate_candidate_rows_removed"] > 0
+    assert "duplicate_candidate_examples" in payload
+    assert len(payload["duplicate_candidate_examples"]) > 0
+
+    # 6. JSON includes lane_counts_before_dedupe and lane_counts_after_dedupe.
+    assert "lane_counts_before_dedupe" in payload
+    assert "lane_counts_after_dedupe" in payload
+    assert payload["lane_counts_before_dedupe"]["research_only_candidates"] == 4
+    assert payload["lane_counts_after_dedupe"]["research_only_candidates"] == 2
+
+    # 7. Status and score are unchanged by dedupe.
+    assert payload["status"] == "RESEARCH_ONLY"
+    assert payload["score"] == 45
+
+    # 8. pick_history.csv is not read or written.
+    pick_hist = history_root / "pick_history.csv"
+    assert not pick_hist.exists()
+
+
