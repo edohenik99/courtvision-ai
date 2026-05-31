@@ -488,7 +488,12 @@ def _promotion_candidate_proposal(
         recommendation = RECOMMEND_WATCHLIST if rule_type == RULE_DATA_COLLECTION else RECOMMEND_DO_NOT_PROMOTE
     else:
         rule_type = _rule_type_for_watchlist(item)
-        if rule_type in {RULE_UNDER_VISIBILITY_WATCHLIST, RULE_NEAR_ELITE_WATCHLIST, RULE_COMBO_SHADOW_WATCHLIST}:
+        if rule_type in {
+            RULE_UNDER_VISIBILITY_WATCHLIST,
+            RULE_NEAR_ELITE_WATCHLIST,
+            RULE_COMBO_SHADOW_WATCHLIST,
+            RULE_HIGH_CAUTION_COMBO_SHADOW_WATCHLIST,
+        }:
             rule_type = RULE_MANUAL_REVIEW
         recommendation = RECOMMEND_PROPOSED_REQUIRES_APPROVAL
     return _proposal(

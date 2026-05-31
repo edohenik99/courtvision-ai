@@ -8,6 +8,7 @@ from courtvision.reporting.shadow_rule_proposals import (
     RULE_COMBO_SHADOW_WATCHLIST,
     RULE_DATA_COLLECTION,
     RULE_DO_NOT_PROMOTE_BLOCK,
+    RULE_MANUAL_REVIEW,
     RULE_NEAR_ELITE_WATCHLIST,
     RULE_UNDER_VISIBILITY_WATCHLIST,
     STATUS_BLOCKED_MISSING_LEARNING_REPORT,
@@ -141,6 +142,33 @@ def test_combo_proposal_is_disabled_and_never_kelly_eligible(tmp_path: Path) -> 
     proposal = next(item for item in payload["proposals"] if item["rule_type"] == RULE_COMBO_SHADOW_WATCHLIST)
 
     assert proposal["activation"] == "DISABLED"
+    assert proposal["eligible_for_kelly"] is False
+
+
+def test_high_caution_combo_promotion_candidate_becomes_manual_review(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    _write_learning_report(
+        runtime_root,
+        _payload(
+            promotion_candidates=[
+                _base_item(
+                    "high-caution combo OVER",
+                    recommendation="PROMOTION_CANDIDATE_REQUIRES_APPROVAL",
+                    market_type="player_points_rebounds",
+                    selection="over",
+                    context_caution_level="high",
+                )
+            ]
+        ),
+    )
+
+    payload = _build(runtime_root)
+    proposal = next(item for item in payload["proposals"] if item["source_bucket"] == "high-caution combo OVER")
+
+    assert proposal["rule_type"] == RULE_MANUAL_REVIEW
+    assert proposal["activation"] == "DISABLED"
+    assert proposal["requires_human_approval"] is True
+    assert proposal["production_effect"] is False
     assert proposal["eligible_for_kelly"] is False
 
 

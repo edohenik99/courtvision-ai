@@ -82,6 +82,12 @@ def _read_json(path: Path) -> dict[str, Any]:
         return {}
 
 
+def _count_under_rows(df: pd.DataFrame) -> int:
+    if df.empty or "selection" not in df.columns:
+        return 0
+    return int((df["selection"].astype(str).str.lower() == "under").sum())
+
+
 def _sort_candidates(df: pd.DataFrame, limit: int) -> pd.DataFrame:
     if df.empty:
         return df
@@ -156,14 +162,14 @@ def get_under_research_snapshot_text(
         sl_total = funnel.get("shadow_candidate_lane", {}).get("total", 0)
     else:
         # Compute dynamically
-        fm_under = int((full_market_df["selection"].astype(str).str.lower() == "under").sum()) if not full_market_df.empty else 0
+        fm_under = _count_under_rows(full_market_df)
         fm_total = len(full_market_df)
         
-        ne_under = int((near_elite_df["selection"].astype(str).str.lower() == "under").sum()) if not near_elite_df.empty else 0
+        ne_under = _count_under_rows(near_elite_df)
         
-        inc_under = int((incubator_df["selection"].astype(str).str.lower() == "under").sum()) if not incubator_df.empty else 0
+        inc_under = _count_under_rows(incubator_df)
         
-        sl_under = int((shadow_lane_df["selection"].astype(str).str.lower() == "under").sum()) if not shadow_lane_df.empty else 0
+        sl_under = _count_under_rows(shadow_lane_df)
         sl_total = len(shadow_lane_df)
 
     fm_pct = (fm_under / fm_total * 100) if fm_total > 0 else 0.0
@@ -267,7 +273,7 @@ def get_under_research_snapshot_text(
             )
     else:
         # Load from full_market_df directly
-        if not full_market_df.empty:
+        if not full_market_df.empty and "selection" in full_market_df.columns:
             under_candidates = full_market_df[full_market_df["selection"].astype(str).str.lower() == "under"].copy()
             sorted_fm = _sort_candidates(under_candidates, 5)
             for _, row in sorted_fm.iterrows():
@@ -298,7 +304,7 @@ def get_under_research_snapshot_text(
     top_aligned_lines = []
     if shadow_lane_path.exists():
         shadow_lane_df = _read_csv(shadow_lane_path)
-        if not shadow_lane_df.empty:
+        if not shadow_lane_df.empty and "research_lane" in shadow_lane_df.columns:
             # Filter for UNDER_ALIGNED_RESEARCH research_lane
             aligned_under = shadow_lane_df[shadow_lane_df["research_lane"] == "UNDER_ALIGNED_RESEARCH"].head(5)
             for _, row in aligned_under.iterrows():
