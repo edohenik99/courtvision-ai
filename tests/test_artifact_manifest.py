@@ -354,3 +354,121 @@ def test_write_artifact_manifest_outputs_writes_json_and_text(tmp_path: Path) ->
     assert payload["prediction_date"] == PREDICTION_DATE
     assert payload["generated_at"] == "2026-04-10T12:00:00Z"
     assert payload["artifact_count"] == manifest["artifact_count"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 6A Learning Artifacts — optional/reporting-only manifest entries
+# ---------------------------------------------------------------------------
+
+def test_manifest_learning_brain_report_is_shadow_only_not_fatal(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    _write_core_boards(runtime_root)
+
+    manifest = build_artifact_manifest(
+        prediction_date=PREDICTION_DATE,
+        runtime_root=runtime_root,
+        generated_at="2026-04-10T12:00:00Z",
+    )
+
+    txt = _artifact(manifest, "learning_brain_report_txt")
+    jsn = _artifact(manifest, "learning_brain_report_json")
+    assert txt["exists"] is False
+    assert jsn["exists"] is False
+    assert txt["severity"] == SEVERITY_SHADOW_ONLY
+    assert jsn["severity"] == SEVERITY_SHADOW_ONLY
+    assert "not an Elite, Kelly, final decision, or staking input" in txt["notes"]
+    assert manifest["missing_by_severity"]["fatal"] == 0
+
+
+def test_manifest_shadow_rule_proposals_is_shadow_only_not_fatal(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    _write_core_boards(runtime_root)
+
+    manifest = build_artifact_manifest(
+        prediction_date=PREDICTION_DATE,
+        runtime_root=runtime_root,
+        generated_at="2026-04-10T12:00:00Z",
+    )
+
+    txt = _artifact(manifest, "shadow_rule_proposals_txt")
+    jsn = _artifact(manifest, "shadow_rule_proposals_json")
+    assert txt["exists"] is False
+    assert jsn["exists"] is False
+    assert txt["severity"] == SEVERITY_SHADOW_ONLY
+    assert jsn["severity"] == SEVERITY_SHADOW_ONLY
+    assert "not an Elite, Kelly, final decision, or staking input" in txt["notes"]
+    assert manifest["missing_by_severity"]["fatal"] == 0
+
+
+def test_manifest_learning_integration_snapshot_is_shadow_only_not_fatal(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    _write_core_boards(runtime_root)
+
+    manifest = build_artifact_manifest(
+        prediction_date=PREDICTION_DATE,
+        runtime_root=runtime_root,
+        generated_at="2026-04-10T12:00:00Z",
+    )
+
+    txt = _artifact(manifest, "learning_integration_snapshot_txt")
+    jsn = _artifact(manifest, "learning_integration_snapshot_json")
+    assert txt["exists"] is False
+    assert jsn["exists"] is False
+    assert txt["severity"] == SEVERITY_SHADOW_ONLY
+    assert jsn["severity"] == SEVERITY_SHADOW_ONLY
+    assert "not an Elite, Kelly, final decision, or staking input" in txt["notes"]
+    assert manifest["missing_by_severity"]["fatal"] == 0
+
+
+def test_manifest_learning_artifacts_summary_is_shadow_only_not_fatal(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    _write_core_boards(runtime_root)
+
+    manifest = build_artifact_manifest(
+        prediction_date=PREDICTION_DATE,
+        runtime_root=runtime_root,
+        generated_at="2026-04-10T12:00:00Z",
+    )
+
+    txt = _artifact(manifest, "learning_artifacts_summary_txt")
+    jsn = _artifact(manifest, "learning_artifacts_summary_json")
+    assert txt["exists"] is False
+    assert jsn["exists"] is False
+    assert txt["severity"] == SEVERITY_SHADOW_ONLY
+    assert jsn["severity"] == SEVERITY_SHADOW_ONLY
+    assert "not an Elite, Kelly, final decision, or staking input" in txt["notes"]
+    assert manifest["missing_by_severity"]["fatal"] == 0
+
+
+def test_manifest_learning_artifacts_are_not_betting_required(tmp_path: Path) -> None:
+    """All 8 Phase 6A learning artifact specs must be shadow-only with zero fatal impact."""
+    runtime_root = tmp_path / "runtime"
+    _write_core_boards(runtime_root)
+
+    manifest = build_artifact_manifest(
+        prediction_date=PREDICTION_DATE,
+        runtime_root=runtime_root,
+        generated_at="2026-04-10T12:00:00Z",
+    )
+
+    learning_names = [
+        "learning_brain_report_txt",
+        "learning_brain_report_json",
+        "shadow_rule_proposals_txt",
+        "shadow_rule_proposals_json",
+        "learning_integration_snapshot_txt",
+        "learning_integration_snapshot_json",
+        "learning_artifacts_summary_txt",
+        "learning_artifacts_summary_json",
+    ]
+    for name in learning_names:
+        item = _artifact(manifest, name)
+        assert item["severity"] == SEVERITY_SHADOW_ONLY, (
+            f"{name} must be SEVERITY_SHADOW_ONLY, got {item['severity']}"
+        )
+        assert item["exists"] is False  # not written in this test
+        assert item["category"] == "learning_artifacts_reporting"
+
+    # All 8 are shadow_only — fatal_missing must remain 0
+    assert manifest["missing_by_severity"]["fatal"] == 0
+

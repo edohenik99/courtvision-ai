@@ -137,6 +137,7 @@ $CompletionStateAuditScript = Join-Path $ScriptRoot "scripts\write_completion_st
 $OperatorCardScript = Join-Path $ScriptRoot "scripts\write_operator_card.py"
 $ArtifactManifestScript = Join-Path $ScriptRoot "scripts\write_artifact_manifest.py"
 $ResearchArtifactsScript = Join-Path $ScriptRoot "scripts\write_research_artifacts.py"
+$LearningArtifactsScript = Join-Path $ScriptRoot "scripts\write_learning_artifacts.py"
 
 # Bankroll override: read $env:COURTVISION_BANKROLL when set, else default.
 $KellyBankroll = if ($env:COURTVISION_BANKROLL) { $env:COURTVISION_BANKROLL } else { "1000" }
@@ -650,6 +651,53 @@ if (-not (Test-Path $ResearchArtifactsScript)) {
     } else {
         Write-LogLine -Path $GradeLog -Message "[OK] Phase 5 Research Artifacts completed." -AlsoConsole:$VerboseMode
         Write-Host "[OK] Phase 5 Research Artifacts completed." -ForegroundColor Green
+    }
+}
+
+Write-Host ""
+Write-Host "[START] Phase 6A Learning Artifacts" -ForegroundColor Yellow
+$learningArtifactStatus = "skipped"
+$learningArtifactJsonPath = "outputs\runtime\diagnostics\learning_artifacts_summary_$Date.json"
+if (-not (Test-Path $LearningArtifactsScript)) {
+    Write-LogLine -Path $GradeLog -Message "[WARNING] Phase 6A Learning Artifacts script not found: $LearningArtifactsScript" -AlsoConsole:$VerboseMode
+    Write-Host "[WARN] Phase 6A Learning Artifacts skipped; script not found: $LearningArtifactsScript" -ForegroundColor Yellow
+    $learningArtifactStatus = "script_missing"
+} else {
+    "`n--- Phase 6A Learning Artifacts ---" | Out-File $GradeLog -Append
+    $learningExitCode = Invoke-LoggedCommand `
+        -LogPath $GradeLog `
+        -Exe $PyExe `
+        -Arguments ($PyArgsPrefix + @($LearningArtifactsScript, "--prediction-date", $Date)) `
+        -StreamToConsole:$VerboseMode
+    if ($learningExitCode -eq 0) {
+        Write-LogLine -Path $GradeLog -Message "[OK] Phase 6A Learning Artifacts completed." -AlsoConsole:$VerboseMode
+        Write-Host "[OK] Phase 6A Learning Artifacts completed." -ForegroundColor Green
+        $learningArtifactStatus = "ok"
+    } else {
+        # Inspect the summary JSON to distinguish unsafe-proposal blocking from ordinary nonfatal failures.
+        $learningFinalStatus = ""
+        if (Test-Path $learningArtifactJsonPath) {
+            try {
+                $learningPayload = Get-Content -Path $learningArtifactJsonPath -Raw -Encoding UTF8 | ConvertFrom-Json
+                $learningFinalStatus = [string]$learningPayload.final_status
+            } catch {
+                Write-LogLine -Path $GradeLog -Message "[WARNING] Phase 6A: could not read learning artifacts summary JSON: $learningArtifactJsonPath" -AlsoConsole:$VerboseMode
+            }
+        }
+        if ($learningFinalStatus -eq "LEARNING_ARTIFACTS_BLOCKED_BY_UNSAFE_PROPOSALS") {
+            Write-LogLine -Path $GradeLog -Message "[SAFETY-HIGH] Phase 6A Learning Artifacts blocked by unsafe proposals (exit code: $learningExitCode). No rules activated. No picks modified. Logs preserved." -AlsoConsole:$VerboseMode
+            Write-Host "" -ForegroundColor Red
+            Write-Host "[SAFETY-HIGH] Phase 6A Learning Artifacts: unsafe proposals detected." -ForegroundColor Red
+            Write-Host "              final_status=$learningFinalStatus" -ForegroundColor Red
+            Write-Host "              No rules were activated. No picks or boards were modified." -ForegroundColor Red
+            Write-Host "              Logs and reports are preserved. Daily run continues." -ForegroundColor Red
+            Write-Host "" -ForegroundColor Red
+            $learningArtifactStatus = "blocked_unsafe_proposals"
+        } else {
+            Write-LogLine -Path $GradeLog -Message "[WARNING] Phase 6A Learning Artifacts failed or exited nonzero (exit code: $learningExitCode). Continuing daily run because learning artifacts are reporting-only." -AlsoConsole:$VerboseMode
+            Write-Host "[WARN] Phase 6A Learning Artifacts failed; continuing daily run." -ForegroundColor Yellow
+            $learningArtifactStatus = "failed_nonfatal"
+        }
     }
 }
 
