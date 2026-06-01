@@ -19,6 +19,7 @@ Key UI changes vs. the previous build:
   shell is browsable before any real run.
 * View-only demo mode (``COURTVISION_DEMO_MODE=1``) hides mutation controls
   while still loading existing runtime artifacts.
+* Dataframe Config applied for native sorting, and professional visual cues added.
 """
 
 from __future__ import annotations
@@ -137,6 +138,26 @@ RUNTIME_TEXT_FILES = {
 RUNTIME_LOG_FILES = {
     "run_today_log": ("logs", "run_today_{date}.log", "Run log"),
     "grading_log": ("logs", "grading_{date}.log", "Grading log"),
+}
+UNDER_VISIBILITY_WARNING = (
+    "This is not an Elite board, not a Kelly input, and not a betting recommendation."
+)
+RUNTIME_UNDER_VISIBILITY_FILES = {
+    "under_visibility_board": (
+        "operator",
+        "under_visibility_board_{date}.csv",
+        "UNDER visibility board",
+    ),
+    "under_visibility_report_text": (
+        "operator",
+        "under_visibility_report_{date}.txt",
+        "UNDER visibility report",
+    ),
+    "under_visibility_diagnostics": (
+        "diagnostics",
+        "under_visibility_board_{date}.json",
+        "UNDER visibility diagnostics",
+    ),
 }
 
 
@@ -469,6 +490,46 @@ def load_runtime_prediction_cached(
         text_payloads[payload_key] = text
         records.append(record)
 
+    under_visibility_records: dict[str, dict[str, Any]] = {}
+    under_csv_path = _runtime_path(
+        runtime_root,
+        RUNTIME_UNDER_VISIBILITY_FILES["under_visibility_board"][0],
+        RUNTIME_UNDER_VISIBILITY_FILES["under_visibility_board"][1],
+        date_text,
+    )
+    under_visibility_board, under_csv_record = _read_runtime_csv(
+        RUNTIME_UNDER_VISIBILITY_FILES["under_visibility_board"][2],
+        under_csv_path,
+    )
+    under_visibility_records["under_visibility_board"] = under_csv_record
+    records.append(under_csv_record)
+
+    under_text_path = _runtime_path(
+        runtime_root,
+        RUNTIME_UNDER_VISIBILITY_FILES["under_visibility_report_text"][0],
+        RUNTIME_UNDER_VISIBILITY_FILES["under_visibility_report_text"][1],
+        date_text,
+    )
+    under_visibility_report_text, under_text_record = _read_runtime_text(
+        RUNTIME_UNDER_VISIBILITY_FILES["under_visibility_report_text"][2],
+        under_text_path,
+    )
+    under_visibility_records["under_visibility_report_text"] = under_text_record
+    records.append(under_text_record)
+
+    under_json_path = _runtime_path(
+        runtime_root,
+        RUNTIME_UNDER_VISIBILITY_FILES["under_visibility_diagnostics"][0],
+        RUNTIME_UNDER_VISIBILITY_FILES["under_visibility_diagnostics"][1],
+        date_text,
+    )
+    under_visibility_diagnostics, under_json_record = _read_runtime_json(
+        RUNTIME_UNDER_VISIBILITY_FILES["under_visibility_diagnostics"][2],
+        under_json_path,
+    )
+    under_visibility_records["under_visibility_diagnostics"] = under_json_record
+    records.append(under_json_record)
+
     for _payload_key, (folder, template, label) in RUNTIME_LOG_FILES.items():
         path = _runtime_path(runtime_root, folder, template, date_text)
         records.append(_inspect_runtime_file(label, path, "log"))
@@ -500,6 +561,13 @@ def load_runtime_prediction_cached(
         "board_diagnostics": board_diagnostics,
         "market_coverage": market_coverage,
         "daily_summary_text": text_payloads.get("daily_summary_text", ""),
+        "under_visibility_board": under_visibility_board,
+        "under_visibility_report_text": under_visibility_report_text,
+        "under_visibility_diagnostics": under_visibility_diagnostics,
+        "under_visibility_records": under_visibility_records,
+        "under_visibility_shadow_only": True,
+        "under_visibility_affects_betting": False,
+        "under_visibility_warning": UNDER_VISIBILITY_WARNING,
         "runtime_load_diagnostics": records,
         "summary": summary,
     }
@@ -704,37 +772,28 @@ REVIEW_DISPLAY_COLUMN_ORDER = [
 ]
 
 
+def courtvision_column_config() -> dict[str, Any]:
+    """Typed Streamlit columns for sortable, consistently formatted boards."""
+    return {
+        "Line": st.column_config.NumberColumn("Line", format="%.1f"),
+        "Projection": st.column_config.NumberColumn("Projection", format="%.2f"),
+        "Recent Avg": st.column_config.NumberColumn("Recent Avg", format="%.1f"),
+        "Season Avg": st.column_config.NumberColumn("Season Avg", format="%.1f"),
+        "Edge": st.column_config.NumberColumn("Edge", format="%+.2f"),
+        "Edge Abs": st.column_config.NumberColumn("Edge Abs", format="%.2f"),
+        "Edge %": st.column_config.NumberColumn("Edge %", format="%.1f%%"),
+        "Confidence": st.column_config.NumberColumn("Confidence", format="%.1f%%"),
+        "Quality": st.column_config.NumberColumn("Quality", format="%.1f"),
+        "Odds": st.column_config.NumberColumn("Odds", format="%+d"),
+        "Hit Rate": st.column_config.NumberColumn("Hit Rate", format="%.1f%%"),
+        "Projected Minutes": st.column_config.NumberColumn("Projected Minutes", format="%.1f"),
+        "Minutes Basis": st.column_config.NumberColumn("Minutes Basis", format="%.1f"),
+    }
+
+
 # =====================================================================
 # DataFrame styling helpers (pure presentation)
 # =====================================================================
-
-def _format_number_for_display(value: Any, decimals: int = 1) -> str:
-    if value is None or str(value).strip() == "":
-        return ""
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return str(value)
-    if pd.isna(number):
-        return ""
-    if float(number).is_integer() and decimals == 0:
-        return str(int(number))
-    return f"{number:.{decimals}f}"
-
-
-def _format_percent_for_display(value: Any) -> str:
-    if value is None or str(value).strip() == "":
-        return ""
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return str(value)
-    if pd.isna(number):
-        return ""
-    if abs(number) <= 1:
-        number *= 100
-    return f"{number:.1f}%"
-
 
 def _normalize_text_for_display(value: Any, title: bool = False, upper: bool = False) -> str:
     text = str(value if value is not None else "").strip()
@@ -748,10 +807,23 @@ def _normalize_text_for_display(value: Any, title: bool = False, upper: bool = F
     return text
 
 
+def scale_pct_for_display(val: Any) -> float | None:
+    try:
+        v = float(val)
+        if pd.isna(v):
+            return None
+        if abs(v) <= 1.0:
+            return v * 100.0
+        return v
+    except (ValueError, TypeError):
+        return None
+
+
 def _format_display_columns(
     df: pd.DataFrame,
     preferred_order: list[str] | None = None,
 ) -> pd.DataFrame:
+    """Prepare a DataFrame for Streamlit display while preserving numeric sorting."""
     if df is None or df.empty:
         return df if df is not None else pd.DataFrame()
 
@@ -771,21 +843,29 @@ def _format_display_columns(
     ):
         if col in view.columns:
             view[col] = view[col].map(lambda x: _normalize_text_for_display(x, title=True))
-    for col in ("sportsbook_line", "line", "model_projection", "projection", "recent_avg", "season_avg"):
+
+    for col in (
+        "sportsbook_line",
+        "line",
+        "model_projection",
+        "projection",
+        "recent_avg",
+        "season_avg",
+        "edge",
+        "edge_abs",
+        "side_edge",
+        "minutes_basis",
+        "projected_minutes",
+        "quality_score",
+        "quality",
+        "odds",
+    ):
         if col in view.columns:
-            view[col] = view[col].map(lambda x: _format_number_for_display(x, decimals=1))
-    for col in ("edge", "edge_abs", "side_edge", "minutes_basis", "projected_minutes"):
-        if col in view.columns:
-            view[col] = view[col].map(lambda x: _format_number_for_display(x, decimals=2))
-    for col in ("quality_score", "quality"):
-        if col in view.columns:
-            view[col] = view[col].map(lambda x: _format_number_for_display(x, decimals=1))
-    for col in ("odds",):
-        if col in view.columns:
-            view[col] = view[col].map(lambda x: _format_number_for_display(x, decimals=0))
+            view[col] = pd.to_numeric(view[col], errors="coerce")
+
     for col in ("confidence", "edge_pct", "hit_rate", "roi"):
         if col in view.columns:
-            view[col] = view[col].map(_format_percent_for_display)
+            view[col] = view[col].map(scale_pct_for_display)
 
     view = view.rename(columns=DISPLAY_COLUMN_LABELS)
     if preferred_order:
@@ -1230,7 +1310,7 @@ def render_no_picks_explainer(
         return
     if full_market_df is not None and not full_market_df.empty:
         return
-    st.warning("No selections qualified today.")
+    st.warning("No selections qualified today.", icon="⚠️")
     if rejected_df is None or rejected_df.empty:
         render_empty_state(
             "No rejected rows to explain",
@@ -1245,14 +1325,24 @@ def render_no_picks_explainer(
         .rename_axis("Reason")
         .reset_index(name="Count")
     )
-    st.dataframe(reason_counts, width="stretch", hide_index=True)
+    st.dataframe(
+        reason_counts,
+        width="stretch",
+        hide_index=True,
+        column_config=courtvision_column_config(),
+    )
 
     render_section_head("Closest misses", None)
     near = rejected_df.copy()
     if "edge_abs" in near.columns:
         near["edge_abs"] = pd.to_numeric(near["edge_abs"], errors="coerce").fillna(-999)
         near = near.sort_values(by="edge_abs", ascending=False)
-    st.dataframe(style_rejection_table(near.head(20)), width="stretch", hide_index=True)
+    st.dataframe(
+        style_rejection_table(near.head(20)),
+        width="stretch",
+        hide_index=True,
+        column_config=courtvision_column_config(),
+    )
 
 
 def _dataframe_height(row_count: int, max_height: int = 420) -> int:
@@ -1349,6 +1439,7 @@ def render_table_card(
             width="stretch",
             hide_index=True,
             height=_dataframe_height(len(df), max_height=max_height),
+            column_config=courtvision_column_config(),
         )
 
 
@@ -1414,7 +1505,12 @@ def render_runtime_file_diagnostics(payload: dict[str, Any]) -> None:
         return
 
     with st.expander("Runtime file load", expanded=False):
-        st.dataframe(diag_df, width="stretch", hide_index=True)
+        st.dataframe(
+            diag_df,
+            width="stretch",
+            hide_index=True,
+            column_config=courtvision_column_config(),
+        )
 
 
 def runtime_file_diagnostics_dataframe(payload: dict[str, Any]) -> pd.DataFrame:
@@ -1586,6 +1682,165 @@ def _render_completion_state_raw(review_payload: dict[str, Any] | None) -> None:
             st.caption("Completion audit text is not available for this date.")
 
 
+def under_visibility_records_dataframe(payload: dict[str, Any] | None) -> pd.DataFrame:
+    """Return load records for the shadow-only UNDER Visibility panel."""
+    payload = payload or {}
+    records = payload.get("under_visibility_records")
+    if not isinstance(records, dict) or not records:
+        return pd.DataFrame()
+    diag_df = pd.DataFrame(
+        record for record in records.values() if isinstance(record, dict)
+    )
+    keep = [
+        "label",
+        "kind",
+        "exists",
+        "status",
+        "rows",
+        "columns",
+        "bytes",
+        "modified",
+        "path",
+        "error",
+    ]
+    keep = [col for col in keep if col in diag_df.columns]
+    return diag_df[keep]
+
+
+def under_visibility_betting_contract(payload: dict[str, Any] | None) -> dict[str, bool]:
+    """UI-side invariant: UNDER visibility is read-only and never betting input."""
+    _ = payload
+    return {
+        "shadow_only": True,
+        "read_only": True,
+        "affects_lane_a": False,
+        "affects_betability": False,
+        "affects_elite": False,
+        "affects_kelly": False,
+        "affects_final_decision": False,
+        "affects_staking": False,
+    }
+
+
+def under_visibility_contract_is_safe(contract: dict[str, bool]) -> bool:
+    """Return True when the UNDER visibility contract is shadow-only and inert."""
+    return (
+        contract.get("shadow_only") is True
+        and contract.get("read_only") is True
+        and contract.get("affects_lane_a") is False
+        and contract.get("affects_betability") is False
+        and contract.get("affects_elite") is False
+        and contract.get("affects_kelly") is False
+        and contract.get("affects_final_decision") is False
+        and contract.get("affects_staking") is False
+    )
+
+
+def render_under_visibility_panel(payload: dict[str, Any] | None) -> None:
+    payload = payload or {}
+    board_df = payload.get("under_visibility_board", pd.DataFrame())
+    report_text = str(payload.get("under_visibility_report_text") or "")
+    diagnostics = payload.get("under_visibility_diagnostics") or {}
+    records_df = under_visibility_records_dataframe(payload)
+
+    render_section_head(
+        "UNDER Visibility — Shadow Only",
+        "Read-only Phase 6B.1 research artifacts loaded from runtime outputs.",
+    )
+    render_review_banner(
+        "UNDER Visibility — Shadow Only",
+        UNDER_VISIBILITY_WARNING,
+        "warning",
+    )
+    contract = under_visibility_betting_contract(payload)
+    render_kpi_cards(
+        [
+            {
+                "label": "Mode",
+                "value": "Shadow only",
+                "caption": "read-only",
+                "state": "info",
+            },
+            {
+                "label": "Elite impact",
+                "value": "None",
+                "caption": "not an Elite board",
+                "state": "success",
+            },
+            {
+                "label": "Kelly impact",
+                "value": "None",
+                "caption": "not staking input",
+                "state": "success",
+            },
+            {
+                "label": "Final decision impact",
+                "value": "None",
+                "caption": "no betting status effect",
+                "state": "success",
+            },
+            {
+                "label": "Rows",
+                "value": len(board_df) if isinstance(board_df, pd.DataFrame) else 0,
+                "caption": "visibility only",
+            },
+        ]
+    )
+
+    if not under_visibility_contract_is_safe(contract):
+        render_review_banner(
+            "UNDER Visibility contract failed",
+            "The panel is hidden because its shadow-only/read-only invariants were not met.",
+            "danger",
+        )
+        return
+
+    if isinstance(board_df, pd.DataFrame) and not board_df.empty:
+        render_table_card(
+            _format_display_columns(board_df),
+            helper_text=UNDER_VISIBILITY_WARNING,
+            max_height=420,
+        )
+    else:
+        render_empty_state(
+            "No UNDER visibility rows",
+            "The board is empty or the CSV artifact is missing for this runtime date.",
+        )
+
+    if report_text:
+        with st.expander("UNDER visibility report text", expanded=False):
+            st.code(report_text, language="text")
+    else:
+        st.caption("UNDER visibility report text is not available for this date.")
+
+    if diagnostics:
+        with st.expander("UNDER visibility diagnostics JSON", expanded=False):
+            st.json(diagnostics)
+    else:
+        json_record = (payload.get("under_visibility_records") or {}).get(
+            "under_visibility_diagnostics",
+            {},
+        )
+        error = str(json_record.get("error") or "")
+        if error:
+            render_review_banner(
+                "UNDER visibility diagnostics unavailable",
+                error,
+                "warning",
+            )
+        else:
+            st.caption("UNDER visibility diagnostics JSON is not available for this date.")
+
+    if not records_df.empty:
+        with st.expander("UNDER visibility artifact load", expanded=False):
+            st.dataframe(
+                records_df,
+                width="stretch",
+                hide_index=True,
+                column_config=courtvision_column_config(),
+            )
+
+
 def render_today_board(
     payload: dict[str, Any] | None = None,
     out_dir: str | None = None,
@@ -1659,8 +1914,9 @@ def render_today_board(
         "All Stats",
         "Team Board",
         "Near Miss",
+        "UNDER Visibility — Shadow Only",
     ]
-    elite_tab, full_tab, sgp_tab, stat_tab, team_tab, near_tab = st.tabs(tab_names)
+    elite_tab, full_tab, sgp_tab, stat_tab, team_tab, near_tab, under_tab = st.tabs(tab_names)
     with elite_tab:
         render_board_section(
             "Elite Board",
@@ -1699,6 +1955,8 @@ def render_today_board(
             near_miss_df,
             "Rejected plays closest to qualification thresholds.",
         )
+    with under_tab:
+        render_under_visibility_panel(payload)
 
     # Diagnostics
     render_section_head("Diagnostics", "Provider, ingestion and model context.")
@@ -1754,6 +2012,7 @@ def render_today_board(
                     width="stretch",
                     hide_index=True,
                     height=360,
+                    column_config=courtvision_column_config(),
                 )
 
 
@@ -1855,7 +2114,13 @@ def _render_csv_preview(
     if isinstance(df, pd.DataFrame) and not df.empty:
         st.markdown(f"##### {label}")
         display_df = _format_display_columns(df.head(max_rows), REVIEW_DISPLAY_COLUMN_ORDER)
-        st.dataframe(display_df, width="stretch", hide_index=True, height=360)
+        st.dataframe(
+            display_df,
+            width="stretch",
+            hide_index=True,
+            height=360,
+            column_config=courtvision_column_config(),
+        )
         if len(df) > max_rows:
             st.caption(f"Showing first {max_rows} of {len(df)} rows.")
         path = str((record or {}).get("path") or "")
@@ -1972,7 +2237,12 @@ def render_quality_review_view(
                 "error",
             ]
             keep = [col for col in keep if col in diag_df.columns]
-            st.dataframe(diag_df[keep], width="stretch", hide_index=True)
+            st.dataframe(
+                diag_df[keep],
+                width="stretch",
+                hide_index=True,
+                column_config=courtvision_column_config(),
+            )
 
 
 # =====================================================================
@@ -2197,7 +2467,12 @@ def render_history_view(out_dir: str) -> None:
                     .rename_axis("Reason")
                     .reset_index(name="Count")
                 )
-                st.dataframe(counts, width="stretch", hide_index=True)
+                st.dataframe(
+                    counts,
+                    width="stretch",
+                    hide_index=True,
+                    column_config=courtvision_column_config(),
+                )
 
     with tab3:
         render_section_head("Result feedback", "Learning memory.")
@@ -2221,7 +2496,12 @@ def render_history_view(out_dir: str) -> None:
                 hit_rate["hit_rate"] = (
                     pd.to_numeric(hit_rate["hit_rate"], errors="coerce") * 100
                 ).round(2)
-                st.dataframe(hit_rate, width="stretch", hide_index=True)
+                st.dataframe(
+                    hit_rate,
+                    width="stretch",
+                    hide_index=True,
+                    column_config=courtvision_column_config(),
+                )
             if {"hit", "model_projection", "actual_value"}.issubset(feedback_df.columns):
                 overall_hit_rate = numeric_column_or_default(feedback_df, "hit").mean()
                 mae = (
@@ -2249,9 +2529,14 @@ def render_history_summary(history_df: pd.DataFrame | None) -> None:
         avg_edge=("edge_abs", "mean"),
     )
     grp["market_type"] = grp["market_type"].map(pretty_market_name)
-    grp["avg_confidence"] = numeric_column_or_default(grp, "avg_confidence").round(3)
-    grp["avg_edge"] = numeric_column_or_default(grp, "avg_edge").round(3)
-    st.dataframe(grp, width="stretch", hide_index=True)
+    grp["avg_confidence"] = (numeric_column_or_default(grp, "avg_confidence") * 100).round(2)
+    grp["avg_edge"] = numeric_column_or_default(grp, "avg_edge").round(2)
+    st.dataframe(
+        grp.rename(columns={"avg_confidence": "Confidence", "avg_edge": "Edge Abs"}),
+        width="stretch",
+        hide_index=True,
+        column_config=courtvision_column_config(),
+    )
 
 
 # =====================================================================
@@ -2278,7 +2563,12 @@ def render_calibration_view(out_dir: str) -> None:
             view["market_type"] = view["market_type"].map(pretty_market_name)
         if "hit_rate" in view.columns:
             view["hit_rate"] = (numeric_column_or_default(view, "hit_rate") * 100).round(2)
-        st.dataframe(view, width="stretch", hide_index=True)
+        st.dataframe(
+            view.rename(columns={"hit_rate": "Hit Rate"}),
+            width="stretch",
+            hide_index=True,
+            column_config=courtvision_column_config(),
+        )
 
 
 # =====================================================================
@@ -2371,7 +2661,12 @@ def feedback_upload_block(ai: CourtVisionAI, view_only_demo: bool = False) -> No
     if uploaded is not None:
         try:
             df = pd.read_csv(uploaded)
-            st.dataframe(df.head(20), width="stretch", hide_index=True)
+            st.dataframe(
+                df.head(20),
+                width="stretch",
+                hide_index=True,
+                column_config=courtvision_column_config(),
+            )
             if st.button("Save feedback and update calibration", type="primary"):
                 ai.log_results(df)
                 bump_history_refresh()
