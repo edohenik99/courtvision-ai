@@ -199,18 +199,33 @@ def render_section_head(title: str, caption: str | None = None) -> None:
 
 # -------------------------------------------------------------- featured pick
 
-def render_featured_pick(pick: Mapping[str, Any] | None) -> None:
+def render_featured_pick(
+    pick: Mapping[str, Any] | None,
+    *,
+    has_runtime: bool = False,
+) -> None:
     """Render the hero featured pick card.
 
     ``pick`` should expose: entity_name, team, opponent, selection,
     sportsbook_line (optional), letter_grade.
+
+    ``has_runtime`` controls the empty-state copy:
+      True  → runtime data was loaded; system found no approved picks.
+      False → no runtime artifacts are present for this date.
     """
     if not pick:
-        st.markdown(
-            '<div class="cv-empty"><strong>No featured pick yet</strong>'
-            "Run predictions to surface today's lock.</div>",
-            unsafe_allow_html=True,
-        )
+        if has_runtime:
+            st.markdown(
+                '<div class="cv-empty"><strong>No Approved Picks for this date.</strong>'
+                "CourtVision loaded the slate and found no real-money eligible plays.</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                '<div class="cv-empty"><strong>No runtime artifacts loaded.</strong>'
+                "Select a prediction date with generated artifacts to review the board.</div>",
+                unsafe_allow_html=True,
+            )
         return
 
     name = html.escape(str(pick.get("entity_name") or pick.get("player_name") or "—"))
@@ -303,7 +318,7 @@ def render_slate(games: Iterable[Mapping[str, Any]]) -> None:
         market_count = int(g.get("market_count", picks) or 0)
         elite_count = int(g.get("elite_count", 0) or 0)
         full_market_count = int(g.get("full_market_count", picks) or 0)
-        status = html.escape(str(g.get("status", "Markets loaded" if picks else "No elite picks")))
+        status = html.escape(str(g.get("status", "Markets loaded" if picks else "No approved picks")))
         picks_html = (
             f'<span style="color:var(--court-orange)">{picks} picks</span>'
             if picks

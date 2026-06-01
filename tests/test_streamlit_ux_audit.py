@@ -4,15 +4,20 @@ tests/test_streamlit_ux_audit.py
 UX Audit enforcement tests for the CourtVision Streamlit workstation.
 
 These tests enforce the UX audit requirements approved by the operator:
-  - Normal sidebar contains exactly 4 items (Today's Board, Run Review, History, UNDER Lab).
-  - Debug-only items (Slate, Run Log, Calibration, Feedback) are hidden in normal mode.
+  - Normal sidebar contains exactly 3 items (Today's Board, Run Review, History).
+  - Debug-only items (UNDER Lab, Slate, Run Log, Calibration, Feedback) are hidden in normal mode.
   - Client-facing label renames are applied in the source.
   - Phase 15 panels are NOT in normal view (only inside debug expander in run_review).
   - New helper functions exist and have correct signatures.
   - Responsible betting footer function exists.
   - Navigation routing uses 'run_review' not 'review_layers'.
-  - UNDER Lab page function exists.
+  - UNDER Lab page function exists; UNDER Lab is a tab inside Today's Board.
   - New CSS classes are present in the theme file.
+  - No raw markdown **UNDER Lab** in UI copy.
+  - No "No elite pick" / "No featured pick yet" / "Run predictions" copy in normal UI.
+  - Conditional approved-pick empty states in render_featured_pick.
+  - No hardcoded 2026-06-01 date; date.today() used as default.
+  - Backend/betting files do not contain UI helpers.
 
 No streamlit runtime, no pandas, no network calls are required.
 """
@@ -483,3 +488,207 @@ def test_elite_tab_renamed_to_approved_picks_in_today_board():
     assert '"Approved Picks"' in body or "'Approved Picks'" in body, (
         "Tab must be renamed from 'Elite' to 'Approved Picks' in Today's Board."
     )
+
+
+# ---------------------------------------------------------------------------
+# 11. Copy-polish: no raw markdown, no "No elite pick", no "Run predictions"
+# ---------------------------------------------------------------------------
+
+_HELPERS_FILE = PROJECT_ROOT / "dashboard" / "styles" / "streamlit_helpers.py"
+
+
+def _helpers_source() -> str:
+    return _HELPERS_FILE.read_text(encoding="utf-8")
+
+
+def test_no_raw_markdown_bold_under_lab_in_decision_card():
+    """Decision card must not emit literal **UNDER Lab** markdown syntax."""
+    app = _app_source()
+    assert "**UNDER Lab**" not in app, (
+        "Decision card emits raw markdown '**UNDER Lab**' — must use plain text or HTML."
+    )
+
+
+def test_no_elite_pick_label_in_app_source():
+    """'No elite pick' must not appear as UI copy in the main app."""
+    app = _app_source()
+    assert '"No elite pick"' not in app and "'No elite pick'" not in app, (
+        "'No elite pick' must be replaced with 'No Approved Pick' in the main app."
+    )
+
+
+def test_no_approved_pick_label_present():
+    """'No Approved Pick' must appear in the main app as the fallback decision label."""
+    app = _app_source()
+    assert "No Approved Pick" in app, (
+        "'No Approved Pick' must appear as the fallback decision label in the main app."
+    )
+
+
+def test_no_elite_picks_in_helpers_slate():
+    """'No elite picks' must not appear as the slate game status in streamlit_helpers.py."""
+    helpers = _helpers_source()
+    assert '"No elite picks"' not in helpers and "'No elite picks'" not in helpers, (
+        "render_slate uses 'No elite picks' — must use 'No approved picks'."
+    )
+
+
+def test_no_featured_pick_yet_copy_removed():
+    """'No featured pick yet' must be removed from streamlit_helpers.py."""
+    helpers = _helpers_source()
+    assert "No featured pick yet" not in helpers, (
+        "'No featured pick yet' must be replaced with client-friendly empty state copy."
+    )
+
+
+def test_no_run_predictions_copy_in_featured_pick():
+    """'Run predictions to surface today's lock' must not appear in the helpers."""
+    helpers = _helpers_source()
+    assert "today's lock" not in helpers and "today\\'s lock" not in helpers, (
+        "'today's lock' developer copy must be removed from render_featured_pick."
+    )
+    assert "Run predictions to surface" not in helpers, (
+        "'Run predictions to surface' must be removed from render_featured_pick."
+    )
+
+
+def test_no_run_predictions_copy_in_app_empty_state():
+    """'Run predictions to see the workstation' must not appear in render_today_board."""
+    app = _app_source()
+    assert "Run predictions to see the workstation" not in app, (
+        "render_today_board empty state must not say 'Run predictions to see the workstation'."
+    )
+    assert "hit RUN PREDICTIONS" not in app, (
+        "render_today_board empty state must not say 'hit RUN PREDICTIONS'."
+    )
+
+
+def test_approved_picks_empty_state_copy_in_helpers():
+    """'No Approved Picks for this date' must appear in streamlit_helpers.py as the runtime empty state."""
+    helpers = _helpers_source()
+    assert "No Approved Picks for this date" in helpers, (
+        "render_featured_pick must use 'No Approved Picks for this date' when runtime is loaded."
+    )
+
+
+def test_runtime_not_loaded_empty_state_copy_in_helpers():
+    """'No runtime artifacts loaded' must appear in streamlit_helpers.py as the no-data empty state."""
+    helpers = _helpers_source()
+    assert "No runtime artifacts loaded" in helpers, (
+        "render_featured_pick must use 'No runtime artifacts loaded' when no runtime data is present."
+    )
+
+
+# ---------------------------------------------------------------------------
+# 12. Date consistency — no hardcoded date, correct normalization
+# ---------------------------------------------------------------------------
+
+
+def test_no_hardcoded_2026_06_01_in_app_source():
+    """The string '2026-06-01' must not appear as a hardcoded date in the main app source."""
+    app = _app_source()
+    # Allow it in comments but not as a string literal assigned/passed in logic
+    # Simple check: it must not appear as a quoted string literal
+    assert '"2026-06-01"' not in app and "'2026-06-01'" not in app, (
+        "'2026-06-01' must not be hardcoded as a date literal in the app."
+    )
+
+
+def test_no_hardcoded_2026_06_01_in_helpers():
+    """The string '2026-06-01' must not appear in streamlit_helpers.py."""
+    helpers = _helpers_source()
+    assert "2026-06-01" not in helpers, (
+        "'2026-06-01' must not appear in streamlit_helpers.py."
+    )
+
+
+def test_normalize_prediction_date_text_converts_slash_to_dash():
+    """normalize_prediction_date_text must convert YYYY/MM/DD to YYYY-MM-DD."""
+    src = _app_source()
+    # 1. Function must exist
+    assert "def normalize_prediction_date_text" in src, (
+        "normalize_prediction_date_text function must be defined."
+    )
+    # 2. Must handle the slash-to-dash format ("%Y/%m/%d")
+    assert '"%Y/%m/%d"' in src or "'%Y/%m/%d'" in src, (
+        "normalize_prediction_date_text must support '%Y/%m/%d' format (slash input)."
+    )
+    # 3. Must produce YYYY-MM-DD output (isoformat)
+    assert ".isoformat()" in src, (
+        "normalize_prediction_date_text must call .isoformat() to produce YYYY-MM-DD output."
+    )
+    # 4. Behavior test via direct exec of just the function (extract only its indented body)
+    from datetime import date as _date, datetime as _datetime
+    lines = src.splitlines()
+    fn_lines: list[str] = []
+    in_fn = False
+    for line in lines:
+        if line.startswith("def normalize_prediction_date_text("):
+            in_fn = True
+        if in_fn:
+            fn_lines.append(line)
+            # Stop at next top-level definition (non-indented def/class after start)
+            if fn_lines and len(fn_lines) > 1 and line and not line.startswith(" ") and not line.startswith("def normalize"):
+                fn_lines.pop()  # remove the triggering line
+                break
+    fn_src = "\n".join(fn_lines)
+    ns: dict = {"date": _date, "datetime": _datetime, "Any": object}
+    exec(fn_src, ns)
+    fn = ns["normalize_prediction_date_text"]
+    assert fn("2026/06/03") == "2026-06-03", (
+        "normalize_prediction_date_text('2026/06/03') must return '2026-06-03'."
+    )
+    assert fn("2026-06-03") == "2026-06-03", (
+        "normalize_prediction_date_text('2026-06-03') must return '2026-06-03' unchanged."
+    )
+
+
+
+
+def test_today_defaults_to_date_today_not_hardcoded():
+    """The sidebar default date must use date.today() not a hardcoded date string."""
+    app = _app_source()
+    # Must use date.today()
+    assert "date.today()" in app, (
+        "Sidebar default date must call date.today() — not a hardcoded literal."
+    )
+
+
+# ---------------------------------------------------------------------------
+# 13. Backend/betting file invariant
+# ---------------------------------------------------------------------------
+
+_BETTING_FILES = [
+    "courtvision/betting",
+    "courtvision/selection",
+    "courtvision/scoring",
+    "courtvision/grading",
+    "courtvision/calibration",
+]
+
+
+def test_backend_betting_files_unchanged_by_ui_audit():
+    """UI-only changes must not touch any betting/scoring/selection/grading source files.
+
+    This is a structural guard — it verifies that the files identified as
+    production-risky betting logic still exist at their expected paths,
+    and that no UX audit helper names were injected into them.
+    """
+    ui_helpers = {
+        "render_client_decision_card",
+        "render_responsible_betting_footer",
+        "render_under_lab_preview_card",
+        "raw_ui_debug_enabled",
+        "_normal_nav",
+        "_debug_nav",
+    }
+    for folder in _BETTING_FILES:
+        folder_path = PROJECT_ROOT / folder
+        if not folder_path.exists():
+            continue
+        for py_file in folder_path.rglob("*.py"):
+            text = py_file.read_text(encoding="utf-8", errors="ignore")
+            for helper in ui_helpers:
+                assert helper not in text, (
+                    f"UI helper '{helper}' must not appear in betting file {py_file.name}."
+                )

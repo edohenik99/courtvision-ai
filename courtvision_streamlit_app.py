@@ -1188,7 +1188,7 @@ def _operator_decision(quality_json: dict[str, Any], summary: dict[str, Any]) ->
         return "No-bet"
     if elite_count > 0:
         return "Board qualified"
-    return "No elite pick"
+    return "No Approved Pick"
 
 
 def render_operator_status_strip(
@@ -2092,7 +2092,7 @@ def render_client_decision_card(
         headline = "Today's Status: No Bet"
         no_bet_reason = _derive_no_bet_reason(quality_json)
         body = f"CourtVision found no real-money eligible plays today. {no_bet_reason}"
-        detail = "Research-only signals are available in **UNDER Lab**."
+        detail = "Research-only signals are available in the UNDER Lab tab."
 
     st.markdown(
         f"""
@@ -2172,9 +2172,11 @@ def render_today_board(
         payload = demo_payload()
 
     if not payload:
+        # No runtime artifacts loaded for the selected date
+        date_hint = f" for {prediction_date_text}" if prediction_date_text else ""
         render_empty_state(
-            "Run predictions to see the workstation",
-            "Use the sidebar to pick a date and hit RUN PREDICTIONS.",
+            f"No runtime artifacts loaded{date_hint}.",
+            "Select a prediction date with generated artifacts to review the board.",
         )
         return
 
@@ -2215,9 +2217,10 @@ def render_today_board(
     )
     _render_completion_state_card(review_payload)
 
-    # Featured pick
+    # Featured pick — conditional copy based on whether runtime artifacts are loaded
     featured = safe_pick_featured(elite_df)
-    render_featured_pick(featured)
+    has_runtime = payload_has_existing_runtime_artifacts(payload) or payload_has_board_rows(payload)
+    render_featured_pick(featured, has_runtime=has_runtime)
 
     # KPI row
     render_kpi_row(summary, quality_json)
@@ -2714,11 +2717,11 @@ def games_from_payload(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
     for entry in games.values():
         entry["market_count"] = len(entry.pop("_markets", set()))
         entry["status"] = (
-            "Elite picks loaded"
+            "Approved picks loaded"
             if entry["elite_count"]
             else "Markets loaded"
             if entry["full_market_count"]
-            else "No elite picks"
+            else "No approved picks"
         )
     return list(games.values())
 
@@ -2735,10 +2738,11 @@ def render_slate_view(payload: dict[str, Any] | None = None) -> None:
     if not games:
         render_empty_state(
             "No slate yet",
-            "Run predictions for a date with scheduled games.",
+            "Pick a date with scheduled games to see tonight's board.",
         )
         return
     render_slate(games)
+
 
 
 def _hit_rate_from_statuses(df: pd.DataFrame) -> float | None:
