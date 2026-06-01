@@ -1208,3 +1208,151 @@ pre {
 
 /* ---------- Streamlit branding hide ---------- */
 #MainMenu, footer, [data-testid="stToolbar"] { visibility: hidden !important; }
+
+/* ==========================================================================
+ * UX Audit additions — client decision card, info banner, footer, gate items
+ * ==========================================================================*/
+
+/* Client decision card */
+.cv-decision-card {
+  position: relative;
+  padding: 22px 24px;
+  background: linear-gradient(135deg, rgba(17,22,29,0.97) 0%, rgba(11,15,20,0.97) 100%);
+  border: 1px solid rgba(74,86,104,0.42);
+  border-radius: 12px;
+  margin: 0 0 22px;
+  overflow: hidden;
+}
+.cv-decision-card[data-state="bettable"] {
+  border-color: rgba(45,190,124,0.4);
+  box-shadow: 0 0 28px rgba(45,190,124,0.08);
+}
+.cv-decision-card[data-state="no_bet"] {
+  border-color: rgba(230,184,80,0.38);
+  box-shadow: 0 0 28px rgba(230,184,80,0.06);
+}
+.cv-decision-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.cv-decision-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 11px;
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: #0B0F14;
+}
+.cv-decision-headline {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 18px;
+  color: var(--ink-7);
+}
+.cv-decision-body {
+  font-family: var(--font-body);
+  font-size: 14px;
+  color: var(--ink-6);
+  line-height: 1.55;
+  margin-bottom: 6px;
+}
+.cv-decision-detail {
+  font-family: var(--font-body);
+  font-size: 13px;
+  color: var(--ink-6);
+  margin-top: 8px;
+}
+
+/* Informational banner (UNDER Lab explainer, etc.) */
+.cv-info-banner {
+  padding: 12px 16px;
+  background: rgba(59,130,246,0.07);
+  border: 1px solid rgba(59,130,246,0.22);
+  border-left: 3px solid var(--confidence-blue);
+  border-radius: 8px;
+  font-family: var(--font-body);
+  font-size: 13px;
+  color: var(--ink-6);
+  line-height: 1.55;
+  margin: 8px 0 12px;
+}
+.cv-info-banner strong {
+  color: var(--ink-7);
+}
+
+/* Responsible betting disclaimer footer */
+.cv-disclaimer {
+  margin: 32px 0 8px;
+  padding: 10px 14px;
+  border-radius: 7px;
+  background: rgba(11,15,20,0.62);
+  border: 1px solid rgba(74,86,104,0.22);
+  font-family: var(--font-body);
+  font-size: 11px;
+  color: var(--ink-5);
+  line-height: 1.5;
+  text-align: center;
+}
+
+/* Gate item (safety gate row in Run Review) */
+.cv-gate-item {
+  padding: 10px 14px;
+  margin: 6px 0;
+  border-radius: 7px;
+  background: rgba(17,22,29,0.86);
+  border: 1px solid rgba(74,86,104,0.30);
+  font-family: var(--font-body);
+  font-size: 13px;
+  color: var(--ink-7);
+}
+.cv-gate-item[data-state="warning"] {
+  background: rgba(230,184,80,0.06);
+  border-color: rgba(230,184,80,0.30);
+}
+.cv-gate-item[data-state="danger"] {
+  background: rgba(229,72,77,0.06);
+  border-color: rgba(229,72,77,0.30);
+}
+
+/* Data health item (odds live/fallback indicator) */
+.cv-health-item {
+  padding: 10px 14px;
+  margin: 6px 0;
+  border-radius: 7px;
+  background: rgba(17,22,29,0.86);
+  border: 1px solid rgba(74,86,104,0.30);
+  font-family: var(--font-body);
+  font-size: 13px;
+  color: var(--ink-7);
+}
+.cv-health-item[data-state="success"] {
+  background: rgba(45,190,124,0.05);
+  border-color: rgba(45,190,124,0.28);
+}
+.cv-health-item[data-state="warning"] {
+  background: rgba(230,184,80,0.05);
+  border-color: rgba(230,184,80,0.28);
+}
+.cv-health-item strong { color: var(--ink-7); }
+
+/* UNDER Lab preview card (inline in Today's Board) */
+.cv-under-preview-card {
+  padding: 14px 18px;
+  border-radius: 9px;
+  background: rgba(17,22,29,0.88);
+  border: 1px solid rgba(74,86,104,0.34);
+  font-family: var(--font-body);
+  font-size: 13px;
+  color: var(--ink-6);
+  line-height: 1.6;
+  margin: 4px 0 18px;
+}
+.cv-under-preview-card strong {
+  color: var(--court-orange);
+}

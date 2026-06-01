@@ -722,6 +722,17 @@ DISPLAY_COLUMN_LABELS = {
     "policy_name": "Policy",
     "risk_verdict": "Risk Verdict",
     "sample_status": "Sample Status",
+    # UNDER Lab client-friendly column labels
+    "under_visibility_lane": "Research Lane",
+    "identity_conflict_flag": "Data Conflict",
+    "historical_bucket_n": "Sample Size",
+    "historical_hit_rate": "Historical Hit Rate",
+    "historical_roi": "Historical ROI",
+    "abs_edge": "Edge",
+    "safety_notes": "Safety Note",
+    "caution_bucket": "Caution Level",
+    "context_alignment": "Context",
+    "same_opponent_warning": "Same Opp. Warning",
 }
 
 PICK_COLUMN_ORDER = [
@@ -1236,22 +1247,22 @@ def render_operator_status_strip(
                 "caption": "Live vs fallback",
             },
             {
-                "label": "Kelly eligible",
+                "label": "Stake Eligible",
                 "value": kelly_eligible,
                 "state": "success" if _safe_int(kelly_eligible) > 0 else "neutral",
                 "caption": "Rows",
             },
             {
-                "label": "Manual review",
+                "label": "Operator Flags",
                 "value": manual_review_count,
                 "state": "warning" if _safe_int(manual_review_count) else "success",
-                "caption": "Diagnostic flags",
+                "caption": "Flags to review",
             },
             {
-                "label": "Pending grading",
+                "label": "Grading Status",
                 "value": pending_grading,
                 "state": "warning" if str(pending_grading) not in {"0", "not_available"} else "success",
-                "caption": "Daily Summary",
+                "caption": "Pending results",
             },
         ]
     )
@@ -1267,18 +1278,18 @@ def render_kpi_row(summary: dict[str, Any], quality_json: dict[str, Any] | None 
             {"label": "Players", "value": summary.get("players_evaluated", 0), "caption": "evaluated"},
             {"label": "Markets", "value": summary.get("markets_evaluated", 0), "caption": "priced rows"},
             {
-                "label": "Elite picks",
+                "label": "Approved Picks",
                 "value": candidate_funnel.get("elite_board_count", summary.get("elite_count", summary.get("selected_count", 0))),
                 "caption": "final board",
                 "state": "success",
             },
             {
-                "label": "Full market",
+                "label": "Full Market",
                 "value": candidate_funnel.get("full_market_board_count", summary.get("full_market_count", 0)),
                 "caption": "operator rows",
             },
             {
-                "label": "Kelly rows",
+                "label": "Stake Eligible",
                 "value": kelly_summary.get("total_rows", candidate_funnel.get("kelly_rows_count", 0)),
                 "caption": "sizing output",
             },
@@ -1712,6 +1723,75 @@ def under_visibility_contract_is_safe(contract: dict[str, bool]) -> bool:
     )
 
 
+
+# ── UNDER Lab display helpers ──────────────────────────────────────────────────
+
+UNDER_LAB_COLUMN_ORDER: list[str] = [
+    "Player",
+    "Market",
+    "Side",
+    "Line",
+    "Projection",
+    "Edge",
+    "Confidence",
+    "Quality",
+    "Historical Hit Rate",
+    "Historical ROI",
+    "Sample Status",
+    "Research Lane",
+    "Safety Note",
+    "Caution Level",
+]
+
+UNDER_LAB_DISPLAY_COLUMNS: list[str] = [
+    "entity_name", "player_name",
+    "market_type",
+    "selection",
+    "sportsbook_line", "line",
+    "model_projection",
+    "edge", "abs_edge",
+    "confidence",
+    "quality_score",
+    "historical_hit_rate",
+    "historical_roi",
+    "sample_status",
+    "under_visibility_lane",
+    "safety_notes", "recommended_action",
+    "caution_bucket",
+]
+
+_UNDER_LANE_LABELS: dict[str, str] = {
+    "UNDER_REVIEW_CANDIDATE_SHADOW_ONLY": "Review Candidate",
+    "UNDER_WATCHLIST_SHADOW_ONLY": "Watchlist",
+    "UNDER_INSUFFICIENT_SAMPLE": "Insufficient Data",
+    "UNDER_DO_NOT_PROMOTE": "Do Not Promote",
+}
+
+
+def _style_under_lab_board(df: pd.DataFrame) -> pd.DataFrame:
+    """Format the UNDER Lab board for client-facing display."""
+    if df is None or df.empty:
+        return df if df is not None else pd.DataFrame()
+    view = df.copy()
+    # Map lane codes to friendly labels
+    if "under_visibility_lane" in view.columns:
+        view["under_visibility_lane"] = view["under_visibility_lane"].map(
+            lambda x: _UNDER_LANE_LABELS.get(str(x), str(x).replace("_", " ").title())
+        )
+    # Select available columns in preferred order, deduplicate overlapping alternatives
+    keep = [c for c in UNDER_LAB_DISPLAY_COLUMNS if c in view.columns]
+    if "player_name" in keep and "entity_name" in keep:
+        keep.remove("entity_name")
+    if "abs_edge" in keep and "edge" in keep:
+        keep.remove("abs_edge")
+    if "line" in keep and "sportsbook_line" in keep:
+        keep.remove("line")
+    if "recommended_action" in keep and "safety_notes" in keep:
+        keep.remove("recommended_action")
+    view = view[keep]
+    return _format_display_columns(view, UNDER_LAB_COLUMN_ORDER)
+
+
 def render_under_visibility_panel(payload: dict[str, Any] | None) -> None:
     payload = payload or {}
     board_df = payload.get("under_visibility_board", pd.DataFrame())
@@ -1720,11 +1800,18 @@ def render_under_visibility_panel(payload: dict[str, Any] | None) -> None:
     records_df = under_visibility_records_dataframe(payload)
 
     render_section_head(
-        "UNDER Visibility — Shadow Only",
-        "Read-only Phase 6B.1 research artifacts loaded from runtime outputs.",
+        "UNDER Lab — Research Only",
+        "Shadow-only UNDER candidates being monitored for research.",
+    )
+    st.markdown(
+        '<div class="cv-info-banner">'
+        "These are UNDER-side candidates the model is monitoring for research. "
+        "They are <strong>not approved bets</strong> and are not input to any staking decision."
+        "</div>",
+        unsafe_allow_html=True,
     )
     render_review_banner(
-        "UNDER Visibility — Shadow Only",
+        "Research Only — Not a Betting Recommendation",
         UNDER_VISIBILITY_WARNING,
         "warning",
     )
@@ -1733,32 +1820,32 @@ def render_under_visibility_panel(payload: dict[str, Any] | None) -> None:
         [
             {
                 "label": "Mode",
-                "value": "Shadow only",
-                "caption": "read-only",
+                "value": "Research Only",
+                "caption": "shadow tracking",
                 "state": "info",
             },
             {
-                "label": "Elite impact",
+                "label": "Real-Money Impact",
                 "value": "None",
-                "caption": "not an Elite board",
+                "caption": "not an Approved Pick",
                 "state": "success",
             },
             {
-                "label": "Kelly impact",
+                "label": "Staking Impact",
                 "value": "None",
-                "caption": "not staking input",
+                "caption": "not Stake Eligible",
                 "state": "success",
             },
             {
-                "label": "Final decision impact",
+                "label": "Final Decision Impact",
                 "value": "None",
-                "caption": "no betting status effect",
+                "caption": "no effect on betability",
                 "state": "success",
             },
             {
-                "label": "Rows",
+                "label": "Candidates",
                 "value": len(board_df) if isinstance(board_df, pd.DataFrame) else 0,
-                "caption": "visibility only",
+                "caption": "research only",
             },
         ]
     )
@@ -1773,18 +1860,18 @@ def render_under_visibility_panel(payload: dict[str, Any] | None) -> None:
 
     if isinstance(board_df, pd.DataFrame) and not board_df.empty:
         render_table_card(
-            _format_display_columns(board_df),
-            helper_text=UNDER_VISIBILITY_WARNING,
+            _style_under_lab_board(board_df),
+            helper_text="Research-only. These candidates are not approved bets.",
             max_height=420,
         )
     else:
         render_empty_state(
-            "No UNDER visibility rows",
-            "The board is empty or the CSV artifact is missing for this runtime date.",
+            "No research candidates available",
+            "The UNDER Lab board is empty or the artifact is missing for this date.",
         )
 
     if raw_diagnostics_visible(VIEW_ONLY_DEMO_MODE):
-        with st.expander("Advanced Debug", expanded=False):
+        with st.expander("Advanced Debug — UNDER Lab Raw Artifacts", expanded=False):
             st.caption(
                 "Raw UNDER visibility artifacts and local paths. Visible only "
                 "when COURTVISION_SHOW_RAW_UI_DEBUG=1."
@@ -1824,6 +1911,12 @@ def render_under_visibility_panel(payload: dict[str, Any] | None) -> None:
                 "Diagnostics could not be loaded for this date.",
                 "warning",
             )
+
+
+def render_under_lab_page(payload: dict[str, Any] | None = None) -> None:
+    """Top-level UNDER Lab page — research-only UNDER candidates."""
+    payload = payload or st.session_state.get("display_prediction") or {}
+    render_under_visibility_panel(payload)
 
 
 def runtime_status_message(summary: dict[str, Any] | None, prediction_date_text: str | None = None) -> str:
@@ -1929,6 +2022,146 @@ def render_advanced_debug_section(
                 )
 
 
+# =====================================================================
+# Render: Client-facing decision card, footer, and preview helpers
+# =====================================================================
+
+
+def _derive_final_decision_label(
+    quality_json: dict[str, Any],
+    summary: dict[str, Any],
+) -> str:
+    """Return BETTABLE, NO_BET, or RESEARCH_ONLY based on run health and counts."""
+    elite_count = _safe_int(
+        summary.get("elite_count", summary.get("selected_count", 0))
+    )
+    kelly_count = _safe_int(
+        _nested_get(quality_json, "kelly_safety_summary", "kelly_eligible_count")
+        or _nested_get(quality_json, "candidate_funnel", "kelly_rows_count")
+        or 0
+    )
+    run_health = str(
+        quality_json.get("run_health_status")
+        or _nested_get(quality_json, "run_health", "status")
+        or ""
+    ).lower()
+    if "no_bet" in run_health or "no bet" in run_health:
+        return "NO_BET"
+    if elite_count > 0 or kelly_count > 0:
+        return "BETTABLE"
+    return "NO_BET"
+
+
+def _derive_no_bet_reason(quality_json: dict[str, Any]) -> str:
+    """Return a plain-language no-bet reason derived from quality_json."""
+    warnings = quality_json.get("warnings") or []
+    if warnings and isinstance(warnings[0], str):
+        return warnings[0]
+    return "No Approved Picks or Stake Eligible plays passed the safety gates."
+
+
+def render_client_decision_card(
+    summary: dict[str, Any],
+    quality_json: dict[str, Any],
+    prediction_date_text: str,
+) -> None:
+    """Render a client-friendly top-level decision card at the top of Today's Board."""
+    decision = _derive_final_decision_label(quality_json, summary)
+    elite_count = _safe_int(summary.get("elite_count", summary.get("selected_count", 0)))
+    kelly_count = _safe_int(
+        _nested_get(quality_json, "kelly_safety_summary", "kelly_eligible_count")
+        or _nested_get(quality_json, "candidate_funnel", "kelly_rows_count")
+        or 0
+    )
+    full_market_count = _safe_int(summary.get("full_market_count", 0))
+
+    if decision == "BETTABLE":
+        badge_color = "#22c55e"
+        headline = f"Today's Status: Bettable"
+        body = f"CourtVision has identified real-money eligible plays for {prediction_date_text}."
+        detail_parts = []
+        if elite_count:
+            detail_parts.append(f"Approved Picks: **{elite_count}**")
+        if kelly_count:
+            detail_parts.append(f"Stake Eligible: **{kelly_count}**")
+        if full_market_count:
+            detail_parts.append(f"Full Market: **{full_market_count}**")
+        detail = " · ".join(detail_parts)
+    else:
+        badge_color = "#f59e0b"
+        headline = "Today's Status: No Bet"
+        no_bet_reason = _derive_no_bet_reason(quality_json)
+        body = f"CourtVision found no real-money eligible plays today. {no_bet_reason}"
+        detail = "Research-only signals are available in **UNDER Lab**."
+
+    st.markdown(
+        f"""
+        <div class="cv-decision-card" data-state="{decision.lower()}">
+            <div class="cv-decision-header">
+                <span class="cv-decision-badge" style="background:{badge_color}">
+                    {decision.replace("_", " ")}
+                </span>
+                <span class="cv-decision-headline">{headline}</span>
+            </div>
+            <div class="cv-decision-body">{body}</div>
+            {f'<div class="cv-decision-detail">{detail}</div>' if detail else ""}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_responsible_betting_footer() -> None:
+    """Render a subtle responsible-betting disclaimer at the bottom of a page."""
+    st.markdown(
+        '<div class="cv-disclaimer">'
+        "CourtVision is a decision-support tool, not a guarantee. "
+        "Only Approved Picks are eligible for real-money consideration. "
+        "Research-only signals should not be treated as bets."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def render_compact_slate_card(payload: dict[str, Any] | None) -> None:
+    """Render a compact collapsed slate summary inside Today's Board."""
+    payload = payload or {}
+    games = games_from_payload(payload)
+    if not games:
+        return
+    with st.expander(f"Tonight's Slate — {len(games)} game(s)", expanded=False):
+        render_slate(games)
+
+
+def render_under_lab_preview_card(payload: dict[str, Any] | None) -> None:
+    """Render a small UNDER Lab preview card pointing users to the UNDER Lab page."""
+    payload = payload or {}
+    board_df = payload.get("under_visibility_board", pd.DataFrame())
+    row_count = len(board_df) if isinstance(board_df, pd.DataFrame) else 0
+    if row_count == 0:
+        st.markdown(
+            '<div class="cv-under-preview-card">'
+            "<strong>UNDER Lab</strong> — No research candidates available for this date. "
+            "Use the <strong>UNDER Lab</strong> page in the sidebar for details."
+            "</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            f'<div class="cv-under-preview-card">'
+            f"<strong>UNDER Lab</strong> — {row_count} research candidate(s) are being monitored. "
+            f"Navigate to <strong>UNDER Lab</strong> in the sidebar for the full view. "
+            f"These are not approved bets."
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+
+# =====================================================================
+# Render: Today's Board
+# =====================================================================
+
+
 def render_today_board(
     payload: dict[str, Any] | None = None,
     out_dir: str | None = None,
@@ -1967,6 +2200,13 @@ def render_today_board(
         )
         quality_json = review_payload.get("quality_summary_json") or {}
 
+    # Client decision card — answers the main question fast
+    render_client_decision_card(
+        summary,
+        quality_json,
+        prediction_date_text or str(summary.get("prediction_date") or ""),
+    )
+
     render_operator_status_strip(
         summary,
         quality_json,
@@ -1989,24 +2229,23 @@ def render_today_board(
     # No-picks explainer
     render_no_picks_explainer(rejected_df, elite_df, full_market_df)
 
-    # Board tabs
+    # Board tabs — UNDER Lab is now its own sidebar page
     render_section_head(
-        "Today's picks",
-        "Hard-filtered boards. Top of the slate, ranked.",
+        "Today's Picks",
+        "Hard-filtered boards. Top of the slate, ranked by quality score.",
     )
     tab_names = [
-        "Elite",
+        "Approved Picks",
         "Full Market",
         "SGP",
         "All Stats",
         "Team Board",
         "Near Miss",
-        "UNDER Visibility — Shadow Only",
     ]
-    elite_tab, full_tab, sgp_tab, stat_tab, team_tab, near_tab, under_tab = st.tabs(tab_names)
+    elite_tab, full_tab, sgp_tab, stat_tab, team_tab, near_tab = st.tabs(tab_names)
     with elite_tab:
         render_board_section(
-            "Elite Board",
+            "Approved Picks",
             elite_df,
             "Hard-filtered board for strongest market-backed plays.",
         )
@@ -2042,18 +2281,29 @@ def render_today_board(
             near_miss_df,
             "Rejected plays closest to qualification thresholds.",
         )
-    with under_tab:
-        render_under_visibility_panel(payload)
 
-    # Diagnostics
-    render_section_head("Diagnostics", "Provider, ingestion and model context.")
+    # Tonight's slate — compact, collapsed by default
+    render_compact_slate_card(payload)
+
+    # UNDER Lab preview — points users to the UNDER Lab sidebar page
+    render_section_head(
+        "UNDER Lab",
+        "Research-only candidates. Not approved bets.",
+    )
+    render_under_lab_preview_card(payload)
+
+    # Diagnostics and advanced debug — visible only in debug mode
     odds_diag = summary.get("odds_diagnostics", {}) or {}
     model_diag = summary.get("model_diagnostics", {}) or {}
     board_diag = payload.get("board_diagnostics", {}) or summary.get("board_diagnostics", {}) or {}
     market_coverage = payload.get("market_coverage", {}) or summary.get("market_coverage", {}) or {}
-    render_diagnostics_overview(payload, quality_json, elite_df, full_market_df, sgp_df)
-    if not odds_diag and not model_diag and not board_diag and not market_coverage and not daily_summary_text:
-        render_empty_state("No diagnostics emitted by the latest run")
+
+    if raw_ui_debug_enabled():
+        render_section_head("Diagnostics", "Provider, ingestion and model context.")
+        render_diagnostics_overview(payload, quality_json, elite_df, full_market_df, sgp_df)
+        if not odds_diag and not model_diag and not board_diag and not market_coverage and not daily_summary_text:
+            render_empty_state("No diagnostics emitted by the latest run")
+
     render_advanced_debug_section(
         payload=payload,
         review_payload=review_payload,
@@ -2066,9 +2316,12 @@ def render_today_board(
         rejected_df=rejected_df,
     )
 
+    # Responsible betting disclaimer
+    render_responsible_betting_footer()
+
 
 # =====================================================================
-# Render: Review Layers
+# Render: Run Review
 # =====================================================================
 
 def _format_review_status_value(value: Any) -> str:
@@ -2083,10 +2336,10 @@ def _format_review_status_value(value: Any) -> str:
 def _render_review_status_cards(statuses: dict[str, Any]) -> None:
     render_kpi_cards(
         [
-            {"label": "Run health", "value": statuses.get("run_health"), "caption": "Quality Summary", "state": _status_state(statuses.get("run_health"))},
-            {"label": "Elite count", "value": statuses.get("elite_count"), "caption": "final board"},
-            {"label": "Full market", "value": statuses.get("full_market_count"), "caption": "operator rows"},
-            {"label": "Kelly eligible", "value": statuses.get("kelly_eligible_count"), "caption": "rows"},
+            {"label": "System Health", "value": statuses.get("run_health"), "caption": "Run status", "state": _status_state(statuses.get("run_health"))},
+            {"label": "Approved Picks", "value": statuses.get("elite_count"), "caption": "final board"},
+            {"label": "Full Market", "value": statuses.get("full_market_count"), "caption": "operator rows"},
+            {"label": "Stake Eligible", "value": statuses.get("kelly_eligible_count"), "caption": "rows"},
         ]
     )
 
@@ -2269,44 +2522,149 @@ def render_quality_review_view(
     statuses = extract_quality_review_statuses(quality_json, board_summary)
 
     render_section_head(
-        "Quality review",
-        "Quality Summary plus Phase 15D-G review and simulation artifacts.",
+        "Run Review",
+        "Run health, data quality, and safety gate summary for the selected date.",
     )
     render_review_banner(
-        "Review-only layer",
-        "Review artifacts are loaded read-only for the selected date. This page does not regenerate reports, suppress picks, or change prediction, grading, Kelly, or history files.",
+        "Read-Only View",
+        "This page shows the results of the latest run. No predictions, grading, or staking logic is triggered here.",
         "info",
     )
-    _render_review_status_cards(statuses)
-    _render_phase15_verdict_cards(statuses)
 
+    # ── Today's Decision ──────────────────────────────────────────────
+    render_section_head("Today's Decision", None)
+    _render_review_status_cards(statuses)
+    elite_count = _safe_int(statuses.get("elite_count", 0))
+    kelly_count = _safe_int(statuses.get("kelly_eligible_count", 0))
+    run_health = str(statuses.get("run_health") or "not_available")
+    if "no_bet" in run_health.lower() or (elite_count == 0 and kelly_count == 0):
+        decision_label = "NO BET"
+        decision_color = "#f59e0b"
+        decision_body = (
+            "CourtVision found no real-money eligible plays for this date. "
+            "No Approved Picks or Stake Eligible plays passed the safety gates."
+        )
+    else:
+        decision_label = "BETTABLE"
+        decision_color = "#22c55e"
+        decision_body = (
+            f"CourtVision identified real-money eligible plays: "
+            f"{elite_count} Approved Pick(s), {kelly_count} Stake Eligible."
+        )
+    st.markdown(
+        f'<div class="cv-decision-card">'
+        f'<div class="cv-decision-header">'
+        f'<span class="cv-decision-badge" style="background:{decision_color}">{html.escape(decision_label)}</span>'
+        f'</div>'
+        f'<div class="cv-decision-body">{html.escape(decision_body)}</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    # ── Why No Bet? / Gate Warnings ───────────────────────────────────
+    warnings_list = quality_json.get("warnings") or []
+    errors_list = quality_json.get("errors") or []
+    if warnings_list or errors_list or "no_bet" in run_health.lower():
+        section_title = "Why No Bet?" if "no_bet" in run_health.lower() else "Gate Warnings"
+        render_section_head(section_title, None)
+        for w in (warnings_list or [])[:5]:
+            st.warning(str(w))
+        for e in (errors_list or [])[:3]:
+            st.error(str(e))
+        if not warnings_list and not errors_list:
+            st.info("No specific warnings were recorded. The system found no qualifying picks.")
+
+    # ── Data Health ───────────────────────────────────────────────────
+    render_section_head("Data Health", "Provider, odds, and data integrity checks.")
+    provider_counts = quality_json.get("slate_provider_counts") or {}
+    live_count = _safe_int(provider_counts.get("live_odds_count") or 0)
+    fallback_count = _safe_int(provider_counts.get("synthetic_or_fallback_odds_count") or 0)
+    if live_count or fallback_count:
+        odds_state = "success" if live_count and not fallback_count else "warning"
+        st.markdown(
+            f'<div class="cv-health-item" data-state="{odds_state}">'
+            f"Live odds: <strong>{live_count}</strong> markets · "
+            f"Fallback / synthetic: <strong>{fallback_count}</strong>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.caption("Odds data status: not available for this date.")
+    identity_issues = _safe_int(quality_json.get("identity_conflict_count") or 0)
+    if identity_issues:
+        st.warning(f"Player / team data conflict: {identity_issues} row(s) flagged.")
+    over_gate = quality_json.get("high_caution_over_gate_triggered")
+    if over_gate:
+        st.warning("Risk gate: blocked aggressive OVERs from advancing.")
+
+    # ── Safety Gates ──────────────────────────────────────────────────
+    render_section_head("Safety Gates", "Automated safety checks applied to this run.")
+    gate_items: list[tuple[str, str, str]] = []
+    if identity_issues:
+        gate_items.append(("Player / team data conflict", str(identity_issues), "warning"))
+    if over_gate:
+        gate_items.append(("Risk gate: aggressive OVERs blocked", "Yes", "warning"))
+    manual_review_count = _safe_int(
+        _nested_get(quality_json, "manual_review_summary", "manual_review_required_count")
+        or quality_json.get("manual_review_required_count")
+        or 0
+    )
+    if manual_review_count:
+        gate_items.append(("Operator Flags", str(manual_review_count), "warning"))
+    if gate_items:
+        for label, value, state in gate_items:
+            st.markdown(
+                f'<div class="cv-gate-item" data-state="{state}">'
+                f"<strong>{html.escape(label)}</strong>: {html.escape(value)}"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+    else:
+        st.success("All safety gates passed. No conflicts or blocks recorded.")
+
+    # ── Grading Status ────────────────────────────────────────────────
     render_section_head(
-        "Completion State",
-        "Read-only completion audit across real picks, shadow history, paper Kelly, and summaries.",
+        "Grading Status",
+        "Read-only status of real picks, shadow history, and paper results for this date.",
     )
     _render_completion_state_card(review_payload)
 
-    render_section_head("Quality Summary", "Operator-level run health and checks.")
+    # ── System Health ─────────────────────────────────────────────────
+    render_section_head("System Health", "Run health signals and model readiness.")
     if quality_json:
         render_review_banner(
-            "Quality summary loaded",
+            "System health loaded",
             "Run health and readiness signals are summarized in the cards above.",
             "info",
         )
     else:
-        render_empty_state("No quality summary found for this date")
+        render_empty_state("No system health data found for this date")
 
-    render_section_head(
-        "Phase 15 review layers",
-        "Guard review, outcome validation, policy simulation and attribution.",
-    )
-    phases = review_payload.get("phases") or {}
-    if not phases:
-        render_empty_state("No Phase 15 review artifacts found for this date")
-    for phase_key, phase in phases.items():
-        _render_phase15_review_panel(phase_key, phase)
+    # ── Operator Action ───────────────────────────────────────────────
+    render_section_head("Operator Action", "Items requiring attention for this date.")
+    daily_summary_text = payload.get("daily_summary_text", "") if isinstance(payload, dict) else ""
+    pending_grading = _extract_pending_grading_count(daily_summary_text)
+    if str(pending_grading) not in {"0", "not_available"}:
+        st.warning(f"Grading Status: {pending_grading} pick(s) still pending results.")
+    else:
+        st.success("No operator action required for this date.")
 
-    render_quality_review_debug_section(review_payload, quality_json)
+    # ── Advanced Debug / Model QA (Phase 15 panels — debug only) ─────
+    if raw_ui_debug_enabled():
+        with st.expander("Advanced Debug / Model QA", expanded=False):
+            st.caption(
+                "Phase 15D-G model review artifacts, raw diagnostics, and internal labels. "
+                "Visible only when COURTVISION_SHOW_RAW_UI_DEBUG=1."
+            )
+            _render_phase15_verdict_cards(statuses)
+            phases = review_payload.get("phases") or {}
+            if not phases:
+                st.caption("No Phase 15 review artifacts found for this date.")
+            for phase_key, phase in phases.items():
+                _render_phase15_review_panel(phase_key, phase)
+            render_quality_review_debug_section(review_payload, quality_json)
+
+    render_responsible_betting_footer()
 
 
 # =====================================================================
@@ -2742,23 +3100,32 @@ def main() -> None:
         st.markdown('<div class="cv-sidebar-divider"></div>', unsafe_allow_html=True)
         if _THEME_AVAILABLE:
             render_sidebar_label("Navigation")
-        # Navigation radio styled as nav list
+        # Normal navigation — 4 clean client-facing items
+        _normal_nav = [
+            ("today", "Today's Board"),
+            ("run_review", "Run Review"),
+            ("history", "History"),
+            ("under_lab", "UNDER Lab"),
+        ]
+        # Debug-only navigation items
+        _debug_nav = [
+            ("slate", "Slate"),
+            ("run_log", "Run Log"),
+            ("calibration", "Calibration"),
+            ("feedback", "Feedback"),
+        ]
+        _nav_options = _normal_nav + (_debug_nav if raw_ui_debug_enabled() else [])
         view = st.radio(
             "Navigation",
-            options=[
-                ("today", "Today's Board"),
-                ("slate", "Slate"),
-                ("review_layers", "Review Layers"),
-                ("history", "History"),
-                ("calibration", "Calibration"),
-                ("run_log", "Run Log"),
-                ("feedback", "Feedback"),
-            ],
+            options=_nav_options,
             format_func=lambda x: x[1],
             label_visibility="collapsed",
             key="nav_radio",
         )
         active_key = view[0] if isinstance(view, tuple) else "today"
+        # Guard: if a debug-only key leaks into normal mode, reset to today
+        if active_key in {k for k, _ in _debug_nav} and not raw_ui_debug_enabled():
+            active_key = "today"
         st.session_state["active_view"] = active_key
 
         st.markdown('<div class="cv-sidebar-divider"></div>', unsafe_allow_html=True)
@@ -2871,15 +3238,20 @@ def main() -> None:
         pill = ("Demo data", "stale")
     titles = {
         "today": ("Today's Board", APP_SUBTITLE),
-        "slate": ("Slate", "Tonight's games on the board."),
-        "review_layers": (
-            "Review Layers",
-            "Quality Summary and Phase 15D-G review-only diagnostics.",
+        "run_review": (
+            "Run Review",
+            "Run health, data quality, and safety gate summary.",
         ),
-        "history": ("History", "Prediction, rejection and feedback history."),
-        "calibration": ("Calibration", "Hit-rate memory across markets."),
+        "history": ("History", "Performance, hit rate, and result history."),
+        "under_lab": (
+            "UNDER Lab",
+            "Research-only UNDER candidates. Not approved bets.",
+        ),
+        # Debug-only pages
+        "slate": ("Slate", "Tonight's games on the board."),
         "run_log": ("Run Log", "Most recent predictions and fits."),
-        "feedback": ("Feedback", "Log finals to update calibration."),
+        "calibration": ("Calibration", "Hit-rate memory across markets."),
+        "feedback": ("Feedback", "Log finals to update calibration memory."),
     }
     title, sub = titles.get(active_key, (APP_TITLE, APP_SUBTITLE))
     if _THEME_AVAILABLE:
@@ -2897,9 +3269,7 @@ def main() -> None:
     # ---------------- Views ----------------
     if active_key == "today":
         render_today_board(payload, resolved_out_dir_text, prediction_date_text)
-    elif active_key == "slate":
-        render_slate_view(payload)
-    elif active_key == "review_layers":
+    elif active_key == "run_review":
         render_quality_review_view(
             resolved_out_dir_text,
             prediction_date_text,
@@ -2907,12 +3277,19 @@ def main() -> None:
         )
     elif active_key == "history":
         render_history_view(resolved_out_dir_text)
+    elif active_key == "under_lab":
+        render_under_lab_page(payload)
+    elif active_key == "slate":
+        render_slate_view(payload)
     elif active_key == "calibration":
         render_calibration_view(resolved_out_dir_text)
     elif active_key == "run_log":
         render_run_log_view(resolved_out_dir_text)
     elif active_key == "feedback":
         feedback_upload_block(ai, VIEW_ONLY_DEMO_MODE)
+    else:
+        # Fallback for any unrecognised key
+        render_today_board(payload, resolved_out_dir_text, prediction_date_text)
 
 
 if __name__ == "__main__":
