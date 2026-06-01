@@ -2229,7 +2229,7 @@ def render_today_board(
     # No-picks explainer
     render_no_picks_explainer(rejected_df, elite_df, full_market_df)
 
-    # Board tabs — UNDER Lab is now its own sidebar page
+    # Board tabs — UNDER Lab is a research-only tab inside Today's Board
     render_section_head(
         "Today's Picks",
         "Hard-filtered boards. Top of the slate, ranked by quality score.",
@@ -2241,8 +2241,9 @@ def render_today_board(
         "All Stats",
         "Team Board",
         "Near Miss",
+        "UNDER Lab",
     ]
-    elite_tab, full_tab, sgp_tab, stat_tab, team_tab, near_tab = st.tabs(tab_names)
+    elite_tab, full_tab, sgp_tab, stat_tab, team_tab, near_tab, under_tab = st.tabs(tab_names)
     with elite_tab:
         render_board_section(
             "Approved Picks",
@@ -2281,16 +2282,11 @@ def render_today_board(
             near_miss_df,
             "Rejected plays closest to qualification thresholds.",
         )
+    with under_tab:
+        render_under_visibility_panel(payload)
 
     # Tonight's slate — compact, collapsed by default
     render_compact_slate_card(payload)
-
-    # UNDER Lab preview — points users to the UNDER Lab sidebar page
-    render_section_head(
-        "UNDER Lab",
-        "Research-only candidates. Not approved bets.",
-    )
-    render_under_lab_preview_card(payload)
 
     # Diagnostics and advanced debug — visible only in debug mode
     odds_diag = summary.get("odds_diagnostics", {}) or {}
@@ -3100,15 +3096,15 @@ def main() -> None:
         st.markdown('<div class="cv-sidebar-divider"></div>', unsafe_allow_html=True)
         if _THEME_AVAILABLE:
             render_sidebar_label("Navigation")
-        # Normal navigation — 4 clean client-facing items
+        # Normal navigation — 3 client-facing items
         _normal_nav = [
             ("today", "Today's Board"),
             ("run_review", "Run Review"),
             ("history", "History"),
-            ("under_lab", "UNDER Lab"),
         ]
-        # Debug-only navigation items
+        # Debug-only navigation items (also includes under_lab for operator access)
         _debug_nav = [
+            ("under_lab", "UNDER Lab"),
             ("slate", "Slate"),
             ("run_log", "Run Log"),
             ("calibration", "Calibration"),

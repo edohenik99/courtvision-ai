@@ -56,8 +56,8 @@ def _collect_functions(tree: ast.Module) -> set[str]:
 # 1. Normal navigation — exactly 4 client-facing items
 # ---------------------------------------------------------------------------
 
-_NORMAL_NAV_KEYS = {"today", "run_review", "history", "under_lab"}
-_DEBUG_NAV_KEYS = {"slate", "run_log", "calibration", "feedback"}
+_NORMAL_NAV_KEYS = {"today", "run_review", "history"}
+_DEBUG_NAV_KEYS = {"under_lab", "slate", "run_log", "calibration", "feedback"}
 
 
 def test_normal_nav_keys_are_defined():
@@ -69,20 +69,17 @@ def test_normal_nav_keys_are_defined():
         )
 
 
-def test_debug_nav_keys_are_in_debug_list_only():
-    """Debug nav keys must only appear as part of _debug_nav, not _normal_nav."""
+def test_normal_nav_has_exactly_3_items():
+    """Normal nav must have exactly 3 items: Today's Board, Run Review, History."""
     src = _app_source()
-    # _normal_nav block ends before _debug_nav block
-    normal_nav_match = re.search(
-        r"_normal_nav\s*=\s*\[(.*?)\]", src, re.DOTALL
+    m = re.search(r"_normal_nav\s*=\s*\[(.*?)\]", src, re.DOTALL)
+    assert m, "_normal_nav list not found."
+    block = m.group(1)
+    # Extract only the tuple keys (first element of each tuple) — match ("key", ...) pattern
+    keys = re.findall(r'\(\s*"([^"]+)"', block)
+    assert set(keys) == {"today", "run_review", "history"}, (
+        f"Normal nav must have exactly today/run_review/history keys, got: {keys}"
     )
-    assert normal_nav_match, "_normal_nav list not found in source."
-    normal_nav_block = normal_nav_match.group(1)
-    for key in _DEBUG_NAV_KEYS:
-        assert f'"{key}"' not in normal_nav_block and f"'{key}'" not in normal_nav_block, (
-            f"Debug nav key '{key}' should not appear in _normal_nav. "
-            f"Found in: {normal_nav_block[:200]!r}"
-        )
 
 
 def test_debug_guard_prevents_debug_nav_in_normal_mode():
@@ -95,13 +92,23 @@ def test_debug_guard_prevents_debug_nav_in_normal_mode():
     )
 
 
-def test_run_log_is_debug_only():
-    """Run Log must only appear inside _debug_nav, never in _normal_nav."""
+def test_under_lab_not_in_normal_nav():
+    """UNDER Lab must NOT appear in _normal_nav — it lives inside Today's Board."""
     src = _app_source()
-    normal_nav_match = re.search(r"_normal_nav\s*=\s*\[(.*?)\]", src, re.DOTALL)
-    assert normal_nav_match
-    assert "run_log" not in normal_nav_match.group(1), (
-        "Run Log must not appear in _normal_nav."
+    m = re.search(r"_normal_nav\s*=\s*\[(.*?)\]", src, re.DOTALL)
+    assert m, "_normal_nav list not found."
+    assert '"under_lab"' not in m.group(1), (
+        "under_lab must be removed from _normal_nav — it is now a tab inside Today's Board."
+    )
+
+
+def test_under_lab_in_debug_nav():
+    """UNDER Lab must be in _debug_nav for operator/debug access."""
+    src = _app_source()
+    m = re.search(r"_debug_nav\s*=\s*\[(.*?)\]", src, re.DOTALL)
+    assert m, "_debug_nav list not found."
+    assert '"under_lab"' in m.group(1), (
+        "under_lab must appear in _debug_nav for debug-mode sidebar access."
     )
 
 
@@ -445,18 +452,21 @@ def test_today_board_calls_decision_card():
     )
 
 
-def test_today_board_calls_under_lab_preview():
-    """render_under_lab_preview_card must be called inside render_today_board."""
+def test_under_lab_tab_exists_in_today_board():
+    """UNDER Lab must appear as a tab inside Today's Board (not just a preview card)."""
     src = _app_source()
     fn_match = re.search(
         r"def render_today_board\s*\(.*?\).*?:(.*?)(?=\n\n\n|\n# ===|\ndef [a-z])",
         src,
         re.DOTALL,
     )
-    assert fn_match
+    assert fn_match, "render_today_board not found."
     body = fn_match.group(1)
-    assert "render_under_lab_preview_card" in body, (
-        "render_under_lab_preview_card must be called inside render_today_board."
+    assert '"UNDER Lab"' in body, (
+        "'UNDER Lab' must appear as a tab name inside render_today_board."
+    )
+    assert "render_under_visibility_panel" in body, (
+        "render_under_visibility_panel must be called inside Today's Board UNDER Lab tab."
     )
 
 
