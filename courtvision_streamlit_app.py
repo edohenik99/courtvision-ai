@@ -54,6 +54,7 @@ from courtvision.streamlit_ui_helpers import (  # noqa: E402
     mutation_actions_enabled,
     raw_diagnostics_visible,
     raw_review_artifacts_visible,
+    show_raw_ui_debug,
 )
 
 try:
@@ -437,10 +438,7 @@ def _derive_runtime_summary(
         "sgp_count": int(len(sgp_df)),
         "rejected_count": int(board_counts.get("rejected", 0) or 0),
         "qualified_pool_count": int(board_counts.get("qualified_pool", 0) or 0),
-        "data_status": (
-            f"Loaded runtime artifacts for {date_text} from "
-            f"{runtime_root.resolve()}"
-        ),
+        "data_status": f"Runtime artifacts loaded for {date_text}.",
         "runtime_output_dir": str(out_dir.resolve()),
         "runtime_operator_dir": str((runtime_root / "operator").resolve()),
         "runtime_diagnostics_dir": str((runtime_root / "diagnostics").resolve()),
@@ -1477,11 +1475,17 @@ def render_board_section(
 
 
 def render_runtime_file_diagnostics(payload: dict[str, Any]) -> None:
+    if not raw_diagnostics_visible(VIEW_ONLY_DEMO_MODE):
+        return
     diag_df = runtime_file_diagnostics_dataframe(payload)
     if diag_df.empty:
         return
 
-    with st.expander("Runtime file load", expanded=False):
+    with st.expander("Advanced Debug", expanded=False):
+        st.caption(
+            "Runtime file load diagnostics. Visible only when "
+            "COURTVISION_SHOW_RAW_UI_DEBUG=1."
+        )
         st.dataframe(diag_df, width="stretch", hide_index=True)
 
 
@@ -1635,23 +1639,23 @@ def _render_completion_state_raw(review_payload: dict[str, Any] | None) -> None:
     completion_text = str(review_payload.get("completion_state_audit_text") or "")
     json_record = review_payload.get("completion_state_audit_json_record") or {}
     text_record = review_payload.get("completion_state_audit_text_record") or {}
-    with st.expander("Completion audit raw JSON/text", expanded=False):
-        if completion_json:
-            st.markdown("##### completion_state_audit JSON")
-            st.json(completion_json)
-            path = str(json_record.get("path") or "")
-            if path:
-                st.caption(path)
-        else:
-            st.caption("Completion audit JSON is not available for this date.")
-        if completion_text:
-            st.markdown("##### completion_state_audit text")
-            st.code(completion_text, language="text")
-            path = str(text_record.get("path") or "")
-            if path:
-                st.caption(path)
-        else:
-            st.caption("Completion audit text is not available for this date.")
+    st.markdown("##### Completion audit raw JSON/text")
+    if completion_json:
+        st.markdown("###### completion_state_audit JSON")
+        st.json(completion_json)
+        path = str(json_record.get("path") or "")
+        if path:
+            st.caption(path)
+    else:
+        st.caption("Completion audit JSON is not available for this date.")
+    if completion_text:
+        st.markdown("###### completion_state_audit text")
+        st.code(completion_text, language="text")
+        path = str(text_record.get("path") or "")
+        if path:
+            st.caption(path)
+    else:
+        st.caption("Completion audit text is not available for this date.")
 
 
 def under_visibility_records_dataframe(payload: dict[str, Any] | None) -> pd.DataFrame:
@@ -1779,16 +1783,36 @@ def render_under_visibility_panel(payload: dict[str, Any] | None) -> None:
             "The board is empty or the CSV artifact is missing for this runtime date.",
         )
 
-    if report_text:
-        with st.expander("UNDER visibility report text", expanded=False):
-            st.code(report_text, language="text")
-    else:
-        st.caption("UNDER visibility report text is not available for this date.")
+    if raw_diagnostics_visible(VIEW_ONLY_DEMO_MODE):
+        with st.expander("Advanced Debug", expanded=False):
+            st.caption(
+                "Raw UNDER visibility artifacts and local paths. Visible only "
+                "when COURTVISION_SHOW_RAW_UI_DEBUG=1."
+            )
+            if report_text:
+                st.markdown("##### UNDER visibility report text")
+                st.code(report_text, language="text")
+            else:
+                st.caption("UNDER visibility report text is not available for this date.")
 
-    if diagnostics:
-        with st.expander("UNDER visibility diagnostics JSON", expanded=False):
-            st.json(diagnostics)
-    else:
+            if diagnostics:
+                st.markdown("##### UNDER visibility diagnostics JSON")
+                st.json(diagnostics)
+            else:
+                json_record = (payload.get("under_visibility_records") or {}).get(
+                    "under_visibility_diagnostics",
+                    {},
+                )
+                error = str(json_record.get("error") or "")
+                if error:
+                    st.caption(error)
+                else:
+                    st.caption("UNDER visibility diagnostics JSON is not available for this date.")
+
+            if not records_df.empty:
+                st.markdown("##### UNDER visibility artifact load")
+                st.dataframe(records_df, width="stretch", hide_index=True)
+    elif not diagnostics:
         json_record = (payload.get("under_visibility_records") or {}).get(
             "under_visibility_diagnostics",
             {},
@@ -1797,15 +1821,112 @@ def render_under_visibility_panel(payload: dict[str, Any] | None) -> None:
         if error:
             render_review_banner(
                 "UNDER visibility diagnostics unavailable",
-                error,
+                "Diagnostics could not be loaded for this date.",
                 "warning",
             )
-        else:
-            st.caption("UNDER visibility diagnostics JSON is not available for this date.")
 
-    if not records_df.empty:
-        with st.expander("UNDER visibility artifact load", expanded=False):
-            st.dataframe(records_df, width="stretch", hide_index=True)
+
+def runtime_status_message(summary: dict[str, Any] | None, prediction_date_text: str | None = None) -> str:
+    """Return a path-free operator-facing runtime status message."""
+    summary = summary or {}
+    date_text = str(
+        prediction_date_text
+        or summary.get("prediction_date")
+        or ""
+    ).strip()
+    status = str(summary.get("data_status") or "").strip()
+    if status.lower().startswith("demo mode"):
+        return status
+    if date_text:
+        return f"Runtime artifacts loaded for {date_text}."
+    return "Runtime artifacts loaded."
+
+
+def raw_ui_debug_enabled() -> bool:
+    """Return whether the Streamlit app may render raw/path-heavy debug UI."""
+    return show_raw_ui_debug() and not VIEW_ONLY_DEMO_MODE
+
+
+def render_action_debug_details(
+    *,
+    json_payload: Any | None = None,
+    traceback_text: str | None = None,
+) -> None:
+    """Render action diagnostics only under the explicit debug flag."""
+    if not raw_ui_debug_enabled():
+        return
+    with st.expander("Advanced Debug", expanded=False):
+        st.caption(
+            "Raw action diagnostics. Visible only when "
+            "COURTVISION_SHOW_RAW_UI_DEBUG=1."
+        )
+        if json_payload is not None:
+            st.json(json_payload)
+        if traceback_text:
+            st.code(traceback_text, language="text")
+
+
+def render_advanced_debug_section(
+    *,
+    payload: dict[str, Any],
+    review_payload: dict[str, Any] | None,
+    summary: dict[str, Any],
+    odds_diag: dict[str, Any],
+    model_diag: dict[str, Any],
+    board_diag: dict[str, Any],
+    market_coverage: dict[str, Any],
+    daily_summary_text: str,
+    rejected_df: pd.DataFrame | None = None,
+) -> None:
+    """Render all raw/path-heavy UI under one explicit debug gate."""
+    if not raw_diagnostics_visible(VIEW_ONLY_DEMO_MODE):
+        return
+
+    with st.expander("Advanced Debug", expanded=False):
+        st.caption(
+            "Raw runtime artifacts, local paths, JSON payloads, and text dumps. "
+            "Visible only when COURTVISION_SHOW_RAW_UI_DEBUG=1."
+        )
+        if review_payload:
+            _render_completion_state_raw(review_payload)
+
+        diag_df = runtime_file_diagnostics_dataframe(payload)
+        if not diag_df.empty:
+            st.markdown("##### Runtime file load")
+            render_table_card(
+                diag_df,
+                helper_text="File-level load status for the selected runtime date.",
+                max_height=360,
+            )
+        if odds_diag:
+            st.markdown("##### Odds ingestion JSON")
+            st.json(odds_diag)
+        if model_diag:
+            st.markdown("##### Model context JSON")
+            st.json(model_diag)
+        if board_diag:
+            st.markdown("##### Board diagnostics JSON")
+            st.json(board_diag)
+        if market_coverage:
+            st.markdown("##### Market coverage JSON")
+            st.json(market_coverage)
+        if daily_summary_text:
+            st.markdown("##### Daily summary text")
+            st.code(daily_summary_text, language="text")
+        st.markdown("##### Run summary JSON")
+        st.json(summary)
+
+        if rejected_df is not None:
+            st.markdown("##### Full rejection table - filtered candidates")
+            if rejected_df.empty:
+                st.caption("No rejection rows.")
+            else:
+                st.dataframe(
+                    style_rejection_table(rejected_df),
+                    width="stretch",
+                    hide_index=True,
+                    height=360,
+                )
 
 
 def render_today_board(
@@ -1853,7 +1974,6 @@ def render_today_board(
         daily_summary_text,
     )
     _render_completion_state_card(review_payload)
-    _render_completion_state_raw(review_payload)
 
     # Featured pick
     featured = safe_pick_featured(elite_df)
@@ -1864,7 +1984,7 @@ def render_today_board(
 
     data_status = summary.get("data_status")
     if data_status:
-        st.info(data_status)
+        st.info(runtime_status_message(summary, prediction_date_text))
 
     # No-picks explainer
     render_no_picks_explainer(rejected_df, elite_df, full_market_df)
@@ -1934,52 +2054,17 @@ def render_today_board(
     render_diagnostics_overview(payload, quality_json, elite_df, full_market_df, sgp_df)
     if not odds_diag and not model_diag and not board_diag and not market_coverage and not daily_summary_text:
         render_empty_state("No diagnostics emitted by the latest run")
-    else:
-        if not raw_diagnostics_visible(VIEW_ONLY_DEMO_MODE):
-            with st.expander("Advanced diagnostics", expanded=False):
-                render_review_banner(
-                    "Advanced diagnostics are hidden in demo mode.",
-                    "Operator-only runtime JSON and raw text dumps stay available when demo mode is disabled.",
-                    "info",
-                )
-        else:
-            with st.expander("Advanced diagnostics", expanded=False):
-                st.caption("Raw runtime artifacts and JSON payloads. Collapsed by default for demo-safe viewing.")
-                diag_df = runtime_file_diagnostics_dataframe(payload)
-                if not diag_df.empty:
-                    st.markdown("##### Runtime file load")
-                    render_table_card(
-                        diag_df,
-                        helper_text="File-level load status for the selected runtime date.",
-                        max_height=360,
-                    )
-                if odds_diag:
-                    st.markdown("##### Odds ingestion JSON")
-                    st.json(odds_diag)
-                if model_diag:
-                    st.markdown("##### Model context JSON")
-                    st.json(model_diag)
-                if board_diag:
-                    st.markdown("##### Board diagnostics JSON")
-                    st.json(board_diag)
-                if market_coverage:
-                    st.markdown("##### Market coverage JSON")
-                    st.json(market_coverage)
-                if daily_summary_text:
-                    st.markdown("##### Daily summary text")
-                    st.code(daily_summary_text, language="text")
-                st.markdown("##### Run summary JSON")
-                st.json(summary)
-        with st.expander("Full rejection table - filtered candidates", expanded=False):
-            if rejected_df is None or rejected_df.empty:
-                render_empty_state("No rejection rows")
-            else:
-                st.dataframe(
-                    style_rejection_table(rejected_df),
-                    width="stretch",
-                    hide_index=True,
-                    height=360,
-                )
+    render_advanced_debug_section(
+        payload=payload,
+        review_payload=review_payload,
+        summary=summary,
+        odds_diag=odds_diag,
+        model_diag=model_diag,
+        board_diag=board_diag,
+        market_coverage=market_coverage,
+        daily_summary_text=daily_summary_text,
+        rejected_df=rejected_df,
+    )
 
 
 # =====================================================================
@@ -2038,7 +2123,8 @@ def _render_artifact_notice(label: str, record: dict[str, Any] | None) -> None:
     path = str(record.get("path") or "")
     error = str(record.get("error") or "")
     state = "warning" if status in {"missing", "error"} else "info"
-    detail = error if status == "error" else path
+    _ = path, error
+    detail = ""
     message = (
         f"{label} could not be loaded."
         if status == "error"
@@ -2064,9 +2150,6 @@ def _render_text_artifact(
     if text:
         with st.expander(label, expanded=expanded):
             st.code(text, language="text")
-            path = str((record or {}).get("path") or "")
-            if path:
-                st.caption(path)
         return
     _render_artifact_notice(label, record)
 
@@ -2083,9 +2166,6 @@ def _render_csv_preview(
         st.dataframe(display_df, width="stretch", hide_index=True, height=360)
         if len(df) > max_rows:
             st.caption(f"Showing first {max_rows} of {len(df)} rows.")
-        path = str((record or {}).get("path") or "")
-        if path:
-            st.caption(path)
         return
     _render_artifact_notice(label, record)
 
@@ -2099,18 +2179,78 @@ def _render_phase15_review_panel(phase_key: str, phase: dict[str, Any]) -> None:
             "No picks are suppressed. No prediction, grading, Kelly, suppression, or history changes are made from this UI.",
             "simulation" if mode == "SIMULATION ONLY" else "info",
         )
-        if raw_review_artifacts_visible(VIEW_ONLY_DEMO_MODE):
-            _render_text_artifact(
-                f"{phase.get('short_title', title)} text",
-                str(phase.get("text") or ""),
-                phase.get("text_record"),
-                expanded=False,
-            )
         _render_csv_preview(
             f"{phase.get('short_title', title)} CSV preview",
             phase.get("csv", pd.DataFrame()),
             phase.get("csv_record"),
         )
+
+
+def render_quality_review_debug_section(
+    review_payload: dict[str, Any],
+    quality_json: dict[str, Any],
+) -> None:
+    if not raw_review_artifacts_visible(VIEW_ONLY_DEMO_MODE):
+        return
+
+    with st.expander("Advanced Debug", expanded=False):
+        st.caption(
+            "Raw quality review artifacts, local paths, JSON payloads, and text dumps. "
+            "Visible only when COURTVISION_SHOW_RAW_UI_DEBUG=1."
+        )
+        _render_completion_state_raw(review_payload)
+        quality_text = str(review_payload.get("quality_summary_text") or "")
+        if quality_text:
+            st.markdown("##### quality_summary text")
+            st.code(quality_text, language="text")
+            path = str((review_payload.get("quality_summary_text_record") or {}).get("path") or "")
+            if path:
+                st.caption(path)
+        else:
+            _render_artifact_notice(
+                "quality_summary text",
+                review_payload.get("quality_summary_text_record"),
+            )
+        phases = review_payload.get("phases") or {}
+        if phases:
+            st.markdown("##### Phase review raw text")
+            for phase_key, phase in phases.items():
+                raw_label = str(phase.get("short_title") or phase.get("title") or phase_key)
+                raw_text = str(phase.get("text") or "")
+                if not raw_text:
+                    continue
+                st.markdown(f"###### {raw_label}")
+                st.code(raw_text, language="text")
+                path = str((phase.get("text_record") or {}).get("path") or "")
+                if path:
+                    st.caption(path)
+        if quality_json:
+            st.markdown("##### quality_summary JSON")
+            st.json(quality_json)
+        else:
+            _render_artifact_notice(
+                "quality_summary JSON",
+                review_payload.get("quality_summary_json_record"),
+            )
+
+        records = review_payload.get("records") or []
+        if records:
+            st.markdown("##### Quality Review artifact load")
+            diag_df = pd.DataFrame(records)
+            keep = [
+                "label",
+                "kind",
+                "exists",
+                "status",
+                "rows",
+                "columns",
+                "bytes",
+                "modified",
+                "path",
+                "error",
+            ]
+            keep = [col for col in keep if col in diag_df.columns]
+            st.dataframe(diag_df[keep], width="stretch", hide_index=True)
 
 
 def render_quality_review_view(
@@ -2134,7 +2274,7 @@ def render_quality_review_view(
     )
     render_review_banner(
         "Review-only layer",
-        "Artifacts are loaded from outputs/runtime/operator. This page does not regenerate reports, suppress picks, or change prediction, grading, Kelly, or history files.",
+        "Review artifacts are loaded read-only for the selected date. This page does not regenerate reports, suppress picks, or change prediction, grading, Kelly, or history files.",
         "info",
     )
     _render_review_status_cards(statuses)
@@ -2145,30 +2285,16 @@ def render_quality_review_view(
         "Read-only completion audit across real picks, shadow history, paper Kelly, and summaries.",
     )
     _render_completion_state_card(review_payload)
-    _render_completion_state_raw(review_payload)
 
     render_section_head("Quality Summary", "Operator-level run health and checks.")
-    if raw_review_artifacts_visible(VIEW_ONLY_DEMO_MODE):
-        _render_text_artifact(
-            "quality_summary text",
-            str(review_payload.get("quality_summary_text") or ""),
-            review_payload.get("quality_summary_text_record"),
-            expanded=True,
-        )
-        if quality_json:
-            with st.expander("quality_summary JSON", expanded=False):
-                st.json(quality_json)
-        else:
-            _render_artifact_notice(
-                "quality_summary JSON",
-                review_payload.get("quality_summary_json_record"),
-            )
-    else:
+    if quality_json:
         render_review_banner(
-            "Raw review artifacts are hidden in demo mode.",
-            "Verdict cards and compact CSV previews remain visible.",
+            "Quality summary loaded",
+            "Run health and readiness signals are summarized in the cards above.",
             "info",
         )
+    else:
+        render_empty_state("No quality summary found for this date")
 
     render_section_head(
         "Phase 15 review layers",
@@ -2180,24 +2306,7 @@ def render_quality_review_view(
     for phase_key, phase in phases.items():
         _render_phase15_review_panel(phase_key, phase)
 
-    records = review_payload.get("records") or []
-    if records and raw_review_artifacts_visible(VIEW_ONLY_DEMO_MODE):
-        with st.expander("Quality Review artifact load", expanded=False):
-            diag_df = pd.DataFrame(records)
-            keep = [
-                "label",
-                "kind",
-                "exists",
-                "status",
-                "rows",
-                "columns",
-                "bytes",
-                "modified",
-                "path",
-                "error",
-            ]
-            keep = [col for col in keep if col in diag_df.columns]
-            st.dataframe(diag_df[keep], width="stretch", hide_index=True)
+    render_quality_review_debug_section(review_payload, quality_json)
 
 
 # =====================================================================
@@ -2711,7 +2820,7 @@ def main() -> None:
         ai = get_ai(resolved_out_dir_text)
     except Exception as exc:
         st.error(f"Could not initialise CourtVision engine: {exc}")
-        st.code(traceback.format_exc())
+        render_action_debug_details(traceback_text=traceback.format_exc())
         return
 
     if reload_history_clicked:
@@ -2724,10 +2833,10 @@ def main() -> None:
                 st.session_state["latest_fit_metrics"] = metrics
                 bump_history_refresh()
                 st.success("Model fit complete.")
-                st.json(metrics)
+                render_action_debug_details(json_payload=metrics)
             except Exception as exc:
                 st.error(f"Fit failed: {exc}")
-                st.code(traceback.format_exc())
+                render_action_debug_details(traceback_text=traceback.format_exc())
 
     if predict_clicked:
         with st.spinner("Scoring markets..."):
@@ -2737,7 +2846,7 @@ def main() -> None:
                 bump_history_refresh()
             except Exception as exc:
                 st.error(f"Prediction run failed: {exc}")
-                st.code(traceback.format_exc())
+                render_action_debug_details(traceback_text=traceback.format_exc())
 
     runtime_payload = load_runtime_prediction_cached(
         resolved_out_dir_text,

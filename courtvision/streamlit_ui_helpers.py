@@ -32,19 +32,33 @@ def mutation_actions_enabled(view_only_demo: bool) -> bool:
     return not bool(view_only_demo)
 
 
-def raw_diagnostics_visible(view_only_demo: bool) -> bool:
+def show_raw_ui_debug(env: Mapping[str, str] | None = None) -> bool:
+    """Return whether raw/debug UI sections should be rendered."""
+    return env_flag_enabled("COURTVISION_SHOW_RAW_UI_DEBUG", env)
+
+
+def raw_diagnostics_visible(
+    view_only_demo: bool,
+    env: Mapping[str, str] | None = None,
+) -> bool:
     """Return whether raw JSON/text diagnostics should be visible."""
-    return not bool(view_only_demo)
+    return show_raw_ui_debug(env) and not bool(view_only_demo)
 
 
-def raw_review_artifacts_visible(view_only_demo: bool) -> bool:
+def raw_review_artifacts_visible(
+    view_only_demo: bool,
+    env: Mapping[str, str] | None = None,
+) -> bool:
     """Return whether raw review artifact text/JSON should be visible."""
-    return not bool(view_only_demo)
+    return show_raw_ui_debug(env) and not bool(view_only_demo)
 
 
-def completion_audit_raw_details_visible(view_only_demo: bool) -> bool:
+def completion_audit_raw_details_visible(
+    view_only_demo: bool,
+    env: Mapping[str, str] | None = None,
+) -> bool:
     """Return whether raw completion audit JSON/text should be visible."""
-    return not bool(view_only_demo)
+    return show_raw_ui_debug(env) and not bool(view_only_demo)
 
 
 def completion_status_display(status: str | None) -> dict[str, str]:
@@ -80,4 +94,5 @@ __all__ = [
     "mutation_actions_enabled",
     "raw_diagnostics_visible",
     "raw_review_artifacts_visible",
+    "show_raw_ui_debug",
 ]

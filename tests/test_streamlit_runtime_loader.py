@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
@@ -52,6 +53,26 @@ def _normal_pick(player: str, *, market: str = "player_points") -> dict[str, obj
     }
 
 
+class _FakeStreamlit:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
+
+    def _record(self, name: str, *args: Any, **kwargs: Any) -> None:
+        self.calls.append((name, args, kwargs))
+
+    def markdown(self, *args: Any, **kwargs: Any) -> None:
+        self._record("markdown", *args, **kwargs)
+
+    def json(self, *args: Any, **kwargs: Any) -> None:
+        self._record("json", *args, **kwargs)
+
+    def code(self, *args: Any, **kwargs: Any) -> None:
+        self._record("code", *args, **kwargs)
+
+    def caption(self, *args: Any, **kwargs: Any) -> None:
+        self._record("caption", *args, **kwargs)
+
+
 def test_streamlit_runtime_loader_loads_normal_boards(tmp_path: Path) -> None:
     out_dir = tmp_path / "outputs"
     runtime_root = out_dir / "runtime"
@@ -79,7 +100,73 @@ def test_streamlit_runtime_loader_loads_normal_boards(tmp_path: Path) -> None:
     assert payload["summary"]["elite_count"] == 1
     assert payload["summary"]["full_market_count"] == 2
     assert payload["summary"]["rejected_count"] == 4
+    assert payload["summary"]["data_status"] == (
+        f"Runtime artifacts loaded for {PREDICTION_DATE}."
+    )
+    assert str(runtime_root) not in payload["summary"]["data_status"]
+    assert app.runtime_status_message(payload["summary"]) == (
+        f"Runtime artifacts loaded for {PREDICTION_DATE}."
+    )
     assert app.payload_has_board_rows(payload) is True
+
+
+def test_runtime_status_message_removes_local_artifact_paths(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "outputs" / "runtime"
+    summary = {
+        "prediction_date": PREDICTION_DATE,
+        "data_status": f"Loaded runtime artifacts for {PREDICTION_DATE} from {runtime_root}",
+    }
+
+    message = app.runtime_status_message(summary)
+
+    assert message == f"Runtime artifacts loaded for {PREDICTION_DATE}."
+    assert str(runtime_root) not in message
+    assert "Loaded runtime artifacts" not in message
+
+
+def test_raw_debug_ui_helpers_require_explicit_env_flag(monkeypatch) -> None:
+    monkeypatch.delenv("COURTVISION_SHOW_RAW_UI_DEBUG", raising=False)
+    assert app.raw_ui_debug_enabled() is False
+
+    monkeypatch.setenv("COURTVISION_SHOW_RAW_UI_DEBUG", "1")
+    assert app.raw_ui_debug_enabled() is True
+
+
+def test_completion_raw_audit_text_not_rendered_by_default(monkeypatch) -> None:
+    fake_st = _FakeStreamlit()
+    monkeypatch.delenv("COURTVISION_SHOW_RAW_UI_DEBUG", raising=False)
+    monkeypatch.setattr(app, "st", fake_st)
+
+    app._render_completion_state_raw(
+        {
+            "completion_state_audit_json": {"status": "COMPLETE"},
+            "completion_state_audit_text": "raw completion audit",
+        }
+    )
+
+    assert fake_st.calls == []
+
+
+def test_completion_raw_audit_text_renders_only_in_debug_mode(monkeypatch) -> None:
+    fake_st = _FakeStreamlit()
+    monkeypatch.setenv("COURTVISION_SHOW_RAW_UI_DEBUG", "1")
+    monkeypatch.setattr(app, "st", fake_st)
+
+    app._render_completion_state_raw(
+        {
+            "completion_state_audit_json": {"status": "COMPLETE"},
+            "completion_state_audit_text": "raw completion audit",
+        }
+    )
+
+    rendered_text = "\n".join(
+        str(arg)
+        for _name, args, _kwargs in fake_st.calls
+        for arg in args
+    )
+    assert "Completion audit raw JSON/text" in rendered_text
+    assert any(name == "json" for name, _args, _kwargs in fake_st.calls)
+    assert any(name == "code" for name, _args, _kwargs in fake_st.calls)
 
 
 def test_streamlit_runtime_loader_missing_and_empty_files_are_nonfatal(tmp_path: Path) -> None:

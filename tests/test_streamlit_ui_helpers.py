@@ -6,6 +6,7 @@ from courtvision.streamlit_ui_helpers import (
     mutation_actions_enabled,
     raw_diagnostics_visible,
     raw_review_artifacts_visible,
+    show_raw_ui_debug,
 )
 
 
@@ -25,14 +26,24 @@ def test_mutation_actions_disabled_in_demo_mode() -> None:
     assert mutation_actions_enabled(False)
 
 
-def test_raw_diagnostics_hidden_in_demo_mode() -> None:
+def test_show_raw_ui_debug_requires_explicit_flag() -> None:
+    assert not show_raw_ui_debug({})
+    assert not show_raw_ui_debug({"COURTVISION_SHOW_RAW_UI_DEBUG": "0"})
+    assert show_raw_ui_debug({"COURTVISION_SHOW_RAW_UI_DEBUG": "1"})
+
+
+def test_raw_diagnostics_hidden_by_default_and_in_demo_mode() -> None:
+    assert not raw_diagnostics_visible(False, {})
     assert not raw_diagnostics_visible(True)
-    assert raw_diagnostics_visible(False)
+    assert raw_diagnostics_visible(False, {"COURTVISION_SHOW_RAW_UI_DEBUG": "1"})
+    assert not raw_diagnostics_visible(True, {"COURTVISION_SHOW_RAW_UI_DEBUG": "1"})
 
 
-def test_raw_review_artifacts_hidden_in_demo_mode() -> None:
+def test_raw_review_artifacts_hidden_by_default_and_in_demo_mode() -> None:
+    assert not raw_review_artifacts_visible(False, {})
     assert not raw_review_artifacts_visible(True)
-    assert raw_review_artifacts_visible(False)
+    assert raw_review_artifacts_visible(False, {"COURTVISION_SHOW_RAW_UI_DEBUG": "1"})
+    assert not raw_review_artifacts_visible(True, {"COURTVISION_SHOW_RAW_UI_DEBUG": "1"})
 
 
 def test_completion_status_display_maps_operator_states() -> None:
@@ -51,9 +62,17 @@ def test_completion_status_display_maps_operator_states() -> None:
     assert completion_status_display("INCONSISTENT_REPORTING")["state"] == "danger"
 
 
-def test_completion_raw_audit_details_hidden_in_demo_mode() -> None:
+def test_completion_raw_audit_details_hidden_by_default_and_in_demo_mode() -> None:
+    assert not completion_audit_raw_details_visible(False, {})
     assert not completion_audit_raw_details_visible(True)
-    assert completion_audit_raw_details_visible(False)
+    assert completion_audit_raw_details_visible(
+        False,
+        {"COURTVISION_SHOW_RAW_UI_DEBUG": "1"},
+    )
+    assert not completion_audit_raw_details_visible(
+        True,
+        {"COURTVISION_SHOW_RAW_UI_DEBUG": "1"},
+    )
 
 
 def test_dataframe_height_is_compact_and_bounded() -> None:
