@@ -485,3 +485,110 @@ def test_candidate_deduplication(tmp_path: Path) -> None:
     assert not pick_hist.exists()
 
 
+# ============================================================
+# Phase 6B.1 — UNDER Visibility Board in Bet Readiness Report
+# ============================================================
+
+def test_under_visibility_board_context_present_in_payload(tmp_path: Path) -> None:
+    """under_visibility_board_context key is present in the bet readiness JSON payload."""
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+
+    _seed_required_artifacts(runtime_root)
+    _seed_optional_artifacts(runtime_root)
+
+    # Write an under_visibility_board JSON
+    board_payload = {
+        "prediction_date": PREDICTION_DATE,
+        "shadow_only": True,
+        "betting_logic_changed": False,
+        "real_money_promotion": False,
+        "board_row_count": 3,
+        "lane_counts": {
+            "UNDER_REVIEW_CANDIDATE_SHADOW_ONLY": 1,
+            "UNDER_WATCHLIST_SHADOW_ONLY": 2,
+            "UNDER_INSUFFICIENT_SAMPLE": 0,
+            "UNDER_DO_NOT_PROMOTE": 0,
+        },
+    }
+    _write_json(
+        runtime_root / "diagnostics" / f"under_visibility_board_{PREDICTION_DATE}.json",
+        board_payload,
+    )
+
+    exit_code, payload, report = run_bet_readiness_report(
+        prediction_date=PREDICTION_DATE,
+        runtime_root=runtime_root,
+        history_root=history_root,
+        strict=False,
+    )
+
+    assert "under_visibility_board_context" in payload
+    ctx = payload["under_visibility_board_context"]
+    assert ctx["present"] is True
+    assert ctx["affects_betability"] is False
+    assert ctx["shadow_only"] is True
+    assert ctx["board_row_count"] == 3
+    assert "UNDER_REVIEW_CANDIDATE_SHADOW_ONLY" in ctx["lane_counts"]
+
+
+def test_under_visibility_board_cannot_change_betability_status(tmp_path: Path) -> None:
+    """Presence of UNDER visibility board never upgrades status from RESEARCH_ONLY."""
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+
+    _seed_required_artifacts(runtime_root)
+    _seed_optional_artifacts(runtime_root)
+
+    # Write a board with many candidates
+    board_payload = {
+        "prediction_date": PREDICTION_DATE,
+        "shadow_only": True,
+        "betting_logic_changed": False,
+        "real_money_promotion": False,
+        "board_row_count": 20,
+        "lane_counts": {"UNDER_REVIEW_CANDIDATE_SHADOW_ONLY": 20},
+    }
+    _write_json(
+        runtime_root / "diagnostics" / f"under_visibility_board_{PREDICTION_DATE}.json",
+        board_payload,
+    )
+
+    exit_code, payload, report = run_bet_readiness_report(
+        prediction_date=PREDICTION_DATE,
+        runtime_root=runtime_root,
+        history_root=history_root,
+        strict=False,
+    )
+
+    # Status must still be RESEARCH_ONLY (no elite rows, no kelly rows)
+    assert payload["status"] == "RESEARCH_ONLY"
+    # Score must still be <= 59 (shadow-only cap)
+    assert payload["score"] <= 59
+    # Safety declaration must be present
+    assert any("UNDER visibility" in d for d in payload["safety_declarations"])
+    # affects_betability must be False
+    assert payload["under_visibility_board_context"]["affects_betability"] is False
+
+
+def test_under_visibility_board_context_absent_when_board_missing(tmp_path: Path) -> None:
+    """under_visibility_board_context is present but marked not-present when board file missing."""
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+
+    _seed_required_artifacts(runtime_root)
+    _seed_optional_artifacts(runtime_root)
+    # No under_visibility_board JSON
+
+    exit_code, payload, report = run_bet_readiness_report(
+        prediction_date=PREDICTION_DATE,
+        runtime_root=runtime_root,
+        history_root=history_root,
+        strict=False,
+    )
+
+    assert "under_visibility_board_context" in payload
+    ctx = payload["under_visibility_board_context"]
+    assert ctx["present"] is False
+    assert ctx["affects_betability"] is False
+    assert ctx["shadow_only"] is True

@@ -64,6 +64,9 @@ def run_pre_game_finalization_guard(
     res_files = {
         "under_visibility_audit_txt": runtime_root / "operator" / f"under_visibility_audit_{prediction_date}.txt",
         "under_visibility_audit_json": runtime_root / "diagnostics" / f"under_visibility_audit_{prediction_date}.json",
+        "under_visibility_board_csv": runtime_root / "operator" / f"under_visibility_board_{prediction_date}.csv",
+        "under_visibility_board_txt": runtime_root / "operator" / f"under_visibility_report_{prediction_date}.txt",
+        "under_visibility_board_json": runtime_root / "diagnostics" / f"under_visibility_board_{prediction_date}.json",
         "shadow_candidate_lane_csv": runtime_root / "operator" / f"shadow_candidate_lane_{prediction_date}.csv",
         "shadow_candidate_lane_report_txt": runtime_root / "operator" / f"shadow_candidate_lane_report_{prediction_date}.txt",
         "shadow_candidate_lane_json": runtime_root / "diagnostics" / f"shadow_candidate_lane_{prediction_date}.json",
@@ -220,6 +223,36 @@ def run_pre_game_finalization_guard(
                         errors.append(f"under_visibility_audit JSON contains flag implying betting promotion: {k}={v}")
         except Exception as e:
             errors.append(f"Failed to read/validate under_visibility_audit JSON: {e}")
+
+    # 5b. under_visibility_board JSON check (Phase 6B.1)
+    board_json_path = res_files["under_visibility_board_json"]
+    if board_json_path.exists():
+        try:
+            with open(board_json_path, "r", encoding="utf-8") as f:
+                board_data = json.load(f)
+
+            board_pred_date = _clean_str(board_data.get("prediction_date", ""))
+            if board_pred_date and board_pred_date != prediction_date:
+                errors.append(f"under_visibility_board JSON prediction_date mismatch: {board_pred_date} != {prediction_date}")
+
+            # Shadow safety flags
+            if not _is_true(board_data.get("shadow_only", True)):
+                errors.append("under_visibility_board JSON has shadow_only=False")
+            if _is_true(board_data.get("betting_logic_changed", False)):
+                errors.append("under_visibility_board JSON has betting_logic_changed=True")
+            if _is_true(board_data.get("real_money_promotion", False)):
+                real_money_promotion_detected = True
+                errors.append("under_visibility_board JSON has real_money_promotion=True")
+            if _is_true(board_data.get("elite_promotion", False)):
+                elite_promotion_detected = True
+                errors.append("under_visibility_board JSON has elite_promotion=True")
+            if _is_true(board_data.get("kelly_promotion", False)):
+                kelly_promotion_detected = True
+                errors.append("under_visibility_board JSON has kelly_promotion=True")
+            if _is_true(board_data.get("pick_history_written", False)):
+                errors.append("under_visibility_board JSON has pick_history_written=True")
+        except Exception as e:
+            errors.append(f"Failed to read/validate under_visibility_board JSON: {e}")
 
     # 6. shadow candidate performance JSON check
     perf_json_path = res_files["shadow_candidate_lane_performance_json"]

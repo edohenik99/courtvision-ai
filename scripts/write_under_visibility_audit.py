@@ -8,16 +8,20 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from courtvision.reporting.under_visibility_audit import write_under_visibility_audit_outputs
+from courtvision.reporting.under_visibility_audit import (
+    write_under_visibility_audit_outputs,
+    write_under_visibility_board_outputs,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Write the reporting-only UNDER Candidate Visibility Audit.")
+    parser = argparse.ArgumentParser(description="Write the reporting-only UNDER Candidate Visibility Audit and Board.")
     parser.add_argument("--prediction-date", required=True)
     parser.add_argument("--runtime-root", default="outputs/runtime")
     parser.add_argument("--history-root", default="data/history")
     args = parser.parse_args(argv)
 
+    # Existing audit outputs (unchanged)
     csv_path, text_path, json_path, payload = write_under_visibility_audit_outputs(
         prediction_date=args.prediction_date,
         runtime_root=args.runtime_root,
@@ -39,8 +43,26 @@ def main(argv: list[str] | None = None) -> int:
         f"shadow_under={funnel['shadow_candidate_lane']['under']} "
         f"betting_logic_changed={payload['betting_logic_changed']}"
     )
+
+    # Phase 6B.1: new UNDER visibility board outputs
+    board_csv, board_txt, board_json, board_payload = write_under_visibility_board_outputs(
+        prediction_date=args.prediction_date,
+        runtime_root=args.runtime_root,
+        history_root=args.history_root,
+    )
+    print(f"under_visibility_board_csv={board_csv}")
+    print(f"under_visibility_board_txt={board_txt}")
+    print(f"under_visibility_board_json={board_json}")
+    print(
+        f"under_visibility_board "
+        f"row_count={board_payload['board_row_count']} "
+        f"shadow_only={board_payload['shadow_only']} "
+        f"betting_logic_changed={board_payload['betting_logic_changed']} "
+        f"real_money_promotion={board_payload['real_money_promotion']}"
+    )
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

@@ -101,12 +101,31 @@ def _seed_optional_artifacts(runtime_root: Path, date: str = PREDICTION_DATE) ->
     })
 
 
+def _seed_under_visibility_board_artifacts(runtime_root: Path, date: str = PREDICTION_DATE) -> None:
+    """Seed Phase 6B.1 UNDER visibility board artifacts separately."""
+    operator = runtime_root / "operator"
+    diagnostics = runtime_root / "diagnostics"
+    _write_text(operator / f"under_visibility_board_{date}.csv", "player_name\n")
+    _write_text(operator / f"under_visibility_report_{date}.txt", "UNDER visibility board report")
+    _write_json(diagnostics / f"under_visibility_board_{date}.json", {
+        "prediction_date": date,
+        "shadow_only": True,
+        "betting_logic_changed": False,
+        "real_money_promotion": False,
+        "elite_promotion": False,
+        "kelly_promotion": False,
+        "pick_history_written": False,
+        "board_row_count": 0,
+    })
+
+
 def test_all_required_and_optional_present_and_clean_ready_to_lock(tmp_path: Path) -> None:
     runtime_root = tmp_path / "runtime"
     history_root = tmp_path / "history"
 
     _seed_required_artifacts(runtime_root)
     _seed_optional_artifacts(runtime_root)
+    _seed_under_visibility_board_artifacts(runtime_root)
 
     exit_code, payload, report = run_pre_game_finalization_guard(
         prediction_date=PREDICTION_DATE,
@@ -354,3 +373,142 @@ def test_json_diagnostics_contain_expected_fields(tmp_path: Path) -> None:
     assert "betting_safety" in payload
     assert "warnings" in payload
     assert "errors" in payload
+
+
+# ============================================================
+# Phase 6B.1 — UNDER Visibility Board Guard Tests
+# ============================================================
+
+def test_guard_accepts_under_visibility_board_when_clean(tmp_path: Path) -> None:
+    """Guard is READY_TO_LOCK when under_visibility_board JSON has clean safety flags."""
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+
+    _seed_required_artifacts(runtime_root)
+    _seed_optional_artifacts(runtime_root)
+
+    # Write a clean under_visibility_board JSON
+    board_payload = {
+        "prediction_date": PREDICTION_DATE,
+        "shadow_only": True,
+        "betting_logic_changed": False,
+        "real_money_promotion": False,
+        "elite_promotion": False,
+        "kelly_promotion": False,
+        "pick_history_written": False,
+        "board_row_count": 5,
+    }
+    _write_json(
+        runtime_root / "diagnostics" / f"under_visibility_board_{PREDICTION_DATE}.json",
+        board_payload,
+    )
+    _write_text(
+        runtime_root / "operator" / f"under_visibility_board_{PREDICTION_DATE}.csv",
+        "player_name\nAlice\n",
+    )
+    _write_text(
+        runtime_root / "operator" / f"under_visibility_report_{PREDICTION_DATE}.txt",
+        "UNDER board report text",
+    )
+
+    exit_code, payload, report = run_pre_game_finalization_guard(
+        prediction_date=PREDICTION_DATE,
+        runtime_root=runtime_root,
+        history_root=history_root,
+        strict=False,
+    )
+
+    assert exit_code == 0
+    assert payload["status"] == "READY_TO_LOCK"
+    assert len(payload["errors"]) == 0
+
+
+def test_guard_warns_when_under_visibility_board_missing(tmp_path: Path) -> None:
+    """Guard is READY_WITH_WARNINGS when UNDER visibility board artifacts are absent."""
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+
+    _seed_required_artifacts(runtime_root)
+    _seed_optional_artifacts(runtime_root)
+    # No under_visibility_board files written
+
+    exit_code, payload, report = run_pre_game_finalization_guard(
+        prediction_date=PREDICTION_DATE,
+        runtime_root=runtime_root,
+        history_root=history_root,
+        strict=False,
+    )
+
+    # Missing UNDER visibility board is a warning, never fatal
+    assert exit_code == 0
+    assert payload["status"] == "READY_WITH_WARNINGS"
+    assert len(payload["errors"]) == 0
+    assert len(payload["warnings"]) > 0
+
+
+def test_guard_blocks_when_under_visibility_board_json_has_real_money_promotion(tmp_path: Path) -> None:
+    """Guard is NOT_READY when board JSON has real_money_promotion=True."""
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+
+    _seed_required_artifacts(runtime_root)
+    _seed_optional_artifacts(runtime_root)
+
+    # Corrupt board JSON: real_money_promotion=True
+    board_payload = {
+        "prediction_date": PREDICTION_DATE,
+        "shadow_only": True,
+        "betting_logic_changed": False,
+        "real_money_promotion": True,  # violation!
+        "elite_promotion": False,
+        "kelly_promotion": False,
+        "pick_history_written": False,
+    }
+    _write_json(
+        runtime_root / "diagnostics" / f"under_visibility_board_{PREDICTION_DATE}.json",
+        board_payload,
+    )
+
+    exit_code, payload, report = run_pre_game_finalization_guard(
+        prediction_date=PREDICTION_DATE,
+        runtime_root=runtime_root,
+        history_root=history_root,
+        strict=False,
+    )
+
+    assert exit_code == 2
+    assert payload["status"] == "NOT_READY"
+    assert any("real_money_promotion" in err for err in payload["errors"])
+
+
+def test_guard_blocks_when_under_visibility_board_json_pick_history_written(tmp_path: Path) -> None:
+    """Guard is NOT_READY when board JSON has pick_history_written=True."""
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+
+    _seed_required_artifacts(runtime_root)
+    _seed_optional_artifacts(runtime_root)
+
+    board_payload = {
+        "prediction_date": PREDICTION_DATE,
+        "shadow_only": True,
+        "betting_logic_changed": False,
+        "real_money_promotion": False,
+        "pick_history_written": True,  # violation!
+    }
+    _write_json(
+        runtime_root / "diagnostics" / f"under_visibility_board_{PREDICTION_DATE}.json",
+        board_payload,
+    )
+
+    exit_code, payload, report = run_pre_game_finalization_guard(
+        prediction_date=PREDICTION_DATE,
+        runtime_root=runtime_root,
+        history_root=history_root,
+        strict=False,
+    )
+
+    assert exit_code == 2
+    assert payload["status"] == "NOT_READY"
+    assert any("pick_history_written" in err for err in payload["errors"])
+

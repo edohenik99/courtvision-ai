@@ -591,6 +591,31 @@ def _specs(prediction_date: str) -> tuple[ArtifactSpec, ...]:
             SEVERITY_SHADOW_ONLY,
             "Optional Phase 6A learning artifacts reporting; not an Elite, Kelly, final decision, or staking input.",
         ),
+        # Phase 6B.1 UNDER Visibility Board — shadow-only reporting; never fatal.
+        ArtifactSpec(
+            "under_visibility_board",
+            "under_visibility_board_csv",
+            "operator",
+            f"under_visibility_board_{prediction_date}.csv",
+            SEVERITY_SHADOW_ONLY,
+            "Phase 6B.1 shadow-only UNDER visibility board; not a betting, Elite, Kelly, final decision, or staking input.",
+        ),
+        ArtifactSpec(
+            "under_visibility_board",
+            "under_visibility_board_txt",
+            "operator",
+            f"under_visibility_report_{prediction_date}.txt",
+            SEVERITY_SHADOW_ONLY,
+            "Phase 6B.1 shadow-only UNDER visibility report; not a betting, Elite, Kelly, final decision, or staking input.",
+        ),
+        ArtifactSpec(
+            "under_visibility_board",
+            "under_visibility_board_json",
+            "diagnostics",
+            f"under_visibility_board_{prediction_date}.json",
+            SEVERITY_SHADOW_ONLY,
+            "Phase 6B.1 shadow-only UNDER visibility board diagnostics; not a betting, Elite, Kelly, final decision, or staking input.",
+        ),
     )
 
 

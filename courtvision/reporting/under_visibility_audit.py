@@ -11,7 +11,62 @@ from typing import Any
 import pandas as pd
 
 REPORT_FILE_PREFIX = "under_visibility_audit"
+BOARD_FILE_PREFIX = "under_visibility_board"
+BOARD_REPORT_FILE_PREFIX = "under_visibility_report"
 REPORT_VERSION = "1.0"
+
+# ── UNDER visibility lanes ──────────────────────────────────────────────────
+UNDER_REVIEW_CANDIDATE_SHADOW_ONLY = "UNDER_REVIEW_CANDIDATE_SHADOW_ONLY"
+UNDER_WATCHLIST_SHADOW_ONLY = "UNDER_WATCHLIST_SHADOW_ONLY"
+UNDER_INSUFFICIENT_SAMPLE = "UNDER_INSUFFICIENT_SAMPLE"
+UNDER_DO_NOT_PROMOTE = "UNDER_DO_NOT_PROMOTE"
+
+_UNDER_LANES = (
+    UNDER_REVIEW_CANDIDATE_SHADOW_ONLY,
+    UNDER_WATCHLIST_SHADOW_ONLY,
+    UNDER_INSUFFICIENT_SAMPLE,
+    UNDER_DO_NOT_PROMOTE,
+)
+
+# Minimum graded-row count for sample to be considered "adequate"
+_ADEQUATE_SAMPLE_MIN = 10
+# Minimum absolute edge to qualify as REVIEW_CANDIDATE
+_REVIEW_CANDIDATE_MIN_ABS_EDGE = 0.5
+
+_BOARD_SHADOW_DISCLAIMERS = (
+    "This is shadow-only.",
+    "This is not an Elite board.",
+    "This is not a Kelly input.",
+    "This is not a betting recommendation.",
+    "No real-money promotion is allowed.",
+)
+
+BOARD_COLUMNS: tuple[str, ...] = (
+    "prediction_date",
+    "player_name",
+    "team",
+    "opponent",
+    "market_type",
+    "selection",
+    "line",
+    "odds",
+    "projection",
+    "edge",
+    "abs_edge",
+    "confidence",
+    "quality_score",
+    "caution_bucket",
+    "context_alignment",
+    "same_opponent_warning",
+    "identity_conflict_flag",
+    "historical_bucket_n",
+    "historical_hit_rate",
+    "historical_roi",
+    "sample_status",
+    "under_visibility_lane",
+    "recommended_action",
+    "safety_notes",
+)
 
 
 def _safe_text(value: Any, default: str = "") -> str:
@@ -629,3 +684,553 @@ def write_under_visibility_audit_outputs(
     text_path.write_text(text, encoding="utf-8")
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return csv_path, text_path, json_path, payload
+
+
+# ── Phase 6B.1: New UNDER Visibility Board ──────────────────────────────────
+
+def _sample_status(n: int) -> str:
+    """Return a human-readable sample status label based on graded-row count."""
+    if n >= 100:
+        return "adequate_100+"
+    if n >= 50:
+        return "moderate_50_99"
+    if n >= _ADEQUATE_SAMPLE_MIN:
+        return "weak_10_49"
+    return "insufficient_lt_10"
+
+
+def _classify_under_lane(
+    *,
+    same_opponent_warning: bool,
+    identity_conflict: bool,
+    caution: str,
+    context_aligned: bool,
+    hist_n: int,
+    abs_edge: float,
+) -> str:
+    """
+    Classify an UNDER candidate into one of four shadow-only visibility lanes.
+
+    Priority order (highest to lowest):
+      1. UNDER_DO_NOT_PROMOTE  — hard blocks: same-opponent, identity conflict, high caution
+      2. UNDER_INSUFFICIENT_SAMPLE — inadequate history
+      3. UNDER_REVIEW_CANDIDATE_SHADOW_ONLY — context-aligned, adequate sample, meaningful edge
+      4. UNDER_WATCHLIST_SHADOW_ONLY — everything else
+    """
+    if same_opponent_warning or identity_conflict or caution.lower() == "high":
+        return UNDER_DO_NOT_PROMOTE
+    if hist_n < _ADEQUATE_SAMPLE_MIN:
+        return UNDER_INSUFFICIENT_SAMPLE
+    if context_aligned and abs_edge >= _REVIEW_CANDIDATE_MIN_ABS_EDGE:
+        return UNDER_REVIEW_CANDIDATE_SHADOW_ONLY
+    return UNDER_WATCHLIST_SHADOW_ONLY
+
+
+def _rank_under_row(
+    *,
+    lane: str,
+    context_aligned: bool,
+    caution: str,
+    same_opponent_warning: bool,
+    identity_conflict: bool,
+    abs_edge: float,
+    confidence: float,
+    quality_score: float,
+    hist_hit_rate: float | None,
+    hist_roi: float | None,
+    hist_n: int,
+) -> float:
+    """
+    Compute a descending rank score for UNDER board ordering.
+
+    Higher = better (should appear earlier in board).
+    """
+    # Penalize hard blocks heavily
+    if same_opponent_warning or identity_conflict:
+        return -1000.0
+    # Lane priority base
+    lane_base = {
+        UNDER_REVIEW_CANDIDATE_SHADOW_ONLY: 500.0,
+        UNDER_WATCHLIST_SHADOW_ONLY: 300.0,
+        UNDER_INSUFFICIENT_SAMPLE: 100.0,
+        UNDER_DO_NOT_PROMOTE: -500.0,
+    }.get(lane, 0.0)
+    # Caution penalty
+    caution_penalty = 0.0
+    if caution.lower() == "medium":
+        caution_penalty = -20.0
+    # Alignment bonus
+    alignment_bonus = 40.0 if context_aligned else 0.0
+    # Sample bonus
+    sample_bonus = min(hist_n, 200) * 0.2
+    # Metric bonuses
+    edge_score = abs_edge * 10.0
+    conf_score = (confidence or 0.0) * 50.0
+    qual_score = (quality_score or 0.0) * 0.3
+    roi_score = ((hist_roi or 0.0) * 30.0) if hist_roi is not None else 0.0
+    hr_score = ((hist_hit_rate or 0.0) * 20.0) if hist_hit_rate is not None else 0.0
+    return round(
+        lane_base + alignment_bonus + sample_bonus + edge_score
+        + conf_score + qual_score + roi_score + hr_score + caution_penalty,
+        4,
+    )
+
+
+def build_under_visibility_board(
+    *,
+    prediction_date: str,
+    runtime_root: str | Path = "outputs/runtime",
+    history_root: str | Path = "data/history",
+    generated_at_utc: str | None = None,
+) -> tuple[dict[str, Any], pd.DataFrame]:
+    """
+    Build the Phase 6B.1 UNDER Visibility Board.
+
+    Sources UNDER candidates from:
+    - full_market_board_{date}.csv  (accepted + full selection info)
+    - shadow_candidate_lane_{date}.csv  (pre-classified shadow rows for UNDER)
+
+    Only UNDER-side rows are included. All outputs are shadow-only.
+    No betting logic, Kelly, Elite, final_decision, or pick_history is touched.
+    """
+    runtime_root_path = Path(runtime_root)
+    history_root_path = Path(history_root)
+
+    operator_dir = runtime_root_path / "operator"
+    diagnostics_dir = runtime_root_path / "diagnostics"
+
+    # ── Load source artifacts ──────────────────────────────────────────────
+    full_market_path = operator_dir / f"full_market_board_{prediction_date}.csv"
+    shadow_lane_path = operator_dir / f"shadow_candidate_lane_{prediction_date}.csv"
+    board_diag_path = diagnostics_dir / f"board_diagnostics_{prediction_date}.json"
+    shadow_history_path = history_root_path / "market_shadow_history.csv"
+
+    full_market_df = _read_csv(full_market_path)
+    shadow_lane_df = _read_csv(shadow_lane_path)
+    board_diag = _read_json(board_diag_path)
+    shadow_history_df = _read_csv(shadow_history_path)
+
+    # Identity conflict count from diagnostics (global for the slate)
+    identity_conflict_total = (
+        board_diag.get("identity_quarantine", {}).get("total_rows_dropped", 0)
+        + board_diag.get("source_identity_conflict", {}).get("source_identity_conflict_count", 0)
+    )
+    slate_has_identity_conflicts = identity_conflict_total > 0
+
+    # ── Aggregate historical stats per (selection) from market shadow history ──
+    hist_stats: dict[str, dict[str, Any]] = {}
+    if not shadow_history_df.empty:
+        for sel, grp in shadow_history_df.groupby("selection"):
+            sel_str = str(sel).lower()
+            hits = int((grp["result_status"] == "hit").sum())
+            misses = int((grp["result_status"] == "miss").sum())
+            pushes = int((grp["result_status"] == "push").sum())
+            total = hits + misses + pushes
+            denom = hits + misses
+            hit_rate = hits / denom if denom > 0 else None
+            roi_vals = pd.to_numeric(grp.get("shadow_roi", pd.Series(dtype=float)), errors="coerce").dropna()
+            avg_roi = float(roi_vals.mean()) if len(roi_vals) > 0 else None
+            hist_stats[sel_str] = {
+                "n": total,
+                "hit_rate": hit_rate,
+                "roi": avg_roi,
+            }
+
+    # ── Collect UNDER candidates from full_market_board ───────────────────
+    rows: list[dict[str, Any]] = []
+
+    if not full_market_df.empty:
+        for _, row in full_market_df.iterrows():
+            sel = _safe_text(row.get("selection")).lower()
+            if sel != "under":
+                continue
+            player_name = _safe_text(row.get("player_name") or row.get("player") or row.get("entity_name"))
+            team = _safe_text(row.get("team_abbr") or row.get("team"))
+            opponent = _safe_text(row.get("opponent"))
+            market_type = _safe_text(row.get("market_type"))
+            line = _safe_float(row.get("line") or row.get("sportsbook_line"))
+            odds = _safe_float(row.get("odds") or row.get("entry_odds"))
+            projection = _safe_float(row.get("model_projection") or row.get("projection"))
+            edge = _safe_float(row.get("edge") or row.get("side_edge"))
+            abs_edge = abs(edge) if edge is not None else 0.0
+            confidence = _safe_float(row.get("confidence")) or 0.0
+            quality_score = _safe_float(row.get("quality_score")) or 0.0
+            caution = _safe_text(row.get("context_caution_level") or row.get("caution_bucket"), default="unknown").lower()
+            alignment_raw = _safe_text(
+                row.get("context_pick_alignment") or row.get("context_alignment") or row.get("context_edge_label"),
+                default="unknown",
+            ).lower()
+            context_aligned = alignment_raw in {"aligned", "supports_under", "under_aligned"}
+            same_opp = str(row.get("same_opponent_under_warning", "")).lower() in {"true", "1", "yes"}
+
+            # Use global slate identity conflict flag (row-level not always available)
+            identity_conflict = slate_has_identity_conflicts
+
+            # Historical stats: use UNDER selection stats from history
+            h = hist_stats.get("under", {})
+            hist_n = int(h.get("n", 0))
+            hist_hit_rate = h.get("hit_rate")
+            hist_roi = h.get("roi")
+
+            lane = _classify_under_lane(
+                same_opponent_warning=same_opp,
+                identity_conflict=identity_conflict,
+                caution=caution,
+                context_aligned=context_aligned,
+                hist_n=hist_n,
+                abs_edge=abs_edge,
+            )
+            rank_score = _rank_under_row(
+                lane=lane,
+                context_aligned=context_aligned,
+                caution=caution,
+                same_opponent_warning=same_opp,
+                identity_conflict=identity_conflict,
+                abs_edge=abs_edge,
+                confidence=confidence,
+                quality_score=quality_score,
+                hist_hit_rate=hist_hit_rate,
+                hist_roi=hist_roi,
+                hist_n=hist_n,
+            )
+            rows.append({
+                "_rank_score": rank_score,
+                "prediction_date": prediction_date,
+                "player_name": player_name,
+                "team": team,
+                "opponent": opponent,
+                "market_type": market_type,
+                "selection": "under",
+                "line": line,
+                "odds": odds,
+                "projection": projection,
+                "edge": edge,
+                "abs_edge": abs_edge,
+                "confidence": confidence,
+                "quality_score": quality_score,
+                "caution_bucket": caution,
+                "context_alignment": alignment_raw,
+                "same_opponent_warning": same_opp,
+                "identity_conflict_flag": identity_conflict,
+                "historical_bucket_n": hist_n,
+                "historical_hit_rate": hist_hit_rate,
+                "historical_roi": hist_roi,
+                "sample_status": _sample_status(hist_n),
+                "under_visibility_lane": lane,
+                "recommended_action": "shadow_tracking_only",
+                "safety_notes": " | ".join(_BOARD_SHADOW_DISCLAIMERS),
+            })
+
+    # ── Supplement with UNDER rows from shadow_candidate_lane that aren't in full_market_board ──
+    # (e.g. UNDER candidates that were classified in the shadow lane from near_elite / incubator)
+    if not shadow_lane_df.empty:
+        # Build a set of (player_name, market_type, line) keys already in rows
+        existing_keys: set[tuple[str, str, str]] = set()
+        for r in rows:
+            pn = str(r.get("player_name", "")).lower().strip()
+            mt = str(r.get("market_type", "")).lower().strip()
+            ln = str(r.get("line", "")).strip()
+            existing_keys.add((pn, mt, ln))
+
+        for _, row in shadow_lane_df.iterrows():
+            sel = _safe_text(row.get("selection")).lower()
+            if sel != "under":
+                continue
+            player_name = _safe_text(row.get("player_name") or row.get("player") or row.get("entity_name"))
+            market_type = _safe_text(row.get("market_type"))
+            line = _safe_float(row.get("line") or row.get("sportsbook_line"))
+            line_str = str(line) if line is not None else ""
+            key = (player_name.lower().strip(), market_type.lower().strip(), line_str)
+            if key in existing_keys:
+                continue  # already present from full_market_board
+            existing_keys.add(key)
+
+            team = _safe_text(row.get("team_abbr") or row.get("team"))
+            opponent = _safe_text(row.get("opponent"))
+            odds = _safe_float(row.get("odds") or row.get("entry_odds"))
+            projection = _safe_float(row.get("model_projection") or row.get("projection"))
+            edge = _safe_float(row.get("edge") or row.get("side_edge"))
+            abs_edge = abs(edge) if edge is not None else 0.0
+            confidence = _safe_float(row.get("confidence")) or 0.0
+            quality_score = _safe_float(row.get("quality_score")) or 0.0
+            caution = _safe_text(row.get("context_caution_level") or row.get("caution_bucket"), default="unknown").lower()
+            alignment_raw = _safe_text(
+                row.get("context_pick_alignment") or row.get("context_alignment") or row.get("context_edge_label"),
+                default="unknown",
+            ).lower()
+            context_aligned = alignment_raw in {"aligned", "supports_under", "under_aligned"}
+            same_opp = str(row.get("same_opponent_under_warning", "")).lower() in {"true", "1", "yes"}
+            identity_conflict = slate_has_identity_conflicts
+
+            h = hist_stats.get("under", {})
+            hist_n = int(h.get("n", 0))
+            hist_hit_rate = h.get("hit_rate")
+            hist_roi = h.get("roi")
+            # Shadow lane rows may have their own historical stats
+            row_hist_n = _safe_float(row.get("historical_graded_rows"))
+            if row_hist_n is not None:
+                hist_n = int(row_hist_n)
+            row_hist_hr = _safe_float(row.get("historical_hit_rate"))
+            if row_hist_hr is not None:
+                hist_hit_rate = row_hist_hr
+            row_hist_roi = _safe_float(row.get("historical_roi"))
+            if row_hist_roi is not None:
+                hist_roi = row_hist_roi
+
+            lane = _classify_under_lane(
+                same_opponent_warning=same_opp,
+                identity_conflict=identity_conflict,
+                caution=caution,
+                context_aligned=context_aligned,
+                hist_n=hist_n,
+                abs_edge=abs_edge,
+            )
+            rank_score = _rank_under_row(
+                lane=lane,
+                context_aligned=context_aligned,
+                caution=caution,
+                same_opponent_warning=same_opp,
+                identity_conflict=identity_conflict,
+                abs_edge=abs_edge,
+                confidence=confidence,
+                quality_score=quality_score,
+                hist_hit_rate=hist_hit_rate,
+                hist_roi=hist_roi,
+                hist_n=hist_n,
+            )
+            rows.append({
+                "_rank_score": rank_score,
+                "prediction_date": prediction_date,
+                "player_name": player_name,
+                "team": team,
+                "opponent": opponent,
+                "market_type": market_type,
+                "selection": "under",
+                "line": line,
+                "odds": odds,
+                "projection": projection,
+                "edge": edge,
+                "abs_edge": abs_edge,
+                "confidence": confidence,
+                "quality_score": quality_score,
+                "caution_bucket": caution,
+                "context_alignment": alignment_raw,
+                "same_opponent_warning": same_opp,
+                "identity_conflict_flag": identity_conflict,
+                "historical_bucket_n": hist_n,
+                "historical_hit_rate": hist_hit_rate,
+                "historical_roi": hist_roi,
+                "sample_status": _sample_status(hist_n),
+                "under_visibility_lane": lane,
+                "recommended_action": "shadow_tracking_only",
+                "safety_notes": " | ".join(_BOARD_SHADOW_DISCLAIMERS),
+            })
+
+    # ── Sort by rank score descending ────────────────────────────────────
+    rows.sort(key=lambda r: -r["_rank_score"])
+    for r in rows:
+        del r["_rank_score"]
+
+    # ── Build DataFrame ───────────────────────────────────────────────────
+    if rows:
+        board_df = pd.DataFrame(rows).reindex(columns=list(BOARD_COLUMNS))
+    else:
+        board_df = pd.DataFrame(columns=list(BOARD_COLUMNS))
+
+    # ── Lane counts ───────────────────────────────────────────────────────
+    from collections import Counter as _Counter
+    lane_counts: dict[str, int] = dict(_Counter(r.get("under_visibility_lane", "") for r in rows))
+    for lane in _UNDER_LANES:
+        lane_counts.setdefault(lane, 0)
+
+    payload: dict[str, Any] = {
+        "report_name": BOARD_FILE_PREFIX,
+        "report_version": REPORT_VERSION,
+        "prediction_date": prediction_date,
+        "generated_at_utc": generated_at_utc or datetime.now(timezone.utc).isoformat(),
+        "shadow_only": True,
+        "betting_logic_changed": False,
+        "real_money_promotion": False,
+        "elite_promotion": False,
+        "kelly_promotion": False,
+        "final_decision_unchanged": True,
+        "pick_history_written": False,
+        "board_row_count": len(rows),
+        "lane_counts": lane_counts,
+        "identity_conflict_slate_total": identity_conflict_total,
+        "disclaimers": list(_BOARD_SHADOW_DISCLAIMERS),
+        "safety_declarations": [
+            "This report does not create bets.",
+            "This report does not change final_decision.",
+            "This report does not write to pick_history.csv.",
+            "This report does not promote UNDERs to Elite.",
+            "This report does not alter Elite/Kelly/staking logic.",
+            "All rows are shadow-only research candidates.",
+            "Lane A (real-money eligible) is unchanged by this board.",
+        ],
+    }
+    return payload, board_df
+
+
+def render_under_visibility_report_text(
+    payload: dict[str, Any],
+    board_df: pd.DataFrame,
+    board_csv_path: Path,
+) -> str:
+    """Render a clear operator-facing UNDER visibility report (shadow-only)."""
+    prediction_date = payload["prediction_date"]
+    lane_counts = payload.get("lane_counts", {})
+
+    lines = [
+        f"CourtVision UNDER Visibility Board — {prediction_date}",
+        "=" * 78,
+        *payload.get("disclaimers", list(_BOARD_SHADOW_DISCLAIMERS)),
+        f"CSV board: {board_csv_path}",
+        "",
+        "OPERATOR NOTICE",
+        "-" * 78,
+        "This is NOT an Elite board, NOT a Kelly input, NOT a betting recommendation.",
+        "No real-money promotion is allowed from this board.",
+        "Lane A remains empty unless Elite/Kelly rules already qualify candidates",
+        "through existing production logic.",
+        "",
+        "Lane Summary",
+        "-" * 78,
+        f"  Total UNDER candidates: {payload['board_row_count']}",
+        f"  UNDER_REVIEW_CANDIDATE_SHADOW_ONLY : {lane_counts.get(UNDER_REVIEW_CANDIDATE_SHADOW_ONLY, 0)}",
+        f"  UNDER_WATCHLIST_SHADOW_ONLY        : {lane_counts.get(UNDER_WATCHLIST_SHADOW_ONLY, 0)}",
+        f"  UNDER_INSUFFICIENT_SAMPLE          : {lane_counts.get(UNDER_INSUFFICIENT_SAMPLE, 0)}",
+        f"  UNDER_DO_NOT_PROMOTE               : {lane_counts.get(UNDER_DO_NOT_PROMOTE, 0)}",
+        "",
+        "UNDER_REVIEW_CANDIDATE_SHADOW_ONLY (shadow-tracking priority)",
+        "-" * 78,
+    ]
+
+    review_rows = board_df[board_df["under_visibility_lane"] == UNDER_REVIEW_CANDIDATE_SHADOW_ONLY] if not board_df.empty else pd.DataFrame()
+    if not review_rows.empty:
+        for _, row in review_rows.iterrows():
+            hr = row.get("historical_hit_rate")
+            roi = row.get("historical_roi")
+            hr_str = f"{hr * 100:.1f}%" if hr is not None else "n/a"
+            roi_str = f"{roi * 100:.1f}%" if roi is not None else "n/a"
+            lines.append(
+                f"  {row.get('player_name')} | {row.get('market_type')} under {row.get('line')}"
+                f" | edge={row.get('edge')} abs_edge={row.get('abs_edge')}"
+                f" conf={row.get('confidence')} qual={row.get('quality_score')}"
+                f" | hist_n={row.get('historical_bucket_n')} hit={hr_str} roi={roi_str}"
+            )
+    else:
+        lines.append("  (none)")
+
+    lines += [
+        "",
+        "UNDER_WATCHLIST_SHADOW_ONLY",
+        "-" * 78,
+    ]
+    watchlist_rows = board_df[board_df["under_visibility_lane"] == UNDER_WATCHLIST_SHADOW_ONLY] if not board_df.empty else pd.DataFrame()
+    if not watchlist_rows.empty:
+        for _, row in watchlist_rows.iterrows():
+            lines.append(
+                f"  {row.get('player_name')} | {row.get('market_type')} under {row.get('line')}"
+                f" | abs_edge={row.get('abs_edge')} caution={row.get('caution_bucket')}"
+                f" context_aligned={row.get('context_alignment')}"
+            )
+    else:
+        lines.append("  (none)")
+
+    lines += [
+        "",
+        "UNDER_INSUFFICIENT_SAMPLE",
+        "-" * 78,
+    ]
+    insuf_rows = board_df[board_df["under_visibility_lane"] == UNDER_INSUFFICIENT_SAMPLE] if not board_df.empty else pd.DataFrame()
+    if not insuf_rows.empty:
+        for _, row in insuf_rows.iterrows():
+            lines.append(
+                f"  {row.get('player_name')} | {row.get('market_type')} under {row.get('line')}"
+                f" | hist_n={row.get('historical_bucket_n')} sample_status={row.get('sample_status')}"
+            )
+    else:
+        lines.append("  (none)")
+
+    lines += [
+        "",
+        "UNDER_DO_NOT_PROMOTE (blocked)",
+        "-" * 78,
+    ]
+    dnp_rows = board_df[board_df["under_visibility_lane"] == UNDER_DO_NOT_PROMOTE] if not board_df.empty else pd.DataFrame()
+    if not dnp_rows.empty:
+        for _, row in dnp_rows.iterrows():
+            flags = []
+            if row.get("same_opponent_warning"):
+                flags.append("same_opponent_warning")
+            if row.get("identity_conflict_flag"):
+                flags.append("identity_conflict")
+            if str(row.get("caution_bucket", "")).lower() == "high":
+                flags.append("high_caution")
+            lines.append(
+                f"  {row.get('player_name')} | {row.get('market_type')} under {row.get('line')}"
+                f" | flags={','.join(flags) or 'none'}"
+            )
+    else:
+        lines.append("  (none)")
+
+    lines += [
+        "",
+        "Safety Declarations",
+        "-" * 78,
+    ]
+    for dec in payload.get("safety_declarations", []):
+        lines.append(f"  - {dec}")
+
+    return "\n".join(lines) + "\n"
+
+
+def board_paths_for_date(
+    *,
+    prediction_date: str,
+    runtime_root: str | Path = "outputs/runtime",
+) -> tuple[Path, Path, Path]:
+    """Return (csv_path, txt_path, json_path) for the UNDER visibility board."""
+    runtime_root_path = Path(runtime_root)
+    return (
+        runtime_root_path / "operator" / f"{BOARD_FILE_PREFIX}_{prediction_date}.csv",
+        runtime_root_path / "operator" / f"{BOARD_REPORT_FILE_PREFIX}_{prediction_date}.txt",
+        runtime_root_path / "diagnostics" / f"{BOARD_FILE_PREFIX}_{prediction_date}.json",
+    )
+
+
+def write_under_visibility_board_outputs(
+    *,
+    prediction_date: str,
+    runtime_root: str | Path = "outputs/runtime",
+    history_root: str | Path = "data/history",
+) -> tuple[Path, Path, Path, dict[str, Any]]:
+    """
+    Write the Phase 6B.1 UNDER visibility board artifacts.
+
+    Outputs (shadow-only, never fatal if missing):
+      operator/under_visibility_board_{date}.csv
+      operator/under_visibility_report_{date}.txt
+      diagnostics/under_visibility_board_{date}.json
+    """
+    csv_path, txt_path, json_path = board_paths_for_date(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+    )
+    payload, board_df = build_under_visibility_board(
+        prediction_date=prediction_date,
+        runtime_root=runtime_root,
+        history_root=history_root,
+    )
+    text = render_under_visibility_report_text(payload, board_df, csv_path)
+
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    txt_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+
+    board_df.to_csv(csv_path, index=False)
+    txt_path.write_text(text, encoding="utf-8")
+    json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return csv_path, txt_path, json_path, payload
+

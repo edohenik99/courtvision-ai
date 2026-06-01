@@ -472,3 +472,79 @@ def test_manifest_learning_artifacts_are_not_betting_required(tmp_path: Path) ->
     # All 8 are shadow_only — fatal_missing must remain 0
     assert manifest["missing_by_severity"]["fatal"] == 0
 
+
+# ============================================================
+# Phase 6B.1 — UNDER Visibility Board Artifact Specs
+# ============================================================
+
+def test_under_visibility_board_artifacts_are_shadow_only(tmp_path: Path) -> None:
+    """All three UNDER visibility board artifacts are SEVERITY_SHADOW_ONLY."""
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+    _write_core_boards(runtime_root)
+
+    manifest = build_artifact_manifest(
+        prediction_date=PREDICTION_DATE,
+        runtime_root=runtime_root,
+    )
+
+    board_names = [
+        "under_visibility_board_csv",
+        "under_visibility_board_txt",
+        "under_visibility_board_json",
+    ]
+    for name in board_names:
+        item = _artifact(manifest, name)
+        assert item["severity"] == SEVERITY_SHADOW_ONLY, (
+            f"{name} must be SEVERITY_SHADOW_ONLY, got {item['severity']}"
+        )
+        assert item["exists"] is False  # not written in this test
+        assert item["category"] == "under_visibility_board", (
+            f"{name} must be in category 'under_visibility_board', got {item['category']}"
+        )
+
+    # UNDER visibility board being missing is never fatal
+    assert manifest["missing_by_severity"]["fatal"] == 0
+
+
+def test_under_visibility_board_artifacts_not_fatal_when_missing(tmp_path: Path) -> None:
+    """Missing UNDER visibility board artifacts never trigger fatal_missing."""
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+    _write_core_boards(runtime_root)
+
+    # Explicitly do NOT write any UNDER visibility board files
+    manifest = build_artifact_manifest(
+        prediction_date=PREDICTION_DATE,
+        runtime_root=runtime_root,
+    )
+
+    assert manifest["missing_by_severity"]["fatal"] == 0
+    # The three UNDER board artifacts should show as missing but shadow_only
+    missing_shadow = [
+        item["name"] for item in manifest["artifacts"]
+        if item["category"] == "under_visibility_board" and not item["exists"]
+    ]
+    assert "under_visibility_board_csv" in missing_shadow
+    assert "under_visibility_board_txt" in missing_shadow
+    assert "under_visibility_board_json" in missing_shadow
+
+
+def test_under_visibility_board_artifacts_registered_with_correct_paths(tmp_path: Path) -> None:
+    """The registered artifact filenames contain the correct date-stamped names."""
+    runtime_root = tmp_path / "runtime"
+    history_root = tmp_path / "history"
+    _write_core_boards(runtime_root)
+
+    manifest = build_artifact_manifest(
+        prediction_date=PREDICTION_DATE,
+        runtime_root=runtime_root,
+    )
+
+    csv_item = _artifact(manifest, "under_visibility_board_csv")
+    txt_item = _artifact(manifest, "under_visibility_board_txt")
+    json_item = _artifact(manifest, "under_visibility_board_json")
+
+    assert csv_item["expected_path"].endswith(f"under_visibility_board_{PREDICTION_DATE}.csv")
+    assert txt_item["expected_path"].endswith(f"under_visibility_report_{PREDICTION_DATE}.txt")
+    assert json_item["expected_path"].endswith(f"under_visibility_board_{PREDICTION_DATE}.json")

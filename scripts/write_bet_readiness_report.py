@@ -98,6 +98,8 @@ def run_bet_readiness_report(
         "shadow_candidate_lane": operator_dir / f"shadow_candidate_lane_{prediction_date}.csv",
         "kelly_stakes": operator_dir / f"kelly_stakes_{prediction_date}.csv",
         "quality_summary": operator_dir / f"quality_summary_{prediction_date}.json",
+        # Phase 6B.1 — UNDER visibility board (shadow-only; never affects betability)
+        "under_visibility_board": diagnostics_dir / f"under_visibility_board_{prediction_date}.json",
     }
 
     # 2. Check required files existence
@@ -119,6 +121,8 @@ def run_bet_readiness_report(
     guard_data = _read_json(required_paths["pre_game_finalization_guard"])
     board_diag_data = _read_json(required_paths["board_diagnostics"])
     quality_data = _read_json(optional_paths["quality_summary"])
+    # Phase 6B.1 — UNDER visibility board (shadow-only; does NOT affect betability)
+    under_vis_board_data = _read_json(optional_paths["under_visibility_board"])
 
     # 4. Check date integrity
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", prediction_date):
@@ -547,7 +551,12 @@ def run_bet_readiness_report(
         "This report does not write to pick_history.csv.",
         "This report does not promote UNDERs.",
         "This report does not alter Elite/Kelly logic.",
+        "UNDER visibility board is shadow-only; it does not increase betability.",
     ]
+
+    # Phase 6B.1 — UNDER visibility board context (research-only, never affects betability)
+    under_vis_board_row_count = int(under_vis_board_data.get("board_row_count", 0)) if under_vis_board_data else 0
+    under_vis_board_present = bool(under_vis_board_data)
 
     # Build TXT report content
     txt_report = f"""CourtVision Bet Readiness Report - {prediction_date}
@@ -617,6 +626,23 @@ Strict Safety Declarations:
     for dec in safety_declarations:
         txt_report += f"- {dec}\n"
 
+    # Phase 6B.1 — UNDER Visibility Board context (shadow-only; does not change betability)
+    txt_report += """
+UNDER Visibility Board (Shadow-Only Research):
+--------------------------------------------
+"""
+    if under_vis_board_present:
+        lane_counts = under_vis_board_data.get("lane_counts", {})
+        txt_report += f"- UNDER board present: {under_vis_board_row_count} candidate(s)\n"
+        txt_report += f"  shadow_only: {under_vis_board_data.get('shadow_only', True)}\n"
+        txt_report += f"  betting_logic_changed: {under_vis_board_data.get('betting_logic_changed', False)}\n"
+        txt_report += f"  real_money_promotion: {under_vis_board_data.get('real_money_promotion', False)}\n"
+        for lane_key, lane_n in lane_counts.items():
+            txt_report += f"  {lane_key}: {lane_n}\n"
+    else:
+        txt_report += "- UNDER visibility board not present (shadow-only research context only).\n"
+    txt_report += "- UNDER visibility CANNOT increase Lane A or betability score.\n"
+
     unknown_display_name_examples = list(dict.fromkeys(unknown_players_list))
     unknown_display_name_count = len(unknown_display_name_examples)
 
@@ -644,6 +670,14 @@ Strict Safety Declarations:
             "identity_conflicts": identity_conflicts,
             "is_fresh": is_fresh,
             "is_guard_ready": is_guard_ready,
+        },
+        # Phase 6B.1 — UNDER visibility board context (shadow-only; does not change betability)
+        "under_visibility_board_context": {
+            "present": under_vis_board_present,
+            "board_row_count": under_vis_board_row_count,
+            "shadow_only": True,
+            "affects_betability": False,
+            "lane_counts": under_vis_board_data.get("lane_counts", {}) if under_vis_board_data else {},
         },
     }
 
