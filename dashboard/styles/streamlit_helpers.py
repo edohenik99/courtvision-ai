@@ -54,7 +54,11 @@ def inject_theme() -> None:
         )
         return
     css = STYLE_END_TAG_RE.sub(r"<\/style", css)
-    st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
+    style_block = f"<style>{css}</style>"
+    if hasattr(st, "html"):
+        st.html(style_block)
+    else:
+        st.markdown(style_block, unsafe_allow_html=True)
 
 
 # ----------------------------------------------------------------- brand block

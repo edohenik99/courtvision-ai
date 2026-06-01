@@ -19,7 +19,6 @@ Key UI changes vs. the previous build:
   shell is browsable before any real run.
 * View-only demo mode (``COURTVISION_DEMO_MODE=1``) hides mutation controls
   while still loading existing runtime artifacts.
-* Dataframe Config applied for native sorting, and professional visual cues added.
 """
 
 from __future__ import annotations
@@ -165,20 +164,21 @@ RUNTIME_UNDER_VISIBILITY_FILES = {
 # Page config + theme
 # =====================================================================
 
-st.set_page_config(
-    page_title="CourtVision",
-    page_icon="🏀",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-if _THEME_AVAILABLE:
-    inject_theme()
-else:
-    st.warning(
-        "CourtVision theme helpers unavailable — falling back to default "
-        f"Streamlit styling. ({_THEME_IMPORT_ERROR})"
+def configure_page() -> None:
+    st.set_page_config(
+        page_title="CourtVision",
+        page_icon="🏀",
+        layout="wide",
+        initial_sidebar_state="expanded",
     )
+
+    if _THEME_AVAILABLE:
+        inject_theme()
+    else:
+        st.warning(
+            "CourtVision theme helpers unavailable — falling back to default "
+            f"Streamlit styling. ({_THEME_IMPORT_ERROR})"
+        )
 
 
 # =====================================================================
@@ -772,28 +772,37 @@ REVIEW_DISPLAY_COLUMN_ORDER = [
 ]
 
 
-def courtvision_column_config() -> dict[str, Any]:
-    """Typed Streamlit columns for sortable, consistently formatted boards."""
-    return {
-        "Line": st.column_config.NumberColumn("Line", format="%.1f"),
-        "Projection": st.column_config.NumberColumn("Projection", format="%.2f"),
-        "Recent Avg": st.column_config.NumberColumn("Recent Avg", format="%.1f"),
-        "Season Avg": st.column_config.NumberColumn("Season Avg", format="%.1f"),
-        "Edge": st.column_config.NumberColumn("Edge", format="%+.2f"),
-        "Edge Abs": st.column_config.NumberColumn("Edge Abs", format="%.2f"),
-        "Edge %": st.column_config.NumberColumn("Edge %", format="%.1f%%"),
-        "Confidence": st.column_config.NumberColumn("Confidence", format="%.1f%%"),
-        "Quality": st.column_config.NumberColumn("Quality", format="%.1f"),
-        "Odds": st.column_config.NumberColumn("Odds", format="%+d"),
-        "Hit Rate": st.column_config.NumberColumn("Hit Rate", format="%.1f%%"),
-        "Projected Minutes": st.column_config.NumberColumn("Projected Minutes", format="%.1f"),
-        "Minutes Basis": st.column_config.NumberColumn("Minutes Basis", format="%.1f"),
-    }
-
-
 # =====================================================================
 # DataFrame styling helpers (pure presentation)
 # =====================================================================
+
+def _format_number_for_display(value: Any, decimals: int = 1) -> str:
+    if value is None or str(value).strip() == "":
+        return ""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if pd.isna(number):
+        return ""
+    if float(number).is_integer() and decimals == 0:
+        return str(int(number))
+    return f"{number:.{decimals}f}"
+
+
+def _format_percent_for_display(value: Any) -> str:
+    if value is None or str(value).strip() == "":
+        return ""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if pd.isna(number):
+        return ""
+    if abs(number) <= 1:
+        number *= 100
+    return f"{number:.1f}%"
+
 
 def _normalize_text_for_display(value: Any, title: bool = False, upper: bool = False) -> str:
     text = str(value if value is not None else "").strip()
@@ -807,23 +816,10 @@ def _normalize_text_for_display(value: Any, title: bool = False, upper: bool = F
     return text
 
 
-def scale_pct_for_display(val: Any) -> float | None:
-    try:
-        v = float(val)
-        if pd.isna(v):
-            return None
-        if abs(v) <= 1.0:
-            return v * 100.0
-        return v
-    except (ValueError, TypeError):
-        return None
-
-
 def _format_display_columns(
     df: pd.DataFrame,
     preferred_order: list[str] | None = None,
 ) -> pd.DataFrame:
-    """Prepare a DataFrame for Streamlit display while preserving numeric sorting."""
     if df is None or df.empty:
         return df if df is not None else pd.DataFrame()
 
@@ -843,29 +839,21 @@ def _format_display_columns(
     ):
         if col in view.columns:
             view[col] = view[col].map(lambda x: _normalize_text_for_display(x, title=True))
-
-    for col in (
-        "sportsbook_line",
-        "line",
-        "model_projection",
-        "projection",
-        "recent_avg",
-        "season_avg",
-        "edge",
-        "edge_abs",
-        "side_edge",
-        "minutes_basis",
-        "projected_minutes",
-        "quality_score",
-        "quality",
-        "odds",
-    ):
+    for col in ("sportsbook_line", "line", "model_projection", "projection", "recent_avg", "season_avg"):
         if col in view.columns:
-            view[col] = pd.to_numeric(view[col], errors="coerce")
-
+            view[col] = view[col].map(lambda x: _format_number_for_display(x, decimals=1))
+    for col in ("edge", "edge_abs", "side_edge", "minutes_basis", "projected_minutes"):
+        if col in view.columns:
+            view[col] = view[col].map(lambda x: _format_number_for_display(x, decimals=2))
+    for col in ("quality_score", "quality"):
+        if col in view.columns:
+            view[col] = view[col].map(lambda x: _format_number_for_display(x, decimals=1))
+    for col in ("odds",):
+        if col in view.columns:
+            view[col] = view[col].map(lambda x: _format_number_for_display(x, decimals=0))
     for col in ("confidence", "edge_pct", "hit_rate", "roi"):
         if col in view.columns:
-            view[col] = view[col].map(scale_pct_for_display)
+            view[col] = view[col].map(_format_percent_for_display)
 
     view = view.rename(columns=DISPLAY_COLUMN_LABELS)
     if preferred_order:
@@ -1310,7 +1298,7 @@ def render_no_picks_explainer(
         return
     if full_market_df is not None and not full_market_df.empty:
         return
-    st.warning("No selections qualified today.", icon="⚠️")
+    st.warning("No selections qualified today.")
     if rejected_df is None or rejected_df.empty:
         render_empty_state(
             "No rejected rows to explain",
@@ -1325,24 +1313,14 @@ def render_no_picks_explainer(
         .rename_axis("Reason")
         .reset_index(name="Count")
     )
-    st.dataframe(
-        reason_counts,
-        width="stretch",
-        hide_index=True,
-        column_config=courtvision_column_config(),
-    )
+    st.dataframe(reason_counts, width="stretch", hide_index=True)
 
     render_section_head("Closest misses", None)
     near = rejected_df.copy()
     if "edge_abs" in near.columns:
         near["edge_abs"] = pd.to_numeric(near["edge_abs"], errors="coerce").fillna(-999)
         near = near.sort_values(by="edge_abs", ascending=False)
-    st.dataframe(
-        style_rejection_table(near.head(20)),
-        width="stretch",
-        hide_index=True,
-        column_config=courtvision_column_config(),
-    )
+    st.dataframe(style_rejection_table(near.head(20)), width="stretch", hide_index=True)
 
 
 def _dataframe_height(row_count: int, max_height: int = 420) -> int:
@@ -1439,7 +1417,6 @@ def render_table_card(
             width="stretch",
             hide_index=True,
             height=_dataframe_height(len(df), max_height=max_height),
-            column_config=courtvision_column_config(),
         )
 
 
@@ -1505,12 +1482,7 @@ def render_runtime_file_diagnostics(payload: dict[str, Any]) -> None:
         return
 
     with st.expander("Runtime file load", expanded=False):
-        st.dataframe(
-            diag_df,
-            width="stretch",
-            hide_index=True,
-            column_config=courtvision_column_config(),
-        )
+        st.dataframe(diag_df, width="stretch", hide_index=True)
 
 
 def runtime_file_diagnostics_dataframe(payload: dict[str, Any]) -> pd.DataFrame:
@@ -1833,12 +1805,7 @@ def render_under_visibility_panel(payload: dict[str, Any] | None) -> None:
 
     if not records_df.empty:
         with st.expander("UNDER visibility artifact load", expanded=False):
-            st.dataframe(
-                records_df,
-                width="stretch",
-                hide_index=True,
-                column_config=courtvision_column_config(),
-            )
+            st.dataframe(records_df, width="stretch", hide_index=True)
 
 
 def render_today_board(
@@ -2012,7 +1979,6 @@ def render_today_board(
                     width="stretch",
                     hide_index=True,
                     height=360,
-                    column_config=courtvision_column_config(),
                 )
 
 
@@ -2114,13 +2080,7 @@ def _render_csv_preview(
     if isinstance(df, pd.DataFrame) and not df.empty:
         st.markdown(f"##### {label}")
         display_df = _format_display_columns(df.head(max_rows), REVIEW_DISPLAY_COLUMN_ORDER)
-        st.dataframe(
-            display_df,
-            width="stretch",
-            hide_index=True,
-            height=360,
-            column_config=courtvision_column_config(),
-        )
+        st.dataframe(display_df, width="stretch", hide_index=True, height=360)
         if len(df) > max_rows:
             st.caption(f"Showing first {max_rows} of {len(df)} rows.")
         path = str((record or {}).get("path") or "")
@@ -2237,12 +2197,7 @@ def render_quality_review_view(
                 "error",
             ]
             keep = [col for col in keep if col in diag_df.columns]
-            st.dataframe(
-                diag_df[keep],
-                width="stretch",
-                hide_index=True,
-                column_config=courtvision_column_config(),
-            )
+            st.dataframe(diag_df[keep], width="stretch", hide_index=True)
 
 
 # =====================================================================
@@ -2467,12 +2422,7 @@ def render_history_view(out_dir: str) -> None:
                     .rename_axis("Reason")
                     .reset_index(name="Count")
                 )
-                st.dataframe(
-                    counts,
-                    width="stretch",
-                    hide_index=True,
-                    column_config=courtvision_column_config(),
-                )
+                st.dataframe(counts, width="stretch", hide_index=True)
 
     with tab3:
         render_section_head("Result feedback", "Learning memory.")
@@ -2496,12 +2446,7 @@ def render_history_view(out_dir: str) -> None:
                 hit_rate["hit_rate"] = (
                     pd.to_numeric(hit_rate["hit_rate"], errors="coerce") * 100
                 ).round(2)
-                st.dataframe(
-                    hit_rate,
-                    width="stretch",
-                    hide_index=True,
-                    column_config=courtvision_column_config(),
-                )
+                st.dataframe(hit_rate, width="stretch", hide_index=True)
             if {"hit", "model_projection", "actual_value"}.issubset(feedback_df.columns):
                 overall_hit_rate = numeric_column_or_default(feedback_df, "hit").mean()
                 mae = (
@@ -2529,14 +2474,9 @@ def render_history_summary(history_df: pd.DataFrame | None) -> None:
         avg_edge=("edge_abs", "mean"),
     )
     grp["market_type"] = grp["market_type"].map(pretty_market_name)
-    grp["avg_confidence"] = (numeric_column_or_default(grp, "avg_confidence") * 100).round(2)
-    grp["avg_edge"] = numeric_column_or_default(grp, "avg_edge").round(2)
-    st.dataframe(
-        grp.rename(columns={"avg_confidence": "Confidence", "avg_edge": "Edge Abs"}),
-        width="stretch",
-        hide_index=True,
-        column_config=courtvision_column_config(),
-    )
+    grp["avg_confidence"] = numeric_column_or_default(grp, "avg_confidence").round(3)
+    grp["avg_edge"] = numeric_column_or_default(grp, "avg_edge").round(3)
+    st.dataframe(grp, width="stretch", hide_index=True)
 
 
 # =====================================================================
@@ -2563,12 +2503,7 @@ def render_calibration_view(out_dir: str) -> None:
             view["market_type"] = view["market_type"].map(pretty_market_name)
         if "hit_rate" in view.columns:
             view["hit_rate"] = (numeric_column_or_default(view, "hit_rate") * 100).round(2)
-        st.dataframe(
-            view.rename(columns={"hit_rate": "Hit Rate"}),
-            width="stretch",
-            hide_index=True,
-            column_config=courtvision_column_config(),
-        )
+        st.dataframe(view, width="stretch", hide_index=True)
 
 
 # =====================================================================
@@ -2661,12 +2596,7 @@ def feedback_upload_block(ai: CourtVisionAI, view_only_demo: bool = False) -> No
     if uploaded is not None:
         try:
             df = pd.read_csv(uploaded)
-            st.dataframe(
-                df.head(20),
-                width="stretch",
-                hide_index=True,
-                column_config=courtvision_column_config(),
-            )
+            st.dataframe(df.head(20), width="stretch", hide_index=True)
             if st.button("Save feedback and update calibration", type="primary"):
                 ai.log_results(df)
                 bump_history_refresh()
@@ -2680,6 +2610,7 @@ def feedback_upload_block(ai: CourtVisionAI, view_only_demo: bool = False) -> No
 # =====================================================================
 
 def main() -> None:
+    configure_page()
     init_state()
 
     today = date.today()
