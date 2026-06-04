@@ -1,0 +1,3 @@
+game_date,game_id,home_team,away_team,home_team_abbr,away_team_abbr,source
+YYYY-MM-DD,manual_YYYY-MM-DD_001,Home Team,Away Team,HTM,ATM,manual_schedule
+
