@@ -1,9 +1,10 @@
-"""Phase 5D research-only market/projection join and edge preview.
+"""Phase 6B research-only market/projection join and edge preview.
 
 This entrypoint joins a Phase 5B market validation board to projection or
-stat-context rows by normalized player name, applies research-only projection
-fallbacks, and calculates preview edges. It does not create picks, MarketProp
-rows, Elite rows, Kelly inputs, or operator betting boards.
+stat-context rows using normalized player names and game-team context, applies
+research-only projection fallbacks, and calculates preview edges. It does not
+create picks, MarketProp rows, Elite rows, Kelly inputs, or operator betting
+boards.
 """
 from __future__ import annotations
 
@@ -37,6 +38,42 @@ DEFAULT_DIAGNOSTICS_DIR = Path("outputs/runtime/diagnostics")
 
 MARKET_REQUIRED_COLUMNS = ["player_name", "market_type", "side", "line"]
 PROJECTION_NAME_COLUMNS = ["player_name", "name", "player", "athlete_name"]
+PROJECTION_TEAM_COLUMNS = ["team_abbr", "team_abbreviation", "team"]
+
+NBA_TEAM_NAME_TO_ABBR = {
+    "atlanta hawks": "ATL",
+    "boston celtics": "BOS",
+    "brooklyn nets": "BKN",
+    "charlotte hornets": "CHA",
+    "chicago bulls": "CHI",
+    "cleveland cavaliers": "CLE",
+    "dallas mavericks": "DAL",
+    "denver nuggets": "DEN",
+    "detroit pistons": "DET",
+    "golden state warriors": "GSW",
+    "houston rockets": "HOU",
+    "indiana pacers": "IND",
+    "la clippers": "LAC",
+    "los angeles clippers": "LAC",
+    "los angeles lakers": "LAL",
+    "memphis grizzlies": "MEM",
+    "miami heat": "MIA",
+    "milwaukee bucks": "MIL",
+    "minnesota timberwolves": "MIN",
+    "new orleans pelicans": "NOP",
+    "new york knicks": "NYK",
+    "oklahoma city thunder": "OKC",
+    "orlando magic": "ORL",
+    "philadelphia 76ers": "PHI",
+    "phoenix suns": "PHX",
+    "portland trail blazers": "POR",
+    "sacramento kings": "SAC",
+    "san antonio spurs": "SAS",
+    "toronto raptors": "TOR",
+    "utah jazz": "UTA",
+    "washington wizards": "WAS",
+}
+NBA_TEAM_ABBRS = set(NBA_TEAM_NAME_TO_ABBR.values())
 
 MARKET_PROJECTION_ALIASES = {
     "player_points": [
@@ -161,6 +198,15 @@ class MarketProjectionJoinResult:
     diagnostics: dict[str, Any]
 
 
+@dataclass(slots=True)
+class ProjectionJoinStats:
+    matched_player_count: int
+    unmatched_players: list[str]
+    duplicate_normalized_player_warning_count: int
+    team_aware_match_count: int
+    name_only_match_count: int
+
+
 def run_market_projection_join(
     *,
     target_date: str,
@@ -194,9 +240,13 @@ def run_market_projection_join(
             market_board_path=market_board_path,
             projection_source_path=None,
             projection_source_available=False,
+            projection_source_type="unavailable",
             joined=joined,
             unmatched_players=[],
             matched_player_count=0,
+            duplicate_normalized_player_warning_count=0,
+            team_aware_match_count=0,
+            name_only_match_count=0,
             warnings=[f"Market board not found: {market_board_path}"],
             output_path=output_path,
             summary_path=summary_path,
@@ -213,7 +263,12 @@ def run_market_projection_join(
     ]
     source_eligible_for_betting_any_true = _eligible_any_true(market_df)
 
-    projection_path, projection_df, projection_available = _load_projection_source(
+    (
+        projection_path,
+        projection_df,
+        projection_available,
+        projection_source_type,
+    ) = _load_projection_source(
         target_date=target_date_text,
         output_dir=output_dir_path,
         projection_source=projection_source,
@@ -227,7 +282,7 @@ def run_market_projection_join(
             projection_schema_valid = False
             warnings.append("Projection source is missing a player name column.")
 
-    joined, matched_player_count, unmatched_players = _join_market_projection_rows(
+    joined, join_stats = _join_market_projection_rows(
         market_df=market_df,
         projection_df=projection_df,
         projection_available=projection_available and projection_schema_valid,
@@ -243,9 +298,9 @@ def run_market_projection_join(
         status = MARKET_PROJECTION_JOIN_SCHEMA_INVALID
     elif not projection_available:
         status = MARKET_PROJECTION_JOIN_NO_PROJECTION_SOURCE
-    elif matched_player_count == 0 and _unique_market_player_count(market_df) > 0:
+    elif join_stats.matched_player_count == 0 and _unique_market_player_count(market_df) > 0:
         status = MARKET_PROJECTION_JOIN_NO_MATCHES
-    elif unmatched_players:
+    elif join_stats.unmatched_players:
         status = MARKET_PROJECTION_JOIN_PARTIAL_MATCH
     else:
         status = MARKET_PROJECTION_JOIN_OK
@@ -256,9 +311,15 @@ def run_market_projection_join(
         market_board_path=market_board_path,
         projection_source_path=projection_path,
         projection_source_available=projection_available,
+        projection_source_type=projection_source_type,
         joined=joined,
-        unmatched_players=unmatched_players,
-        matched_player_count=matched_player_count,
+        unmatched_players=join_stats.unmatched_players,
+        matched_player_count=join_stats.matched_player_count,
+        duplicate_normalized_player_warning_count=(
+            join_stats.duplicate_normalized_player_warning_count
+        ),
+        team_aware_match_count=join_stats.team_aware_match_count,
+        name_only_match_count=join_stats.name_only_match_count,
         warnings=warnings,
         output_path=output_path,
         summary_path=summary_path,
@@ -289,7 +350,7 @@ def _join_market_projection_rows(
     projection_df: pd.DataFrame,
     projection_available: bool,
     warnings: list[str],
-) -> tuple[pd.DataFrame, int, list[str]]:
+) -> tuple[pd.DataFrame, ProjectionJoinStats]:
     joined = market_df.copy()
     for column in JOIN_EXTRA_COLUMNS:
         joined[column] = pd.NA
@@ -306,39 +367,53 @@ def _join_market_projection_rows(
             joined[column] = pd.NA
 
     if joined.empty:
-        return joined, 0, []
+        return joined, ProjectionJoinStats(0, [], 0, 0, 0)
 
     if not projection_available:
         joined["projection_match_status"] = "projection_source_unavailable"
         joined["market_line"] = joined["line"].map(_coerce_number) if "line" in joined.columns else pd.NA
         unmatched_players = _ordered_market_players(joined)
-        return joined, 0, unmatched_players
+        return joined, ProjectionJoinStats(0, unmatched_players, 0, 0, 0)
 
-    projection_lookup, compact_lookup = _projection_row_lookup(projection_df, warnings)
+    (
+        projection_lookup,
+        compact_lookup,
+        duplicate_warning_count,
+    ) = _projection_row_lookup(projection_df, warnings)
     projection_columns = _column_lookup(projection_df)
     matched_keys: set[str] = set()
     unmatched_by_key: dict[str, str] = {}
+    team_aware_match_count = 0
+    name_only_match_count = 0
 
     for index, market_row in joined.iterrows():
         market_name = market_row.get("player_name", "")
         market_key = normalize_player_name(market_name)
-        projection_row = projection_lookup.get(market_key)
-        if projection_row is None:
-            projection_row = compact_lookup.get(_compact_name_key(market_key))
+        projection_candidates = projection_lookup.get(market_key)
+        if projection_candidates is None:
+            projection_candidates = compact_lookup.get(_compact_name_key(market_key))
 
         market_type = _clean_text(market_row.get("market_type"))
         side = _clean_text(market_row.get("side")).lower()
         market_line = _coerce_number(market_row.get("line"))
         joined.at[index, "market_line"] = market_line if market_line is not None else pd.NA
 
-        if projection_row is None:
-            joined.at[index, "projection_match_status"] = "unmatched_player"
+        if not projection_candidates:
+            joined.at[index, "projection_match_status"] = "unmatched"
             if market_key and market_key not in unmatched_by_key:
                 unmatched_by_key[market_key] = _clean_text(market_name)
             continue
 
+        projection_row, match_status = _select_projection_row(
+            projection_candidates,
+            game_team_abbrs=_market_game_team_abbrs(market_row),
+        )
         matched_keys.add(market_key)
-        joined.at[index, "projection_match_status"] = "matched"
+        joined.at[index, "projection_match_status"] = match_status
+        if match_status == "team_aware_matched":
+            team_aware_match_count += 1
+        else:
+            name_only_match_count += 1
         joined.at[index, "matched_projection_player_name"] = projection_row["player_name"]
 
         projection_value = _market_value(
@@ -405,7 +480,13 @@ def _join_market_projection_rows(
         for key, player in unmatched_by_key.items()
         if key and key not in matched_keys
     ]
-    return joined, matched_player_count, unmatched_players
+    return joined, ProjectionJoinStats(
+        matched_player_count,
+        unmatched_players,
+        duplicate_warning_count,
+        team_aware_match_count,
+        name_only_match_count,
+    )
 
 
 def _select_projection_value(
@@ -436,38 +517,86 @@ def _edge_bucket(abs_edge: float) -> str:
 def _projection_row_lookup(
     projection_df: pd.DataFrame,
     warnings: list[str],
-) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+) -> tuple[
+    dict[str, list[dict[str, Any]]],
+    dict[str, list[dict[str, Any]]],
+    int,
+]:
     name_column = _first_existing_column(projection_df, PROJECTION_NAME_COLUMNS)
     if name_column is None or projection_df.empty:
-        return {}, {}
+        return {}, {}, 0
 
-    lookup: dict[str, dict[str, Any]] = {}
-    duplicate_keys: set[str] = set()
+    team_column = _first_existing_column(projection_df, PROJECTION_TEAM_COLUMNS)
+    lookup: dict[str, list[dict[str, Any]]] = {}
     for _, row in projection_df.iterrows():
         row_dict = row.to_dict()
         player_name = _clean_text(row_dict.get(name_column))
         normalized_name = normalize_player_name(player_name)
         if not normalized_name:
             continue
-        if normalized_name in lookup:
-            duplicate_keys.add(normalized_name)
-            continue
-        lookup[normalized_name] = {"player_name": player_name, "row": row_dict}
-
-    if duplicate_keys:
-        warnings.append(
-            f"Projection source had duplicate normalized player names; first row used for {len(duplicate_keys)} players."
+        team_abbr = _normalize_team_abbr(
+            row_dict.get(team_column) if team_column is not None else None
+        )
+        lookup.setdefault(normalized_name, []).append(
+            {
+                "player_name": player_name,
+                "team_abbr": team_abbr,
+                "row": row_dict,
+            }
         )
 
-    compact_items: dict[str, list[dict[str, Any]]] = {}
-    for normalized_name, payload in lookup.items():
-        compact_items.setdefault(_compact_name_key(normalized_name), []).append(payload)
-    compact_lookup = {
-        compact_name: payloads[0]
-        for compact_name, payloads in compact_items.items()
-        if compact_name and len(payloads) == 1
+    duplicate_keys = {
+        normalized_name
+        for normalized_name, payloads in lookup.items()
+        if len(payloads) > 1
     }
-    return lookup, compact_lookup
+    if duplicate_keys:
+        warnings.append(
+            "Projection source had duplicate normalized player names; "
+            f"team-aware selection applied for {len(duplicate_keys)} players."
+        )
+
+    compact_items: dict[str, list[str]] = {}
+    for normalized_name in lookup:
+        compact_items.setdefault(_compact_name_key(normalized_name), []).append(
+            normalized_name
+        )
+    compact_lookup = {
+        compact_name: lookup[normalized_names[0]]
+        for compact_name, normalized_names in compact_items.items()
+        if compact_name and len(normalized_names) == 1
+    }
+    return lookup, compact_lookup, len(duplicate_keys)
+
+
+def _select_projection_row(
+    projection_candidates: list[dict[str, Any]],
+    *,
+    game_team_abbrs: set[str],
+) -> tuple[dict[str, Any], str]:
+    if game_team_abbrs:
+        for candidate in projection_candidates:
+            if candidate["team_abbr"] in game_team_abbrs:
+                return candidate, "team_aware_matched"
+    return projection_candidates[0], "name_only_matched"
+
+
+def _market_game_team_abbrs(market_row: pd.Series) -> set[str]:
+    team_abbrs = {
+        _normalize_team_abbr(market_row.get("home_team")),
+        _normalize_team_abbr(market_row.get("away_team")),
+    }
+    return {team_abbr for team_abbr in team_abbrs if team_abbr}
+
+
+def _normalize_team_abbr(value: Any) -> str:
+    text = _clean_text(value)
+    if not text:
+        return ""
+    upper_text = text.upper()
+    if upper_text in NBA_TEAM_ABBRS:
+        return upper_text
+    return NBA_TEAM_NAME_TO_ABBR.get(normalize_player_name(text), "")
 
 
 def _load_projection_source(
@@ -476,32 +605,60 @@ def _load_projection_source(
     output_dir: Path,
     projection_source: str | Path | None,
     warnings: list[str],
-) -> tuple[Path | None, pd.DataFrame, bool]:
+) -> tuple[Path | None, pd.DataFrame, bool, str]:
     if projection_source:
         path = Path(projection_source)
         if not path.exists():
             warnings.append(f"Projection source not found: {path}")
-            return path, pd.DataFrame(), False
-        return path, _read_csv(path, warnings=warnings, source_label="projection source"), True
+            return path, pd.DataFrame(), False, "unavailable"
+        return (
+            path,
+            _read_csv(path, warnings=warnings, source_label="projection source"),
+            True,
+            "explicit_projection_source",
+        )
+
+    cleaned_projection_path = output_dir / f"projection_context_clean_{target_date}.csv"
+    if cleaned_projection_path.exists():
+        return (
+            cleaned_projection_path,
+            _read_csv(
+                cleaned_projection_path,
+                warnings=warnings,
+                source_label="projection source",
+            ),
+            True,
+            "cleaned_projection_context",
+        )
 
     stat_projection_path = output_dir / f"stat_projection_source_{target_date}.csv"
     if stat_projection_path.exists():
-        return stat_projection_path, _read_csv(
+        return (
             stat_projection_path,
-            warnings=warnings,
-            source_label="projection source",
-        ), True
+            _read_csv(
+                stat_projection_path,
+                warnings=warnings,
+                source_label="projection source",
+            ),
+            True,
+            "stat_projection_source",
+        )
 
     baseline_path = output_dir.parent.parent / "model" / "player_baselines.csv"
     if baseline_path.exists():
-        return baseline_path, _read_csv(
+        return (
             baseline_path,
-            warnings=warnings,
-            source_label="projection source",
-        ), True
+            _read_csv(
+                baseline_path,
+                warnings=warnings,
+                source_label="projection source",
+            ),
+            True,
+            "raw_player_baselines",
+        )
 
     warnings.append("No projection source available.")
-    return None, pd.DataFrame(), False
+    return None, pd.DataFrame(), False, "unavailable"
 
 
 def _diagnostics_payload(
@@ -511,9 +668,13 @@ def _diagnostics_payload(
     market_board_path: Path,
     projection_source_path: Path | None,
     projection_source_available: bool,
+    projection_source_type: str,
     joined: pd.DataFrame,
     unmatched_players: list[str],
     matched_player_count: int,
+    duplicate_normalized_player_warning_count: int,
+    team_aware_match_count: int,
+    name_only_match_count: int,
     warnings: list[str],
     output_path: Path,
     summary_path: Path,
@@ -545,6 +706,15 @@ def _diagnostics_payload(
         "unmatched_players": unmatched_players,
         "projection_source_path": str(projection_source_path) if projection_source_path else "",
         "projection_source_available": bool(projection_source_available),
+        "projection_source_type": projection_source_type,
+        "used_cleaned_projection_context": (
+            projection_source_type == "cleaned_projection_context"
+        ),
+        "duplicate_normalized_player_warning_count": int(
+            duplicate_normalized_player_warning_count
+        ),
+        "team_aware_match_count": int(team_aware_match_count),
+        "name_only_match_count": int(name_only_match_count),
         "projection_value_available_count": projection_value_available_count,
         "projection_value_missing_count": market_row_count - projection_value_available_count,
         "projection_source_type_counts": _value_counts(joined, "projection_source_type"),
@@ -600,11 +770,19 @@ def _write_summary(path: Path, diagnostics: dict[str, Any]) -> None:
         f"status: {diagnostics['status']}",
         f"market_board: {diagnostics['market_board_path']}",
         f"projection_source_path: {diagnostics['projection_source_path'] or 'none'}",
+        f"projection_source_type: {diagnostics['projection_source_type']}",
         f"projection_source_available: {diagnostics['projection_source_available']}",
+        f"used_cleaned_projection_context: {diagnostics['used_cleaned_projection_context']}",
         f"market_row_count: {diagnostics['market_row_count']}",
         f"joined_row_count: {diagnostics['joined_row_count']}",
         f"matched_player_count: {diagnostics['matched_player_count']}",
+        f"team_aware_match_count: {diagnostics['team_aware_match_count']}",
+        f"name_only_match_count: {diagnostics['name_only_match_count']}",
         f"unmatched_player_count: {diagnostics['unmatched_player_count']}",
+        (
+            "duplicate_normalized_player_warning_count: "
+            f"{diagnostics['duplicate_normalized_player_warning_count']}"
+        ),
         f"unmatched_players: {_list_inline(diagnostics['unmatched_players'])}",
         f"projection_value_available_count: {diagnostics['projection_value_available_count']}",
         f"projection_value_missing_count: {diagnostics['projection_value_missing_count']}",
