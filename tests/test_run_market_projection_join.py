@@ -133,13 +133,20 @@ def test_clean_join_maps_projection_values_and_edges_for_supported_markets(
     assists = joined[joined["market_type"] == "player_assists"].iloc[0]
 
     assert points_over["projection_value"] == 27.0
+    assert points_over["projection_source_type"] == "model_projection"
+    assert points_over["projection_quality_flag"] == "projection_available"
     assert points_over["raw_edge"] == 1.5
     assert points_over["side_adjusted_edge"] == 1.5
+    assert points_over["edge_direction"] == "over_edge"
+    assert points_over["abs_edge"] == 1.5
+    assert points_over["edge_bucket"] == "medium_edge"
     assert points_under["raw_edge"] == 1.5
     assert points_under["side_adjusted_edge"] == -1.5
+    assert points_under["edge_direction"] == "no_edge"
     assert rebounds["projection_value"] == 9.0
     assert assists["projection_value"] == 5.0
     assert assists["side_adjusted_edge"] == 1.5
+    assert assists["edge_direction"] == "under_edge"
     assert joined["projection_minutes"].tolist() == [33.0] * 4
 
     diagnostics = _read_diagnostics(result.diagnostics_path)
@@ -149,6 +156,18 @@ def test_clean_join_maps_projection_values_and_edges_for_supported_markets(
     assert diagnostics["matched_player_count"] == 1
     assert diagnostics["unmatched_player_count"] == 0
     assert diagnostics["projection_value_available_count"] == 4
+    assert diagnostics["projection_value_missing_count"] == 0
+    assert diagnostics["projection_source_type_counts"] == {"model_projection": 4}
+    assert diagnostics["projection_quality_flag_counts"] == {
+        "projection_available": 4
+    }
+    assert diagnostics["edge_available_count"] == 4
+    assert diagnostics["edge_missing_count"] == 0
+    assert diagnostics["edge_bucket_counts"] == {
+        "medium_edge": 3,
+        "small_edge": 1,
+    }
+    assert diagnostics["positive_side_adjusted_edge_count"] == 3
     assert diagnostics["markets_with_projection_values"] == [
         "player_points",
         "player_rebounds",
@@ -160,6 +179,148 @@ def test_clean_join_maps_projection_values_and_edges_for_supported_markets(
     assert diagnostics["kelly_called"] is False
     assert diagnostics["operator_betting_boards_written"] == []
     assert not hasattr(market_projection_join, "MarketProp")
+
+
+def test_projection_fallback_precedence_and_unavailable_context(tmp_path: Path) -> None:
+    _write_market_board(
+        tmp_path,
+        [
+            _market_row(player_name="Model Player", line=19.0),
+            _market_row(player_name="Recent Player", line=11.0),
+            _market_row(player_name="Baseline Player", side="under", line=15.0),
+            _market_row(player_name="No Context Player", line=8.0),
+        ],
+    )
+    _write_stat_projection_source(
+        tmp_path,
+        [
+            {
+                "player_name": "Model Player",
+                "points": 20.0,
+                "pts_recent": 18.0,
+                "pts_avg": 17.0,
+            },
+            {
+                "player_name": "Recent Player",
+                "pts_recent": 12.0,
+                "pts_avg": 10.0,
+            },
+            {
+                "player_name": "Baseline Player",
+                "pts_avg": 14.0,
+            },
+            {
+                "player_name": "No Context Player",
+                "minutes": 30.0,
+            },
+        ],
+    )
+
+    result = _run(tmp_path)
+
+    assert result.status == MARKET_PROJECTION_JOIN_OK
+    joined = pd.read_csv(result.output_path).set_index("player_name")
+
+    assert joined.loc["Model Player", "projection_value"] == 20.0
+    assert joined.loc["Recent Player", "projection_value"] == 12.0
+    assert joined.loc["Baseline Player", "projection_value"] == 14.0
+    assert pd.isna(joined.loc["No Context Player", "projection_value"])
+
+    assert joined["projection_source_type"].tolist() == [
+        "model_projection",
+        "recent_avg_fallback",
+        "baseline_fallback",
+        "unavailable",
+    ]
+    assert joined["projection_quality_flag"].tolist() == [
+        "projection_available",
+        "fallback_recent_average",
+        "fallback_baseline_only",
+        "no_projection_context",
+    ]
+    assert joined.loc["Recent Player", "raw_edge"] == 1.0
+    assert joined.loc["Recent Player", "side_adjusted_edge"] == 1.0
+    assert joined.loc["Recent Player", "edge_direction"] == "over_edge"
+    assert joined.loc["Baseline Player", "raw_edge"] == -1.0
+    assert joined.loc["Baseline Player", "side_adjusted_edge"] == 1.0
+    assert joined.loc["Baseline Player", "edge_direction"] == "under_edge"
+    assert pd.isna(joined.loc["No Context Player", "raw_edge"])
+    assert joined.loc["No Context Player", "edge_direction"] == "unavailable"
+    assert joined.loc["No Context Player", "edge_bucket"] == "unavailable"
+    assert joined["eligible_for_betting"].tolist() == [False] * 4
+
+    diagnostics = _read_diagnostics(result.diagnostics_path)
+    assert diagnostics["projection_value_available_count"] == 3
+    assert diagnostics["projection_value_missing_count"] == 1
+    assert diagnostics["projection_source_type_counts"] == {
+        "model_projection": 1,
+        "recent_avg_fallback": 1,
+        "baseline_fallback": 1,
+        "unavailable": 1,
+    }
+    assert diagnostics["projection_quality_flag_counts"] == {
+        "projection_available": 1,
+        "fallback_recent_average": 1,
+        "fallback_baseline_only": 1,
+        "no_projection_context": 1,
+    }
+    assert diagnostics["edge_available_count"] == 3
+    assert diagnostics["edge_missing_count"] == 1
+    assert diagnostics["positive_side_adjusted_edge_count"] == 3
+
+    summary = result.summary_path.read_text(encoding="utf-8")
+    assert "projection_source_type_counts:" in summary
+    assert "edge_bucket_counts:" in summary
+    assert "positive_side_adjusted_edge_count: 3" in summary
+    assert (
+        "WARNING: Research-only edge preview. Fallback projections are not betting-approved."
+        in summary
+    )
+
+
+def test_edge_direction_and_bucket_boundaries(tmp_path: Path) -> None:
+    _write_market_board(
+        tmp_path,
+        [
+            _market_row(line=9.75, sportsbook="Tiny"),
+            _market_row(line=9.5, sportsbook="Small"),
+            _market_row(side="under", line=11.5, sportsbook="Medium"),
+            _market_row(line=7.0, sportsbook="Large"),
+            _market_row(side="under", line=9.0, sportsbook="NoEdge"),
+        ],
+    )
+    _write_stat_projection_source(
+        tmp_path,
+        [{"player_name": "Jane Doe", "points": 10.0}],
+    )
+
+    result = _run(tmp_path)
+
+    joined = pd.read_csv(result.output_path).set_index("sportsbook")
+    assert joined["abs_edge"].tolist() == [0.25, 0.5, 1.5, 3.0, 1.0]
+    assert joined["edge_bucket"].tolist() == [
+        "tiny_edge",
+        "small_edge",
+        "medium_edge",
+        "large_edge",
+        "small_edge",
+    ]
+    assert joined["edge_direction"].tolist() == [
+        "over_edge",
+        "over_edge",
+        "under_edge",
+        "over_edge",
+        "no_edge",
+    ]
+
+    diagnostics = _read_diagnostics(result.diagnostics_path)
+    assert diagnostics["edge_bucket_counts"] == {
+        "tiny_edge": 1,
+        "small_edge": 2,
+        "medium_edge": 1,
+        "large_edge": 1,
+    }
+    assert diagnostics["positive_side_adjusted_edge_count"] == 4
 
 
 def test_apostrophe_and_hyphen_name_normalization_works(tmp_path: Path) -> None:
@@ -277,6 +438,11 @@ def test_baseline_fallback_attaches_baseline_recent_and_minutes_context(
     joined = pd.read_csv(result.output_path)
     assert joined["baseline_value"].tolist() == [24.0, 8.0, 6.0]
     assert joined["recent_avg_value"].tolist() == [26.0, 9.0, 7.0]
+    assert joined["projection_value"].tolist() == [26.0, 9.0, 7.0]
+    assert joined["projection_source_type"].tolist() == ["recent_avg_fallback"] * 3
+    assert joined["projection_quality_flag"].tolist() == [
+        "fallback_recent_average"
+    ] * 3
     assert joined["projection_min_avg"].tolist() == [32.0, 32.0, 32.0]
     assert joined["projection_min_recent"].tolist() == [34.0, 34.0, 34.0]
     assert result.diagnostics["projection_source_path"] == str(baseline_path)

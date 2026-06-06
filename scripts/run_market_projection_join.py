@@ -1,9 +1,9 @@
-"""Phase 5C research-only market/projection join preview.
+"""Phase 5D research-only market/projection join and edge preview.
 
 This entrypoint joins a Phase 5B market validation board to projection or
-stat-context rows by normalized player name. It is a preview artifact only:
-it does not create picks, MarketProp rows, Elite rows, Kelly inputs, or
-operator betting boards.
+stat-context rows by normalized player name, applies research-only projection
+fallbacks, and calculates preview edges. It does not create picks, MarketProp
+rows, Elite rows, Kelly inputs, or operator betting boards.
 """
 from __future__ import annotations
 
@@ -39,9 +39,29 @@ MARKET_REQUIRED_COLUMNS = ["player_name", "market_type", "side", "line"]
 PROJECTION_NAME_COLUMNS = ["player_name", "name", "player", "athlete_name"]
 
 MARKET_PROJECTION_ALIASES = {
-    "player_points": ["points", "pts", "projected_points", "points_projection"],
-    "player_rebounds": ["rebounds", "reb", "totReb", "projected_rebounds"],
-    "player_assists": ["assists", "ast", "projected_assists"],
+    "player_points": [
+        "projection_value",
+        "model_projection",
+        "points",
+        "pts",
+        "projected_points",
+        "points_projection",
+    ],
+    "player_rebounds": [
+        "projection_value",
+        "model_projection",
+        "rebounds",
+        "reb",
+        "totReb",
+        "projected_rebounds",
+    ],
+    "player_assists": [
+        "projection_value",
+        "model_projection",
+        "assists",
+        "ast",
+        "projected_assists",
+    ],
 }
 
 BASELINE_VALUE_ALIASES = {
@@ -120,10 +140,15 @@ JOIN_EXTRA_COLUMNS = [
     "projection_match_status",
     "market_line",
     "projection_value",
+    "projection_source_type",
+    "projection_quality_flag",
     "baseline_value",
     "recent_avg_value",
     "raw_edge",
     "side_adjusted_edge",
+    "edge_direction",
+    "abs_edge",
+    "edge_bucket",
 ]
 
 
@@ -267,13 +292,13 @@ def _join_market_projection_rows(
 ) -> tuple[pd.DataFrame, int, list[str]]:
     joined = market_df.copy()
     for column in JOIN_EXTRA_COLUMNS:
-        if column not in joined.columns:
-            joined[column] = pd.NA
+        joined[column] = pd.NA
 
-    if "eligible_for_betting" not in joined.columns:
-        joined["eligible_for_betting"] = False
-    else:
-        joined["eligible_for_betting"] = False
+    joined["eligible_for_betting"] = False
+    joined["projection_source_type"] = "unavailable"
+    joined["projection_quality_flag"] = "no_projection_context"
+    joined["edge_direction"] = "unavailable"
+    joined["edge_bucket"] = "unavailable"
 
     context_output_columns = _context_output_columns(projection_df)
     for column in context_output_columns:
@@ -331,9 +356,6 @@ def _join_market_projection_rows(
             projection_columns,
             RECENT_VALUE_ALIASES.get(market_type, []),
         )
-        joined.at[index, "projection_value"] = (
-            projection_value if projection_value is not None else pd.NA
-        )
         joined.at[index, "baseline_value"] = (
             baseline_value if baseline_value is not None else pd.NA
         )
@@ -341,13 +363,37 @@ def _join_market_projection_rows(
             recent_avg_value if recent_avg_value is not None else pd.NA
         )
 
-        if projection_value is not None and market_line is not None:
-            raw_edge = projection_value - market_line
+        selected_projection, source_type, quality_flag = _select_projection_value(
+            model_projection=projection_value,
+            recent_avg_value=recent_avg_value,
+            baseline_value=baseline_value,
+        )
+        joined.at[index, "projection_value"] = (
+            selected_projection if selected_projection is not None else pd.NA
+        )
+        joined.at[index, "projection_source_type"] = source_type
+        joined.at[index, "projection_quality_flag"] = quality_flag
+
+        if selected_projection is not None and market_line is not None:
+            raw_edge = selected_projection - market_line
             joined.at[index, "raw_edge"] = raw_edge
             if side == "over":
                 joined.at[index, "side_adjusted_edge"] = raw_edge
+                side_adjusted_edge = raw_edge
             elif side == "under":
-                joined.at[index, "side_adjusted_edge"] = market_line - projection_value
+                side_adjusted_edge = market_line - selected_projection
+                joined.at[index, "side_adjusted_edge"] = side_adjusted_edge
+            else:
+                side_adjusted_edge = None
+
+            if side_adjusted_edge is not None:
+                abs_edge = abs(side_adjusted_edge)
+                joined.at[index, "abs_edge"] = abs_edge
+                joined.at[index, "edge_bucket"] = _edge_bucket(abs_edge)
+                if side_adjusted_edge > 0:
+                    joined.at[index, "edge_direction"] = f"{side}_edge"
+                else:
+                    joined.at[index, "edge_direction"] = "no_edge"
 
         for source_column, output_column in context_output_columns.items():
             value = projection_row["row"].get(source_column)
@@ -360,6 +406,31 @@ def _join_market_projection_rows(
         if key and key not in matched_keys
     ]
     return joined, matched_player_count, unmatched_players
+
+
+def _select_projection_value(
+    *,
+    model_projection: float | None,
+    recent_avg_value: float | None,
+    baseline_value: float | None,
+) -> tuple[float | None, str, str]:
+    if model_projection is not None:
+        return model_projection, "model_projection", "projection_available"
+    if recent_avg_value is not None:
+        return recent_avg_value, "recent_avg_fallback", "fallback_recent_average"
+    if baseline_value is not None:
+        return baseline_value, "baseline_fallback", "fallback_baseline_only"
+    return None, "unavailable", "no_projection_context"
+
+
+def _edge_bucket(abs_edge: float) -> str:
+    if abs_edge < 0.5:
+        return "tiny_edge"
+    if abs_edge < 1.5:
+        return "small_edge"
+    if abs_edge < 3.0:
+        return "medium_edge"
+    return "large_edge"
 
 
 def _projection_row_lookup(
@@ -458,6 +529,7 @@ def _diagnostics_payload(
         markets_with_projection_values,
     )
     eligible_for_betting_any_true = _eligible_any_true(joined)
+    edge_available_count = _numeric_value_count(joined, "side_adjusted_edge")
 
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -475,6 +547,18 @@ def _diagnostics_payload(
         "projection_source_available": bool(projection_source_available),
         "projection_value_available_count": projection_value_available_count,
         "projection_value_missing_count": market_row_count - projection_value_available_count,
+        "projection_source_type_counts": _value_counts(joined, "projection_source_type"),
+        "projection_quality_flag_counts": _value_counts(
+            joined,
+            "projection_quality_flag",
+        ),
+        "edge_available_count": edge_available_count,
+        "edge_missing_count": market_row_count - edge_available_count,
+        "edge_bucket_counts": _value_counts(joined, "edge_bucket"),
+        "positive_side_adjusted_edge_count": _positive_numeric_value_count(
+            joined,
+            "side_adjusted_edge",
+        ),
         "markets_with_projection_values": markets_with_projection_values,
         "markets_missing_projection_values": markets_missing_projection_values,
         "source_eligible_for_betting_any_true": bool(source_eligible_for_betting_any_true),
@@ -512,7 +596,7 @@ def _write_outputs(
 
 def _write_summary(path: Path, diagnostics: dict[str, Any]) -> None:
     lines = [
-        f"Market Projection Join Preview - {diagnostics['date']}",
+        f"Market Projection Edge Preview - {diagnostics['date']}",
         f"status: {diagnostics['status']}",
         f"market_board: {diagnostics['market_board_path']}",
         f"projection_source_path: {diagnostics['projection_source_path'] or 'none'}",
@@ -524,6 +608,12 @@ def _write_summary(path: Path, diagnostics: dict[str, Any]) -> None:
         f"unmatched_players: {_list_inline(diagnostics['unmatched_players'])}",
         f"projection_value_available_count: {diagnostics['projection_value_available_count']}",
         f"projection_value_missing_count: {diagnostics['projection_value_missing_count']}",
+        f"projection_source_type_counts: {_counts_inline(diagnostics['projection_source_type_counts'])}",
+        f"projection_quality_flag_counts: {_counts_inline(diagnostics['projection_quality_flag_counts'])}",
+        f"edge_available_count: {diagnostics['edge_available_count']}",
+        f"edge_missing_count: {diagnostics['edge_missing_count']}",
+        f"edge_bucket_counts: {_counts_inline(diagnostics['edge_bucket_counts'])}",
+        f"positive_side_adjusted_edge_count: {diagnostics['positive_side_adjusted_edge_count']}",
         f"markets_with_projection_values: {_list_inline(diagnostics['markets_with_projection_values'])}",
         f"markets_missing_projection_values: {_list_inline(diagnostics['markets_missing_projection_values'])}",
         f"eligible_for_betting_any_true: {diagnostics['eligible_for_betting_any_true']}",
@@ -532,7 +622,8 @@ def _write_summary(path: Path, diagnostics: dict[str, Any]) -> None:
         "kelly_called: False",
         "operator_betting_boards_written: 0",
         "",
-        "WARNING: Research-only join preview; no picks, MarketProp rows, Elite rows, Kelly calls, or operator betting boards were created.",
+        "WARNING: Research-only edge preview. Fallback projections are not betting-approved.",
+        "No picks, MarketProp rows, Elite rows, Kelly calls, or operator betting boards were created.",
     ]
     if diagnostics["warnings"]:
         lines.extend(["warnings:", *[f"  {warning}" for warning in diagnostics["warnings"]]])
@@ -613,6 +704,28 @@ def _numeric_value_count(df: pd.DataFrame, column: str) -> int:
     if column not in df.columns:
         return 0
     return int(sum(_coerce_number(value) is not None for value in df[column].tolist()))
+
+
+def _positive_numeric_value_count(df: pd.DataFrame, column: str) -> int:
+    if column not in df.columns:
+        return 0
+    return int(
+        sum(
+            value is not None and value > 0
+            for value in (_coerce_number(raw_value) for raw_value in df[column].tolist())
+        )
+    )
+
+
+def _value_counts(df: pd.DataFrame, column: str) -> dict[str, int]:
+    if column not in df.columns:
+        return {}
+    counts: dict[str, int] = {}
+    for raw_value in df[column].tolist():
+        value = _clean_text(raw_value)
+        if value:
+            counts[value] = counts.get(value, 0) + 1
+    return counts
 
 
 def _markets_with_projection_values(df: pd.DataFrame) -> list[str]:
@@ -720,6 +833,10 @@ def _compact_name_key(normalized_name: str) -> str:
 
 def _list_inline(values: list[str]) -> str:
     return ", ".join(values) if values else "none"
+
+
+def _counts_inline(counts: dict[str, int]) -> str:
+    return ", ".join(f"{key}={value}" for key, value in counts.items()) if counts else "none"
 
 
 def _validate_date(value: str) -> str:
