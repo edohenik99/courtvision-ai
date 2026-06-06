@@ -42,6 +42,7 @@ REQUIRED_COLUMNS = [
     "sportsbook",
     "player_name",
     "abs_edge",
+    "side_adjusted_edge",
     "projection_source_type",
 ]
 MARKET_LINE_COLUMNS = ["market_line", "line"]
@@ -55,6 +56,8 @@ VALIDATION_COLUMNS = [
     "has_player_name",
     "has_minutes_context",
     "passes_min_edge",
+    "passes_directional_edge",
+    "directional_edge_bucket",
     "passes_projection_source",
     "passes_minutes_context",
     "passes_basic_schema",
@@ -219,9 +222,10 @@ def _build_validation_board(
         sportsbook = _clean_text(row.get("sportsbook"))
         player_name = _clean_text(row.get("player_name"))
         abs_edge = _coerce_number(row.get("abs_edge"))
+        side_adjusted_edge = _coerce_number(row.get("side_adjusted_edge"))
         source_type = _clean_text(row.get("projection_source_type")).lower()
         minutes_value = _minutes_context_value(row)
-        edge_bucket = _clean_text(row.get("edge_bucket")).lower()
+        directional_edge_bucket = _directional_edge_bucket(side_adjusted_edge)
 
         has_projection_value = projection_value is not None
         has_market_line = market_line is not None
@@ -230,6 +234,9 @@ def _build_validation_board(
         has_player_name = bool(player_name)
         has_minutes_context = minutes_value is not None
         passes_min_edge = abs_edge is not None and abs(abs_edge) >= min_edge
+        passes_directional_edge = (
+            side_adjusted_edge is not None and side_adjusted_edge >= min_edge
+        )
         passes_projection_source = source_type in allowed_source_types
         passes_minutes_context = (
             minutes_value is None or minutes_value >= min_minutes
@@ -246,9 +253,9 @@ def _build_validation_board(
         passes_research_validation = all(
             [
                 passes_basic_schema,
-                passes_min_edge,
                 passes_projection_source,
                 passes_minutes_context,
+                passes_directional_edge,
             ]
         )
 
@@ -260,6 +267,8 @@ def _build_validation_board(
             has_player_name=has_player_name,
             abs_edge=abs_edge,
             passes_min_edge=passes_min_edge,
+            side_adjusted_edge=side_adjusted_edge,
+            passes_directional_edge=passes_directional_edge,
             source_type=source_type,
             passes_projection_source=passes_projection_source,
             has_minutes_context=has_minutes_context,
@@ -269,8 +278,8 @@ def _build_validation_board(
             rejected_reason_counts[reason] = rejected_reason_counts.get(reason, 0) + 1
 
         rank_score, rank_reason = _research_rank(
-            abs_edge=abs_edge,
-            edge_bucket=edge_bucket,
+            side_adjusted_edge=side_adjusted_edge,
+            directional_edge_bucket=directional_edge_bucket,
             source_type=source_type,
             has_minutes_context=has_minutes_context,
             passes_minutes_context=passes_minutes_context,
@@ -285,6 +294,8 @@ def _build_validation_board(
                 "has_player_name": has_player_name,
                 "has_minutes_context": has_minutes_context,
                 "passes_min_edge": passes_min_edge,
+                "passes_directional_edge": passes_directional_edge,
+                "directional_edge_bucket": directional_edge_bucket,
                 "passes_projection_source": passes_projection_source,
                 "passes_minutes_context": passes_minutes_context,
                 "passes_basic_schema": passes_basic_schema,
@@ -294,7 +305,11 @@ def _build_validation_board(
                 ),
                 "research_rank_score": rank_score,
                 "research_rank_reason": rank_reason,
-                "_rank_abs_edge": abs_edge if abs_edge is not None else float("-inf"),
+                "_rank_directional_edge": (
+                    side_adjusted_edge
+                    if side_adjusted_edge is not None
+                    else float("-inf")
+                ),
             }
         )
 
@@ -307,7 +322,7 @@ def _build_validation_board(
             board[column] = payload_df[column]
 
     board["_source_position"] = payload_df["source_position"]
-    board["_rank_abs_edge"] = payload_df["_rank_abs_edge"]
+    board["_rank_directional_edge"] = payload_df["_rank_directional_edge"]
     board["_rank_market"] = (
         board["market_type"].map(_clean_text)
         if "market_type" in board.columns
@@ -317,7 +332,7 @@ def _build_validation_board(
         by=[
             "passes_research_validation",
             "research_rank_score",
-            "_rank_abs_edge",
+            "_rank_directional_edge",
             "_source_position",
         ],
         ascending=[False, False, False, True],
@@ -327,7 +342,9 @@ def _build_validation_board(
     board["edge_rank_within_market"] = (
         board.groupby("_rank_market", sort=False).cumcount() + 1
     )
-    board = board.drop(columns=["_source_position", "_rank_abs_edge", "_rank_market"])
+    board = board.drop(
+        columns=["_source_position", "_rank_directional_edge", "_rank_market"]
+    )
     return board, dict(sorted(rejected_reason_counts.items()))
 
 
@@ -340,6 +357,8 @@ def _rejection_reasons(
     has_player_name: bool,
     abs_edge: float | None,
     passes_min_edge: bool,
+    side_adjusted_edge: float | None,
+    passes_directional_edge: bool,
     source_type: str,
     passes_projection_source: bool,
     has_minutes_context: bool,
@@ -358,6 +377,12 @@ def _rejection_reasons(
         reasons.append("missing_player_name")
     if not passes_min_edge:
         reasons.append("missing_abs_edge" if abs_edge is None else "edge_below_minimum")
+    if not passes_directional_edge:
+        reasons.append(
+            "missing_side_adjusted_edge"
+            if side_adjusted_edge is None
+            else "directional_edge_below_minimum"
+        )
     if not passes_projection_source:
         reasons.append(
             "missing_projection_source"
@@ -371,19 +396,20 @@ def _rejection_reasons(
 
 def _research_rank(
     *,
-    abs_edge: float | None,
-    edge_bucket: str,
+    side_adjusted_edge: float | None,
+    directional_edge_bucket: str,
     source_type: str,
     has_minutes_context: bool,
     passes_minutes_context: bool,
 ) -> tuple[float, str]:
-    score = abs(abs_edge) * 10 if abs_edge is not None else 0.0
-    reasons = [f"abs_edge_x10={score:.2f}"]
+    positive_directional_edge = max(side_adjusted_edge or 0.0, 0.0)
+    score = positive_directional_edge * 10
+    reasons = [f"positive_directional_edge_x10={score:.2f}"]
 
-    if edge_bucket == "medium_edge":
+    if directional_edge_bucket == "medium_edge":
         score += 3
         reasons.append("medium_edge=+3")
-    elif edge_bucket == "large_edge":
+    elif directional_edge_bucket == "large_edge":
         score += 6
         reasons.append("large_edge=+6")
 
@@ -403,6 +429,20 @@ def _research_rank(
 
     reasons.append(f"total={score:.2f}")
     return round(score, 6), "; ".join(reasons)
+
+
+def _directional_edge_bucket(side_adjusted_edge: float | None) -> str:
+    if side_adjusted_edge is None:
+        return "unavailable"
+    if side_adjusted_edge <= 0:
+        return "no_positive_edge"
+    if side_adjusted_edge < 0.5:
+        return "tiny_edge"
+    if side_adjusted_edge < 1.5:
+        return "small_edge"
+    if side_adjusted_edge < 3.0:
+        return "medium_edge"
+    return "large_edge"
 
 
 def _limit_events(
@@ -488,7 +528,13 @@ def _diagnostics_payload(
             board, "projection_source_type"
         ),
         "edge_bucket_counts": _value_counts(board, "edge_bucket"),
+        "directional_edge_bucket_counts": _value_counts(
+            board, "directional_edge_bucket"
+        ),
         "passes_min_edge_count": _true_count(board, "passes_min_edge"),
+        "passes_directional_edge_count": _true_count(
+            board, "passes_directional_edge"
+        ),
         "passes_projection_source_count": _true_count(
             board, "passes_projection_source"
         ),
@@ -523,8 +569,10 @@ def _top_research_rows_sample(board: pd.DataFrame) -> list[dict[str, Any]]:
         "sportsbook",
         "projection_value",
         "projection_source_type",
+        "side_adjusted_edge",
         "abs_edge",
         "edge_bucket",
+        "directional_edge_bucket",
         "research_rank_score",
         "edge_rank_overall",
         "betting_approval_status",
@@ -575,7 +623,9 @@ def _write_summary(path: Path, diagnostics: dict[str, Any]) -> None:
         f"eligible_for_betting_any_true: {diagnostics['eligible_for_betting_any_true']}",
         f"projection_source_type_counts: {_counts_inline(diagnostics['projection_source_type_counts'])}",
         f"edge_bucket_counts: {_counts_inline(diagnostics['edge_bucket_counts'])}",
+        f"directional_edge_bucket_counts: {_counts_inline(diagnostics['directional_edge_bucket_counts'])}",
         f"passes_min_edge_count: {diagnostics['passes_min_edge_count']}",
+        f"passes_directional_edge_count: {diagnostics['passes_directional_edge_count']}",
         f"passes_projection_source_count: {diagnostics['passes_projection_source_count']}",
         f"passes_minutes_context_count: {diagnostics['passes_minutes_context_count']}",
         f"passes_research_validation_count: {diagnostics['passes_research_validation_count']}",
@@ -595,7 +645,7 @@ def _write_summary(path: Path, diagnostics: dict[str, Any]) -> None:
                 f"player={row.get('player_name')} "
                 f"market={row.get('market_type')} "
                 f"side={row.get('side')} "
-                f"edge={row.get('abs_edge')} "
+                f"directional_edge={row.get('side_adjusted_edge')} "
                 f"score={row.get('research_rank_score')}"
             )
     else:
@@ -626,8 +676,10 @@ def _empty_validation_frame() -> pd.DataFrame:
         "eligible_for_betting",
         "projection_value",
         "projection_source_type",
+        "side_adjusted_edge",
         "abs_edge",
         "edge_bucket",
+        "directional_edge_bucket",
         *VALIDATION_COLUMNS,
     ]
     return pd.DataFrame(columns=list(dict.fromkeys(columns)))
@@ -802,7 +854,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--min-edge",
         type=float,
         default=DEFAULT_MIN_EDGE,
-        help="Minimum absolute edge for research validation.",
+        help="Minimum directional edge for research validation.",
     )
     parser.add_argument(
         "--allowed-source-types",

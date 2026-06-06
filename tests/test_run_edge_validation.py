@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import pytest
 
 import scripts.run_edge_validation as edge_validation
 from scripts.run_edge_validation import (
@@ -18,6 +19,7 @@ from scripts.run_edge_validation import (
 
 
 PREDICTION_DATE = "2026-06-05"
+_UNSET = object()
 
 
 def _row(
@@ -31,11 +33,21 @@ def _row(
     projection_value: float = 23.0,
     projection_source_type: str = "model_projection",
     abs_edge: float = 2.5,
+    side_adjusted_edge: float | None | object = _UNSET,
     edge_bucket: str = "medium_edge",
     projection_min_avg: float | None = 30.0,
     eligible_for_betting: bool = False,
     provider_event_id: str = "evt_1",
 ) -> dict[str, Any]:
+    if side_adjusted_edge is _UNSET:
+        raw_edge = projection_value - line
+        if side == "over":
+            side_adjusted_edge = raw_edge
+        elif side == "under":
+            side_adjusted_edge = -raw_edge
+        else:
+            side_adjusted_edge = None
+
     return {
         "provider": "the_odds_api",
         "provider_event_id": provider_event_id,
@@ -52,6 +64,7 @@ def _row(
         "eligible_for_betting": eligible_for_betting,
         "projection_value": projection_value,
         "projection_source_type": projection_source_type,
+        "side_adjusted_edge": side_adjusted_edge,
         "abs_edge": abs_edge,
         "edge_bucket": edge_bucket,
         "projection_min_avg": projection_min_avg,
@@ -139,6 +152,7 @@ def test_validation_flags_rejections_and_ranking(tmp_path: Path) -> None:
             ),
             _row(
                 player_name="Missing Minutes Allowed",
+                projection_value=22.0,
                 projection_min_avg=None,
                 abs_edge=1.5,
             ),
@@ -160,6 +174,7 @@ def test_validation_flags_rejections_and_ranking(tmp_path: Path) -> None:
     assert bool(indexed.loc["Valid Fallback", "passes_research_validation"])
     assert bool(indexed.loc["Missing Minutes Allowed", "passes_research_validation"])
     assert not bool(indexed.loc["Tiny Edge", "passes_min_edge"])
+    assert not bool(indexed.loc["Tiny Edge", "passes_directional_edge"])
     assert not bool(indexed.loc["Tiny Edge", "passes_research_validation"])
     assert not bool(indexed.loc["Missing Odds", "has_american_odds"])
     assert not bool(indexed.loc["Missing Odds", "passes_basic_schema"])
@@ -182,14 +197,21 @@ def test_validation_flags_rejections_and_ranking(tmp_path: Path) -> None:
     assert diagnostics["research_rejected_count"] == 4
     assert diagnostics["eligible_for_betting_any_true"] is False
     assert diagnostics["passes_min_edge_count"] == 6
+    assert diagnostics["passes_directional_edge_count"] == 6
     assert diagnostics["passes_projection_source_count"] == 6
     assert diagnostics["passes_minutes_context_count"] == 6
     assert diagnostics["passes_research_validation_count"] == 3
     assert diagnostics["rejected_reason_counts"] == {
+        "directional_edge_below_minimum": 1,
         "edge_below_minimum": 1,
         "minutes_below_minimum": 1,
         "missing_american_odds": 1,
         "projection_source_not_allowed": 1,
+    }
+    assert diagnostics["directional_edge_bucket_counts"] == {
+        "large_edge": 1,
+        "medium_edge": 5,
+        "small_edge": 1,
     }
     assert diagnostics["top_research_rows_sample"][0]["player_name"] == "Strong Model"
     assert diagnostics["top_research_rows_sample"][0][
@@ -208,6 +230,134 @@ def test_eligible_for_betting_is_forced_false(tmp_path: Path) -> None:
     assert diagnostics["source_eligible_for_betting_any_true"] is True
     assert diagnostics["eligible_for_betting_any_true"] is False
     assert any("forced false" in warning for warning in diagnostics["warnings"])
+
+
+@pytest.mark.parametrize(
+    ("side", "projection_value", "expected_passes", "expected_bucket"),
+    [
+        pytest.param("over", 22.0, True, "medium_edge", id="over-above-line"),
+        pytest.param("under", 22.0, False, "no_positive_edge", id="under-above-line"),
+        pytest.param("under", 19.0, True, "medium_edge", id="under-below-line"),
+        pytest.param("over", 19.0, False, "no_positive_edge", id="over-below-line"),
+    ],
+)
+def test_directional_edge_controls_research_validation(
+    tmp_path: Path,
+    side: str,
+    projection_value: float,
+    expected_passes: bool,
+    expected_bucket: str,
+) -> None:
+    _write_join_board(
+        tmp_path,
+        [
+            _row(
+                side=side,
+                line=20.5,
+                projection_value=projection_value,
+                abs_edge=1.5,
+                edge_bucket="medium_edge",
+            )
+        ],
+    )
+
+    result = _run(tmp_path)
+
+    board = pd.read_csv(result.output_path)
+    row = board.iloc[0]
+    assert bool(row["passes_min_edge"])
+    assert bool(row["passes_directional_edge"]) is expected_passes
+    assert bool(row["passes_research_validation"]) is expected_passes
+    assert row["directional_edge_bucket"] == expected_bucket
+    if expected_passes:
+        assert row["research_rejection_reasons"] == "none"
+    else:
+        assert "directional_edge_below_minimum" in row["research_rejection_reasons"]
+
+
+def test_abs_edge_alone_does_not_pass_validation(tmp_path: Path) -> None:
+    _write_join_board(
+        tmp_path,
+        [
+            _row(
+                side="under",
+                projection_value=24.5,
+                abs_edge=4.0,
+                edge_bucket="large_edge",
+            )
+        ],
+    )
+
+    result = _run(tmp_path)
+
+    row = pd.read_csv(result.output_path).iloc[0]
+    assert bool(row["passes_min_edge"])
+    assert row["side_adjusted_edge"] == -4.0
+    assert not bool(row["passes_directional_edge"])
+    assert not bool(row["passes_research_validation"])
+
+
+def test_ranking_prefers_directionally_valid_side(tmp_path: Path) -> None:
+    _write_join_board(
+        tmp_path,
+        [
+            _row(
+                player_name="Opposite Under",
+                side="under",
+                projection_value=24.5,
+                abs_edge=4.0,
+                edge_bucket="large_edge",
+            ),
+            _row(
+                player_name="Valid Over",
+                side="over",
+                projection_value=24.5,
+                abs_edge=4.0,
+                edge_bucket="large_edge",
+            ),
+        ],
+    )
+
+    result = _run(tmp_path)
+
+    board = pd.read_csv(result.output_path)
+    assert board["player_name"].tolist() == ["Valid Over", "Opposite Under"]
+    assert board["research_rank_score"].iloc[0] > board["research_rank_score"].iloc[1]
+    assert bool(board.iloc[0]["passes_research_validation"])
+    assert not bool(board.iloc[1]["passes_research_validation"])
+
+
+def test_directional_edge_bucket_categories_and_diagnostics(tmp_path: Path) -> None:
+    values = [
+        ("Unavailable", None, "unavailable"),
+        ("No Positive", 0.0, "no_positive_edge"),
+        ("Tiny", 0.25, "tiny_edge"),
+        ("Small", 1.0, "small_edge"),
+        ("Medium", 2.0, "medium_edge"),
+        ("Large", 3.0, "large_edge"),
+    ]
+    _write_join_board(
+        tmp_path,
+        [
+            _row(player_name=name, side_adjusted_edge=value)
+            for name, value, _ in values
+        ],
+    )
+
+    result = _run(tmp_path)
+
+    board = pd.read_csv(result.output_path).set_index("player_name")
+    for name, _, expected_bucket in values:
+        assert board.loc[name, "directional_edge_bucket"] == expected_bucket
+    diagnostics = _read_diagnostics(result.diagnostics_path)
+    assert diagnostics["directional_edge_bucket_counts"] == {
+        "large_edge": 1,
+        "medium_edge": 1,
+        "no_positive_edge": 1,
+        "small_edge": 1,
+        "tiny_edge": 1,
+        "unavailable": 1,
+    }
 
 
 def test_no_betting_domain_rows_calls_or_operator_artifacts_are_created(
@@ -281,6 +431,7 @@ def test_no_validated_rows_uses_explicit_status_and_reason_counts(
         [
             _row(
                 player_name="Tiny Edge",
+                projection_value=20.75,
                 abs_edge=0.25,
                 edge_bucket="tiny_edge",
             )
@@ -292,8 +443,13 @@ def test_no_validated_rows_uses_explicit_status_and_reason_counts(
     assert result.status == EDGE_VALIDATION_NO_RESEARCH_VALIDATED_ROWS
     diagnostics = _read_diagnostics(result.diagnostics_path)
     assert diagnostics["research_validated_count"] == 0
-    assert diagnostics["rejected_reason_counts"] == {"edge_below_minimum": 1}
+    assert diagnostics["rejected_reason_counts"] == {
+        "directional_edge_below_minimum": 1,
+        "edge_below_minimum": 1,
+    }
     summary = result.summary_path.read_text(encoding="utf-8")
+    assert "passes_directional_edge_count: 0" in summary
+    assert "directional_edge_bucket_counts: tiny_edge=1" in summary
     assert "WARNING: Research-only validation. No row is betting-approved." in summary
     assert "No picks, MarketProp rows, Elite rows, Kelly calls" in summary
 
