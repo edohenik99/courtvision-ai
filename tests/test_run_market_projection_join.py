@@ -295,7 +295,7 @@ def test_projection_fallback_precedence_and_unavailable_context(tmp_path: Path) 
     assert "edge_bucket_counts:" in summary
     assert "positive_side_adjusted_edge_count: 3" in summary
     assert (
-        "WARNING: Research-only edge preview. Fallback projections are not betting-approved."
+        "WARNING: Research-only edge preview. Projection values are not betting-approved."
         in summary
     )
 
@@ -481,18 +481,26 @@ def test_baseline_fallback_attaches_baseline_recent_and_minutes_context(
     assert result.diagnostics["team_aware_match_count"] == 3
 
 
-def test_cleaned_projection_context_is_preferred_over_raw_baselines(
+def test_stat_projection_source_is_preferred_over_cleaned_context(
     tmp_path: Path,
 ) -> None:
-    _write_market_board(tmp_path, [_market_row()])
-    cleaned_path = _write_cleaned_projection_context(
+    _write_market_board(
+        tmp_path,
+        [
+            _market_row(market_type="player_points"),
+            _market_row(market_type="player_rebounds", line=8.5),
+            _market_row(market_type="player_assists", line=6.5),
+        ],
+    )
+    _write_cleaned_projection_context(
         tmp_path,
         [
             {
                 "player_name": "Jane Doe",
                 "team_abbr": "OKC",
-                "pts_avg": 26.0,
                 "pts_recent": 28.0,
+                "reb_recent": 12.0,
+                "ast_recent": 11.0,
             }
         ],
     )
@@ -507,26 +515,46 @@ def test_cleaned_projection_context_is_preferred_over_raw_baselines(
             }
         ],
     )
-    _write_stat_projection_source(
+    stat_path = _write_stat_projection_source(
         tmp_path,
-        [{"player_name": "Jane Doe", "team_abbr": "OKC", "points": 24.0}],
+        [
+            {
+                "player_name": "Jane Doe",
+                "team_abbr": "OKC",
+                "projected_points": 24.0,
+                "projected_rebounds": 9.0,
+                "projected_assists": 7.0,
+                "projection_quality_flag": "research_projection_only",
+                "eligible_for_betting": False,
+            }
+        ],
     )
 
     result = _run(tmp_path)
 
     joined = pd.read_csv(result.output_path)
-    assert joined["projection_value"].tolist() == [28.0]
-    assert joined["projection_match_status"].tolist() == ["team_aware_matched"]
-    assert result.diagnostics["projection_source_path"] == str(cleaned_path)
-    assert result.diagnostics["projection_source_type"] == "cleaned_projection_context"
-    assert result.diagnostics["used_cleaned_projection_context"] is True
+    assert joined["projection_value"].tolist() == [24.0, 9.0, 7.0]
+    assert joined["projection_source_type"].tolist() == ["model_projection"] * 3
+    assert joined["projection_quality_flag"].tolist() == [
+        "research_projection_only"
+    ] * 3
+    assert joined["projection_match_status"].tolist() == [
+        "team_aware_matched"
+    ] * 3
+    assert joined["eligible_for_betting"].tolist() == [False] * 3
+    assert result.diagnostics["projection_source_path"] == str(stat_path)
+    assert result.diagnostics["projection_source_type"] == "stat_projection_source"
+    assert result.diagnostics["projection_source_type_counts"] == {
+        "model_projection": 3
+    }
+    assert result.diagnostics["used_cleaned_projection_context"] is False
     assert result.diagnostics["duplicate_normalized_player_warning_count"] == 0
 
     summary = result.summary_path.read_text(encoding="utf-8")
-    assert f"projection_source_path: {cleaned_path}" in summary
-    assert "projection_source_type: cleaned_projection_context" in summary
-    assert "used_cleaned_projection_context: True" in summary
-    assert "team_aware_match_count: 1" in summary
+    assert f"projection_source_path: {stat_path}" in summary
+    assert "projection_source_type: stat_projection_source" in summary
+    assert "used_cleaned_projection_context: False" in summary
+    assert "team_aware_match_count: 3" in summary
     assert "name_only_match_count: 0" in summary
     assert "unmatched_player_count: 0" in summary
     assert "duplicate_normalized_player_warning_count: 0" in summary

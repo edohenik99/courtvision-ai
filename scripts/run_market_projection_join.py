@@ -431,6 +431,11 @@ def _join_market_projection_rows(
             projection_columns,
             RECENT_VALUE_ALIASES.get(market_type, []),
         )
+        source_quality_flag = _clean_text(
+            projection_row["row"].get(
+                projection_columns.get("projection_quality_flag", "")
+            )
+        )
         joined.at[index, "baseline_value"] = (
             baseline_value if baseline_value is not None else pd.NA
         )
@@ -442,6 +447,7 @@ def _join_market_projection_rows(
             model_projection=projection_value,
             recent_avg_value=recent_avg_value,
             baseline_value=baseline_value,
+            model_quality_flag=source_quality_flag,
         )
         joined.at[index, "projection_value"] = (
             selected_projection if selected_projection is not None else pd.NA
@@ -494,9 +500,14 @@ def _select_projection_value(
     model_projection: float | None,
     recent_avg_value: float | None,
     baseline_value: float | None,
+    model_quality_flag: str = "",
 ) -> tuple[float | None, str, str]:
     if model_projection is not None:
-        return model_projection, "model_projection", "projection_available"
+        return (
+            model_projection,
+            "model_projection",
+            model_quality_flag or "projection_available",
+        )
     if recent_avg_value is not None:
         return recent_avg_value, "recent_avg_fallback", "fallback_recent_average"
     if baseline_value is not None:
@@ -618,19 +629,6 @@ def _load_projection_source(
             "explicit_projection_source",
         )
 
-    cleaned_projection_path = output_dir / f"projection_context_clean_{target_date}.csv"
-    if cleaned_projection_path.exists():
-        return (
-            cleaned_projection_path,
-            _read_csv(
-                cleaned_projection_path,
-                warnings=warnings,
-                source_label="projection source",
-            ),
-            True,
-            "cleaned_projection_context",
-        )
-
     stat_projection_path = output_dir / f"stat_projection_source_{target_date}.csv"
     if stat_projection_path.exists():
         return (
@@ -642,6 +640,19 @@ def _load_projection_source(
             ),
             True,
             "stat_projection_source",
+        )
+
+    cleaned_projection_path = output_dir / f"projection_context_clean_{target_date}.csv"
+    if cleaned_projection_path.exists():
+        return (
+            cleaned_projection_path,
+            _read_csv(
+                cleaned_projection_path,
+                warnings=warnings,
+                source_label="projection source",
+            ),
+            True,
+            "cleaned_projection_context",
         )
 
     baseline_path = output_dir.parent.parent / "model" / "player_baselines.csv"
@@ -800,7 +811,7 @@ def _write_summary(path: Path, diagnostics: dict[str, Any]) -> None:
         "kelly_called: False",
         "operator_betting_boards_written: 0",
         "",
-        "WARNING: Research-only edge preview. Fallback projections are not betting-approved.",
+        "WARNING: Research-only edge preview. Projection values are not betting-approved.",
         "No picks, MarketProp rows, Elite rows, Kelly calls, or operator betting boards were created.",
     ]
     if diagnostics["warnings"]:
