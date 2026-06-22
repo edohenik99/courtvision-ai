@@ -131,3 +131,53 @@ COURTVISION_ENABLE_LEGACY_PIPELINE=true
 
 ## Still needs real work
 Read `HARSH_AUDIT.md` and `courtvision/CLEANUP_NOTES.md`.
+
+## CourtVision 2.0 multi-sport foundation
+
+CourtVision now has a compatibility-first multi-sport package layout:
+
+```text
+courtvision/
+  core/                 # registry, shared scoring contracts, hit rates, CLV shape
+  sports/
+    nba/                # extracted NBA projection rules and legacy runtime export
+    wnba/               # NBA-style placeholder projection model
+    mlb/                # Statcast-style feature placeholders
+    nfl/                # matchup, usage, and injury placeholders
+    nhl/                # reserved expansion module
+```
+
+The existing NBA runtime remains authoritative. The new confidence model and
+recommendation tiers are isolated from production NBA selection, Kelly, grading,
+provider, and bankroll logic.
+
+### Supported research markets
+
+- NBA/WNBA: points, rebounds, assists, PRA, threes, steals, blocks
+- MLB: hits, total bases, runs, RBIs, home runs, strikeouts, pitcher outs
+- NFL: passing yards, rushing yards, receiving yards, receptions, touchdowns,
+  completions, interceptions
+- NHL foundation: points, goals, assists, shots on goal, saves
+
+### Run NBA
+
+The existing commands are unchanged:
+
+```powershell
+.\run_today.bat
+.\.venv\Scripts\python.exe courtvision_ai.py --prediction-date YYYY-MM-DD --out-dir outputs
+```
+
+### Exercise the WNBA, MLB, and NFL frameworks
+
+The new sport models are offline-safe placeholders; they do not fetch live data
+or produce wager-ready picks. Use these smoke examples from the repository root:
+
+```powershell
+.\.venv\Scripts\python.exe -c "from courtvision.sports.wnba import WNBAProjectionModel; print(WNBAProjectionModel().project('points', [{'points': 18}, {'points': 22}]))"
+.\.venv\Scripts\python.exe -c "from courtvision.sports.mlb import MLBProjectionModel; print(MLBProjectionModel().project('total_bases', [1, 2, 0, 3]))"
+.\.venv\Scripts\python.exe -c "from courtvision.sports.nfl import NFLProjectionModel; print(NFLProjectionModel().project('receiving_yards', [55, 72, 68]))"
+```
+
+See `COURTVISION_2_ROADMAP.md` and `SPORTS_EXPANSION_PLAN.md` before connecting
+providers or promoting any new sport into bankroll-facing operation.

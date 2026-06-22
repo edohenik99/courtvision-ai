@@ -1,0 +1,4 @@
+game_date,game_id,player_id,player_name,team,opponent,market_type,sportsbook,american_odds,decimal_odds,odds_collected_at,event_start_time,home_team,away_team,provider,source_type,market_label,selection_name
+2025-04-01,20250401TORBOS-1,b001,Sample Slugger,TOR,BOS,player_home_run,Sample Source A,+275,,2025-04-01T22:15:00Z,2025-04-01T23:05:00Z,TOR,BOS,Local Snapshot A,historical,Player home run,Sample Slugger
+2025-04-01,20250401TORBOS-1,b002,Sample Hitter,BOS,TOR,home_run,Sample Source B,+425,5.25,2025-04-01T22:20:00Z,2025-04-01T23:05:00Z,TOR,BOS,Local Snapshot B,historical,Player home run,Sample Hitter
+2025-04-01,unmatched-game,b999,Unmatched Batter,EXA,EXB,home_run,Sample Source A,+500,,2025-04-01T22:25:00Z,2025-04-01T23:05:00Z,EXA,EXB,Local Snapshot A,historical,Player home run,Unmatched Batter

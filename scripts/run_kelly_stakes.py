@@ -181,6 +181,57 @@ def _is_falsey(value: Any) -> bool:
     return text in {"false", "0", "no", "n", "off"}
 
 
+def _is_mlb_research_boundary(row: dict[str, Any]) -> bool:
+    """Identify rows that are categorically outside the staking runtime."""
+
+    sport = _clean_text(row.get("sport")).upper()
+    mode = _clean_text(row.get("mode")).lower()
+    approval = _clean_text(row.get("betting_approval_status")).lower()
+    source_text = " ".join(
+        _clean_text(row.get(name)).lower()
+        for name in ("data_source", "provider", "provider_name", "data_quality")
+    )
+    return (
+        sport == "MLB"
+        or mode == "research"
+        or approval == "research_only_not_betting_approved"
+        or "sample data" in source_text
+        or source_text.strip() == "sample"
+    )
+
+
+def _research_betting_hard_block_reasons(row: dict[str, Any]) -> list[str]:
+    """Return immutable research/approval failures before any sizing math."""
+
+    reasons: list[str] = []
+    sport = _clean_text(row.get("sport")).upper()
+    mode = _clean_text(row.get("mode")).lower()
+
+    if sport == "MLB":
+        reasons.append("sport=MLB")
+    if mode == "research":
+        reasons.append("mode=research")
+    if "eligible_for_betting" in row and _is_falsey(row.get("eligible_for_betting")):
+        reasons.append("eligible_for_betting=false")
+    if "kelly_eligible" in row and _is_falsey(row.get("kelly_eligible")):
+        reasons.append("kelly_eligible=false")
+
+    if _is_mlb_research_boundary(row):
+        if _to_float(row.get("calibrated_probability")) is None:
+            reasons.append("missing_calibrated_probability")
+        model_approval = _clean_text(row.get("model_approval_status")).lower()
+        model_approved = _is_truthy(row.get("model_approved"))
+        if model_approval not in {"approved", "production_approved"} and not model_approved:
+            reasons.append("missing_model_approval")
+        if "sample" in " ".join(
+            _clean_text(row.get(name)).lower()
+            for name in ("data_source", "provider", "provider_name", "data_quality")
+        ):
+            reasons.append("sample_data_source")
+
+    return reasons
+
+
 def _american_to_decimal(american: float) -> float | None:
     """Convert American odds to decimal odds.
 
@@ -277,7 +328,7 @@ def _pre_kelly_hard_block_reasons(
     review_policy_hold: bool,
 ) -> list[str]:
     """Return safety reasons that must zero the row before Kelly sizing."""
-    reasons: list[str] = []
+    reasons = _research_betting_hard_block_reasons(row)
 
     if _is_truthy(row.get("source_identity_conflicted")):
         reasons.append("source_identity_conflicted")
@@ -719,6 +770,16 @@ def main(argv: list[str] | None = None) -> int:
             f"[KELLY][FATAL] Elite board is empty: {input_path}\n"
             f"        Refusing to emit a stakes file with zero rows."
         )
+
+    research_row_count = sum(1 for row in rows if _is_mlb_research_boundary(row))
+    if research_row_count:
+        _log(f"research_rows_hard_blocked={research_row_count}")
+        rows = [row for row in rows if not _is_mlb_research_boundary(row)]
+        if not rows:
+            raise SystemExit(
+                "[KELLY][FATAL] Input contains only MLB/research/sample rows.\n"
+                "        Refusing to emit a staking artifact for unapproved research."
+            )
 
     edge_col = _validate_columns(fieldnames)
     _log(f"edge_column={edge_col}")
