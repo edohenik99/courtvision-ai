@@ -1,0 +1,5 @@
+game_id,game_date,home_team,away_team,game_number,venue_name,home_score,away_score,game_status,source_type
+20250401TORBOS-1,2025-04-01,TOR,BOS,1,Rogers Centre,5,3,completed,historical
+20250401TORBOS-2,2025-04-01,TOR,BOS,2,Rogers Centre,,,postponed,historical
+20250402NYYTBR,2025-04-02,NYY,TBR,1,Yankee Stadium,2,2,suspended,historical
+20250403LADSF,2025-04-03,LAD,SF,1,Dodger Stadium,,,unknown,historical

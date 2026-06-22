@@ -1,0 +1,4 @@
+game_id,game_date,event_start_time,venue_name,latitude,longitude,temperature,wind_speed,wind_direction,wind_out_to_field,humidity,precipitation,roof_status,source_name,source_type,collected_at,as_of_date
+20250401TORBOS-1,2025-04-01,2025-04-01T23:05:00Z,Rogers Centre,40.8296,-73.9262,72.0,9.5,out to center,center,48,0.0,open,weather_historical_fixture,historical,2026-06-19T16:00:00Z,2026-06-19
+mlb-weather-002,2025-04-02,2025-04-02T20:10:00Z,Example Dome,29.7573,-95.3555,74.0,0.0,calm,,55,,unknown,weather_historical_fixture,historical,2026-06-19T16:05:00Z,2026-06-19
+,2025-04-03,,Example Coastal Park,37.7786,-122.3893,,,out to right,right,,0.2,closed,weather_historical_fixture,historical,2026-06-19T16:10:00Z,2026-06-19

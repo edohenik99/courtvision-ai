@@ -1,0 +1,4 @@
+venue_name,team,park_factor_hr,handedness_factor_lhb,handedness_factor_rhb,altitude,left_field_distance,center_field_distance,right_field_distance,roof_type,source_name,source_type,data_version,collected_at,as_of_date
+Rogers Centre,TOR,1.08,1.10,1.06,50,330,400,325,open,ballpark_factors_static_fixture,static,fixture-v1,2026-06-19T17:00:00Z,2026-06-19
+Example Retractable Park,EXR,1.02,1.03,1.01,35,315,409,326,retractable,ballpark_factors_static_fixture,static,fixture-v1,2026-06-19T17:00:00Z,2026-06-19
+Example Coastal Park,EXC,0.91,,,15,339,399,309,,ballpark_factors_static_fixture,static,fixture-v1,2026-06-19T17:00:00Z,2026-06-19

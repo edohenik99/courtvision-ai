@@ -1,0 +1,3 @@
+game_id,game_date,inning,batting_team,fielding_team,batter_id,batter_name,pitcher_id,pitcher_name,event_type,event_text,is_home_run,rbi,source_type
+20250401TORBOS-1,2025-04-01,1,TOR,BOS,b001,Sample Slugger,p001,Sample Pitcher,home_run,Home run to left field,true,2,historical
+20250401TORBOS-1,2025-04-01,3,BOS,TOR,b002,Sample Hitter,p002,Other Pitcher,single,Single to center field,false,0,historical

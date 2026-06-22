@@ -49,3 +49,6 @@ fonts/
 run_output.txt
 
 test_outputs/
+
+# CourtVision local manual MLB scratch data
+data/manual/
