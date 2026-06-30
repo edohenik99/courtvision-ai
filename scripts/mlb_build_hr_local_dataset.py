@@ -7,6 +7,7 @@ import csv
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import re
 import sys
 from typing import Final, Mapping, Sequence
 
@@ -19,6 +20,9 @@ if str(PROJECT_ROOT) not in sys.path:
 from courtvision.sports.mlb.data.ballpark_factors import (
     ingest_local_ballpark_factors_csv,
     normalize_venue_name,
+)
+from courtvision.sports.mlb.data.historical_input_pack import (
+    preflight_historical_input_pack,
 )
 from courtvision.sports.mlb.data.retrosheet_ingestion import (
     ingest_local_retrosheet_csvs,
@@ -34,7 +38,12 @@ from courtvision.sports.mlb.data.statcast_ingestion import (
 from courtvision.sports.mlb.data.weather_ingestion import (
     ingest_local_weather_csv,
 )
-from courtvision.sports.mlb.data_manifest import compute_file_sha256
+from courtvision.sports.mlb.data_manifest import (
+    MLBSourceClassification,
+    compute_file_sha256,
+    verify_source_manifest_file,
+    verify_source_manifest_payload,
+)
 from courtvision.sports.mlb.training.hr_dataset_builder import (
     build_hr_batter_game_rows_from_sources,
     write_hr_dataset_csv,
@@ -53,12 +62,12 @@ from courtvision.sports.mlb.training.hr_dataset_readiness import (
 
 LOCAL_DATASET_VERSION: Final = "phase4d-local-file-v1"
 LOCAL_GENERATED_BY: Final = "scripts.mlb_build_hr_local_dataset"
-SOURCE_MANIFEST_VERSION: Final = "phase4e-source-manifest-v1"
+SOURCE_MANIFEST_VERSION: Final = "phase6c-source-manifest-v2"
 STATCAST_TRIAL_MANIFEST_VERSION: Final = "phase5a-statcast-trial-v1"
 LABEL_PAIRING_TRIAL_VERSION: Final = "phase5b-label-pairing-trial-v1"
 CONTEXT_PAIRING_TRIAL_VERSION: Final = "phase5c-context-pairing-trial-v1"
 ODDS_PAIRING_TRIAL_VERSION: Final = "phase5d-odds-pairing-trial-v1"
-HISTORICAL_DRY_RUN_VERSION: Final = "phase6a-historical-dry-run-v1"
+HISTORICAL_DRY_RUN_VERSION: Final = "phase6c-historical-rebuild-v2"
 FIXTURE_SOURCE_COLLECTED_AT: Final = datetime(
     2026, 6, 19, 18, 0, tzinfo=timezone.utc
 )
@@ -190,8 +199,24 @@ def _parser() -> argparse.ArgumentParser:
         "--historical-dry-run",
         action="store_true",
         help=(
-            "Run a real local-file historical dry run with explicit CSV paths. "
-            "No APIs, downloads, model training, or production approval."
+            "Internal historical build mode. Direct CSV use is disabled; use "
+            "--historical-input-pack so preflight cannot be bypassed."
+        ),
+    )
+    parser.add_argument(
+        "--historical-input-pack",
+        type=Path,
+        help=(
+            "Preflight and build from one contract-shaped real historical input "
+            "pack directory. Local files only; all research gates remain intact."
+        ),
+    )
+    parser.add_argument(
+        "--verify-source-manifest",
+        type=Path,
+        help=(
+            "Read and hash-verify an existing MLB source_manifest.json. "
+            "This mode never writes or repairs files."
         ),
     )
     parser.add_argument("--retrosheet-games-csv", type=Path)
@@ -241,6 +266,16 @@ def _resolve_inputs(args: argparse.Namespace) -> tuple[str, dict[str, Path | Non
             "--historical-dry-run are mutually exclusive"
         )
     if args.historical_dry_run:
+        if args.historical_input_pack is None:
+            raise LocalDatasetCLIError(
+                "direct --historical-dry-run CSV mode is disabled; use "
+                "--historical-input-pack so immutable manifests and source "
+                "alignment are preflighted before building"
+            )
+        if args.overwrite:
+            raise LocalDatasetCLIError(
+                "real historical rebuild packs are immutable; --overwrite is not allowed"
+            )
         if args.fixtures:
             raise LocalDatasetCLIError(
                 "--historical-dry-run requires explicit local CSV paths"
@@ -499,6 +534,139 @@ def _display_value(value: object) -> object:
     return isoformat() if callable(isoformat) else value
 
 
+def _source_classification(mode: str) -> str:
+    if mode == "fixtures":
+        return MLBSourceClassification.FIXTURE.value
+    if mode == "historical_dry_run":
+        return MLBSourceClassification.REAL.value
+    return MLBSourceClassification.SAMPLE.value
+
+
+def _manifest_date_range(result: object | None) -> tuple[str | None, str | None]:
+    manifest = getattr(result, "manifest", None)
+    start = getattr(manifest, "date_range_start", None)
+    end = getattr(manifest, "date_range_end", None)
+    return (
+        str(_display_value(start)) if start is not None else None,
+        str(_display_value(end)) if end is not None else None,
+    )
+
+
+def _provider_label(result: object | None, source_name: str) -> str:
+    manifest = getattr(result, "manifest", None)
+    provider_name = str(getattr(manifest, "provider_name", "") or "").strip()
+    source_label = str(getattr(manifest, "source_name", "") or "").strip()
+    return provider_name or source_label or source_name
+
+
+def _source_fingerprints(
+    paths: Mapping[str, Path | None],
+) -> dict[str, tuple[Path, int, str]]:
+    fingerprints: dict[str, tuple[Path, int, str]] = {}
+    for argument_name, path in paths.items():
+        if path is None:
+            continue
+        if not path.is_file():
+            raise LocalDatasetCLIError(
+                f"{INPUT_LABELS[argument_name]} source file is missing: {path}"
+            )
+        fingerprints[argument_name] = (
+            path,
+            path.stat().st_size,
+            compute_file_sha256(path),
+        )
+    return fingerprints
+
+
+def _assert_source_fingerprints_unchanged(
+    before: Mapping[str, tuple[Path, int, str]],
+) -> None:
+    for argument_name, (path, expected_size, expected_hash) in before.items():
+        if not path.is_file():
+            raise LocalDatasetCLIError(
+                f"{INPUT_LABELS[argument_name]} source file disappeared during build: {path}"
+            )
+        actual_size = path.stat().st_size
+        if actual_size != expected_size:
+            raise LocalDatasetCLIError(
+                f"{INPUT_LABELS[argument_name]} source file size changed during build: "
+                f"expected {expected_size}, found {actual_size}: {path}"
+            )
+        actual_hash = compute_file_sha256(path)
+        if actual_hash != expected_hash:
+            raise LocalDatasetCLIError(
+                f"{INPUT_LABELS[argument_name]} source file SHA-256 changed during build: "
+                f"expected {expected_hash}, found {actual_hash}: {path}"
+            )
+
+
+_SAMPLE_IDENTITY_NAME = re.compile(r"\b(sample|fixture|mock|test)\b", re.IGNORECASE)
+_SYNTHETIC_IDENTITY = re.compile(r"^[bp]\d{3}$", re.IGNORECASE)
+
+
+def _real_historical_identity_errors(
+    *,
+    paths: Mapping[str, Path | None],
+    statcast: object | None,
+    retrosheet: object | None,
+    odds: object | None,
+) -> tuple[str, ...]:
+    errors: list[str] = []
+    fixture_root = FIXTURE_DIR.resolve()
+    for argument_name, path in paths.items():
+        if path is not None and path.is_relative_to(fixture_root):
+            errors.append(
+                f"{INPUT_LABELS[argument_name]} points to a repository fixture: {path}"
+            )
+
+    identities: list[tuple[str, object, object]] = []
+    if statcast is not None:
+        identities.extend(
+            ("statcast batter", row.player_id, row.player_name)
+            for row in statcast.rows
+        )
+    if retrosheet is not None:
+        for row in retrosheet.events:
+            identities.append(("retrosheet batter", row.batter_id, row.batter_name))
+            identities.append(("retrosheet pitcher", row.pitcher_id, row.pitcher_name))
+    if odds is not None:
+        identities.extend(
+            ("odds player", row.player_id, row.player_name) for row in odds.rows
+        )
+
+    for label, identity_id, identity_name in identities:
+        id_text = str(identity_id or "").strip()
+        name_text = str(identity_name or "").strip()
+        if _SAMPLE_IDENTITY_NAME.search(name_text) or _SYNTHETIC_IDENTITY.fullmatch(
+            id_text
+        ):
+            errors.append(
+                f"{label} uses a fixture/sample identity: "
+                f"id={id_text or '<missing>'} name={name_text or '<missing>'}"
+            )
+    return tuple(dict.fromkeys(errors))
+
+
+def _validate_real_historical_sources(
+    *,
+    paths: Mapping[str, Path | None],
+    statcast: object | None,
+    retrosheet: object | None,
+    odds: object | None,
+) -> None:
+    errors = _real_historical_identity_errors(
+        paths=paths,
+        statcast=statcast,
+        retrosheet=retrosheet,
+        odds=odds,
+    )
+    if errors:
+        raise LocalDatasetCLIError(
+            "real historical build rejected fixture/sample provenance: "
+            + "; ".join(errors)
+        )
+
+
 def _source_warnings(result: object) -> list[str]:
     manifest = getattr(result, "manifest", None)
     return list(getattr(manifest, "warnings", ())) if manifest is not None else []
@@ -514,6 +682,7 @@ def _source_manifest_entries(
     ballpark: object | None,
     odds: object | None,
     allow_partial: bool,
+    created_at: datetime,
 ) -> list[dict[str, object]]:
     source_specs = (
         (
@@ -558,15 +727,29 @@ def _source_manifest_entries(
         path = paths[argument_name]
         if path is None:
             continue
+        date_range_start, date_range_end = _manifest_date_range(result)
+        stat = path.stat()
         entries.append(
             {
                 "source_name": source_name,
+                "provider_label": _provider_label(result, source_name),
                 "source_type": "fixture" if mode == "fixtures" else "local_file",
+                "source_classification": _source_classification(mode),
                 "path": str(path),
                 "file_exists": path.is_file(),
-                "byte_size": path.stat().st_size,
+                "path_is_absolute": path.is_absolute(),
+                "byte_size": stat.st_size,
                 "sha256": compute_file_sha256(path),
                 "parsed_row_count": parsed_row_count,
+                "created_at": created_at.isoformat(),
+                "file_created_at": datetime.fromtimestamp(
+                    stat.st_ctime, tz=timezone.utc
+                ).isoformat(),
+                "file_modified_at": datetime.fromtimestamp(
+                    stat.st_mtime, tz=timezone.utc
+                ).isoformat(),
+                "date_range_start": date_range_start,
+                "date_range_end": date_range_end,
                 "required_or_optional": "optional" if allow_partial else "required",
                 "loaded_successfully": result is not None,
                 "warnings": _source_warnings(result) if result is not None else [],
@@ -630,6 +813,7 @@ def _statcast_trial_source_entry(
     statcast: object,
     metrics: Mapping[str, object],
     column_warnings: Sequence[str],
+    created_at: datetime,
 ) -> dict[str, object]:
     warnings = [
         *_source_warnings(statcast),
@@ -639,11 +823,23 @@ def _statcast_trial_source_entry(
     ]
     return {
         "source_name": "statcast",
+        "provider_label": _provider_label(statcast, "statcast"),
         "source_type": "local_file",
+        "source_classification": MLBSourceClassification.SAMPLE.value,
         "path": str(path),
         "file_exists": path.is_file(),
+        "path_is_absolute": path.is_absolute(),
         "byte_size": path.stat().st_size,
         "sha256": compute_file_sha256(path),
+        "created_at": created_at.isoformat(),
+        "file_created_at": datetime.fromtimestamp(
+            path.stat().st_ctime, tz=timezone.utc
+        ).isoformat(),
+        "file_modified_at": datetime.fromtimestamp(
+            path.stat().st_mtime, tz=timezone.utc
+        ).isoformat(),
+        "date_range_start": metrics["detected_date_range_start"],
+        "date_range_end": metrics["detected_date_range_end"],
         **metrics,
         "loaded_successfully": True,
         "warnings": warnings,
@@ -717,15 +913,24 @@ def _write_statcast_trial_pack(
         statcast=statcast,
         metrics=metrics,
         column_warnings=column_warnings,
+        created_at=generated_at,
     )
     source_manifest = {
         "manifest_version": STATCAST_TRIAL_MANIFEST_VERSION,
         "mode": "statcast_trial",
         "generated_at": generated_at.isoformat(),
+        "created_at": generated_at.isoformat(),
+        "source_classification": MLBSourceClassification.SAMPLE.value,
+        "dataset_date_range_start": metrics["detected_date_range_start"],
+        "dataset_date_range_end": metrics["detected_date_range_end"],
         "dataset_row_count": 0,
         "safety_notice": safety_notice,
         "sources": [source_entry],
+        "approval_status": "not_approved",
+        "eligible_for_betting": False,
+        "kelly_eligible": False,
     }
+    verify_source_manifest_payload(source_manifest).raise_for_errors()
     _write_json(
         pack_paths["statcast_preview.json"], preview, overwrite=args.overwrite
     )
@@ -734,6 +939,7 @@ def _write_statcast_trial_pack(
         source_manifest,
         overwrite=args.overwrite,
     )
+    verify_source_manifest_file(pack_paths["source_manifest.json"]).raise_for_errors()
     mode = "w" if args.overwrite else "x"
     with pack_paths["build_summary.txt"].open(
         mode, encoding="utf-8", newline="\n"
@@ -758,6 +964,7 @@ def _run_statcast_trial(
     if source_path is None:
         raise LocalDatasetCLIError("--statcast-trial requires --statcast-csv")
 
+    source_fingerprint = _source_fingerprints({"statcast_csv": source_path})
     column_warnings = _statcast_column_warnings(source_path)
     for warning in column_warnings:
         print(f"warning: {warning}", file=sys.stderr)
@@ -765,6 +972,7 @@ def _run_statcast_trial(
     statcast = ingest_local_statcast_csv(source_path, collected_at=generated_at)
     metrics = _statcast_trial_metrics(statcast)
     preview_rows = _statcast_trial_preview_rows(statcast)
+    _assert_source_fingerprints_unchanged(source_fingerprint)
 
     if pack_paths:
         _write_statcast_trial_pack(
@@ -1302,9 +1510,58 @@ def _write_build_pack(
     readiness: object,
     pairing_quality: Mapping[str, object] | None = None,
 ) -> None:
+    source_entries = _source_manifest_entries(
+        mode=mode,
+        paths=paths,
+        statcast=statcast,
+        retrosheet=retrosheet,
+        weather=weather,
+        ballpark=ballpark,
+        odds=odds,
+        allow_partial=args.allow_partial,
+        created_at=generated_at,
+    )
+    source_manifest = {
+        "manifest_version": (
+            HISTORICAL_DRY_RUN_VERSION
+            if mode == "historical_dry_run"
+            else ODDS_PAIRING_TRIAL_VERSION
+            if mode == "odds_pairing_trial"
+            else CONTEXT_PAIRING_TRIAL_VERSION
+            if mode == "context_pairing_trial"
+            else LABEL_PAIRING_TRIAL_VERSION
+            if mode == "label_pairing_trial"
+            else SOURCE_MANIFEST_VERSION
+        ),
+        "mode": mode,
+        "generated_at": generated_at.isoformat(),
+        "created_at": generated_at.isoformat(),
+        "source_classification": _source_classification(mode),
+        "dataset_schema_version": dataset.metadata.schema_version,
+        "dataset_version": LOCAL_DATASET_VERSION,
+        "dataset_id": dataset.metadata.dataset_id,
+        "dataset_row_count": dataset.row_count,
+        "dataset_date_range_start": str(
+            _display_value(dataset.metadata.date_range_start)
+        ),
+        "dataset_date_range_end": str(
+            _display_value(dataset.metadata.date_range_end)
+        ),
+        "audit": {
+            "error_count": audit.error_count,
+            "warning_count": audit.warning_count,
+            "passed": audit.passed,
+        },
+        "pairing_quality": dict(pairing_quality) if pairing_quality else None,
+        "sources": source_entries,
+        "approval_status": audit.approval_status,
+        "eligible_for_betting": audit.eligible_for_betting,
+        "kelly_eligible": audit.kelly_eligible,
+    }
+    verify_source_manifest_payload(source_manifest).raise_for_errors()
+
     output_dir = next(iter(pack_paths.values())).parent
     output_dir.mkdir(parents=True, exist_ok=True)
-
     write_hr_dataset_csv(
         dataset, pack_paths["dataset.csv"], overwrite=args.overwrite
     )
@@ -1320,50 +1577,12 @@ def _write_build_pack(
     write_readiness_report_txt(
         readiness, pack_paths["readiness_summary.txt"], overwrite=args.overwrite
     )
-
-    source_manifest = {
-        "manifest_version": (
-            HISTORICAL_DRY_RUN_VERSION
-            if mode == "historical_dry_run"
-            else ODDS_PAIRING_TRIAL_VERSION
-            if mode == "odds_pairing_trial"
-            else CONTEXT_PAIRING_TRIAL_VERSION
-            if mode == "context_pairing_trial"
-            else LABEL_PAIRING_TRIAL_VERSION
-            if mode == "label_pairing_trial"
-            else SOURCE_MANIFEST_VERSION
-        ),
-        "mode": mode,
-        "generated_at": generated_at.isoformat(),
-        "dataset_schema_version": dataset.metadata.schema_version,
-        "dataset_version": LOCAL_DATASET_VERSION,
-        "dataset_id": dataset.metadata.dataset_id,
-        "dataset_row_count": dataset.row_count,
-        "audit": {
-            "error_count": audit.error_count,
-            "warning_count": audit.warning_count,
-            "passed": audit.passed,
-        },
-        "pairing_quality": dict(pairing_quality) if pairing_quality else None,
-        "sources": _source_manifest_entries(
-            mode=mode,
-            paths=paths,
-            statcast=statcast,
-            retrosheet=retrosheet,
-            weather=weather,
-            ballpark=ballpark,
-            odds=odds,
-            allow_partial=args.allow_partial,
-        ),
-        "approval_status": audit.approval_status,
-        "eligible_for_betting": audit.eligible_for_betting,
-        "kelly_eligible": audit.kelly_eligible,
-    }
     _write_json(
         pack_paths["source_manifest.json"],
         source_manifest,
         overwrite=args.overwrite,
     )
+    verify_source_manifest_file(pack_paths["source_manifest.json"]).raise_for_errors()
 
     statcast_count = len(statcast.rows) if statcast is not None else 0
     retrosheet_game_count = len(retrosheet.games) if retrosheet is not None else 0
@@ -1393,10 +1612,84 @@ def _write_build_pack(
         handle.write(summary)
 
 
+def _run_source_manifest_verification(args: argparse.Namespace) -> None:
+    manifest_path = args.verify_source_manifest
+    conflicting = any(
+        (
+            args.fixtures,
+            args.statcast_trial,
+            args.label_pairing_trial,
+            args.context_pairing_trial,
+            args.odds_pairing_trial,
+            args.historical_dry_run,
+            args.historical_input_pack is not None,
+            args.allow_partial,
+            args.overwrite,
+            args.output_dir is not None,
+            args.output_csv is not None,
+            args.audit_json is not None,
+            args.metadata_json is not None,
+            args.readiness_report_json is not None,
+            args.readiness_report_txt is not None,
+            *(getattr(args, name) is not None for name in INPUT_ARGUMENTS),
+        )
+    )
+    if conflicting:
+        raise LocalDatasetCLIError(
+            "--verify-source-manifest is read-only and cannot be combined with build or output options"
+        )
+    result = verify_source_manifest_file(manifest_path)
+    result.raise_for_errors()
+    print(f"source_manifest_verified: {Path(manifest_path).expanduser().resolve()}")
+    print("source_manifest_status: valid")
+
+
+def _apply_historical_input_pack(args: argparse.Namespace) -> None:
+    pack_dir = args.historical_input_pack
+    if pack_dir is None:
+        return
+    conflicting = any(
+        (
+            args.fixtures,
+            args.statcast_trial,
+            args.label_pairing_trial,
+            args.context_pairing_trial,
+            args.odds_pairing_trial,
+            args.historical_dry_run,
+            args.allow_partial,
+            *(getattr(args, name) is not None for name in INPUT_ARGUMENTS),
+        )
+    )
+    if conflicting:
+        raise LocalDatasetCLIError(
+            "--historical-input-pack cannot be combined with another input mode, "
+            "--allow-partial, or explicit source CSV paths"
+        )
+
+    result = preflight_historical_input_pack(pack_dir)
+    result.raise_for_errors()
+    source_paths = result.paths.source_map()
+    args.historical_dry_run = True
+    args.statcast_csv = source_paths["statcast"]
+    args.retrosheet_games_csv = source_paths["retrosheet_games"]
+    args.retrosheet_events_csv = source_paths["retrosheet_events"]
+    args.weather_csv = source_paths["weather"]
+    args.ballpark_csv = source_paths["ballpark_factors"]
+    args.odds_csv = source_paths["odds_snapshot"]
+    print(f"historical_input_pack: {result.paths.root}")
+    print("historical_input_pack_preflight: valid")
+
+
 def _run(args: argparse.Namespace) -> None:
+    if args.verify_source_manifest is not None:
+        _run_source_manifest_verification(args)
+        return
+
+    _apply_historical_input_pack(args)
     mode, paths = _resolve_inputs(args)
     pack_paths = _preflight_outputs(args)
     generated_at = datetime.now(timezone.utc)
+    initial_source_fingerprints = _source_fingerprints(paths)
     if mode == "statcast_trial":
         _run_statcast_trial(
             args=args,
@@ -1442,6 +1735,14 @@ def _run(args: argparse.Namespace) -> None:
         if paths["odds_csv"] is not None
         else None
     )
+
+    if mode == "historical_dry_run":
+        _validate_real_historical_sources(
+            paths=paths,
+            statcast=statcast,
+            retrosheet=retrosheet,
+            odds=odds,
+        )
 
     manifest_ids = {
         key: identifier
@@ -1516,6 +1817,7 @@ def _run(args: argparse.Namespace) -> None:
             ballpark=ballpark,
             odds=odds,
             allow_partial=args.allow_partial,
+            created_at=generated_at,
         )
     }
     readiness = build_hr_dataset_readiness_report(
@@ -1525,6 +1827,10 @@ def _run(args: argparse.Namespace) -> None:
         source_manifest=readiness_source_manifest,
         pairing_summary=pairing_quality,
     )
+
+    # Parsing and dataset assembly may take time. Re-hash every source before
+    # any artifact write so a mid-build replacement cannot be silently blessed.
+    _assert_source_fingerprints_unchanged(initial_source_fingerprints)
 
     if args.output_csv is not None:
         write_hr_dataset_csv(dataset, args.output_csv, overwrite=args.overwrite)

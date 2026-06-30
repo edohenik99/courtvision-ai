@@ -60,7 +60,7 @@ IDENTITY_FIELD_NAMES: Final = (
     "probable_pitcher_status",
 )
 
-PREGAME_FEATURE_FIELD_NAMES: Final = (
+HISTORICAL_ROLLING_FEATURE_FIELD_NAMES: Final = (
     "hitter_pa_window",
     "hitter_recent_hr_rate",
     "hitter_recent_barrel_rate",
@@ -78,6 +78,9 @@ PREGAME_FEATURE_FIELD_NAMES: Final = (
     "pitcher_hard_hit_allowed_rate_to_date",
     "pitcher_fly_ball_allowed_rate_to_date",
     "pitcher_pitch_mix_json",
+)
+
+PREGAME_CONTEXT_FEATURE_FIELD_NAMES: Final = (
     "batter_hand",
     "pitcher_hand",
     "platoon_side",
@@ -92,6 +95,11 @@ PREGAME_FEATURE_FIELD_NAMES: Final = (
     "park_factor_lhb",
     "park_factor_rhb",
     "altitude",
+)
+
+PREGAME_FEATURE_FIELD_NAMES: Final = (
+    *HISTORICAL_ROLLING_FEATURE_FIELD_NAMES,
+    *PREGAME_CONTEXT_FEATURE_FIELD_NAMES,
 )
 
 ODDS_CONTEXT_FIELD_NAMES: Final = (
@@ -853,6 +861,7 @@ def manifest_to_json(
 
 __all__ = [
     "FORBIDDEN_DECISION_FIELD_NAMES",
+    "HISTORICAL_ROLLING_FEATURE_FIELD_NAMES",
     "IDENTITY_FIELD_NAMES",
     "MLB_HR_DATASET_SCHEMA_VERSION",
     "MLB_HR_MARKET_TYPE",
@@ -863,6 +872,7 @@ __all__ = [
     "MLBHRDatasetValidationResult",
     "ODDS_CONTEXT_FIELD_NAMES",
     "OUTCOME_LABEL_FIELD_NAMES",
+    "PREGAME_CONTEXT_FEATURE_FIELD_NAMES",
     "PREGAME_FEATURE_FIELD_NAMES",
     "PROVENANCE_FIELD_NAMES",
     "ROW_FIELD_NAMES",

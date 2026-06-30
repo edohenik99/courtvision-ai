@@ -4,6 +4,7 @@ import csv
 import json
 from pathlib import Path
 import re
+import shutil
 import socket
 import urllib.request
 
@@ -213,6 +214,13 @@ def test_fixture_output_dir_writes_complete_reproducibility_pack(
     assert metadata["kelly_eligible"] is False
     assert metadata["schema_version"] == "1.0"
     assert manifest["mode"] == "fixtures"
+    assert manifest["source_classification"] == "fixture"
+    assert manifest["approval_status"] == "not_approved"
+    assert manifest["eligible_for_betting"] is False
+    assert manifest["kelly_eligible"] is False
+    assert manifest["created_at"]
+    assert manifest["dataset_date_range_start"] == "2025-04-01"
+    assert manifest["dataset_date_range_end"] == "2025-04-02"
     assert manifest["dataset_schema_version"] == "1.0"
     assert manifest["audit"]["passed"] is True
     assert readiness["readiness_status"] == "READY_FOR_LARGER_HISTORICAL_BUILD"
@@ -239,6 +247,11 @@ def test_fixture_output_dir_writes_complete_reproducibility_pack(
         "ballpark_factors": 3,
     }
     assert all(entry["source_type"] == "fixture" for entry in entries.values())
+    assert all(
+        entry["source_classification"] == "fixture" for entry in entries.values()
+    )
+    assert all(entry["provider_label"] for entry in entries.values())
+    assert all(entry["created_at"] for entry in entries.values())
     assert all(entry["file_exists"] is True for entry in entries.values())
     assert all(entry["loaded_successfully"] is True for entry in entries.values())
     assert all(entry["byte_size"] > 0 for entry in entries.values())
@@ -596,8 +609,15 @@ def test_statcast_trial_pack_and_console_avoid_forbidden_language(
     ) == 0
     captured = capsys.readouterr()
     payload = captured.out + captured.err + "\n".join(
-        path.read_text(encoding="utf-8") for path in output_dir.iterdir()
+        path.read_text(encoding="utf-8")
+        for path in output_dir.iterdir()
+        if path.name != "source_manifest.json"
     )
+    source_manifest = json.loads(
+        (output_dir / "source_manifest.json").read_text(encoding="utf-8")
+    )
+    assert source_manifest["eligible_for_betting"] is False
+    assert source_manifest["kelly_eligible"] is False
     forbidden = (
         "betting recommendation",
         "staking",
@@ -1218,8 +1238,8 @@ def test_odds_pairing_trial_requires_odds_path_and_protects_pack(
     assert cli.main((*args, "--overwrite")) == 0
     capsys.readouterr()
 
-# Phase 6A manual historical dry-run coverage.
-HISTORICAL_DRY_RUN_ARGS = (
+# Real historical builds require a semantically aligned, manifested input pack.
+HISTORICAL_SAMPLE_ARGS = (
     "--historical-dry-run",
     "--statcast-csv",
     str(cli.FIXTURE_DIR / "statcast_sample.csv"),
@@ -1236,36 +1256,52 @@ HISTORICAL_DRY_RUN_ARGS = (
 )
 
 
-def test_historical_dry_run_uses_local_fixture_files_and_writes_no_files(
+def _real_historical_args(tmp_path: Path) -> tuple[str, ...]:
+    source_dir = tmp_path / "real_historical_inputs"
+    shutil.copytree(FIXTURES / "real_aligned_pack", source_dir)
+    return ("--historical-input-pack", str(source_dir))
+
+
+def test_historical_dry_run_uses_real_local_files_and_writes_no_files(
     monkeypatch, tmp_path, capsys
 ) -> None:
+    args = _real_historical_args(tmp_path)
+    sources = tuple((tmp_path / "real_historical_inputs").iterdir())
+    before = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in sources}
     monkeypatch.chdir(tmp_path)
 
-    assert cli.main(HISTORICAL_DRY_RUN_ARGS) == 0
+    assert cli.main(args) == 0
 
     captured = capsys.readouterr()
     output = captured.out
 
     assert "CourtVision MLB HR historical CSV dry run" in output
     assert "mode: historical_dry_run" in output
-    assert "statcast rows: 2" in output
-    assert "retrosheet games: 4" in output
+    assert "historical_input_pack_preflight: valid" in output
+    assert "statcast rows: 4" in output
+    assert "retrosheet games: 1" in output
     assert "retrosheet events: 2" in output
-    assert "weather rows: 3" in output
-    assert "ballpark rows: 3" in output
-    assert "odds snapshot rows: 3" in output
+    assert "weather rows: 1" in output
+    assert "ballpark rows: 1" in output
+    assert "odds snapshot rows: 2" in output
     assert "HR batter-game rows:" in output
     assert "audit passed:" in output
     assert "readiness_status:" in output
     assert "approval_status: not_approved" in output
-    assert not tuple(tmp_path.rglob("*"))
+    assert before == {
+        path: (path.read_bytes(), path.stat().st_mtime_ns) for path in sources
+    }
+    assert not (tmp_path / "outputs").exists()
+    assert not (tmp_path / "data" / "history").exists()
+    assert not (tmp_path / "runtime").exists()
 
 
 def test_historical_dry_run_output_dir_writes_full_pack(tmp_path, capsys) -> None:
     output_dir = tmp_path / "historical_dry_run_pack"
+    args = _real_historical_args(tmp_path)
 
     assert cli.main(
-        (*HISTORICAL_DRY_RUN_ARGS, "--output-dir", str(output_dir))
+        (*args, "--output-dir", str(output_dir))
     ) == 0
 
     captured = capsys.readouterr()
@@ -1283,7 +1319,16 @@ def test_historical_dry_run_output_dir_writes_full_pack(tmp_path, capsys) -> Non
     summary = (output_dir / "build_summary.txt").read_text(encoding="utf-8")
 
     assert manifest["mode"] == "historical_dry_run"
-    assert manifest["manifest_version"] == "phase6a-historical-dry-run-v1"
+    assert manifest["manifest_version"] == "phase6c-historical-rebuild-v2"
+    assert manifest["source_classification"] == "real"
+    assert manifest["created_at"]
+    assert manifest["dataset_date_range_start"] == "2024-04-10"
+    assert manifest["dataset_date_range_end"] == "2024-04-10"
+    assert all(source["source_classification"] == "real" for source in manifest["sources"])
+    assert all(source["provider_label"] for source in manifest["sources"])
+    assert all(source["sha256"] for source in manifest["sources"])
+    assert all(source["byte_size"] > 0 for source in manifest["sources"])
+    assert all(source["created_at"] for source in manifest["sources"])
     assert audit["approval_status"] == "not_approved"
     assert audit["eligible_for_betting"] is False
     assert audit["kelly_eligible"] is False
@@ -1297,4 +1342,51 @@ def test_historical_dry_run_rejects_fixtures_shortcut(capsys) -> None:
     assert cli.main(["--historical-dry-run", "--fixtures"]) == 2
 
     captured = capsys.readouterr()
-    assert "--historical-dry-run requires explicit local CSV paths" in captured.err
+    assert "direct --historical-dry-run CSV mode is disabled" in captured.err
+
+
+def test_historical_dry_run_rejects_explicit_sample_fixture_paths(capsys) -> None:
+    assert cli.main(HISTORICAL_SAMPLE_ARGS) == 2
+    captured = capsys.readouterr()
+    assert "direct --historical-dry-run CSV mode is disabled" in captured.err
+
+
+def test_historical_dry_run_rejects_copied_sample_identities(
+    tmp_path, capsys
+) -> None:
+    source_dir = tmp_path / "copied_inputs"
+    source_dir.mkdir()
+    paths: dict[str, Path] = {}
+    for filename in (
+        "statcast_sample.csv",
+        "retrosheet_games_sample.csv",
+        "retrosheet_events_sample.csv",
+        "weather_sample.csv",
+        "ballpark_factors_sample.csv",
+        "hr_odds_snapshot_sample.csv",
+    ):
+        destination = source_dir / filename.replace("_sample", "")
+        destination.write_bytes((cli.FIXTURE_DIR / filename).read_bytes())
+        paths[filename] = destination
+
+    args = (
+        "--historical-dry-run",
+        "--statcast-csv", str(paths["statcast_sample.csv"]),
+        "--retrosheet-games-csv", str(paths["retrosheet_games_sample.csv"]),
+        "--retrosheet-events-csv", str(paths["retrosheet_events_sample.csv"]),
+        "--weather-csv", str(paths["weather_sample.csv"]),
+        "--ballpark-csv", str(paths["ballpark_factors_sample.csv"]),
+        "--odds-csv", str(paths["hr_odds_snapshot_sample.csv"]),
+    )
+    assert cli.main(args) == 2
+    captured = capsys.readouterr()
+    assert "direct --historical-dry-run CSV mode is disabled" in captured.err
+
+
+def test_historical_rebuild_pack_cannot_be_overwritten(tmp_path, capsys) -> None:
+    args = _real_historical_args(tmp_path)
+    pack = tmp_path / "pack"
+    assert cli.main((*args, "--output-dir", str(pack), "--overwrite")) == 2
+    captured = capsys.readouterr()
+    assert "real historical rebuild packs are immutable" in captured.err
+    assert not pack.exists()

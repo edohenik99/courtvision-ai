@@ -155,6 +155,11 @@ def test_fixture_builder_preserves_joined_and_missing_context_cases() -> None:
     assert all(row.approval_status == "not_approved" for row in result.rows)
     assert all(row.eligible_for_betting is False for row in result.rows)
     assert all(row.kelly_eligible is False for row in result.rows)
+    assert all(
+        row.hr_market_available is False
+        for row in result.rows
+        if row.sportsbook is None
+    )
     assert result.approval_status == "not_approved"
     assert result.eligible_for_betting is False
     assert result.kelly_eligible is False

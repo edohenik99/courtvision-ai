@@ -736,7 +736,7 @@ def build_hr_batter_game_rows_from_sources(
             altitude=ballpark.altitude if ballpark else None,
             sportsbook=odds.sportsbook if odds else None,
             odds_provider=odds.provider if odds else None,
-            hr_market_available=True if odds else None,
+            hr_market_available=odds is not None,
             american_odds=odds.american_odds if odds else None,
             decimal_odds=odds.decimal_odds if odds else None,
             implied_probability=odds.implied_probability if odds else None,
