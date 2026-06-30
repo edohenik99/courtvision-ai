@@ -1,0 +1,3 @@
+game_date,retrosheet_game_id,mlbam_game_id,game_number,retrosheet_batter_id,mlbam_batter_id,batter_name,retrosheet_home_team_id,home_team,retrosheet_away_team_id,away_team,retrosheet_batting_team_id,batting_team,retrosheet_fielding_team_id,fielding_team,player_mapping_source,game_mapping_source,team_mapping_source,verified_at
+2024-04-10,NYA202404100,746100,1,judga001,592450,Aaron Judge,NYA,NYY,MIA,MIA,NYA,NYY,MIA,MIA,retrosheet-biofile-2024,local-mlbam-player-export-2024-04-10,reviewed-retrosheet-team-table,2026-06-28T14:00:00-04:00
+2024-04-10,NYA202404100,746100,1,sotoj001,665742,Juan Soto,NYA,NYY,MIA,MIA,NYA,NYY,MIA,MIA,retrosheet-biofile-2024,local-mlbam-player-export-2024-04-10,reviewed-retrosheet-team-table,2026-06-28T14:00:00-04:00

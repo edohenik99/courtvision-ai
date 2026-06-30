@@ -1,0 +1,5 @@
+game_date,game_pk,player_name,batter,pitcher,events,description,stand,p_throws,home_team,away_team,inning,inning_topbot,pitch_type,launch_speed,launch_angle,hit_distance_sc,bb_type,estimated_ba_using_speedangle,estimated_woba_using_speedangle,woba_value,barrel
+2024-04-10,746100,"Judge, Aaron",592450,666200,home_run,hit_into_play,R,L,NYY,MIA,1,Bot,FF,108.4,27,412,fly_ball,0.930,1.820,2.0,1
+2024-04-10,746100,"Judge, Aaron",592450,666200,,ball,R,L,NYY,MIA,3,Bot,CH,,,,,,,,
+2024-04-10,746100,"Soto, Juan",665742,666200,single,hit_into_play,L,L,NYY,MIA,1,Bot,SI,101.2,8,179,line_drive,0.710,0.640,0.9,0
+2024-04-10,746100,"Soto, Juan",665742,666200,,called_strike,L,L,NYY,MIA,4,Bot,SL,,,,,,,,

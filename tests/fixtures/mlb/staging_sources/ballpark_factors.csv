@@ -1,0 +1,2 @@
+venue_name,team,park_factor_hr,handedness_factor_lhb,handedness_factor_rhb,altitude,left_field_distance,center_field_distance,right_field_distance,roof_type,source_name,source_type,data_version,collected_at,as_of_date
+Yankee Stadium,NYY,1.12,1.17,1.07,55,318,408,314,open,fangraphs_park_factors_manual_snapshot,static,2024,2024-04-01T12:00:00Z,2024-04-01

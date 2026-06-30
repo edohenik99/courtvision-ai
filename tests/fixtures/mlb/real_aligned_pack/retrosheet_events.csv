@@ -1,0 +1,3 @@
+game_id,game_date,inning,batting_team,fielding_team,batter_id,batter_name,pitcher_id,pitcher_name,event_type,event_text,is_home_run,rbi,source_type
+746100,2024-04-10,1,NYY,MIA,592450,Aaron Judge,666200,Jesus Luzardo,home_run,Home run to center field,true,2,historical
+746100,2024-04-10,1,NYY,MIA,665742,Juan Soto,666200,Jesus Luzardo,single,Single to right field,false,0,historical

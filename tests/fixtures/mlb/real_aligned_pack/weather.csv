@@ -1,0 +1,2 @@
+game_id,game_date,event_start_time,venue_name,latitude,longitude,temperature,wind_speed,wind_direction,wind_out_to_field,humidity,precipitation,roof_status,source_name,source_type,collected_at,as_of_date
+746100,2024-04-10,2024-04-10T23:05:00Z,Yankee Stadium,40.8296,-73.9262,61.0,8.0,out to right,right,52,0.0,open,open_meteo_historical_archive,historical,2024-04-11T12:00:00Z,2024-04-11

@@ -1,0 +1,3 @@
+retrosheet_game_id,game_date,game_number,retrosheet_home_team_id,retrosheet_away_team_id,venue_name,home_score,away_score,game_status,retrosheet_batting_team_id,retrosheet_fielding_team_id,retrosheet_batter_id,batter_name,pitcher_id,pitcher_name,inning,event_type,event_text,is_home_run,rbi,source_type
+NYA202404100,2024-04-10,1,NYA,MIA,Yankee Stadium,5,2,completed,NYA,MIA,judga001,Aaron Judge,666200,Jesus Luzardo,1,home_run,Home run to center field,true,2,historical
+NYA202404100,2024-04-10,1,NYA,MIA,Yankee Stadium,5,2,completed,NYA,MIA,sotoj001,Juan Soto,666200,Jesus Luzardo,1,single,Single to right field,false,0,historical

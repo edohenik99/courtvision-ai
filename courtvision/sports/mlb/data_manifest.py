@@ -15,7 +15,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
-from typing import Final, Sequence
+from typing import Final, Mapping, Sequence
 
 
 MLB_MANIFEST_SCHEMA_VERSION: Final = "1.0"
@@ -37,6 +37,14 @@ class MLBSourceType(StrEnum):
     STATIC = "static"
 
 
+class MLBSourceClassification(StrEnum):
+    """Explicit trust class for a local source file or reproducibility pack."""
+
+    FIXTURE = "fixture"
+    SAMPLE = "sample"
+    REAL = "real"
+
+
 class MLBDataDomain(StrEnum):
     """Supported raw and derived MLB storage domains."""
 
@@ -53,6 +61,9 @@ class MLBDataDomain(StrEnum):
 
 
 SUPPORTED_MLB_SOURCE_TYPES: Final = frozenset(item.value for item in MLBSourceType)
+SUPPORTED_MLB_SOURCE_CLASSIFICATIONS: Final = frozenset(
+    item.value for item in MLBSourceClassification
+)
 SUPPORTED_MLB_DATA_DOMAINS: Final = frozenset(item.value for item in MLBDataDomain)
 RAW_MLB_DATA_DOMAINS: Final = frozenset(
     {
@@ -524,6 +535,196 @@ def compute_file_sha256(path: str | Path) -> str:
     return digest.hexdigest()
 
 
+def _parse_iso_datetime(value: object, field_name: str, errors: list[str]) -> None:
+    if not isinstance(value, str) or not value.strip():
+        errors.append(f"{field_name} is required")
+        return
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        errors.append(f"{field_name} must be an ISO-8601 datetime")
+
+
+def _parse_iso_date(value: object, field_name: str, errors: list[str]) -> date | None:
+    if not isinstance(value, str) or not value.strip():
+        errors.append(f"{field_name} is required")
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        errors.append(f"{field_name} must be an ISO-8601 date")
+        return None
+
+
+def verify_source_manifest_payload(
+    payload: Mapping[str, object],
+    *,
+    base_dir: str | Path | None = None,
+) -> MLBManifestValidationResult:
+    """Verify recorded source metadata against the current immutable bytes.
+
+    This validator is intentionally read-only. It never creates directories,
+    rewrites a manifest, or repairs a drifted source in place.
+    """
+
+    if not isinstance(payload, Mapping):
+        return MLBManifestValidationResult(False, ("manifest payload must be a mapping",))
+
+    errors: list[str] = []
+    classification = str(payload.get("source_classification") or "").strip().lower()
+    if classification not in SUPPORTED_MLB_SOURCE_CLASSIFICATIONS:
+        errors.append("source_classification must be fixture, sample, or real")
+
+    _parse_iso_datetime(payload.get("created_at"), "created_at", errors)
+    range_start = _parse_iso_date(
+        payload.get("dataset_date_range_start"),
+        "dataset_date_range_start",
+        errors,
+    )
+    range_end = _parse_iso_date(
+        payload.get("dataset_date_range_end"),
+        "dataset_date_range_end",
+        errors,
+    )
+    if range_start is not None and range_end is not None and range_start > range_end:
+        errors.append("dataset_date_range_start must not be after dataset_date_range_end")
+
+    approval_status = payload.get("approval_status")
+    eligible_for_betting = payload.get("eligible_for_betting")
+    kelly_eligible = payload.get("kelly_eligible")
+    if approval_status != NOT_APPROVED:
+        errors.append("approval_status must be 'not_approved'")
+    if eligible_for_betting is not False:
+        errors.append("eligible_for_betting must be false")
+    if kelly_eligible is not False:
+        errors.append("kelly_eligible must be false")
+    if classification in {
+        MLBSourceClassification.FIXTURE.value,
+        MLBSourceClassification.SAMPLE.value,
+    } and (
+        approval_status != NOT_APPROVED
+        or eligible_for_betting is not False
+        or kelly_eligible is not False
+    ):
+        errors.append("fixture/sample sources cannot be treated as production-ready")
+
+    sources = payload.get("sources")
+    if not isinstance(sources, list) or not sources:
+        errors.append("sources must be a non-empty list")
+        return MLBManifestValidationResult(False, tuple(errors))
+
+    root = Path(base_dir).expanduser().resolve() if base_dir is not None else None
+    for index, raw_source in enumerate(sources):
+        prefix = f"sources[{index}]"
+        if not isinstance(raw_source, Mapping):
+            errors.append(f"{prefix} must be a mapping")
+            continue
+
+        source_name = raw_source.get("source_name")
+        provider_label = raw_source.get("provider_label")
+        source_classification = str(
+            raw_source.get("source_classification") or ""
+        ).strip().lower()
+        if not isinstance(source_name, str) or not source_name.strip():
+            errors.append(f"{prefix}.source_name is required")
+        if not isinstance(provider_label, str) or not provider_label.strip():
+            errors.append(f"{prefix}.provider_label is required")
+        if source_classification not in SUPPORTED_MLB_SOURCE_CLASSIFICATIONS:
+            errors.append(
+                f"{prefix}.source_classification must be fixture, sample, or real"
+            )
+        elif classification and source_classification != classification:
+            errors.append(
+                f"{prefix}.source_classification does not match pack classification"
+            )
+
+        _parse_iso_datetime(raw_source.get("created_at"), f"{prefix}.created_at", errors)
+        raw_source_start = raw_source.get("date_range_start")
+        raw_source_end = raw_source.get("date_range_end")
+        source_start = None
+        source_end = None
+        if raw_source_start is not None or raw_source_end is not None:
+            source_start = _parse_iso_date(
+                raw_source_start,
+                f"{prefix}.date_range_start",
+                errors,
+            )
+            source_end = _parse_iso_date(
+                raw_source_end,
+                f"{prefix}.date_range_end",
+                errors,
+            )
+        if source_start is not None and source_end is not None and source_start > source_end:
+            errors.append(f"{prefix} has an invalid date range")
+
+        row_count = raw_source.get("parsed_row_count", raw_source.get("row_count"))
+        if isinstance(row_count, bool) or not isinstance(row_count, int) or row_count < 0:
+            errors.append(f"{prefix}.parsed_row_count must be a non-negative integer")
+
+        expected_size = raw_source.get("byte_size")
+        if (
+            isinstance(expected_size, bool)
+            or not isinstance(expected_size, int)
+            or expected_size < 0
+        ):
+            errors.append(f"{prefix}.byte_size must be a non-negative integer")
+            expected_size = None
+
+        expected_hash = raw_source.get("sha256", raw_source.get("checksum"))
+        if not _valid_sha256(expected_hash):
+            errors.append(f"{prefix}.sha256 must be a 64-character SHA-256 digest")
+            expected_hash = None
+
+        raw_path = raw_source.get("path")
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            errors.append(f"{prefix}.path is required")
+            continue
+        source_path = Path(raw_path).expanduser()
+        if not source_path.is_absolute() and root is not None:
+            source_path = root / source_path
+        source_path = source_path.resolve()
+        if not source_path.is_file():
+            errors.append(f"{prefix} source file is missing: {source_path}")
+            continue
+
+        actual_size = source_path.stat().st_size
+        if expected_size is not None and actual_size != expected_size:
+            errors.append(
+                f"{prefix} source file size mismatch: expected {expected_size}, "
+                f"found {actual_size}: {source_path}"
+            )
+        if expected_hash is not None:
+            actual_hash = compute_file_sha256(source_path)
+            if actual_hash.lower() != str(expected_hash).lower():
+                errors.append(
+                    f"{prefix} source file SHA-256 mismatch: expected "
+                    f"{expected_hash}, found {actual_hash}: {source_path}"
+                )
+
+    return MLBManifestValidationResult(not errors, tuple(errors))
+
+
+def verify_source_manifest_file(path: str | Path) -> MLBManifestValidationResult:
+    """Load and verify one source-manifest JSON file without mutating it."""
+
+    manifest_path = Path(path).expanduser().resolve()
+    if not manifest_path.is_file():
+        return MLBManifestValidationResult(
+            False,
+            (f"source manifest file is missing: {manifest_path}",),
+        )
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return MLBManifestValidationResult(
+            False,
+            (f"could not read source manifest {manifest_path}: {exc}",),
+        )
+    if not isinstance(payload, Mapping):
+        return MLBManifestValidationResult(False, ("manifest JSON must be an object",))
+    return verify_source_manifest_payload(payload, base_dir=manifest_path.parent)
+
+
 __all__ = [
     "MLB_MANIFEST_SCHEMA_VERSION",
     "MLBDataDomain",
@@ -531,12 +732,14 @@ __all__ = [
     "MLBManifestValidationError",
     "MLBManifestValidationResult",
     "MLBSourceFileRecord",
+    "MLBSourceClassification",
     "MLBSourceManifest",
     "MLBSourceType",
     "MLBStorageLayout",
     "RAW_MLB_DATA_DOMAINS",
     "SUPPORTED_MLB_DATA_DOMAINS",
     "SUPPORTED_MLB_SOURCE_TYPES",
+    "SUPPORTED_MLB_SOURCE_CLASSIFICATIONS",
     "compute_file_sha256",
     "ensure_mlb_storage_dirs",
     "get_mlb_storage_layout",
@@ -544,5 +747,7 @@ __all__ = [
     "manifest_to_dict",
     "manifest_to_json",
     "validate_source_manifest",
+    "verify_source_manifest_file",
+    "verify_source_manifest_payload",
     "write_manifest",
 ]

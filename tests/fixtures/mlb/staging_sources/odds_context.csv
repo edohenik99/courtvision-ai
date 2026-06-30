@@ -1,0 +1,3 @@
+game_date,game_id,player_id,player_name,team,opponent,market_type,sportsbook,american_odds,decimal_odds,odds_collected_at,event_start_time,home_team,away_team,provider,source_type,market_label,selection_name
+2024-04-10,746100,592450,Aaron Judge,NYY,MIA,player_home_run,Historical Book A,+275,,2024-04-10T20:00:00Z,2024-04-10T23:05:00Z,NYY,MIA,licensed_historical_export,historical,Player home run,Aaron Judge
+2024-04-10,746100,665742,Juan Soto,NYY,MIA,home_run,Historical Book B,+340,4.40,2024-04-10T20:05:00Z,2024-04-10T23:05:00Z,NYY,MIA,licensed_historical_export,historical,Player home run,Juan Soto
