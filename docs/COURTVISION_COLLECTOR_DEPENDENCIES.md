@@ -9,9 +9,9 @@ explicit command.
 Direct pip commands:
 
 ```powershell
-py -m pip install ".[collector-mlb]"
-py -m pip install ".[collector-weather]"
-py -m pip install ".[collector-all]"
+py -m pip install pandas pybaseball python-dateutil requests
+py -m pip install meteostat pandas python-dateutil requests
+py -m pip install meteostat pandas pybaseball python-dateutil requests
 ```
 
 The allowlisted bootstrap command provides the same three choices:
@@ -23,8 +23,10 @@ py scripts/courtvision_collector_doctor.py --install collector-all
 ```
 
 The bootstrap rejects package names and dependency groups outside that
-allowlist. It runs pip only when `--install` is explicitly supplied. Normal
-collector runs never invoke pip.
+allowlist. It passes the approved package names directly to pip and never
+installs the local repository (including editable installs). It runs pip only
+when `--install` is explicitly supplied. Normal collector runs never invoke
+pip.
 
 ## Run the dependency doctor
 

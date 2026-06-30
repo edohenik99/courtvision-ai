@@ -20,11 +20,12 @@ APPROVED_DISTRIBUTIONS = (
     "python-dateutil",
     "requests",
 )
-APPROVED_INSTALL_GROUPS = (
-    "collector-mlb",
-    "collector-weather",
-    "collector-all",
-)
+APPROVED_INSTALL_PACKAGES = {
+    "collector-mlb": ("pandas", "pybaseball", "python-dateutil", "requests"),
+    "collector-weather": ("meteostat", "pandas", "python-dateutil", "requests"),
+    "collector-all": APPROVED_DISTRIBUTIONS,
+}
+APPROVED_INSTALL_GROUPS = tuple(APPROVED_INSTALL_PACKAGES)
 FEATURE_REQUIREMENTS = {
     "statcast": ("pybaseball", "pandas", "python-dateutil", "requests"),
     "weather": ("meteostat", "pandas", "python-dateutil", "requests"),
@@ -115,10 +116,12 @@ def install_dependency_group(
     group: str,
     command_runner: CommandRunner | None = None,
 ) -> int:
-    """Run pip only for an explicitly selected, allowlisted project extra."""
+    """Run pip only for an explicitly selected, allowlisted package group."""
 
-    if group not in APPROVED_INSTALL_GROUPS:
+    if group not in APPROVED_INSTALL_PACKAGES:
         raise ValueError(f"unsupported collector dependency group: {group}")
+    packages = APPROVED_INSTALL_PACKAGES[group]
+
     runner = command_runner or subprocess.run
     command = [
         sys.executable,
@@ -126,7 +129,7 @@ def install_dependency_group(
         "pip",
         "--disable-pip-version-check",
         "install",
-        f".[{group}]",
+        *packages,
     ]
     print(f"Installing approved dependency group: {group}")
     completed = runner(command, cwd=PROJECT_ROOT, check=False)

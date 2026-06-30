@@ -111,7 +111,27 @@ def test_dependency_check_does_not_fetch_sports_data(
     assert report["sports_data_fetched"] is False
 
 
-def test_allowlisted_install_uses_project_extra() -> None:
+@pytest.mark.parametrize(
+    ("group", "expected_packages"),
+    [
+        (
+            "collector-mlb",
+            ("pandas", "pybaseball", "python-dateutil", "requests"),
+        ),
+        (
+            "collector-weather",
+            ("meteostat", "pandas", "python-dateutil", "requests"),
+        ),
+        (
+            "collector-all",
+            ("meteostat", "pandas", "pybaseball", "python-dateutil", "requests"),
+        ),
+    ],
+)
+def test_allowlisted_install_uses_approved_packages_directly(
+    group: str,
+    expected_packages: tuple[str, ...],
+) -> None:
     calls: list[tuple[list[str], Path, bool]] = []
 
     def runner(
@@ -120,7 +140,7 @@ def test_allowlisted_install_uses_project_extra() -> None:
         calls.append((command, cwd, check))
         return subprocess.CompletedProcess(command, 0)
 
-    assert doctor.install_dependency_group("collector-mlb", runner) == 0
+    assert doctor.install_dependency_group(group, runner) == 0
     assert calls == [
         (
             [
@@ -129,9 +149,32 @@ def test_allowlisted_install_uses_project_extra() -> None:
                 "pip",
                 "--disable-pip-version-check",
                 "install",
-                ".[collector-mlb]",
+                *expected_packages,
             ],
             doctor.PROJECT_ROOT,
             False,
         )
     ]
+    command = calls[0][0]
+    assert "." not in command
+    assert "-e" not in command
+    assert "--editable" not in command
+
+
+def test_approved_install_package_allowlist_is_exact() -> None:
+    assert doctor.APPROVED_INSTALL_PACKAGES == {
+        "collector-mlb": ("pandas", "pybaseball", "python-dateutil", "requests"),
+        "collector-weather": (
+            "meteostat",
+            "pandas",
+            "python-dateutil",
+            "requests",
+        ),
+        "collector-all": (
+            "meteostat",
+            "pandas",
+            "pybaseball",
+            "python-dateutil",
+            "requests",
+        ),
+    }
