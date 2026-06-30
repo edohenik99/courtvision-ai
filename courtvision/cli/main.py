@@ -25,6 +25,7 @@ SOURCE_OPTION_NAMES = (
     "fetch_statcast",
     "retrosheet_path",
     "chadwick_register_path",
+    "fetch_chadwick_register",
     "weather_path",
     "weather_provider",
     "ballpark_factors_path",
@@ -75,7 +76,16 @@ def _add_collect_arguments(parser: argparse.ArgumentParser) -> None:
         help="Fetch through pybaseball (never fetched during --dry-run).",
     )
     mlb.add_argument("--retrosheet-path", type=Path)
-    mlb.add_argument("--chadwick-register-path", type=Path)
+    mlb.add_argument(
+        "--chadwick-register-path",
+        type=Path,
+        help="Supplied Chadwick Bureau register file/directory fallback.",
+    )
+    mlb.add_argument(
+        "--fetch-chadwick-register",
+        action="store_true",
+        help="Download the approved Chadwick Bureau register archive.",
+    )
     mlb.add_argument("--weather-path", type=Path)
     mlb.add_argument("--weather-provider", choices=("meteostat", "noaa"))
     mlb.add_argument("--ballpark-factors-path", type=Path)

@@ -36,6 +36,7 @@ class UnsupportedSportCollectionError(CollectionError):
 
 
 Materializer = Callable[[Path], tuple[Path, ...]]
+RowCounter = Callable[[Path], int | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +85,7 @@ class PlannedSource:
     contract: SourceContract
     input_path: Path | None = None
     materializer: Materializer | None = None
+    row_counter: RowCounter | None = None
     warnings: tuple[str, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
@@ -164,7 +166,11 @@ def _record_file(
         local_file_path=file_path.relative_to(collection_dir).as_posix(),
         sha256=sha256_file(file_path),
         file_size=file_path.stat().st_size,
-        row_count=row_count_for_file(file_path),
+        row_count=(
+            planned.row_counter(file_path)
+            if planned.row_counter is not None
+            else row_count_for_file(file_path)
+        ),
         collection_timestamp=timestamp.isoformat(),
         warnings=planned.warnings,
     )

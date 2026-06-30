@@ -43,6 +43,11 @@ def build_parser() -> argparse.ArgumentParser:
     mlb.add_argument(
         "--chadwick-register-path", type=Path, help="Chadwick Bureau register file/directory."
     )
+    mlb.add_argument(
+        "--fetch-chadwick-register",
+        action="store_true",
+        help="Download the approved Chadwick Bureau register archive.",
+    )
     mlb.add_argument("--weather-path", type=Path, help="Meteostat or NOAA export/archive.")
     mlb.add_argument("--weather-provider", choices=("meteostat", "noaa"))
     mlb.add_argument("--ballpark-factors-path", type=Path, help="Approved supplied CSV.")
@@ -57,6 +62,7 @@ def _source_options(args: argparse.Namespace) -> dict[str, object]:
         "fetch_statcast",
         "retrosheet_path",
         "chadwick_register_path",
+        "fetch_chadwick_register",
         "weather_path",
         "weather_provider",
         "ballpark_factors_path",

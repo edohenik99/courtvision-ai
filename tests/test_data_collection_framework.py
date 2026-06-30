@@ -2,15 +2,22 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 import hashlib
+import io
 import json
 from pathlib import Path
+import zipfile
 
 import pytest
 
 from courtvision.data_collection.core import (
+    CollectionError,
     CollectionRequest,
     UnsupportedSportCollectionError,
     collect_sources,
+)
+from courtvision.sports.mlb.data_collection.adapter import (
+    CHADWICK_REGISTER_FILENAME,
+    CHADWICK_REGISTER_URL,
 )
 from courtvision.data_collection.path_guards import ProtectedPathError
 from courtvision.data_collection.registry import get_collection_adapter
@@ -38,6 +45,41 @@ def _request(tmp_path: Path, **overrides: object) -> CollectionRequest:
     return CollectionRequest(**values)  # type: ignore[arg-type]
 
 
+def _chadwick_archive(rows_per_shard: int = 2) -> bytes:
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w") as archive:
+        for suffix in "0123456789abcdef":
+            rows = "".join(
+                f"{suffix}{index},Player {suffix}{index}\n"
+                for index in range(rows_per_shard)
+            )
+            archive.writestr(
+                f"register-master/data/people-{suffix}.csv",
+                "key_person,name_last\n" + rows,
+            )
+    return payload.getvalue()
+
+
+class _DownloadResponse:
+    def __init__(self, payload: bytes, error: Exception | None = None) -> None:
+        self.payload = payload
+        self.error = error
+        self.closed = False
+
+    def raise_for_status(self) -> None:
+        if self.error is not None:
+            raise self.error
+
+    def iter_content(self, chunk_size: int) -> tuple[bytes, ...]:
+        return tuple(
+            self.payload[offset : offset + chunk_size]
+            for offset in range(0, len(self.payload), chunk_size)
+        )
+
+    def close(self) -> None:
+        self.closed = True
+
+
 def test_dry_run_writes_nothing_and_reports_required_blockers(tmp_path: Path) -> None:
     request = _request(tmp_path, dry_run=True)
 
@@ -47,6 +89,124 @@ def test_dry_run_writes_nothing_and_reports_required_blockers(tmp_path: Path) ->
     assert not request.output_raw_dir.exists()
     assert any("odds" in blocker.lower() for blocker in result.blockers)
     assert any("ballpark" in blocker.lower() for blocker in result.blockers)
+
+
+def test_chadwick_dry_run_plans_without_downloading_or_writing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_download(*args: object, **kwargs: object) -> None:
+        raise AssertionError("Chadwick must not download during dry-run")
+
+    monkeypatch.setattr("requests.get", fail_download)
+    request = _request(
+        tmp_path,
+        dry_run=True,
+        source_options={"fetch_chadwick_register": True},
+    )
+
+    result = collect_sources(request)
+
+    assert "chadwick_bureau_register" in result.planned_sources
+    assert not request.output_raw_dir.exists()
+
+
+def test_supplied_chadwick_register_fallback_still_works(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    supplied = tmp_path / "chadwick.csv"
+    supplied.write_text("key_person,name_last\nabc12345,Example\n", encoding="utf-8")
+
+    def fail_download(*args: object, **kwargs: object) -> None:
+        raise AssertionError("supplied Chadwick fallback must not download")
+
+    monkeypatch.setattr("requests.get", fail_download)
+    result = collect_sources(
+        _request(
+            tmp_path,
+            source_options={"chadwick_register_path": supplied},
+        )
+    )
+
+    assert result.manifest is not None
+    record = next(
+        source
+        for source in result.manifest.sources
+        if source.source_name == "chadwick_bureau_register"
+    )
+    copied = result.collection_dir / record.local_file_path
+    assert copied.read_bytes() == supplied.read_bytes()
+    assert record.row_count == 1
+
+
+def test_failed_chadwick_download_reports_blocker_and_leaves_no_collection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    response = _DownloadResponse(b"", error=RuntimeError("service unavailable"))
+    monkeypatch.setattr("requests.get", lambda *args, **kwargs: response)
+    request = _request(
+        tmp_path,
+        source_options={"fetch_chadwick_register": True},
+    )
+
+    with pytest.raises(CollectionError, match="download blocker: service unavailable"):
+        collect_sources(request)
+
+    assert response.closed
+    assert not (
+        request.output_raw_dir
+        / request.sport
+        / str(request.season)
+        / str(request.collection_id)
+    ).exists()
+
+
+def test_downloaded_chadwick_manifest_records_provenance_hash_and_row_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = _chadwick_archive(rows_per_shard=2)
+    response = _DownloadResponse(archive)
+    monkeypatch.setattr("requests.get", lambda *args, **kwargs: response)
+
+    result = collect_sources(
+        _request(
+            tmp_path,
+            source_options={"fetch_chadwick_register": True},
+        )
+    )
+
+    assert result.manifest is not None
+    record = next(
+        source
+        for source in result.manifest.sources
+        if source.source_name == "chadwick_bureau_register"
+    )
+    stored = result.collection_dir / record.local_file_path
+    assert stored.name == CHADWICK_REGISTER_FILENAME
+    assert stored.read_bytes() == archive
+    assert record.source_url_provider == CHADWICK_REGISTER_URL
+    assert "Open Data Commons Attribution License 1.0" in record.license_terms_note
+    assert record.sha256 == hashlib.sha256(archive).hexdigest()
+    assert record.file_size == len(archive)
+    assert record.row_count == 32
+    assert record.collection_timestamp == COLLECTED_AT.isoformat()
+
+
+def test_chadwick_fetch_rejects_protected_output_path_before_downloading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_download(*args: object, **kwargs: object) -> None:
+        raise AssertionError("protected output must be rejected before download")
+
+    monkeypatch.setattr("requests.get", fail_download)
+
+    with pytest.raises(ProtectedPathError):
+        collect_sources(
+            _request(
+                tmp_path,
+                output_raw_dir=tmp_path / "outputs",
+                source_options={"fetch_chadwick_register": True},
+            )
+        )
 
 
 @pytest.mark.parametrize(

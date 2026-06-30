@@ -60,19 +60,37 @@ def test_collect_mlb_dry_run_does_not_fetch_or_write(
     def fail_statcast(*args: object, **kwargs: object) -> None:
         raise AssertionError("Statcast must not be called during a CLI dry-run")
 
+    def fail_chadwick(*args: object, **kwargs: object) -> None:
+        raise AssertionError("Chadwick must not be called during a CLI dry-run")
+
     fake_pybaseball = type(
         "FakePybaseball", (), {"statcast": staticmethod(fail_statcast)}
     )()
     monkeypatch.setitem(sys.modules, "pybaseball", fake_pybaseball)
+    monkeypatch.setattr("requests.get", fail_chadwick)
     monkeypatch.chdir(tmp_path)
 
-    assert main(["collect", "mlb", "--season", "2025", "--fetch-statcast", "--dry-run"]) == 0
+    assert (
+        main(
+            [
+                "collect",
+                "mlb",
+                "--season",
+                "2025",
+                "--fetch-statcast",
+                "--fetch-chadwick-register",
+                "--dry-run",
+            ]
+        )
+        == 0
+    )
 
     report = json.loads(capsys.readouterr().out)
     assert report["sport"] == "mlb"
     assert report["dry_run"] is True
     assert report["writes_performed"] is False
     assert "statcast_pybaseball" in report["planned_sources"]
+    assert "chadwick_bureau_register" in report["planned_sources"]
     assert not (tmp_path / "courtvision-raw").exists()
 
 

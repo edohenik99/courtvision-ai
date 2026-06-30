@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import csv
 from dataclasses import replace
+import io
 from pathlib import Path
+from pathlib import PurePosixPath
+import re
 from typing import Mapping
+import zipfile
 
 from courtvision.data_collection.core import (
     CollectionError,
@@ -44,12 +49,20 @@ RETROSHEET = SourceContract(
 CHADWICK_REGISTER = SourceContract(
     source_name="chadwick_bureau_register",
     source_type="open_data_archive",
-    source_url_provider="https://github.com/chadwickbureau/register",
-    license_terms_note=(
-        "Chadwick Bureau Register only; preserve its published license and attribution."
+    source_url_provider=(
+        "https://github.com/chadwickbureau/register/archive/refs/heads/master.zip"
     ),
-    acquisition_method=AcquisitionMethod.SUPPLIED_ARCHIVE,
+    license_terms_note=(
+        "Chadwick Bureau Register; Open Data Commons Attribution License 1.0. "
+        "Preserve Chadwick Bureau attribution."
+    ),
+    acquisition_method=AcquisitionMethod.OFFICIAL_DOWNLOAD,
     allowed_extensions=(".zip", ".csv"),
+)
+CHADWICK_REGISTER_URL = CHADWICK_REGISTER.source_url_provider
+CHADWICK_REGISTER_FILENAME = "chadwick-register-master.zip"
+_CHADWICK_PEOPLE_FILES = frozenset(
+    f"people-{suffix}.csv" for suffix in "0123456789abcdef"
 )
 METEOSTAT_WEATHER = SourceContract(
     source_name="weather_meteostat",
@@ -128,6 +141,81 @@ def _statcast_materializer(request: CollectionRequest):
     return materialize
 
 
+def _chadwick_register_row_count(path: Path) -> int:
+    """Validate and count the official 16-shard Chadwick player register."""
+
+    try:
+        with zipfile.ZipFile(path) as archive:
+            members = {
+                PurePosixPath(name).name: name
+                for name in archive.namelist()
+                if re.fullmatch(r"people-[0-9a-f]\.csv", PurePosixPath(name).name)
+            }
+            missing = sorted(_CHADWICK_PEOPLE_FILES - members.keys())
+            if missing:
+                raise CollectionError(
+                    "Chadwick Bureau register download blocker: archive is missing "
+                    + ", ".join(missing)
+                )
+
+            rows = 0
+            for basename in sorted(_CHADWICK_PEOPLE_FILES):
+                with archive.open(members[basename]) as raw_handle:
+                    with io.TextIOWrapper(
+                        raw_handle, encoding="utf-8-sig", newline=""
+                    ) as text_handle:
+                        reader = csv.reader(text_handle)
+                        try:
+                            next(reader)
+                        except StopIteration:
+                            continue
+                        rows += sum(1 for row in reader if row)
+            return rows
+    except zipfile.BadZipFile as exc:
+        raise CollectionError(
+            "Chadwick Bureau register download blocker: response is not a valid ZIP archive"
+        ) from exc
+
+
+def _chadwick_register_materializer(destination: Path) -> tuple[Path, ...]:
+    """Download the allowlisted official archive without scraping."""
+
+    try:
+        import requests
+    except ImportError as exc:
+        raise CollectionError(
+            "Chadwick Bureau register download blocker: the optional requests package "
+            "is required"
+        ) from exc
+
+    output = destination / CHADWICK_REGISTER_FILENAME
+    response = None
+    try:
+        response = requests.get(
+            CHADWICK_REGISTER_URL,
+            stream=True,
+            timeout=(10, 120),
+        )
+        response.raise_for_status()
+        with output.open("xb") as handle:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    handle.write(chunk)
+        _chadwick_register_row_count(output)
+    except CollectionError:
+        output.unlink(missing_ok=True)
+        raise
+    except Exception as exc:
+        output.unlink(missing_ok=True)
+        raise CollectionError(
+            f"Chadwick Bureau register download blocker: {exc}"
+        ) from exc
+    finally:
+        if response is not None:
+            response.close()
+    return (output,)
+
+
 class MLBCollectionAdapter:
     """MLB v1 adapter: approved raw sources only, with no website scraping."""
 
@@ -168,18 +256,35 @@ class MLBCollectionAdapter:
         else:
             warnings.append("Statcast was not requested; no Statcast file will be collected.")
 
-        optional_paths = (
-            (RETROSHEET, _path_option(options, "retrosheet_path")),
-            (
-                CHADWICK_REGISTER,
-                _path_option(options, "chadwick_register_path", "chadwick_path"),
-            ),
+        retrosheet_path = _path_option(options, "retrosheet_path")
+        if retrosheet_path is None:
+            warnings.append(f"{RETROSHEET.source_name} was not supplied.")
+        else:
+            planned.append(PlannedSource(RETROSHEET, input_path=retrosheet_path))
+
+        chadwick_path = _path_option(
+            options, "chadwick_register_path", "chadwick_path"
         )
-        for contract, path in optional_paths:
-            if path is None:
-                warnings.append(f"{contract.source_name} was not supplied.")
-            else:
-                planned.append(PlannedSource(contract, input_path=path))
+        fetch_chadwick = bool(options.get("fetch_chadwick_register", False))
+        if chadwick_path is not None and fetch_chadwick:
+            raise CollectionError(
+                "choose either supplied --chadwick-register-path or "
+                "--fetch-chadwick-register"
+            )
+        if chadwick_path is not None:
+            planned.append(PlannedSource(CHADWICK_REGISTER, input_path=chadwick_path))
+        elif fetch_chadwick:
+            planned.append(
+                PlannedSource(
+                    CHADWICK_REGISTER,
+                    materializer=_chadwick_register_materializer,
+                    row_counter=_chadwick_register_row_count,
+                )
+            )
+        else:
+            warnings.append(
+                f"{CHADWICK_REGISTER.source_name} was neither supplied nor requested."
+            )
 
         weather_path = _path_option(options, "weather_path")
         if weather_path is None:
@@ -226,4 +331,9 @@ class MLBCollectionAdapter:
         )
 
 
-__all__ = ["MLB_SOURCE_CONTRACTS", "MLBCollectionAdapter"]
+__all__ = [
+    "CHADWICK_REGISTER_FILENAME",
+    "CHADWICK_REGISTER_URL",
+    "MLB_SOURCE_CONTRACTS",
+    "MLBCollectionAdapter",
+]

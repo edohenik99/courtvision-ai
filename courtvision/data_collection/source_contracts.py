@@ -20,6 +20,7 @@ class SourceContractError(ValueError):
 class AcquisitionMethod(StrEnum):
     SUPPLIED_FILE = "supplied_file"
     SUPPLIED_ARCHIVE = "supplied_archive"
+    OFFICIAL_DOWNLOAD = "official_download"
     PYBASEBALL = "pybaseball"
 
 
