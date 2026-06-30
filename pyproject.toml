@@ -8,6 +8,27 @@ version = "0.1.0"
 description = "CourtVision NBA props runtime"
 requires-python = ">=3.11"
 
+[project.optional-dependencies]
+collector-mlb = [
+    "pandas",
+    "pybaseball",
+    "python-dateutil",
+    "requests",
+]
+collector-weather = [
+    "meteostat",
+    "pandas",
+    "python-dateutil",
+    "requests",
+]
+collector-all = [
+    "meteostat",
+    "pandas",
+    "pybaseball",
+    "python-dateutil",
+    "requests",
+]
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]

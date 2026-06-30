@@ -1,5 +1,8 @@
 # CourtVision
 
+Collector dependency setup and read-only diagnostics are documented in
+[`docs/COURTVISION_COLLECTOR_DEPENDENCIES.md`](docs/COURTVISION_COLLECTOR_DEPENDENCIES.md).
+
 This repository is in a migration state.
 
 ## Current truth
