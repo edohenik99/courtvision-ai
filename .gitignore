@@ -52,3 +52,6 @@ test_outputs/
 
 # CourtVision local manual MLB scratch data
 data/manual/
+
+# Default local CLI raw collection root
+/courtvision-raw/
