@@ -38,6 +38,7 @@ class UnsupportedSportCollectionError(CollectionError):
 Materializer = Callable[[Path], tuple[Path, ...]]
 RowCounter = Callable[[Path], int | None]
 WarningProvider = Callable[[Path], tuple[str, ...]]
+MetadataProvider = Callable[[Path], Mapping[str, object]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +97,7 @@ class PlannedSource:
     source_notes: tuple[str, ...] = field(default_factory=tuple)
     warnings: tuple[str, ...] = field(default_factory=tuple)
     warning_provider: WarningProvider | None = None
+    metadata_provider: MetadataProvider | None = None
 
     def __post_init__(self) -> None:
         if (self.input_path is None) == (self.materializer is None):
@@ -167,6 +169,7 @@ def _record_file(
     planned: PlannedSource,
     timestamp: datetime,
     warnings: tuple[str, ...],
+    metadata: Mapping[str, object],
 ) -> ManifestSource:
     return ManifestSource(
         source_name=planned.contract.source_name,
@@ -184,6 +187,7 @@ def _record_file(
         collection_timestamp=timestamp.isoformat(),
         source_notes=planned.source_notes,
         warnings=warnings,
+        metadata=dict(metadata),
     )
 
 
@@ -306,6 +310,11 @@ def collect_sources(
             source_warnings = tuple(
                 dict.fromkeys((*planned.warnings, *dynamic_warnings))
             )
+            source_metadata = (
+                planned.metadata_provider(source_dir)
+                if planned.metadata_provider is not None
+                else {}
+            )
             materialized_warnings.extend(dynamic_warnings)
             for file_path in files:
                 records.append(
@@ -315,6 +324,7 @@ def collect_sources(
                         planned=planned,
                         timestamp=request.collection_timestamp,
                         warnings=source_warnings,
+                        metadata=source_metadata,
                     )
                 )
         manifest_warnings = tuple(

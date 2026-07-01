@@ -212,6 +212,18 @@ def _run_collect(args: argparse.Namespace, parser: argparse.ArgumentParser) -> i
         "warnings": list(result.warnings),
         "writes_performed": result.manifest is not None,
     }
+    if result.manifest is not None:
+        weather_metadata = next(
+            (
+                source.metadata
+                for source in result.manifest.sources
+                if source.source_name == "weather_meteostat"
+                and "weather_summary" in source.metadata
+            ),
+            None,
+        )
+        if weather_metadata is not None:
+            summary["weather_summary"] = weather_metadata["weather_summary"]
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0
 

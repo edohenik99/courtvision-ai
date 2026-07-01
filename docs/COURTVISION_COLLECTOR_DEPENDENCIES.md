@@ -79,7 +79,9 @@ and a reviewed park-coordinate mapping:
 courtvision collect mlb --season 2025 --start-date 2025-04-01 --end-date 2025-04-30 --retrosheet-path C:\approved-inputs\gl2025.txt --fetch-weather --weather-provider meteostat --stadium-map-path C:\approved-inputs\retrosheet_stadiums.csv --output-raw-dir C:\courtvision-raw --collection-id v2025-april-weather --dry-run
 ```
 
-The mapping CSV requires `park_id`, `latitude`, `longitude`, and `timezone`.
+The mapping CSV requires `park_id`, `latitude`, `longitude`, and `timezone`;
+optional `roof_type` values are `open`, `retractable`, `fixed_roof`, `dome`,
+or `unknown`.
 Dry-run validates local inputs and park coverage but does not import Meteostat,
 fetch weather, or create files. This acquisition path does not relax source
 contracts or enable training, predictions, EV, Kelly, Elite, staking, betting,

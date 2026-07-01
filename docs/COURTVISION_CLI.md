@@ -51,20 +51,21 @@ Even with `--fetch-statcast`, dry-run only validates the plan; it does not call
 Statcast or create the output directory. Missing required ballpark-factor and
 licensed-odds inputs are reported as blockers.
 
-## Collect MLB historical weather (Collector v1.3)
+## Collect MLB historical weather (Collector v1.3.1)
 
 Meteostat weather collection requires a local Retrosheet game log and an
 approved stadium mapping CSV. The mapping must contain `park_id`, `latitude`,
 `longitude`, and `timezone` (an IANA timezone such as `America/New_York`). An
-optional `stadium_name` and `elevation_m` may also be supplied.
+optional `stadium_name`, `elevation_m`, and `roof_type` may also be supplied.
 
 ```powershell
 courtvision collect mlb --season 2025 --start-date 2025-04-01 --end-date 2025-04-30 --retrosheet-path C:\approved-inputs\gl2025.txt --fetch-weather --weather-provider meteostat --stadium-map-path C:\approved-inputs\retrosheet_stadiums.csv --output-raw-dir C:\courtvision-raw --collection-id v2025-april-weather --dry-run
 ```
 
 Remove `--dry-run` only after reviewing the plan. A live run writes an
-immutable hourly weather CSV and records the Retrosheet log, stadium map, and
-weather-file hashes and row counts in the collection manifest. Every
+immutable hourly weather CSV, `weather_diagnostics.csv`, and
+`weather_missing_report.csv`. The manifest records each file hash plus missing
+counts, rate, and reason counts. Every
 Retrosheet park ID in the requested range must have a mapping. Headered
 Retrosheet game-info files use `starttime` when present; legacy `glYYYY.txt`
 logs use documented 13:00 local (day) or 19:00 local (night/unknown) reference

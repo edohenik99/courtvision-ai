@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 
-COLLECTOR_VERSION = "1.3.0"
+COLLECTOR_VERSION = "1.3.1"
 MANIFEST_FILENAME = "collection_manifest.json"
 
 
@@ -64,6 +64,7 @@ class ManifestSource:
     source_notes: tuple[str, ...] = field(default_factory=tuple)
     blockers: tuple[str, ...] = field(default_factory=tuple)
     warnings: tuple[str, ...] = field(default_factory=tuple)
+    metadata: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +96,7 @@ class CollectionManifest:
             source_payload["source_notes"] = list(source.source_notes)
             source_payload["blockers"] = list(source.blockers)
             source_payload["warnings"] = list(source.warnings)
+            source_payload["metadata"] = dict(source.metadata)
             payload["sources"].append(source_payload)
         payload["blockers"] = list(self.blockers)
         payload["warnings"] = list(self.warnings)

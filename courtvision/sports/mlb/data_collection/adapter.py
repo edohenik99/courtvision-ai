@@ -394,9 +394,11 @@ class MLBCollectionAdapter:
             if collector is None:
                 materializer = _blocked_materializer(" ".join(weather_blockers))
                 warning_provider = None
+                metadata_provider = None
             else:
                 materializer = collector.materialize
                 warning_provider = collector.manifest_warnings
+                metadata_provider = collector.manifest_metadata
             planned.append(
                 PlannedSource(
                     METEOSTAT_WEATHER,
@@ -409,6 +411,7 @@ class MLBCollectionAdapter:
                         "after the Retrosheet start-time reference.",
                     ),
                     warning_provider=warning_provider,
+                    metadata_provider=metadata_provider,
                 )
             )
         elif weather_path is None:

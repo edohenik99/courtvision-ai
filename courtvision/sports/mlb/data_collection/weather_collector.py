@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from itertools import chain
@@ -19,6 +20,20 @@ DAY_REFERENCE_TIME = time(13, 0)
 NIGHT_REFERENCE_TIME = time(19, 0)
 WEATHER_WINDOW_HOURS = 2
 WEATHER_FILENAME = "mlb_meteostat_hourly.csv"
+WEATHER_DIAGNOSTICS_FILENAME = "weather_diagnostics.csv"
+WEATHER_MISSING_REPORT_FILENAME = "weather_missing_report.csv"
+
+WEATHER_STATUSES = (
+    "weather_found",
+    "no_nearby_station",
+    "no_hourly_rows",
+    "indoor_or_roofed",
+    "invalid_coordinates",
+    "timezone_error",
+    "provider_error",
+)
+ROOF_TYPES = frozenset({"open", "retractable", "fixed_roof", "dome", "unknown"})
+INDOOR_ROOF_TYPES = frozenset({"fixed_roof", "dome"})
 
 WEATHER_COLUMNS = (
     "game_id",
@@ -41,6 +56,26 @@ WEATHER_COLUMNS = (
     "pressure",
 )
 
+WEATHER_DIAGNOSTIC_COLUMNS = (
+    "game_id",
+    "game_date",
+    "park_id",
+    "stadium_name",
+    "latitude",
+    "longitude",
+    "timezone",
+    "local_lookup_time",
+    "utc_lookup_time",
+    "query_window_start",
+    "query_window_end",
+    "nearest_station_id",
+    "nearest_station_name",
+    "station_distance_km",
+    "stations_found_count",
+    "hourly_rows_found_count",
+    "status",
+)
+
 _MAP_ALIASES = {
     "park_id": ("park_id", "retro_id", "site", "park"),
     "stadium_name": ("stadium_name", "venue_name", "park_name", "name"),
@@ -48,6 +83,7 @@ _MAP_ALIASES = {
     "longitude": ("longitude", "lon", "lng"),
     "timezone": ("timezone", "time_zone", "tz"),
     "elevation": ("elevation", "elevation_m", "altitude"),
+    "roof_type": ("roof_type", "roof"),
 }
 
 
@@ -64,10 +100,11 @@ class RetrosheetGame:
 class StadiumLocation:
     park_id: str
     stadium_name: str
-    latitude: float
-    longitude: float
+    latitude: float | str | None
+    longitude: float | str | None
     timezone_name: str
     elevation_m: int | None = None
+    roof_type: str = "unknown"
 
 
 def _first(row: Mapping[str, object], aliases: Iterable[str]) -> str:
@@ -211,15 +248,9 @@ def load_stadium_map(path: str | Path) -> dict[str, StadiumLocation]:
         for row_number, raw_row in enumerate(reader, start=2):
             row = {str(key).strip().lower(): value for key, value in raw_row.items()}
             values = {name: _first(row, aliases) for name, aliases in _MAP_ALIASES.items()}
-            missing = [
-                name
-                for name in ("park_id", "latitude", "longitude", "timezone")
-                if not values[name]
-            ]
-            if missing:
+            if not values["park_id"]:
                 raise CollectionError(
-                    f"Meteostat weather blocker: stadium map row {row_number} is missing "
-                    + ", ".join(missing)
+                    f"Meteostat weather blocker: stadium map row {row_number} is missing park_id"
                 )
             park_id = values["park_id"].upper()
             if park_id in locations:
@@ -227,8 +258,6 @@ def load_stadium_map(path: str | Path) -> dict[str, StadiumLocation]:
                     f"Meteostat weather blocker: duplicate stadium mapping for {park_id}"
                 )
             try:
-                latitude = float(values["latitude"])
-                longitude = float(values["longitude"])
                 elevation = (
                     int(round(float(values["elevation"])))
                     if values["elevation"]
@@ -236,18 +265,26 @@ def load_stadium_map(path: str | Path) -> dict[str, StadiumLocation]:
                 )
             except ValueError as exc:
                 raise CollectionError(
-                    f"Meteostat weather blocker: stadium map row {row_number} has invalid coordinates/elevation"
+                    f"Meteostat weather blocker: stadium map row {row_number} has invalid elevation"
                 ) from exc
-            if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
-                raise CollectionError(
-                    f"Meteostat weather blocker: stadium map row {row_number} coordinates are out of range"
-                )
             try:
-                ZoneInfo(values["timezone"])
-            except ZoneInfoNotFoundError as exc:
+                latitude: float | str | None = (
+                    float(values["latitude"]) if values["latitude"] else None
+                )
+            except ValueError:
+                latitude = values["latitude"]
+            try:
+                longitude: float | str | None = (
+                    float(values["longitude"]) if values["longitude"] else None
+                )
+            except ValueError:
+                longitude = values["longitude"]
+            roof_type = (values["roof_type"] or "unknown").lower()
+            if roof_type not in ROOF_TYPES:
                 raise CollectionError(
-                    f"Meteostat weather blocker: unknown timezone {values['timezone']!r} for {park_id}"
-                ) from exc
+                    f"Meteostat weather blocker: stadium map row {row_number} has invalid "
+                    f"roof_type {roof_type!r}; expected one of {', '.join(sorted(ROOF_TYPES))}"
+                )
             locations[park_id] = StadiumLocation(
                 park_id=park_id,
                 stadium_name=values["stadium_name"] or park_id,
@@ -255,6 +292,7 @@ def load_stadium_map(path: str | Path) -> dict[str, StadiumLocation]:
                 longitude=longitude,
                 timezone_name=values["timezone"],
                 elevation_m=elevation,
+                roof_type=roof_type,
             )
     if not locations:
         raise CollectionError("Meteostat weather blocker: stadium map has no data rows")
@@ -283,27 +321,50 @@ def _reference_time(game: RetrosheetGame, location: StadiumLocation) -> tuple[da
     )
 
 
-def _fetch_meteostat_hourly(
-    location: StadiumLocation, start: datetime, end: datetime
-):
+def _meteostat_module():
     try:
         import meteostat as ms
     except ImportError as exc:
         raise CollectionError(
             "Meteostat weather blocker: install the collector-weather dependency group"
         ) from exc
+    return ms
+
+
+def _fetch_nearby_stations(location: StadiumLocation):
+    ms = _meteostat_module()
     point = ms.Point(location.latitude, location.longitude, location.elevation_m)
+    stations = getattr(ms, "stations", None)
+    if stations is not None:
+        result = stations.nearby(point)
+    else:
+        stations_type = getattr(ms, "Stations", None)
+        if stations_type is None:
+            raise CollectionError(
+                "Meteostat weather blocker: installed Meteostat package has no station API"
+            )
+        result = stations_type().nearby(location.latitude, location.longitude)
+    fetch = getattr(result, "fetch", None)
+    return fetch() if callable(fetch) else result
+
+
+def _fetch_meteostat_hourly(
+    station_id: str, location: StadiumLocation, start: datetime, end: datetime
+):
+    ms = _meteostat_module()
     hourly = getattr(ms, "hourly", None) or getattr(ms, "Hourly", None)
     if hourly is None:
         raise CollectionError(
             "Meteostat weather blocker: installed Meteostat package has no hourly API"
         )
-    return hourly(
-        point,
+    result = hourly(
+        station_id,
         start.replace(tzinfo=None),
         end.replace(tzinfo=None),
         timezone=location.timezone_name,
-    ).fetch()
+    )
+    fetch = getattr(result, "fetch", None)
+    return fetch() if callable(fetch) else result
 
 
 def _observation_datetime(index: object, row: Mapping[str, object]) -> datetime | None:
@@ -327,11 +388,72 @@ def _csv_value(value: object) -> object:
     return item() if callable(item) else value
 
 
+def _valid_coordinates(location: StadiumLocation) -> bool:
+    return (
+        isinstance(location.latitude, (int, float))
+        and not isinstance(location.latitude, bool)
+        and math.isfinite(float(location.latitude))
+        and -90 <= float(location.latitude) <= 90
+        and isinstance(location.longitude, (int, float))
+        and not isinstance(location.longitude, bool)
+        and math.isfinite(float(location.longitude))
+        and -180 <= float(location.longitude) <= 180
+    )
+
+
+def _station_details(frame: object) -> tuple[str, str, object, int]:
+    if frame is None or getattr(frame, "empty", True):
+        return "", "", "", 0
+    count = len(frame)  # type: ignore[arg-type]
+    index = next(iter(frame.index))  # type: ignore[union-attr]
+    station_id = index[0] if isinstance(index, tuple) else index
+    series = frame.iloc[0]  # type: ignore[union-attr]
+    row = series.to_dict()
+    station_id = row.get("id") or station_id
+    distance_km: object = ""
+    if _csv_value(row.get("distance_km")) != "":
+        distance_km = _csv_value(row.get("distance_km"))
+    elif _csv_value(row.get("distance")) != "":
+        distance_km = round(float(row["distance"]) / 1000, 3)
+    return (
+        str(_csv_value(station_id)),
+        str(_csv_value(row.get("name"))),
+        distance_km,
+        count,
+    )
+
+
+def _diagnostic_base(
+    game: RetrosheetGame, location: StadiumLocation
+) -> dict[str, object]:
+    return {
+        "game_id": game.game_id,
+        "game_date": game.game_date.isoformat(),
+        "park_id": game.park_id,
+        "stadium_name": location.stadium_name,
+        "latitude": _csv_value(location.latitude),
+        "longitude": _csv_value(location.longitude),
+        "timezone": location.timezone_name,
+        "local_lookup_time": "",
+        "utc_lookup_time": "",
+        "query_window_start": "",
+        "query_window_end": "",
+        "nearest_station_id": "",
+        "nearest_station_name": "",
+        "station_distance_km": "",
+        "stations_found_count": 0,
+        "hourly_rows_found_count": 0,
+        "status": "provider_error",
+    }
+
+
 @dataclass(slots=True)
 class MeteostatWeatherCollector:
     games: tuple[RetrosheetGame, ...]
     locations: Mapping[str, StadiumLocation]
     warnings: list[str] = field(default_factory=list)
+    diagnostics: list[dict[str, object]] = field(default_factory=list)
+    unavailable_field_counts: Counter[str] = field(default_factory=Counter)
 
     def materialize(self, destination: Path) -> tuple[Path, ...]:
         missing = missing_stadium_park_ids(self.games, self.locations)
@@ -341,32 +463,108 @@ class MeteostatWeatherCollector:
                 + ", ".join(missing)
             )
         output = destination / WEATHER_FILENAME
+        diagnostics_output = destination / WEATHER_DIAGNOSTICS_FILENAME
+        missing_output = destination / WEATHER_MISSING_REPORT_FILENAME
+        created = (output, diagnostics_output, missing_output)
+        self.warnings.clear()
+        self.diagnostics.clear()
+        self.unavailable_field_counts.clear()
         try:
-            with output.open("x", encoding="utf-8", newline="") as handle:
-                writer = csv.DictWriter(handle, fieldnames=WEATHER_COLUMNS, lineterminator="\n")
+            with (
+                output.open("x", encoding="utf-8", newline="") as weather_handle,
+                diagnostics_output.open(
+                    "x", encoding="utf-8", newline=""
+                ) as diagnostics_handle,
+                missing_output.open("x", encoding="utf-8", newline="") as missing_handle,
+            ):
+                writer = csv.DictWriter(
+                    weather_handle, fieldnames=WEATHER_COLUMNS, lineterminator="\n"
+                )
+                diagnostics_writer = csv.DictWriter(
+                    diagnostics_handle,
+                    fieldnames=WEATHER_DIAGNOSTIC_COLUMNS,
+                    lineterminator="\n",
+                )
+                missing_writer = csv.DictWriter(
+                    missing_handle,
+                    fieldnames=WEATHER_DIAGNOSTIC_COLUMNS,
+                    lineterminator="\n",
+                )
                 writer.writeheader()
+                diagnostics_writer.writeheader()
+                missing_writer.writeheader()
                 used_reference_defaults = False
                 for game in self.games:
                     location = self.locations[game.park_id]
-                    game_time, basis = _reference_time(game, location)
-                    used_reference_defaults |= game.start_time is None
-                    try:
-                        frame = _fetch_meteostat_hourly(
-                            location,
-                            game_time - timedelta(hours=WEATHER_WINDOW_HOURS),
-                            game_time + timedelta(hours=WEATHER_WINDOW_HOURS),
-                        )
-                    except CollectionError:
-                        raise
-                    except Exception as exc:
-                        raise CollectionError(
-                            f"Meteostat weather blocker: fetch failed for {game.game_id} at {game.park_id}: {exc}"
-                        ) from exc
-                    if frame is None or getattr(frame, "empty", True):
-                        self.warnings.append(
-                            f"Meteostat returned no hourly rows for {game.game_id} ({game.park_id})."
+                    diagnostic = _diagnostic_base(game, location)
+                    if not _valid_coordinates(location):
+                        diagnostic["status"] = "invalid_coordinates"
+                        self._record_diagnostic(
+                            diagnostic, diagnostics_writer, missing_writer
                         )
                         continue
+                    try:
+                        game_time, basis = _reference_time(game, location)
+                    except (ZoneInfoNotFoundError, ValueError):
+                        diagnostic["status"] = "timezone_error"
+                        self._record_diagnostic(
+                            diagnostic, diagnostics_writer, missing_writer
+                        )
+                        continue
+                    used_reference_defaults |= game.start_time is None
+                    window_start = game_time - timedelta(hours=WEATHER_WINDOW_HOURS)
+                    window_end = game_time + timedelta(hours=WEATHER_WINDOW_HOURS)
+                    diagnostic.update(
+                        {
+                            "local_lookup_time": game_time.isoformat(),
+                            "utc_lookup_time": game_time.astimezone(
+                                timezone.utc
+                            ).isoformat(),
+                            "query_window_start": window_start.isoformat(),
+                            "query_window_end": window_end.isoformat(),
+                        }
+                    )
+                    if location.roof_type in INDOOR_ROOF_TYPES:
+                        diagnostic["status"] = "indoor_or_roofed"
+                        self._record_diagnostic(
+                            diagnostic, diagnostics_writer, missing_writer
+                        )
+                        continue
+                    try:
+                        stations = _fetch_nearby_stations(location)
+                        station_id, station_name, distance_km, station_count = (
+                            _station_details(stations)
+                        )
+                        diagnostic.update(
+                            {
+                                "nearest_station_id": station_id,
+                                "nearest_station_name": station_name,
+                                "station_distance_km": distance_km,
+                                "stations_found_count": station_count,
+                            }
+                        )
+                        if not station_count:
+                            diagnostic["status"] = "no_nearby_station"
+                            self._record_diagnostic(
+                                diagnostic, diagnostics_writer, missing_writer
+                            )
+                            continue
+                        frame = _fetch_meteostat_hourly(
+                            station_id, location, window_start, window_end
+                        )
+                    except Exception:
+                        diagnostic["status"] = "provider_error"
+                        self._record_diagnostic(
+                            diagnostic, diagnostics_writer, missing_writer
+                        )
+                        continue
+                    if frame is None or getattr(frame, "empty", True):
+                        diagnostic["status"] = "no_hourly_rows"
+                        self._record_diagnostic(
+                            diagnostic, diagnostics_writer, missing_writer
+                        )
+                        continue
+                    diagnostic["hourly_rows_found_count"] = len(frame)
                     columns = set(getattr(frame, "columns", ()))
                     parameter_map = {
                         "temperature": "temp",
@@ -376,26 +574,30 @@ class MeteostatWeatherCollector:
                         "precipitation": "prcp",
                         "pressure": "pres",
                     }
-                    unavailable = [name for name, code in parameter_map.items() if code not in columns]
-                    if unavailable:
-                        self.warnings.append(
-                            f"Meteostat fields unavailable for {game.game_id}: {', '.join(unavailable)}."
-                        )
+                    unavailable = [
+                        name
+                        for name, code in parameter_map.items()
+                        if code not in columns
+                    ]
+                    self.unavailable_field_counts.update(unavailable)
+                    weather_rows: list[dict[str, object]] = []
+                    malformed = False
                     for index, series in frame.iterrows():
                         row = series.to_dict()
                         observed = _observation_datetime(index, row)
                         if observed is None:
-                            raise CollectionError(
-                                f"Meteostat weather blocker: hourly row for {game.game_id} has no observation time"
-                            )
+                            malformed = True
+                            break
                         local_zone = ZoneInfo(location.timezone_name)
                         local_observed = (
                             observed.replace(tzinfo=local_zone)
                             if observed.tzinfo is None
                             else observed.astimezone(local_zone)
                         )
-                        station_id = index[0] if isinstance(index, tuple) and index else ""
-                        writer.writerow(
+                        observed_station_id = (
+                            index[0] if isinstance(index, tuple) and index else station_id
+                        )
+                        weather_rows.append(
                             {
                                 "game_id": game.game_id,
                                 "game_date": game.game_date.isoformat(),
@@ -407,25 +609,149 @@ class MeteostatWeatherCollector:
                                 "game_time_local": game_time.isoformat(),
                                 "game_time_basis": basis,
                                 "observation_time_local": local_observed.isoformat(),
-                                "observation_time_utc": local_observed.astimezone(timezone.utc).isoformat(),
-                                "meteostat_station_id": station_id,
+                                "observation_time_utc": local_observed.astimezone(
+                                    timezone.utc
+                                ).isoformat(),
+                                "meteostat_station_id": observed_station_id,
                                 **{
                                     name: _csv_value(row.get(code))
                                     for name, code in parameter_map.items()
                                 },
                             }
                         )
+                    if malformed:
+                        diagnostic["status"] = "provider_error"
+                        self._record_diagnostic(
+                            diagnostic, diagnostics_writer, missing_writer
+                        )
+                        continue
+                    writer.writerows(weather_rows)
+                    diagnostic["status"] = "weather_found"
+                    self._record_diagnostic(diagnostic, diagnostics_writer, missing_writer)
                 if used_reference_defaults:
                     self.warnings.append(
                         "Retrosheet legacy game logs lack exact start times; day games used 13:00 local and night/unknown games used 19:00 local as weather-window references."
                     )
+                self.warnings.append(self.summary_warning())
+                if self.unavailable_field_counts:
+                    unavailable_summary = ", ".join(
+                        f"{name}={count}"
+                        for name, count in sorted(self.unavailable_field_counts.items())
+                    )
+                    self.warnings.append(
+                        "Meteostat field availability summary: " + unavailable_summary + "."
+                    )
         except Exception:
-            output.unlink(missing_ok=True)
+            for path in created:
+                path.unlink(missing_ok=True)
             raise
-        return (output,)
+        return created
+
+    def _record_diagnostic(
+        self,
+        diagnostic: dict[str, object],
+        diagnostics_writer: csv.DictWriter,
+        missing_writer: csv.DictWriter,
+    ) -> None:
+        if diagnostic["status"] not in WEATHER_STATUSES:
+            raise CollectionError(
+                f"invalid weather diagnostic status: {diagnostic['status']}"
+            )
+        row = dict(diagnostic)
+        self.diagnostics.append(row)
+        diagnostics_writer.writerow(row)
+        if row["status"] != "weather_found":
+            missing_writer.writerow(row)
+
+    def summary(self) -> dict[str, object]:
+        status_counts = Counter(str(row["status"]) for row in self.diagnostics)
+        missing = [
+            row for row in self.diagnostics if row["status"] != "weather_found"
+        ]
+        park_counts = Counter(str(row["park_id"]) for row in missing)
+        processed = len(self.diagnostics)
+        return {
+            "games_processed": processed,
+            "weather_found": status_counts["weather_found"],
+            "missing_weather": len(missing),
+            "missing_weather_rate": (
+                round(len(missing) / processed, 6) if processed else 0.0
+            ),
+            "missing_by_reason": {
+                status: status_counts[status]
+                for status in WEATHER_STATUSES
+                if status != "weather_found" and status_counts[status]
+            },
+            "top_missing_park_ids": dict(
+                sorted(park_counts.items(), key=lambda item: (-item[1], item[0]))[:10]
+            ),
+            "indoor_or_roofed_skipped_count": status_counts["indoor_or_roofed"],
+        }
+
+    def summary_warning(self) -> str:
+        summary = self.summary()
+        reasons = summary["missing_by_reason"]
+        parks = summary["top_missing_park_ids"]
+        reason_text = (
+            ", ".join(f"{key}={value}" for key, value in reasons.items()) or "none"
+        )
+        park_text = (
+            ", ".join(f"{key}={value}" for key, value in parks.items()) or "none"
+        )
+        return (
+            "Weather summary: "
+            f"games processed={summary['games_processed']}; "
+            f"weather found={summary['weather_found']}; "
+            f"missing weather={summary['missing_weather']}; "
+            f"missing by reason={reason_text}; "
+            f"top missing park IDs={park_text}; "
+            f"indoor/roofed skipped={summary['indoor_or_roofed_skipped_count']}."
+        )
+
+    def _load_existing_diagnostics(self, source_dir: Path) -> None:
+        if self.diagnostics:
+            return
+        path = source_dir / WEATHER_DIAGNOSTICS_FILENAME
+        if not path.is_file():
+            return
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            self.diagnostics.extend(dict(row) for row in csv.DictReader(handle))
 
     def manifest_warnings(self, source_dir: Path) -> tuple[str, ...]:
+        self._load_existing_diagnostics(source_dir)
+        if not self.warnings and self.diagnostics:
+            diagnostics_by_game = {
+                str(row["game_id"]): row for row in self.diagnostics
+            }
+            if any(
+                game.start_time is None
+                and diagnostics_by_game.get(game.game_id, {}).get("local_lookup_time")
+                for game in self.games
+            ):
+                self.warnings.append(
+                    "Retrosheet legacy game logs lack exact start times; day games used "
+                    "13:00 local and night/unknown games used 19:00 local as "
+                    "weather-window references."
+                )
+            self.warnings.append(self.summary_warning())
         return tuple(dict.fromkeys(self.warnings))
+
+    def manifest_metadata(self, source_dir: Path) -> Mapping[str, object]:
+        from courtvision.data_collection.manifest import sha256_file
+
+        self._load_existing_diagnostics(source_dir)
+        summary = self.summary()
+        return {
+            "weather_diagnostics_file": WEATHER_DIAGNOSTICS_FILENAME,
+            "weather_diagnostics_sha256": sha256_file(
+                source_dir / WEATHER_DIAGNOSTICS_FILENAME
+            ),
+            "weather_missing_report_file": WEATHER_MISSING_REPORT_FILENAME,
+            "missing_weather_count": summary["missing_weather"],
+            "missing_weather_rate": summary["missing_weather_rate"],
+            "reason_counts": summary["missing_by_reason"],
+            "weather_summary": summary,
+        }
 
 
 __all__ = [
@@ -435,6 +761,9 @@ __all__ = [
     "RetrosheetGame",
     "StadiumLocation",
     "WEATHER_FILENAME",
+    "WEATHER_DIAGNOSTICS_FILENAME",
+    "WEATHER_MISSING_REPORT_FILENAME",
+    "WEATHER_STATUSES",
     "WEATHER_WINDOW_HOURS",
     "load_retrosheet_games",
     "load_stadium_map",
