@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 
-COLLECTOR_VERSION = "1.3.1"
+COLLECTOR_VERSION = "1.3.2"
 MANIFEST_FILENAME = "collection_manifest.json"
 
 

@@ -51,7 +51,7 @@ Even with `--fetch-statcast`, dry-run only validates the plan; it does not call
 Statcast or create the output directory. Missing required ballpark-factor and
 licensed-odds inputs are reported as blockers.
 
-## Collect MLB historical weather (Collector v1.3.1)
+## Collect MLB historical weather (Collector v1.3.2)
 
 Meteostat weather collection requires a local Retrosheet game log and an
 approved stadium mapping CSV. The mapping must contain `park_id`, `latitude`,
@@ -70,6 +70,11 @@ Retrosheet park ID in the requested range must have a mapping. Headered
 Retrosheet game-info files use `starttime` when present; legacy `glYYYY.txt`
 logs use documented 13:00 local (day) or 19:00 local (night/unknown) reference
 times and record that approximation as a manifest warning.
+
+For each game, the collector tries nearby stations in distance order until one
+returns hourly observations. It attempts at most five stations by default; use
+`--max-station-attempts` to set a different positive limit. Diagnostics and the
+missing report retain the attempted and selected station provenance.
 
 ## Fail-closed sports in v1
 

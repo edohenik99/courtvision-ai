@@ -114,6 +114,28 @@ def test_statcast_resume_and_chunk_size_flags_are_parsed() -> None:
     assert args.statcast_chunk_size == "biweekly"
 
 
+def test_weather_max_station_attempts_flag_is_parsed() -> None:
+    args = build_parser().parse_args(
+        [
+            "collect",
+            "mlb",
+            "--season",
+            "2025",
+            "--fetch-weather",
+            "--weather-provider",
+            "meteostat",
+            "--retrosheet-path",
+            "gl2025.txt",
+            "--stadium-map-path",
+            "stadiums.csv",
+            "--max-station-attempts",
+            "3",
+        ]
+    )
+
+    assert args.max_station_attempts == 3
+
+
 def test_resume_requires_fetch_statcast_and_explicit_collection_id(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

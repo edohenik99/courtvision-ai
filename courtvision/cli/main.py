@@ -31,6 +31,7 @@ SOURCE_OPTION_NAMES = (
     "fetch_weather",
     "weather_provider",
     "stadium_map_path",
+    "max_station_attempts",
     "ballpark_factors_path",
     "odds_archive_path",
     "odds_provider",
@@ -111,6 +112,11 @@ def _add_collect_arguments(parser: argparse.ArgumentParser) -> None:
         type=Path,
         help="Approved CSV mapping Retrosheet park IDs to coordinates and timezones.",
     )
+    mlb.add_argument(
+        "--max-station-attempts",
+        type=int,
+        help="Maximum nearby Meteostat stations tried per game (default: 5).",
+    )
     mlb.add_argument("--ballpark-factors-path", type=Path)
     mlb.add_argument("--odds-archive-path", type=Path)
     mlb.add_argument("--odds-provider")
@@ -174,6 +180,10 @@ def _run_collect(args: argparse.Namespace, parser: argparse.ArgumentParser) -> i
         parser.error("--fetch-weather requires --stadium-map-path")
     if args.stadium_map_path is not None and not args.fetch_weather:
         parser.error("--stadium-map-path requires --fetch-weather")
+    if args.max_station_attempts is not None and not args.fetch_weather:
+        parser.error("--max-station-attempts requires --fetch-weather")
+    if args.max_station_attempts is not None and args.max_station_attempts < 1:
+        parser.error("--max-station-attempts must be a positive integer")
 
     try:
         start_date = args.start_date or date(args.season, 1, 1)

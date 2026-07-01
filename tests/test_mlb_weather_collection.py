@@ -5,6 +5,8 @@ from datetime import date, datetime, timezone
 import hashlib
 import json
 from pathlib import Path
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -70,7 +72,16 @@ def _request(
     stadium_map: Path,
     *,
     dry_run: bool = False,
+    max_station_attempts: int | None = None,
 ) -> CollectionRequest:
+    source_options: dict[str, object] = {
+        "retrosheet_path": game_log,
+        "fetch_weather": True,
+        "weather_provider": "meteostat",
+        "stadium_map_path": stadium_map,
+    }
+    if max_station_attempts is not None:
+        source_options["max_station_attempts"] = max_station_attempts
     return CollectionRequest(
         sport="mlb",
         season=2025,
@@ -80,12 +91,7 @@ def _request(
         dry_run=dry_run,
         collection_id="v2025-weather-test",
         collection_timestamp=COLLECTED_AT,
-        source_options={
-            "retrosheet_path": game_log,
-            "fetch_weather": True,
-            "weather_provider": "meteostat",
-            "stadium_map_path": stadium_map,
-        },
+        source_options=source_options,
     )
 
 
@@ -117,9 +123,25 @@ def _station_frame() -> pd.DataFrame:
     )
 
 
+def _multiple_station_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "name": ["Third Airport", "Nearest Airport", "Second Airport"],
+            "distance": [12000.0, 4000.0, 8000.0],
+        },
+        index=pd.Index(["STN3", "STN1", "STN2"], name="id"),
+    )
+
+
 @pytest.fixture(autouse=True)
 def _mock_station_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("meteostat.stations.nearby", lambda point: _station_frame())
+    meteostat = ModuleType("meteostat")
+    meteostat.Point = lambda *args: args  # type: ignore[attr-defined]
+    meteostat.stations = SimpleNamespace(  # type: ignore[attr-defined]
+        nearby=lambda point: _station_frame()
+    )
+    meteostat.hourly = lambda *args, **kwargs: pd.DataFrame()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "meteostat", meteostat)
 
 
 def _weather_manifest_source(result, filename: str):
@@ -158,7 +180,7 @@ def test_fetch_weather_writes_hourly_raw_csv_and_manifest_evidence(
     assert calls[1][1] == datetime(2025, 4, 2, 11, 0)
     assert calls[0][3] == "America/New_York"
     assert result.manifest is not None
-    assert result.manifest.collector_version == "1.3.1"
+    assert result.manifest.collector_version == "1.3.2"
 
     weather = _weather_manifest_source(result, WEATHER_FILENAME)
     raw_path = result.collection_dir / weather.local_file_path
@@ -182,6 +204,11 @@ def test_fetch_weather_writes_hourly_raw_csv_and_manifest_evidence(
     assert diagnostics[0]["nearest_station_name"] == "LaGuardia Airport"
     assert diagnostics[0]["station_distance_km"] == "8.123"
     assert diagnostics[0]["stations_found_count"] == "1"
+    assert diagnostics[0]["stations_attempted_count"] == "1"
+    assert json.loads(diagnostics[0]["attempted_station_ids"]) == ["72503"]
+    assert diagnostics[0]["selected_station_id"] == "72503"
+    assert diagnostics[0]["selected_station_name"] == "LaGuardia Airport"
+    assert diagnostics[0]["selected_station_distance_km"] == "8.123"
     assert diagnostics[0]["hourly_rows_found_count"] == "2"
     assert diagnostics[0]["local_lookup_time"] == "2025-04-01T19:00:00-04:00"
     assert diagnostics[0]["utc_lookup_time"] == "2025-04-01T23:00:00+00:00"
@@ -201,6 +228,7 @@ def test_fetch_weather_writes_hourly_raw_csv_and_manifest_evidence(
     assert metadata["missing_weather_count"] == 0
     assert metadata["missing_weather_rate"] == 0.0
     assert metadata["reason_counts"] == {}
+    assert metadata["weather_summary"]["max_station_attempts"] == 5
     assert set(by_file) == {
         WEATHER_FILENAME,
         WEATHER_DIAGNOSTICS_FILENAME,
@@ -280,6 +308,7 @@ def test_cli_dry_run_plans_weather_without_fetching_or_writing(
     def fail_hourly(*args, **kwargs):
         raise AssertionError("dry-run must not call Meteostat")
 
+    monkeypatch.setattr("meteostat.stations.nearby", fail_hourly)
     monkeypatch.setattr("meteostat.hourly", fail_hourly)
     exit_code = cli_main(
         [
@@ -298,6 +327,8 @@ def test_cli_dry_run_plans_weather_without_fetching_or_writing(
             "meteostat",
             "--stadium-map-path",
             str(stadium_map),
+            "--max-station-attempts",
+            "3",
             "--output-raw-dir",
             str(output),
             "--dry-run",
@@ -355,6 +386,95 @@ def test_station_found_but_no_rows_records_no_hourly_rows(
     assert {row["status"] for row in diagnostics} == {"no_hourly_rows"}
     assert all(row["nearest_station_id"] == "72503" for row in diagnostics)
     assert all(row["hourly_rows_found_count"] == "0" for row in diagnostics)
+
+
+def test_nearest_empty_second_station_succeeds_with_fallback_diagnostics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    game_log = _legacy_log(tmp_path / "gl2025.txt")
+    stadium_map = _stadium_map(tmp_path / "stadiums.csv")
+    monkeypatch.setattr("meteostat.stations.nearby", lambda point: _multiple_station_frame())
+    calls: list[str] = []
+
+    def fake_hourly(station_id, start, end, timezone=None):
+        calls.append(station_id)
+        return pd.DataFrame() if station_id == "STN1" else _HourlyResult(start)
+
+    monkeypatch.setattr("meteostat.hourly", fake_hourly)
+    result = collect_sources(_request(tmp_path, game_log, stadium_map))
+    diagnostics = _diagnostic_rows(result)
+
+    assert calls == ["STN1", "STN2", "STN1", "STN2"]
+    assert {row["status"] for row in diagnostics} == {"weather_found"}
+    assert all(row["stations_found_count"] == "3" for row in diagnostics)
+    assert all(row["stations_attempted_count"] == "2" for row in diagnostics)
+    assert all(
+        json.loads(row["attempted_station_ids"]) == ["STN1", "STN2"]
+        for row in diagnostics
+    )
+    assert all(row["selected_station_id"] == "STN2" for row in diagnostics)
+    assert all(row["selected_station_name"] == "Second Airport" for row in diagnostics)
+    assert all(row["selected_station_distance_km"] == "8.0" for row in diagnostics)
+    assert all(row["hourly_rows_found_count"] == "2" for row in diagnostics)
+    summary = _weather_manifest_source(
+        result, WEATHER_DIAGNOSTICS_FILENAME
+    ).metadata["weather_summary"]
+    assert summary["station_attempts_total"] == 4
+    assert summary["fallback_station_selected_count"] == 2
+
+
+def test_all_attempted_stations_empty_records_attempts_in_missing_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    game_log = _legacy_log(tmp_path / "gl2025.txt")
+    stadium_map = _stadium_map(tmp_path / "stadiums.csv")
+    monkeypatch.setattr("meteostat.stations.nearby", lambda point: _multiple_station_frame())
+    monkeypatch.setattr("meteostat.hourly", lambda *args, **kwargs: pd.DataFrame())
+
+    result = collect_sources(_request(tmp_path, game_log, stadium_map))
+    diagnostics = _diagnostic_rows(result)
+    missing_source = _weather_manifest_source(result, WEATHER_MISSING_REPORT_FILENAME)
+    missing_path = result.collection_dir / missing_source.local_file_path
+    missing_rows = list(csv.DictReader(missing_path.open(encoding="utf-8")))
+
+    assert {row["status"] for row in diagnostics} == {"no_hourly_rows"}
+    assert all(row["stations_attempted_count"] == "3" for row in diagnostics)
+    assert all(
+        json.loads(row["attempted_station_ids"]) == ["STN1", "STN2", "STN3"]
+        for row in diagnostics
+    )
+    assert all(row["selected_station_id"] == "" for row in diagnostics)
+    assert missing_rows == diagnostics
+
+
+def test_max_station_attempts_is_respected_and_summary_stays_aggregate_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    game_log = _legacy_log(tmp_path / "gl2025.txt")
+    stadium_map = _stadium_map(tmp_path / "stadiums.csv")
+    monkeypatch.setattr("meteostat.stations.nearby", lambda point: _multiple_station_frame())
+    calls: list[str] = []
+
+    def empty_hourly(station_id, *args, **kwargs):
+        calls.append(station_id)
+        return pd.DataFrame()
+
+    monkeypatch.setattr("meteostat.hourly", empty_hourly)
+    result = collect_sources(
+        _request(tmp_path, game_log, stadium_map, max_station_attempts=2)
+    )
+    diagnostics = _diagnostic_rows(result)
+    summary = _weather_manifest_source(
+        result, WEATHER_DIAGNOSTICS_FILENAME
+    ).metadata["weather_summary"]
+
+    assert calls == ["STN1", "STN2", "STN1", "STN2"]
+    assert all(row["stations_attempted_count"] == "2" for row in diagnostics)
+    assert summary["max_station_attempts"] == 2
+    assert summary["station_attempts_total"] == 4
+    assert summary["fallback_station_selected_count"] == 0
+    assert summary["missing_by_reason"] == {"no_hourly_rows": 2}
+    assert not any("station_id" in key for key in summary)
 
 
 def test_invalid_coordinates_are_diagnosed_without_provider_call(

@@ -143,7 +143,7 @@ def test_statcast_adapter_wires_chunk_size_and_manifest_version(
     )
 
     assert result.manifest is not None
-    assert result.manifest.collector_version == "1.3.1"
+    assert result.manifest.collector_version == "1.3.2"
     assert calls[0]["chunk_size"] is ChunkSize.BIWEEKLY
     assert calls[0]["resume"] is False
     assert calls[0]["allow_network"] is True

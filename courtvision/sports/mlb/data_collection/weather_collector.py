@@ -7,6 +7,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from itertools import chain
+import json
 import math
 from pathlib import Path
 import re
@@ -19,6 +20,7 @@ from courtvision.data_collection.core import CollectionError
 DAY_REFERENCE_TIME = time(13, 0)
 NIGHT_REFERENCE_TIME = time(19, 0)
 WEATHER_WINDOW_HOURS = 2
+DEFAULT_MAX_STATION_ATTEMPTS = 5
 WEATHER_FILENAME = "mlb_meteostat_hourly.csv"
 WEATHER_DIAGNOSTICS_FILENAME = "weather_diagnostics.csv"
 WEATHER_MISSING_REPORT_FILENAME = "weather_missing_report.csv"
@@ -72,6 +74,11 @@ WEATHER_DIAGNOSTIC_COLUMNS = (
     "nearest_station_name",
     "station_distance_km",
     "stations_found_count",
+    "stations_attempted_count",
+    "attempted_station_ids",
+    "selected_station_id",
+    "selected_station_name",
+    "selected_station_distance_km",
     "hourly_rows_found_count",
     "status",
 )
@@ -401,26 +408,33 @@ def _valid_coordinates(location: StadiumLocation) -> bool:
     )
 
 
-def _station_details(frame: object) -> tuple[str, str, object, int]:
+def _station_candidates(frame: object) -> tuple[tuple[str, str, object], ...]:
     if frame is None or getattr(frame, "empty", True):
-        return "", "", "", 0
-    count = len(frame)  # type: ignore[arg-type]
-    index = next(iter(frame.index))  # type: ignore[union-attr]
-    station_id = index[0] if isinstance(index, tuple) else index
-    series = frame.iloc[0]  # type: ignore[union-attr]
-    row = series.to_dict()
-    station_id = row.get("id") or station_id
-    distance_km: object = ""
-    if _csv_value(row.get("distance_km")) != "":
-        distance_km = _csv_value(row.get("distance_km"))
-    elif _csv_value(row.get("distance")) != "":
-        distance_km = round(float(row["distance"]) / 1000, 3)
-    return (
-        str(_csv_value(station_id)),
-        str(_csv_value(row.get("name"))),
-        distance_km,
-        count,
-    )
+        return ()
+    candidates: list[tuple[str, str, object, float, int]] = []
+    for position, (index, series) in enumerate(frame.iterrows()):  # type: ignore[union-attr]
+        row = series.to_dict()
+        index_id = index[0] if isinstance(index, tuple) else index
+        station_id = str(_csv_value(row.get("id") or index_id))
+        distance_km: object = ""
+        if _csv_value(row.get("distance_km")) != "":
+            distance_km = _csv_value(row.get("distance_km"))
+        elif _csv_value(row.get("distance")) != "":
+            distance_km = round(float(row["distance"]) / 1000, 3)
+        sort_distance = (
+            float(distance_km) if distance_km != "" else math.inf
+        )
+        candidates.append(
+            (
+                station_id,
+                str(_csv_value(row.get("name"))),
+                distance_km,
+                sort_distance,
+                position,
+            )
+        )
+    candidates.sort(key=lambda item: (item[3], item[4]))
+    return tuple((item[0], item[1], item[2]) for item in candidates)
 
 
 def _diagnostic_base(
@@ -442,6 +456,11 @@ def _diagnostic_base(
         "nearest_station_name": "",
         "station_distance_km": "",
         "stations_found_count": 0,
+        "stations_attempted_count": 0,
+        "attempted_station_ids": "[]",
+        "selected_station_id": "",
+        "selected_station_name": "",
+        "selected_station_distance_km": "",
         "hourly_rows_found_count": 0,
         "status": "provider_error",
     }
@@ -451,9 +470,18 @@ def _diagnostic_base(
 class MeteostatWeatherCollector:
     games: tuple[RetrosheetGame, ...]
     locations: Mapping[str, StadiumLocation]
+    max_station_attempts: int = DEFAULT_MAX_STATION_ATTEMPTS
     warnings: list[str] = field(default_factory=list)
     diagnostics: list[dict[str, object]] = field(default_factory=list)
     unavailable_field_counts: Counter[str] = field(default_factory=Counter)
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.max_station_attempts, bool)
+            or not isinstance(self.max_station_attempts, int)
+            or self.max_station_attempts < 1
+        ):
+            raise ValueError("max_station_attempts must be a positive integer")
 
     def materialize(self, destination: Path) -> tuple[Path, ...]:
         missing = missing_stadium_park_ids(self.games, self.locations)
@@ -532,14 +560,18 @@ class MeteostatWeatherCollector:
                         continue
                     try:
                         stations = _fetch_nearby_stations(location)
-                        station_id, station_name, distance_km, station_count = (
-                            _station_details(stations)
+                        station_candidates = _station_candidates(stations)
+                        station_count = len(station_candidates)
+                        nearest = (
+                            station_candidates[0]
+                            if station_candidates
+                            else ("", "", "")
                         )
                         diagnostic.update(
                             {
-                                "nearest_station_id": station_id,
-                                "nearest_station_name": station_name,
-                                "station_distance_km": distance_km,
+                                "nearest_station_id": nearest[0],
+                                "nearest_station_name": nearest[1],
+                                "station_distance_km": nearest[2],
                                 "stations_found_count": station_count,
                             }
                         )
@@ -549,9 +581,40 @@ class MeteostatWeatherCollector:
                                 diagnostic, diagnostics_writer, missing_writer
                             )
                             continue
-                        frame = _fetch_meteostat_hourly(
-                            station_id, location, window_start, window_end
-                        )
+                        attempted_station_ids: list[str] = []
+                        frame = None
+                        station_id = ""
+                        for candidate_id, candidate_name, distance_km in station_candidates[
+                            : self.max_station_attempts
+                        ]:
+                            attempted_station_ids.append(candidate_id)
+                            diagnostic.update(
+                                {
+                                    "stations_attempted_count": len(
+                                        attempted_station_ids
+                                    ),
+                                    "attempted_station_ids": json.dumps(
+                                        attempted_station_ids, separators=(",", ":")
+                                    ),
+                                }
+                            )
+                            candidate_frame = _fetch_meteostat_hourly(
+                                candidate_id, location, window_start, window_end
+                            )
+                            if candidate_frame is None or getattr(
+                                candidate_frame, "empty", True
+                            ):
+                                continue
+                            frame = candidate_frame
+                            station_id = candidate_id
+                            diagnostic.update(
+                                {
+                                    "selected_station_id": candidate_id,
+                                    "selected_station_name": candidate_name,
+                                    "selected_station_distance_km": distance_km,
+                                }
+                            )
+                            break
                     except Exception:
                         diagnostic["status"] = "provider_error"
                         self._record_diagnostic(
@@ -670,8 +733,21 @@ class MeteostatWeatherCollector:
         ]
         park_counts = Counter(str(row["park_id"]) for row in missing)
         processed = len(self.diagnostics)
+        station_attempts_total = sum(
+            int(row.get("stations_attempted_count") or 0)
+            for row in self.diagnostics
+        )
+        fallback_station_selected_count = sum(
+            1
+            for row in self.diagnostics
+            if row["status"] == "weather_found"
+            and int(row.get("stations_attempted_count") or 0) > 1
+        )
         return {
             "games_processed": processed,
+            "max_station_attempts": self.max_station_attempts,
+            "station_attempts_total": station_attempts_total,
+            "fallback_station_selected_count": fallback_station_selected_count,
             "weather_found": status_counts["weather_found"],
             "missing_weather": len(missing),
             "missing_weather_rate": (
@@ -756,6 +832,7 @@ class MeteostatWeatherCollector:
 
 __all__ = [
     "DAY_REFERENCE_TIME",
+    "DEFAULT_MAX_STATION_ATTEMPTS",
     "MeteostatWeatherCollector",
     "NIGHT_REFERENCE_TIME",
     "RetrosheetGame",

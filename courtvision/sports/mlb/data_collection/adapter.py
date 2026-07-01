@@ -28,6 +28,7 @@ from courtvision.sports.mlb.data_collection.statcast_chunked_collector import (
     run_chunked_statcast,
 )
 from courtvision.sports.mlb.data_collection.weather_collector import (
+    DEFAULT_MAX_STATION_ATTEMPTS,
     MeteostatWeatherCollector,
     load_retrosheet_games,
     load_stadium_map,
@@ -142,6 +143,13 @@ def _path_option(options: Mapping[str, object], *names: str) -> Path | None:
         if value is not None and str(value).strip():
             return Path(str(value))
     return None
+
+
+def _max_station_attempts_option(options: Mapping[str, object]) -> int:
+    value = options.get("max_station_attempts", DEFAULT_MAX_STATION_ATTEMPTS)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise CollectionError("max_station_attempts must be a positive integer")
+    return value
 
 
 def _statcast_materializer(request: CollectionRequest):
@@ -386,7 +394,11 @@ class MLBCollectionAdapter:
                         "Meteostat weather blocker: missing stadium mapping for "
                         "Retrosheet park ID(s): " + ", ".join(missing)
                     )
-                collector = MeteostatWeatherCollector(games, locations)
+                collector = MeteostatWeatherCollector(
+                    games,
+                    locations,
+                    max_station_attempts=_max_station_attempts_option(options),
+                )
 
             blockers.extend(weather_blockers)
             if weather_blockers and not request.dry_run:
