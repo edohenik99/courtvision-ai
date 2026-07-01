@@ -27,6 +27,7 @@ from courtvision.sports.mlb.data_collection.statcast_chunked_collector import (
     chunk_size_from_str,
     run_chunked_statcast,
 )
+from courtvision.data_collection.resumable import load_collection_state
 
 
 STATCAST = SourceContract(
@@ -151,6 +152,15 @@ def _statcast_materializer(request: CollectionRequest):
     return materialize
 
 
+def _statcast_collection_warnings(source_dir: Path) -> tuple[str, ...]:
+    state = load_collection_state(source_dir)
+    if state is None:
+        raise CollectionError(
+            f"Statcast collection completed without a checkpoint: {source_dir}"
+        )
+    return tuple(state.warnings)
+
+
 def _chadwick_register_row_count(path: Path) -> int:
     """Validate and count the official 16-shard Chadwick player register."""
 
@@ -261,6 +271,7 @@ class MLBCollectionAdapter:
                 PlannedSource(
                     STATCAST,
                     materializer=_statcast_materializer(request),
+                    warning_provider=_statcast_collection_warnings,
                 )
             )
         else:

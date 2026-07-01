@@ -37,6 +37,7 @@ class UnsupportedSportCollectionError(CollectionError):
 
 Materializer = Callable[[Path], tuple[Path, ...]]
 RowCounter = Callable[[Path], int | None]
+WarningProvider = Callable[[Path], tuple[str, ...]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +94,7 @@ class PlannedSource:
     materializer: Materializer | None = None
     row_counter: RowCounter | None = None
     warnings: tuple[str, ...] = field(default_factory=tuple)
+    warning_provider: WarningProvider | None = None
 
     def __post_init__(self) -> None:
         if (self.input_path is None) == (self.materializer is None):
@@ -163,6 +165,7 @@ def _record_file(
     collection_dir: Path,
     planned: PlannedSource,
     timestamp: datetime,
+    warnings: tuple[str, ...],
 ) -> ManifestSource:
     return ManifestSource(
         source_name=planned.contract.source_name,
@@ -178,7 +181,7 @@ def _record_file(
             else row_count_for_file(file_path)
         ),
         collection_timestamp=timestamp.isoformat(),
-        warnings=planned.warnings,
+        warnings=warnings,
     )
 
 
@@ -284,21 +287,37 @@ def collect_sources(
     destination.mkdir(parents=True, exist_ok=request.resume)
     try:
         records: list[ManifestSource] = []
+        materialized_warnings: list[str] = []
         for planned in plan.sources:
-            for file_path in _materialize_source(
+            files = _materialize_source(
                 planned,
                 destination,
                 output_root,
                 resume=request.resume,
-            ):
+            )
+            source_dir = destination / "sources" / planned.contract.source_name
+            dynamic_warnings = (
+                planned.warning_provider(source_dir)
+                if planned.warning_provider is not None
+                else ()
+            )
+            source_warnings = tuple(
+                dict.fromkeys((*planned.warnings, *dynamic_warnings))
+            )
+            materialized_warnings.extend(dynamic_warnings)
+            for file_path in files:
                 records.append(
                     _record_file(
                         file_path=file_path,
                         collection_dir=destination,
                         planned=planned,
                         timestamp=request.collection_timestamp,
+                        warnings=source_warnings,
                     )
                 )
+        manifest_warnings = tuple(
+            dict.fromkeys((*plan.warnings, *materialized_warnings))
+        )
         manifest = CollectionManifest(
             sport=request.sport,
             season=request.season,
@@ -309,7 +328,7 @@ def collect_sources(
             collection_id=str(request.collection_id),
             sources=tuple(records),
             blockers=plan.blockers,
-            warnings=plan.warnings,
+            warnings=manifest_warnings,
         )
         write_collection_manifest(manifest, destination)
     except Exception:
@@ -328,7 +347,7 @@ def collect_sources(
         manifest=manifest,
         planned_sources=source_names,
         blockers=plan.blockers,
-        warnings=plan.warnings,
+        warnings=manifest_warnings,
     )
 
 

@@ -20,7 +20,11 @@ from courtvision.sports.mlb.data_collection.adapter import (
     CHADWICK_REGISTER_URL,
 )
 from courtvision.data_collection.path_guards import ProtectedPathError
-from courtvision.data_collection.resumable import ChunkSize
+from courtvision.data_collection.resumable import (
+    ChunkSize,
+    CollectionState,
+    save_collection_state,
+)
 from courtvision.data_collection.registry import get_collection_adapter
 from courtvision.data_collection.source_contracts import (
     AcquisitionMethod,
@@ -109,6 +113,17 @@ def test_statcast_adapter_wires_chunk_size_and_manifest_version(
         output_path.write_text(
             "game_date,game_pk\n2025-04-01,1\n", encoding="utf-8"
         )
+        state = CollectionState(
+            sport=request.sport,
+            season=request.season,
+            start_date=request.start_date.isoformat(),
+            end_date=request.end_date.isoformat(),
+            chunk_size_days=14,
+            chunks_planned=["2025-04-01_2025-04-02"],
+            chunks_completed=["2025-04-01_2025-04-02"],
+            merged=True,
+        )
+        save_collection_state(state, staging_dir)
         return output_path
 
     monkeypatch.setattr(
@@ -154,7 +169,7 @@ def test_framework_preserves_checkpoint_and_resumes_same_collection(
         if chunk.chunk_index == 1:
             raise RuntimeError("interrupted")
         path = chunks_dir / f"{chunk.chunk_key}.csv"
-        path.write_text("game_date,game_pk\n2025-04-01,1\n", encoding="utf-8")
+        path.write_text("\n", encoding="utf-8")
         return path.resolve()
 
     monkeypatch.setattr(
@@ -205,7 +220,20 @@ def test_framework_preserves_checkpoint_and_resumes_same_collection(
     assert result.manifest is not None
     assert first_calls[0] not in resumed_calls
     assert resumed_calls == ["2025-04-08_2025-04-08"]
-    assert (result.collection_dir / "collection_manifest.json").is_file()
+    skipped_warning = (
+        "Chunk 2025-04-01_2025-04-07 contained no data and was skipped during CSV merge."
+    )
+    assert skipped_warning in result.manifest.warnings
+    statcast_source = next(
+        source
+        for source in result.manifest.sources
+        if source.source_name == "statcast_pybaseball"
+    )
+    assert skipped_warning in statcast_source.warnings
+    assert statcast_source.row_count == 1
+    manifest_path = result.collection_dir / "collection_manifest.json"
+    assert manifest_path.is_file()
+    assert skipped_warning in json.loads(manifest_path.read_text())["warnings"]
 
 
 def test_resume_without_checkpoint_does_not_mutate_existing_folder(
