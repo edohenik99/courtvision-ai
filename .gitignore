@@ -53,5 +53,35 @@ test_outputs/
 # CourtVision local manual MLB scratch data
 data/manual/
 
+# The Odds API live MLB HR collector artifacts
+data/theoddsapi/live_hr_snapshots/*.csv
+data/theoddsapi/live_hr_snapshots/*.json
+data/theoddsapi/live_hr_snapshots/*backup*
+data/theoddsapi/live_hr_snapshots/run_log.csv
+data/theoddsapi/**/*.json
+
+# Local raw source packs
+source_files/
+
 # Default local CLI raw collection root
 /courtvision-raw/
+
+# Local API probe outputs / runtime odds data
+data/all_books_raw_*.json
+data/odds_raw_*.json
+data/oddspapi_*.json
+data/theoddsapi/
+
+# Local environment test script
+test_env.py
+
+# Raw local source packs
+source_files/
+
+# Local exploratory Odds API probe scripts
+tools/oddspapi_*.py
+tools/theoddsapi_probe.py
+tools/theoddsapi_current_hr_probe.py
+tools/theoddsapi_clean_hr_probe.py
+tools/theoddsapi_2025_historical_hr_probe.py
+tools/__pycache__/
