@@ -1,4 +1,4 @@
-"""Approved MLB source contracts and v1 raw collection planning."""
+"""Approved MLB source contracts and v1.2 raw collection planning."""
 
 from __future__ import annotations
 
@@ -21,6 +21,11 @@ from courtvision.data_collection.source_contracts import (
     AcquisitionMethod,
     SourceContract,
     reject_disallowed_source,
+)
+from courtvision.sports.mlb.data_collection.statcast_chunked_collector import (
+    STATCAST_DEFAULT_CHUNK_SIZE,
+    chunk_size_from_str,
+    run_chunked_statcast,
 )
 
 
@@ -121,22 +126,27 @@ def _path_option(options: Mapping[str, object], *names: str) -> Path | None:
 
 
 def _statcast_materializer(request: CollectionRequest):
+    chunk_size_option = request.source_options.get("statcast_chunk_size")
+    chunk_size = (
+        STATCAST_DEFAULT_CHUNK_SIZE
+        if chunk_size_option is None
+        else chunk_size_from_str(str(chunk_size_option))
+    )
+
     def materialize(destination: Path) -> tuple[Path, ...]:
-        try:
-            from pybaseball import statcast
-        except ImportError as exc:
-            raise CollectionError(
-                "--fetch-statcast requires the optional pybaseball package"
-            ) from exc
-        frame = statcast(
-            start_dt=request.start_date.isoformat(),
-            end_dt=request.end_date.isoformat(),
-        )
         output = destination / (
             f"statcast_{request.start_date.isoformat()}_{request.end_date.isoformat()}.csv"
         )
-        frame.to_csv(output, index=False)
-        return (output,)
+        merged = run_chunked_statcast(
+            request,
+            staging_dir=destination,
+            output_path=output,
+            chunk_size=chunk_size,
+            resume=request.resume,
+            allow_network=True,
+        )
+        assert merged is not None
+        return (merged,)
 
     return materialize
 

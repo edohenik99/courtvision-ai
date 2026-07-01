@@ -20,6 +20,7 @@ from courtvision.sports.mlb.data_collection.adapter import (
     CHADWICK_REGISTER_URL,
 )
 from courtvision.data_collection.path_guards import ProtectedPathError
+from courtvision.data_collection.resumable import ChunkSize
 from courtvision.data_collection.registry import get_collection_adapter
 from courtvision.data_collection.source_contracts import (
     AcquisitionMethod,
@@ -89,6 +90,140 @@ def test_dry_run_writes_nothing_and_reports_required_blockers(tmp_path: Path) ->
     assert not request.output_raw_dir.exists()
     assert any("odds" in blocker.lower() for blocker in result.blockers)
     assert any("ballpark" in blocker.lower() for blocker in result.blockers)
+
+
+def test_statcast_adapter_wires_chunk_size_and_manifest_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_chunked_statcast(request, staging_dir, output_path, **kwargs):
+        calls.append(
+            {
+                "request": request,
+                "staging_dir": staging_dir,
+                "output_path": output_path,
+                **kwargs,
+            }
+        )
+        output_path.write_text(
+            "game_date,game_pk\n2025-04-01,1\n", encoding="utf-8"
+        )
+        return output_path
+
+    monkeypatch.setattr(
+        "courtvision.sports.mlb.data_collection.adapter.run_chunked_statcast",
+        fake_chunked_statcast,
+    )
+    result = collect_sources(
+        _request(
+            tmp_path,
+            start_date=date(2025, 4, 1),
+            end_date=date(2025, 4, 2),
+            source_options={
+                "fetch_statcast": True,
+                "statcast_chunk_size": "biweekly",
+            },
+        )
+    )
+
+    assert result.manifest is not None
+    assert result.manifest.collector_version == "1.2.0"
+    assert calls[0]["chunk_size"] is ChunkSize.BIWEEKLY
+    assert calls[0]["resume"] is False
+    assert calls[0]["allow_network"] is True
+    statcast = next(
+        source
+        for source in result.manifest.sources
+        if source.source_name == "statcast_pybaseball"
+    )
+    assert (result.collection_dir / statcast.local_file_path).is_file()
+
+
+def test_framework_preserves_checkpoint_and_resumes_same_collection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "courtvision.sports.mlb.data_collection.statcast_chunked_collector.enable_pybaseball_cache",
+        lambda: None,
+    )
+    first_calls: list[str] = []
+
+    def interrupted(chunk, chunks_dir: Path, *, allow_network: bool) -> Path:
+        first_calls.append(chunk.chunk_key)
+        if chunk.chunk_index == 1:
+            raise RuntimeError("interrupted")
+        path = chunks_dir / f"{chunk.chunk_key}.csv"
+        path.write_text("game_date,game_pk\n2025-04-01,1\n", encoding="utf-8")
+        return path.resolve()
+
+    monkeypatch.setattr(
+        "courtvision.sports.mlb.data_collection.statcast_chunked_collector.fetch_statcast_chunk",
+        interrupted,
+    )
+    request = _request(
+        tmp_path,
+        start_date=date(2025, 4, 1),
+        end_date=date(2025, 4, 8),
+        source_options={"fetch_statcast": True},
+    )
+    with pytest.raises(RuntimeError, match="interrupted"):
+        collect_sources(request)
+
+    collection_dir = (
+        request.output_raw_dir / "mlb" / "2025" / str(request.collection_id)
+    )
+    assert (
+        collection_dir
+        / "sources"
+        / "statcast_pybaseball"
+        / "collection_state.json"
+    ).is_file()
+
+    resumed_calls: list[str] = []
+
+    def resumed(chunk, chunks_dir: Path, *, allow_network: bool) -> Path:
+        resumed_calls.append(chunk.chunk_key)
+        path = chunks_dir / f"{chunk.chunk_key}.csv"
+        path.write_text("game_date,game_pk\n2025-04-08,2\n", encoding="utf-8")
+        return path.resolve()
+
+    monkeypatch.setattr(
+        "courtvision.sports.mlb.data_collection.statcast_chunked_collector.fetch_statcast_chunk",
+        resumed,
+    )
+    result = collect_sources(
+        _request(
+            tmp_path,
+            start_date=date(2025, 4, 1),
+            end_date=date(2025, 4, 8),
+            resume=True,
+            source_options={"fetch_statcast": True},
+        )
+    )
+
+    assert result.manifest is not None
+    assert first_calls[0] not in resumed_calls
+    assert resumed_calls == ["2025-04-08_2025-04-08"]
+    assert (result.collection_dir / "collection_manifest.json").is_file()
+
+
+def test_resume_without_checkpoint_does_not_mutate_existing_folder(
+    tmp_path: Path,
+) -> None:
+    request = _request(tmp_path, resume=True)
+    collection_dir = (
+        request.output_raw_dir / "mlb" / "2025" / str(request.collection_id)
+    )
+    collection_dir.mkdir(parents=True)
+    sentinel = collection_dir / "sentinel.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+
+    with pytest.raises(FileNotFoundError, match="without a checkpoint"):
+        collect_sources(request)
+
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+    assert list(collection_dir.iterdir()) == [sentinel]
 
 
 def test_chadwick_dry_run_plans_without_downloading_or_writing(

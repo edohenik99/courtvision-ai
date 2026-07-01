@@ -7,7 +7,7 @@ import tomllib
 
 import pytest
 
-from courtvision.cli.main import main
+from courtvision.cli.main import build_parser, main
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -92,6 +92,51 @@ def test_collect_mlb_dry_run_does_not_fetch_or_write(
     assert "statcast_pybaseball" in report["planned_sources"]
     assert "chadwick_bureau_register" in report["planned_sources"]
     assert not (tmp_path / "courtvision-raw").exists()
+
+
+def test_statcast_resume_and_chunk_size_flags_are_parsed() -> None:
+    args = build_parser().parse_args(
+        [
+            "collect",
+            "mlb",
+            "--season",
+            "2025",
+            "--collection-id",
+            "v2025-resume",
+            "--fetch-statcast",
+            "--resume",
+            "--statcast-chunk-size",
+            "biweekly",
+        ]
+    )
+
+    assert args.resume is True
+    assert args.statcast_chunk_size == "biweekly"
+
+
+def test_resume_requires_fetch_statcast_and_explicit_collection_id(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        main(["collect", "mlb", "--season", "2025", "--resume"])
+
+    assert exc_info.value.code == 2
+    assert "--resume requires --fetch-statcast" in capsys.readouterr().err
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(
+            [
+                "collect",
+                "mlb",
+                "--season",
+                "2025",
+                "--fetch-statcast",
+                "--resume",
+            ]
+        )
+
+    assert exc_info.value.code == 2
+    assert "--resume requires --collection-id" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("sport", ("nba", "nfl", "nhl", "wnba"))

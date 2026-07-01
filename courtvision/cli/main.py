@@ -23,6 +23,7 @@ SPORTS = ("mlb", "nba", "nfl", "nhl", "wnba")
 SOURCE_OPTION_NAMES = (
     "statcast_csv",
     "fetch_statcast",
+    "statcast_chunk_size",
     "retrosheet_path",
     "chadwick_register_path",
     "fetch_chadwick_register",
@@ -74,6 +75,16 @@ def _add_collect_arguments(parser: argparse.ArgumentParser) -> None:
         "--fetch-statcast",
         action="store_true",
         help="Fetch through pybaseball (never fetched during --dry-run).",
+    )
+    mlb.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume an interrupted chunked Statcast collection.",
+    )
+    mlb.add_argument(
+        "--statcast-chunk-size",
+        choices=("weekly", "biweekly"),
+        help="Statcast request window size (default: weekly).",
     )
     mlb.add_argument("--retrosheet-path", type=Path)
     mlb.add_argument(
@@ -127,8 +138,14 @@ def _source_options(args: argparse.Namespace) -> dict[str, object]:
 
 def _run_collect(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     source_options = _source_options(args)
-    if args.sport != "mlb" and source_options:
+    if args.sport != "mlb" and (source_options or args.resume):
         parser.error("MLB source flags may only be used with collect mlb")
+    if args.resume and not args.fetch_statcast:
+        parser.error("--resume requires --fetch-statcast")
+    if args.resume and args.collection_id is None:
+        parser.error("--resume requires --collection-id")
+    if args.statcast_chunk_size is not None and not args.fetch_statcast:
+        parser.error("--statcast-chunk-size requires --fetch-statcast")
     if args.weather_path is not None and args.weather_provider is None:
         parser.error("--weather-provider is required with --weather-path")
     if args.weather_provider is not None and args.weather_path is None:
@@ -145,6 +162,7 @@ def _run_collect(args: argparse.Namespace, parser: argparse.ArgumentParser) -> i
                 end_date=end_date,
                 output_raw_dir=args.output_raw_dir,
                 dry_run=args.dry_run,
+                resume=args.resume,
                 collection_id=args.collection_id,
                 source_options=source_options,
             )

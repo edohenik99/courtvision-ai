@@ -10,6 +10,7 @@ import urllib.request
 
 import pytest
 
+from courtvision.data_collection.resumable import merge_chunk_csvs
 from courtvision.sports.mlb.data.statcast_ingestion import (
     STATCAST_SOURCE_NAME,
     StatcastIngestionError,
@@ -51,6 +52,27 @@ def test_fixture_parses_labels_missing_numbers_and_deterministic_rows() -> None:
     assert non_home_run.is_barrel is None
     assert statcast_row_to_json(home_run) == statcast_row_to_json(home_run)
     assert json.loads(statcast_row_to_json(home_run)) == statcast_row_to_dict(home_run)
+
+
+def test_chunk_merged_csv_remains_compatible_with_statcast_ingestion(
+    tmp_path: Path,
+) -> None:
+    lines = FIXTURE.read_text(encoding="utf-8").splitlines()
+    first = tmp_path / "first.csv"
+    second = tmp_path / "second.csv"
+    first.write_text("\n".join((lines[0], lines[1])) + "\n", encoding="utf-8")
+    second.write_text("\n".join((lines[0], lines[2])) + "\n", encoding="utf-8")
+    merged = tmp_path / "merged.csv"
+
+    _, row_count = merge_chunk_csvs((first, second), merged)
+    result = ingest_local_statcast_csv(merged, collected_at=COLLECTED_AT)
+
+    assert row_count == 2
+    assert len(result.rows) == 2
+    assert [row.game_date for row in result.rows] == [
+        date(2025, 4, 1),
+        date(2025, 4, 2),
+    ]
 
 
 def test_normalized_row_has_research_fields_and_no_decision_fields() -> None:

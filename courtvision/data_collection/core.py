@@ -47,6 +47,7 @@ class CollectionRequest:
     end_date: date
     output_raw_dir: Path
     dry_run: bool = False
+    resume: bool = False
     source_options: Mapping[str, object] = field(default_factory=dict)
     collection_id: str | None = None
     collection_timestamp: datetime | None = None
@@ -63,6 +64,10 @@ class CollectionRequest:
             raise ValueError("end_date must be a date")
         if self.start_date > self.end_date:
             raise ValueError("start_date must not be after end_date")
+        options = dict(self.source_options)
+        option_resume = options.get("resume", False)
+        if not isinstance(self.resume, bool) or not isinstance(option_resume, bool):
+            raise ValueError("resume must be a boolean")
         if not self.start_date.year <= self.season <= self.end_date.year:
             raise ValueError("season must overlap the requested date range")
         timestamp = self.collection_timestamp or datetime.now(timezone.utc)
@@ -77,7 +82,8 @@ class CollectionRequest:
         object.__setattr__(self, "output_raw_dir", Path(self.output_raw_dir))
         object.__setattr__(self, "collection_timestamp", timestamp)
         object.__setattr__(self, "collection_id", collection_id)
-        object.__setattr__(self, "source_options", dict(self.source_options))
+        object.__setattr__(self, "resume", self.resume or option_resume)
+        object.__setattr__(self, "source_options", options)
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,11 +183,15 @@ def _record_file(
 
 
 def _materialize_source(
-    planned: PlannedSource, collection_dir: Path, output_root: Path
+    planned: PlannedSource,
+    collection_dir: Path,
+    output_root: Path,
+    *,
+    resume: bool = False,
 ) -> tuple[Path, ...]:
     source_dir = collection_dir / "sources" / planned.contract.source_name
     ensure_within_output_root(source_dir, output_root)
-    source_dir.mkdir(parents=True, exist_ok=False)
+    source_dir.mkdir(parents=True, exist_ok=resume)
     if planned.input_path is not None:
         copied: list[Path] = []
         for source_file, relative_path in _source_files(
@@ -190,12 +200,30 @@ def _materialize_source(
             destination = source_dir / relative_path
             ensure_within_output_root(destination, output_root)
             destination.parent.mkdir(parents=True, exist_ok=True)
+            if destination.exists():
+                if not resume:
+                    raise FileExistsError(destination)
+                if sha256_file(destination) != sha256_file(source_file):
+                    raise CollectionError(
+                        f"resumed supplied source differs from checkpoint: {destination}"
+                    )
+                copied.append(destination)
+                continue
             with source_file.open("rb") as source_handle, destination.open("xb") as output:
                 shutil.copyfileobj(source_handle, output)
             copied.append(destination)
         return tuple(copied)
     assert planned.materializer is not None
-    files = tuple(planned.materializer(source_dir))
+    existing_files = tuple(path for path in sorted(source_dir.rglob("*")) if path.is_file())
+    # Resumable materializers own their checkpoint directory and must be
+    # invoked again. Other completed materializers can safely reuse their
+    # immutable files when a later source caused the prior invocation to fail.
+    has_collection_state = any(path.name == "collection_state.json" for path in existing_files)
+    files = (
+        tuple(planned.materializer(source_dir))
+        if not (resume and existing_files and not has_collection_state)
+        else existing_files
+    )
     if not files:
         raise CollectionError(
             f"source materializer produced no files: {planned.contract.source_name}"
@@ -221,8 +249,25 @@ def collect_sources(
             f"adapter sport {adapter.sport!r} does not match request {request.sport!r}"
         )
     output_root, destination = _collection_dir(request)
-    if destination.exists():
-        raise FileExistsError(f"collection folder already exists: {destination}")
+    destination_preexisted = destination.exists()
+    if destination_preexisted:
+        if not request.resume:
+            raise FileExistsError(f"collection folder already exists: {destination}")
+        if not destination.is_dir():
+            raise FileExistsError(f"collection path is not a folder: {destination}")
+        manifest_path = destination / "collection_manifest.json"
+        if manifest_path.exists():
+            raise FileExistsError(
+                f"completed collection is immutable and cannot be resumed: {destination}"
+            )
+        if not any(destination.rglob("collection_state.json")):
+            raise FileNotFoundError(
+                f"cannot resume collection without a checkpoint: {destination}"
+            )
+    elif request.resume:
+        raise FileNotFoundError(
+            f"cannot resume collection because its folder does not exist: {destination}"
+        )
     plan = adapter.build_plan(request)
     _validate_plan(plan)
     source_names = tuple(item.contract.source_name for item in plan.sources)
@@ -236,11 +281,16 @@ def collect_sources(
             warnings=plan.warnings,
         )
 
-    destination.mkdir(parents=True, exist_ok=False)
+    destination.mkdir(parents=True, exist_ok=request.resume)
     try:
         records: list[ManifestSource] = []
         for planned in plan.sources:
-            for file_path in _materialize_source(planned, destination, output_root):
+            for file_path in _materialize_source(
+                planned,
+                destination,
+                output_root,
+                resume=request.resume,
+            ):
                 records.append(
                     _record_file(
                         file_path=file_path,
@@ -263,8 +313,14 @@ def collect_sources(
         )
         write_collection_manifest(manifest, destination)
     except Exception:
-        # The directory is owned by this invocation and did not pre-exist.
-        shutil.rmtree(destination, ignore_errors=True)
+        # Preserve a valid resumable checkpoint. All other failed new
+        # collections retain the v1 cleanup behavior.
+        has_checkpoint = destination.exists() and any(
+            path.name == "collection_state.json"
+            for path in destination.rglob("collection_state.json")
+        )
+        if not destination_preexisted and not has_checkpoint:
+            shutil.rmtree(destination, ignore_errors=True)
         raise
     return CollectionResult(
         collection_dir=destination,
