@@ -1,4 +1,4 @@
-"""Approved MLB source contracts and v1.3 raw collection planning."""
+"""Approved MLB source contracts and v1.4 raw collection planning."""
 
 from __future__ import annotations
 
@@ -35,6 +35,9 @@ from courtvision.sports.mlb.data_collection.weather_collector import (
     missing_stadium_park_ids,
 )
 from courtvision.data_collection.resumable import load_collection_state
+from courtvision.sports.mlb.data_collection.ballpark_factor_collector import (
+    BallparkFactorCollector,
+)
 
 
 STATCAST = SourceContract(
@@ -108,8 +111,8 @@ STADIUM_COORDINATES = SourceContract(
 )
 BALLPARK_FACTORS = SourceContract(
     source_name="approved_supplied_ballpark_factors",
-    source_type="manual_csv",
-    source_url_provider="caller-approved supplied CSV",
+    source_type="approved_supplied_csv",
+    source_url_provider="caller-approved official supplied CSV",
     license_terms_note="Permission and license must be documented by the CSV supplier.",
     acquisition_method=AcquisitionMethod.SUPPLIED_FILE,
     required=True,
@@ -286,6 +289,7 @@ class MLBCollectionAdapter:
         planned: list[PlannedSource] = []
         blockers: list[str] = []
         warnings: list[str] = []
+        stadium_map_planned = False
 
         statcast_path = _path_option(options, "statcast_csv", "statcast_path")
         fetch_statcast = bool(options.get("fetch_statcast", False))
@@ -381,6 +385,7 @@ class MLBCollectionAdapter:
                         ),
                     )
                 )
+                stadium_map_planned = True
 
             collector: MeteostatWeatherCollector | None = None
             if retrosheet_path is not None and stadium_map_path is not None:
@@ -444,8 +449,43 @@ class MLBCollectionAdapter:
             blockers.append(
                 "Missing required approved supplied ballpark factors CSV."
             )
+        elif stadium_map_path is None:
+            message = (
+                "Ballpark factor blocker: --stadium-map-path is required to validate "
+                "every park_id."
+            )
+            blockers.append(message)
+            if not request.dry_run:
+                raise CollectionError(message)
         else:
-            planned.append(PlannedSource(BALLPARK_FACTORS, input_path=ballpark_path))
+            if not stadium_map_planned:
+                planned.append(
+                    PlannedSource(
+                        STADIUM_COORDINATES,
+                        input_path=stadium_map_path,
+                        source_notes=(
+                            "Validated stadium map used to cross-check supplied "
+                            "ballpark-factor park IDs.",
+                        ),
+                    )
+                )
+                stadium_map_planned = True
+            ballpark_collector = BallparkFactorCollector.validate(
+                ballpark_path,
+                stadium_map_path,
+                requested_season=request.season,
+            )
+            planned.append(
+                PlannedSource(
+                    BALLPARK_FACTORS,
+                    materializer=ballpark_collector.materialize,
+                    source_notes=(
+                        "Caller-approved supplied CSV; no download or scraping performed.",
+                        "Validated against the requested season and immutable stadium map.",
+                    ),
+                    metadata_provider=ballpark_collector.manifest_metadata,
+                )
+            )
 
         odds_path = _path_option(options, "odds_archive_path", "odds_path")
         if odds_path is None:

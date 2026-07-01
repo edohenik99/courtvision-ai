@@ -117,7 +117,11 @@ def _add_collect_arguments(parser: argparse.ArgumentParser) -> None:
         type=int,
         help="Maximum nearby Meteostat stations tried per game (default: 5).",
     )
-    mlb.add_argument("--ballpark-factors-path", type=Path)
+    mlb.add_argument(
+        "--ballpark-factors-path",
+        type=Path,
+        help="Approved supplied MLB ballpark-factor CSV (local file only).",
+    )
     mlb.add_argument("--odds-archive-path", type=Path)
     mlb.add_argument("--odds-provider")
 
@@ -178,8 +182,14 @@ def _run_collect(args: argparse.Namespace, parser: argparse.ArgumentParser) -> i
         parser.error("--fetch-weather requires --retrosheet-path")
     if args.fetch_weather and args.stadium_map_path is None:
         parser.error("--fetch-weather requires --stadium-map-path")
-    if args.stadium_map_path is not None and not args.fetch_weather:
-        parser.error("--stadium-map-path requires --fetch-weather")
+    if args.ballpark_factors_path is not None and args.stadium_map_path is None:
+        parser.error("--ballpark-factors-path requires --stadium-map-path")
+    if args.stadium_map_path is not None and not (
+        args.fetch_weather or args.ballpark_factors_path is not None
+    ):
+        parser.error(
+            "--stadium-map-path requires --fetch-weather or --ballpark-factors-path"
+        )
     if args.max_station_attempts is not None and not args.fetch_weather:
         parser.error("--max-station-attempts requires --fetch-weather")
     if args.max_station_attempts is not None and args.max_station_attempts < 1:

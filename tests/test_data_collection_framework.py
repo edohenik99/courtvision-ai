@@ -143,7 +143,7 @@ def test_statcast_adapter_wires_chunk_size_and_manifest_version(
     )
 
     assert result.manifest is not None
-    assert result.manifest.collector_version == "1.3.2"
+    assert result.manifest.collector_version == "1.4.0"
     assert calls[0]["chunk_size"] is ChunkSize.BIWEEKLY
     assert calls[0]["resume"] is False
     assert calls[0]["allow_network"] is True
@@ -393,7 +393,16 @@ def test_existing_versioned_collection_is_never_overwritten(tmp_path: Path) -> N
 
 def test_manifest_records_hash_size_and_csv_row_count(tmp_path: Path) -> None:
     ballpark = tmp_path / "ballpark.csv"
-    ballpark.write_text("park,factor\nA,1.05\nB,0.98\n", encoding="utf-8")
+    ballpark.write_text(
+        "season,park_id,stadium_name,handedness,hr_factor,run_factor\n"
+        "2025,NYC21,Yankee Stadium,LHB,1.05,1.02\n"
+        "2025,NYC21,Yankee Stadium,RHB,0.98,1.01\n",
+        encoding="utf-8",
+    )
+    stadium_map = tmp_path / "stadiums.csv"
+    stadium_map.write_text(
+        "park_id,stadium_name\nNYC21,Yankee Stadium\n", encoding="utf-8"
+    )
     odds = tmp_path / "odds.jsonl"
     odds.write_text('{"game": 1}\n{"game": 2}\n', encoding="utf-8")
 
@@ -402,6 +411,7 @@ def test_manifest_records_hash_size_and_csv_row_count(tmp_path: Path) -> None:
             tmp_path,
             source_options={
                 "ballpark_factors_path": ballpark,
+                "stadium_map_path": stadium_map,
                 "odds_archive_path": odds,
                 "odds_provider": "licensed-test-archive",
             },
@@ -411,12 +421,22 @@ def test_manifest_records_hash_size_and_csv_row_count(tmp_path: Path) -> None:
     payload = json.loads(
         (result.collection_dir / "collection_manifest.json").read_text(encoding="utf-8")
     )
+    ballpark_records = [
+        source
+        for source in payload["sources"]
+        if source["source_name"] == "approved_supplied_ballpark_factors"
+    ]
+    record = next(
+        source
+        for source in ballpark_records
+        if Path(source["local_file_path"]).name == "normalized_ballpark_factors.csv"
+    )
     by_name = {source["source_name"]: source for source in payload["sources"]}
-    record = by_name["approved_supplied_ballpark_factors"]
     copied = result.collection_dir / record["local_file_path"]
 
-    assert record["sha256"] == hashlib.sha256(ballpark.read_bytes()).hexdigest()
-    assert record["file_size"] == ballpark.stat().st_size == copied.stat().st_size
+    assert record["sha256"] == hashlib.sha256(copied.read_bytes()).hexdigest()
+    assert record["metadata"]["source_sha256"] == hashlib.sha256(ballpark.read_bytes()).hexdigest()
+    assert record["file_size"] == copied.stat().st_size
     assert record["row_count"] == 2
     assert by_name["approved_supplied_odds"]["row_count"] == 2
     assert payload["blockers"] == []
