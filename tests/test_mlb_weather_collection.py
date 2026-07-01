@@ -180,7 +180,7 @@ def test_fetch_weather_writes_hourly_raw_csv_and_manifest_evidence(
     assert calls[1][1] == datetime(2025, 4, 2, 11, 0)
     assert calls[0][3] == "America/New_York"
     assert result.manifest is not None
-    assert result.manifest.collector_version == "1.4.0"
+    assert result.manifest.collector_version == "1.5.0"
 
     weather = _weather_manifest_source(result, WEATHER_FILENAME)
     raw_path = result.collection_dir / weather.local_file_path

@@ -1,9 +1,8 @@
-"""Approved MLB source contracts and v1.4 raw collection planning."""
+"""Approved MLB source contracts and v1.5 raw collection planning."""
 
 from __future__ import annotations
 
 import csv
-from dataclasses import replace
 import io
 from pathlib import Path
 from pathlib import PurePosixPath
@@ -37,6 +36,9 @@ from courtvision.sports.mlb.data_collection.weather_collector import (
 from courtvision.data_collection.resumable import load_collection_state
 from courtvision.sports.mlb.data_collection.ballpark_factor_collector import (
     BallparkFactorCollector,
+)
+from courtvision.sports.mlb.data_collection.hr_odds_archive_collector import (
+    HROddsArchiveCollector,
 )
 
 
@@ -120,12 +122,12 @@ BALLPARK_FACTORS = SourceContract(
 )
 ODDS_ARCHIVE = SourceContract(
     source_name="approved_supplied_odds",
-    source_type="paid_api_or_archive",
-    source_url_provider="caller-approved supplied provider/API/archive",
-    license_terms_note="Use only under the supplying provider's licensed archive/API terms.",
+    source_type="approved_historical_archive",
+    source_url_provider="caller-approved supplied local CSV archive",
+    license_terms_note="Use only under the supplying archive's documented license terms.",
     acquisition_method=AcquisitionMethod.SUPPLIED_ARCHIVE,
     required=True,
-    allowed_extensions=(".csv", ".json", ".jsonl", ".zip"),
+    allowed_extensions=(".csv",),
 )
 
 MLB_SOURCE_CONTRACTS = (
@@ -273,12 +275,12 @@ def _blocked_materializer(message: str):
 
 
 class MLBCollectionAdapter:
-    """MLB v1 adapter: approved raw sources only, with no website scraping."""
+    """MLB adapter: approved sources only, with no sportsbook network access."""
 
     sport = "mlb"
     required_sources = (
         "approved supplied ballpark factors CSV",
-        "approved supplied odds provider/API/archive",
+        "approved supplied historical HR odds CSV archive",
     )
 
     def source_contracts(self) -> tuple[SourceContract, ...]:
@@ -490,18 +492,43 @@ class MLBCollectionAdapter:
         odds_path = _path_option(options, "odds_archive_path", "odds_path")
         if odds_path is None:
             blockers.append(
-                "Missing required approved odds provider/API/archive source."
+                "Missing required approved historical HR odds CSV archive."
             )
         else:
-            provider = str(
-                options.get("odds_provider") or "caller-approved supplied odds archive"
-            ).strip()
-            reject_disallowed_source(provider)
-            odds_contract = replace(
-                ODDS_ARCHIVE,
-                source_url_provider=provider,
-            )
-            planned.append(PlannedSource(odds_contract, input_path=odds_path))
+            reject_disallowed_source(str(odds_path))
+            if retrosheet_path is None:
+                message = (
+                    "Historical HR odds blocker: --retrosheet-path is required to "
+                    "validate every game_id."
+                )
+                blockers.append(message)
+                if not request.dry_run:
+                    raise CollectionError(message)
+            else:
+                odds_collector = HROddsArchiveCollector.validate(
+                    odds_path,
+                    retrosheet_path,
+                    requested_season=request.season,
+                    crosswalk_path=chadwick_path,
+                )
+                if odds_collector.unresolved_player_count:
+                    warnings.append(
+                        "Historical HR odds player IDs were not crosswalk-validated "
+                        "because no supplied Chadwick/crosswalk source was available."
+                    )
+                planned.append(
+                    PlannedSource(
+                        ODDS_ARCHIVE,
+                        materializer=odds_collector.materialize,
+                        source_notes=(
+                            "Approved supplied CSV only; no sportsbook call or scraping "
+                            "performed.",
+                            "Historical HR market observations only; no betting, EV, "
+                            "staking, or prediction behavior.",
+                        ),
+                        metadata_provider=odds_collector.manifest_metadata,
+                    )
+                )
 
         return CollectionPlan(
             sources=tuple(planned),

@@ -143,7 +143,7 @@ def test_statcast_adapter_wires_chunk_size_and_manifest_version(
     )
 
     assert result.manifest is not None
-    assert result.manifest.collector_version == "1.4.0"
+    assert result.manifest.collector_version == "1.5.0"
     assert calls[0]["chunk_size"] is ChunkSize.BIWEEKLY
     assert calls[0]["resume"] is False
     assert calls[0]["allow_network"] is True
@@ -403,8 +403,23 @@ def test_manifest_records_hash_size_and_csv_row_count(tmp_path: Path) -> None:
     stadium_map.write_text(
         "park_id,stadium_name\nNYC21,Yankee Stadium\n", encoding="utf-8"
     )
-    odds = tmp_path / "odds.jsonl"
-    odds.write_text('{"game": 1}\n{"game": 2}\n', encoding="utf-8")
+    retrosheet = tmp_path / "retrosheet.csv"
+    retrosheet.write_text(
+        "game_id,game_date,home_team,away_team,game_status,source_type\n"
+        "20250401TORBOS-1,2025-04-01,TOR,BOS,completed,historical\n",
+        encoding="utf-8",
+    )
+    odds = tmp_path / "odds.csv"
+    odds.write_text(
+        "season,game_id,game_date,player_id,player_name,team,opponent,"
+        "sportsbook,market,line,odds_american,odds_decimal,over_under,"
+        "collected_at,event_start_time,source_name,source_license\n"
+        "2025,20250401TORBOS-1,2025-04-01,660271,Vladimir Guerrero Jr.,"
+        "TOR,BOS,DraftKings,home_run,0.5,+350,4.5,OVER,"
+        "2025-04-01T20:00:00Z,2025-04-01T23:07:00Z,licensed_export,"
+        "internal research license\n",
+        encoding="utf-8",
+    )
 
     result = collect_sources(
         _request(
@@ -413,7 +428,7 @@ def test_manifest_records_hash_size_and_csv_row_count(tmp_path: Path) -> None:
                 "ballpark_factors_path": ballpark,
                 "stadium_map_path": stadium_map,
                 "odds_archive_path": odds,
-                "odds_provider": "licensed-test-archive",
+                "retrosheet_path": retrosheet,
             },
         )
     )
@@ -431,14 +446,22 @@ def test_manifest_records_hash_size_and_csv_row_count(tmp_path: Path) -> None:
         for source in ballpark_records
         if Path(source["local_file_path"]).name == "normalized_ballpark_factors.csv"
     )
-    by_name = {source["source_name"]: source for source in payload["sources"]}
     copied = result.collection_dir / record["local_file_path"]
 
     assert record["sha256"] == hashlib.sha256(copied.read_bytes()).hexdigest()
     assert record["metadata"]["source_sha256"] == hashlib.sha256(ballpark.read_bytes()).hexdigest()
     assert record["file_size"] == copied.stat().st_size
     assert record["row_count"] == 2
-    assert by_name["approved_supplied_odds"]["row_count"] == 2
+    odds_records = [
+        source
+        for source in payload["sources"]
+        if source["source_name"] == "approved_supplied_odds"
+    ]
+    assert next(
+        source
+        for source in odds_records
+        if Path(source["local_file_path"]).name == "normalized_hr_odds.csv"
+    )["row_count"] == 1
     assert payload["blockers"] == []
 
 

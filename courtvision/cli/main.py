@@ -34,7 +34,6 @@ SOURCE_OPTION_NAMES = (
     "max_station_attempts",
     "ballpark_factors_path",
     "odds_archive_path",
-    "odds_provider",
 )
 SOURCE_VERSION_FALLBACK = "0.1.0"
 
@@ -122,8 +121,11 @@ def _add_collect_arguments(parser: argparse.ArgumentParser) -> None:
         type=Path,
         help="Approved supplied MLB ballpark-factor CSV (local file only).",
     )
-    mlb.add_argument("--odds-archive-path", type=Path)
-    mlb.add_argument("--odds-provider")
+    mlb.add_argument(
+        "--odds-archive-path",
+        type=Path,
+        help="Approved supplied historical MLB HR odds CSV (local file only).",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -194,6 +196,8 @@ def _run_collect(args: argparse.Namespace, parser: argparse.ArgumentParser) -> i
         parser.error("--max-station-attempts requires --fetch-weather")
     if args.max_station_attempts is not None and args.max_station_attempts < 1:
         parser.error("--max-station-attempts must be a positive integer")
+    if args.odds_archive_path is not None and args.retrosheet_path is None:
+        parser.error("--odds-archive-path requires --retrosheet-path")
 
     try:
         start_date = args.start_date or date(args.season, 1, 1)
@@ -244,6 +248,17 @@ def _run_collect(args: argparse.Namespace, parser: argparse.ArgumentParser) -> i
         )
         if weather_metadata is not None:
             summary["weather_summary"] = weather_metadata["weather_summary"]
+        odds_metadata = next(
+            (
+                source.metadata
+                for source in result.manifest.sources
+                if source.source_name == "approved_supplied_odds"
+                and "coverage_summary" in source.metadata
+            ),
+            None,
+        )
+        if odds_metadata is not None:
+            summary["odds_coverage_summary"] = odds_metadata["coverage_summary"]
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0
 

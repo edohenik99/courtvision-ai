@@ -57,8 +57,6 @@ def _request(
     dry_run: bool = False,
     output_raw_dir: Path | None = None,
 ) -> CollectionRequest:
-    odds = tmp_path / "odds.jsonl"
-    odds.write_text('{"game": 1}\n', encoding="utf-8")
     return CollectionRequest(
         sport="mlb",
         season=2025,
@@ -71,8 +69,6 @@ def _request(
         source_options={
             "ballpark_factors_path": ballpark_path,
             "stadium_map_path": stadium_map_path,
-            "odds_archive_path": odds,
-            "odds_provider": "licensed-test-archive",
         },
     )
 
@@ -162,7 +158,7 @@ def test_manifest_records_artifact_and_source_provenance(tmp_path: Path) -> None
     result = collect_sources(_request(tmp_path, source, _stadium_map(tmp_path)))
 
     assert result.manifest is not None
-    assert result.manifest.collector_version == "1.4.0"
+    assert result.manifest.collector_version == "1.5.0"
     records = [
         item
         for item in result.manifest.sources
