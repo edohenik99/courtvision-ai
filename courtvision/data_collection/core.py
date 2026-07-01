@@ -93,6 +93,7 @@ class PlannedSource:
     input_path: Path | None = None
     materializer: Materializer | None = None
     row_counter: RowCounter | None = None
+    source_notes: tuple[str, ...] = field(default_factory=tuple)
     warnings: tuple[str, ...] = field(default_factory=tuple)
     warning_provider: WarningProvider | None = None
 
@@ -181,6 +182,7 @@ def _record_file(
             else row_count_for_file(file_path)
         ),
         collection_timestamp=timestamp.isoformat(),
+        source_notes=planned.source_notes,
         warnings=warnings,
     )
 

@@ -1,4 +1,4 @@
-"""Approved MLB source contracts and v1.2 raw collection planning."""
+"""Approved MLB source contracts and v1.3 raw collection planning."""
 
 from __future__ import annotations
 
@@ -26,6 +26,12 @@ from courtvision.sports.mlb.data_collection.statcast_chunked_collector import (
     STATCAST_DEFAULT_CHUNK_SIZE,
     chunk_size_from_str,
     run_chunked_statcast,
+)
+from courtvision.sports.mlb.data_collection.weather_collector import (
+    MeteostatWeatherCollector,
+    load_retrosheet_games,
+    load_stadium_map,
+    missing_stadium_park_ids,
 )
 from courtvision.data_collection.resumable import load_collection_state
 
@@ -72,11 +78,11 @@ _CHADWICK_PEOPLE_FILES = frozenset(
 )
 METEOSTAT_WEATHER = SourceContract(
     source_name="weather_meteostat",
-    source_type="weather_api_or_archive",
+    source_type="historical_weather_api",
     source_url_provider="https://meteostat.net/",
     license_terms_note="Meteostat data only; retain attribution and applicable license metadata.",
-    acquisition_method=AcquisitionMethod.SUPPLIED_ARCHIVE,
-    allowed_extensions=(".csv", ".json", ".jsonl", ".zip"),
+    acquisition_method=AcquisitionMethod.METEOSTAT,
+    allowed_extensions=(".csv",),
 )
 NOAA_WEATHER = SourceContract(
     source_name="weather_noaa",
@@ -87,6 +93,17 @@ NOAA_WEATHER = SourceContract(
     ),
     acquisition_method=AcquisitionMethod.SUPPLIED_ARCHIVE,
     allowed_extensions=(".csv", ".json", ".jsonl", ".zip"),
+)
+STADIUM_COORDINATES = SourceContract(
+    source_name="approved_stadium_coordinates",
+    source_type="approved_reference_csv",
+    source_url_provider="caller-approved Retrosheet park coordinate mapping",
+    license_terms_note=(
+        "Coordinate and timezone mapping provenance must be approved and documented by "
+        "the CSV supplier."
+    ),
+    acquisition_method=AcquisitionMethod.SUPPLIED_FILE,
+    allowed_extensions=(".csv",),
 )
 BALLPARK_FACTORS = SourceContract(
     source_name="approved_supplied_ballpark_factors",
@@ -113,6 +130,7 @@ MLB_SOURCE_CONTRACTS = (
     CHADWICK_REGISTER,
     METEOSTAT_WEATHER,
     NOAA_WEATHER,
+    STADIUM_COORDINATES,
     BALLPARK_FACTORS,
     ODDS_ARCHIVE,
 )
@@ -236,6 +254,13 @@ def _chadwick_register_materializer(destination: Path) -> tuple[Path, ...]:
     return (output,)
 
 
+def _blocked_materializer(message: str):
+    def materialize(destination: Path) -> tuple[Path, ...]:
+        raise CollectionError(message)
+
+    return materialize
+
+
 class MLBCollectionAdapter:
     """MLB v1 adapter: approved raw sources only, with no website scraping."""
 
@@ -281,7 +306,16 @@ class MLBCollectionAdapter:
         if retrosheet_path is None:
             warnings.append(f"{RETROSHEET.source_name} was not supplied.")
         else:
-            planned.append(PlannedSource(RETROSHEET, input_path=retrosheet_path))
+            planned.append(
+                PlannedSource(
+                    RETROSHEET,
+                    input_path=retrosheet_path,
+                    source_notes=(
+                        "Retrosheet game-log venue/date source; used for weather joins "
+                        "when Meteostat acquisition is requested.",
+                    ),
+                )
+            )
 
         chadwick_path = _path_option(
             options, "chadwick_register_path", "chadwick_path"
@@ -308,7 +342,76 @@ class MLBCollectionAdapter:
             )
 
         weather_path = _path_option(options, "weather_path")
-        if weather_path is None:
+        fetch_weather = bool(options.get("fetch_weather", False))
+        stadium_map_path = _path_option(options, "stadium_map_path")
+        if weather_path is not None and fetch_weather:
+            raise CollectionError("choose either supplied weather data or --fetch-weather")
+        if fetch_weather:
+            provider = str(options.get("weather_provider") or "").strip().lower()
+            if provider != "meteostat":
+                raise CollectionError(
+                    "--fetch-weather requires --weather-provider meteostat"
+                )
+
+            weather_blockers: list[str] = []
+            if retrosheet_path is None:
+                weather_blockers.append(
+                    "Meteostat weather blocker: --retrosheet-path is required."
+                )
+            if stadium_map_path is None:
+                weather_blockers.append(
+                    "Meteostat weather blocker: --stadium-map-path is required."
+                )
+            else:
+                planned.append(
+                    PlannedSource(
+                        STADIUM_COORDINATES,
+                        input_path=stadium_map_path,
+                        source_notes=(
+                            "Approved mapping from Retrosheet park ID to stadium latitude, "
+                            "longitude, and IANA timezone.",
+                        ),
+                    )
+                )
+
+            collector: MeteostatWeatherCollector | None = None
+            if retrosheet_path is not None and stadium_map_path is not None:
+                games = load_retrosheet_games(
+                    retrosheet_path, request.start_date, request.end_date
+                )
+                locations = load_stadium_map(stadium_map_path)
+                missing = missing_stadium_park_ids(games, locations)
+                if missing:
+                    weather_blockers.append(
+                        "Meteostat weather blocker: missing stadium mapping for "
+                        "Retrosheet park ID(s): " + ", ".join(missing)
+                    )
+                collector = MeteostatWeatherCollector(games, locations)
+
+            blockers.extend(weather_blockers)
+            if weather_blockers and not request.dry_run:
+                raise CollectionError(" ".join(weather_blockers))
+            if collector is None:
+                materializer = _blocked_materializer(" ".join(weather_blockers))
+                warning_provider = None
+            else:
+                materializer = collector.materialize
+                warning_provider = collector.manifest_warnings
+            planned.append(
+                PlannedSource(
+                    METEOSTAT_WEATHER,
+                    materializer=materializer,
+                    source_notes=(
+                        "Meteostat hourly observations queried at approved stadium coordinates.",
+                        "Metric units: temperature °C, humidity %, wind speed km/h, wind "
+                        "direction degrees, precipitation mm, pressure hPa.",
+                        "The requested weather window is two hours before through two hours "
+                        "after the Retrosheet start-time reference.",
+                    ),
+                    warning_provider=warning_provider,
+                )
+            )
+        elif weather_path is None:
             warnings.append("Meteostat/NOAA weather data was not supplied.")
         else:
             provider = str(options.get("weather_provider") or "").strip().lower()
@@ -357,4 +460,5 @@ __all__ = [
     "CHADWICK_REGISTER_URL",
     "MLB_SOURCE_CONTRACTS",
     "MLBCollectionAdapter",
+    "STADIUM_COORDINATES",
 ]

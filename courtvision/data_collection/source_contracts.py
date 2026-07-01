@@ -22,6 +22,7 @@ class AcquisitionMethod(StrEnum):
     SUPPLIED_ARCHIVE = "supplied_archive"
     OFFICIAL_DOWNLOAD = "official_download"
     PYBASEBALL = "pybaseball"
+    METEOSTAT = "meteostat"
 
 
 _DISALLOWED_SOURCE_PATTERNS = (

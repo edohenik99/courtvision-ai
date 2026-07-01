@@ -28,7 +28,9 @@ SOURCE_OPTION_NAMES = (
     "chadwick_register_path",
     "fetch_chadwick_register",
     "weather_path",
+    "fetch_weather",
     "weather_provider",
+    "stadium_map_path",
     "ballpark_factors_path",
     "odds_archive_path",
     "odds_provider",
@@ -99,6 +101,16 @@ def _add_collect_arguments(parser: argparse.ArgumentParser) -> None:
     )
     mlb.add_argument("--weather-path", type=Path)
     mlb.add_argument("--weather-provider", choices=("meteostat", "noaa"))
+    mlb.add_argument(
+        "--fetch-weather",
+        action="store_true",
+        help="Fetch historical MLB hourly weather through Meteostat.",
+    )
+    mlb.add_argument(
+        "--stadium-map-path",
+        type=Path,
+        help="Approved CSV mapping Retrosheet park IDs to coordinates and timezones.",
+    )
     mlb.add_argument("--ballpark-factors-path", type=Path)
     mlb.add_argument("--odds-archive-path", type=Path)
     mlb.add_argument("--odds-provider")
@@ -146,10 +158,22 @@ def _run_collect(args: argparse.Namespace, parser: argparse.ArgumentParser) -> i
         parser.error("--resume requires --collection-id")
     if args.statcast_chunk_size is not None and not args.fetch_statcast:
         parser.error("--statcast-chunk-size requires --fetch-statcast")
-    if args.weather_path is not None and args.weather_provider is None:
-        parser.error("--weather-provider is required with --weather-path")
-    if args.weather_provider is not None and args.weather_path is None:
-        parser.error("--weather-provider requires --weather-path")
+    if args.weather_path is not None and args.fetch_weather:
+        parser.error("choose either --weather-path or --fetch-weather")
+    if (
+        args.weather_path is not None or args.fetch_weather
+    ) and args.weather_provider is None:
+        parser.error("--weather-provider is required for weather collection")
+    if args.weather_provider is not None and not (args.weather_path or args.fetch_weather):
+        parser.error("--weather-provider requires --weather-path or --fetch-weather")
+    if args.fetch_weather and args.weather_provider != "meteostat":
+        parser.error("--fetch-weather requires --weather-provider meteostat")
+    if args.fetch_weather and args.retrosheet_path is None:
+        parser.error("--fetch-weather requires --retrosheet-path")
+    if args.fetch_weather and args.stadium_map_path is None:
+        parser.error("--fetch-weather requires --stadium-map-path")
+    if args.stadium_map_path is not None and not args.fetch_weather:
+        parser.error("--stadium-map-path requires --fetch-weather")
 
     try:
         start_date = args.start_date or date(args.season, 1, 1)

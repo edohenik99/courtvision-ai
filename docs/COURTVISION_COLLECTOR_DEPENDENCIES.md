@@ -68,7 +68,19 @@ py scripts/courtvision_collect_sources.py --sport mlb --season 2025 --start-date
 
 The supplied file must exist and satisfy the collector's approved CSV
 contract. Keep raw data outside git. Ballpark factors and licensed odds remain
-required collector inputs. Weather remains a supplied Meteostat/NOAA archive;
-this bootstrap does not add a live weather fetch command, relax source
-contracts, or enable training, predictions, EV, Kelly, Elite, staking, betting,
+required collector inputs.
+
+## Plan an MLB Meteostat weather collection
+
+Install `collector-weather`, then dry-run with an approved Retrosheet game log
+and a reviewed park-coordinate mapping:
+
+```powershell
+courtvision collect mlb --season 2025 --start-date 2025-04-01 --end-date 2025-04-30 --retrosheet-path C:\approved-inputs\gl2025.txt --fetch-weather --weather-provider meteostat --stadium-map-path C:\approved-inputs\retrosheet_stadiums.csv --output-raw-dir C:\courtvision-raw --collection-id v2025-april-weather --dry-run
+```
+
+The mapping CSV requires `park_id`, `latitude`, `longitude`, and `timezone`.
+Dry-run validates local inputs and park coverage but does not import Meteostat,
+fetch weather, or create files. This acquisition path does not relax source
+contracts or enable training, predictions, EV, Kelly, Elite, staking, betting,
 or production gates.

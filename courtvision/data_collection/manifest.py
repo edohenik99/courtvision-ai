@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 
-COLLECTOR_VERSION = "1.2.0"
+COLLECTOR_VERSION = "1.3.0"
 MANIFEST_FILENAME = "collection_manifest.json"
 
 
@@ -61,6 +61,7 @@ class ManifestSource:
     row_count: int | None
     collection_timestamp: str
     collector_version: str = COLLECTOR_VERSION
+    source_notes: tuple[str, ...] = field(default_factory=tuple)
     blockers: tuple[str, ...] = field(default_factory=tuple)
     warnings: tuple[str, ...] = field(default_factory=tuple)
 
@@ -87,7 +88,14 @@ class CollectionManifest:
             "end": self.end_date.isoformat(),
         }
         payload["collection_timestamp"] = self.collection_timestamp.isoformat()
-        payload["sources"] = [asdict(source) for source in self.sources]
+        payload["sources"] = []
+        for source in self.sources:
+            source_payload = asdict(source)
+            source_payload["provider"] = source.source_url_provider
+            source_payload["source_notes"] = list(source.source_notes)
+            source_payload["blockers"] = list(source.blockers)
+            source_payload["warnings"] = list(source.warnings)
+            payload["sources"].append(source_payload)
         payload["blockers"] = list(self.blockers)
         payload["warnings"] = list(self.warnings)
         return payload
