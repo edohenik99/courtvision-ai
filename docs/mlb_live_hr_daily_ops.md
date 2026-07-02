@@ -43,3 +43,10 @@ Then run:
 ```powershell
 python .\tools\grade_live_hr_results.py
 ```
+
+## Offline results workflow
+
+Generate a fillable results template from the master odds CSV:
+
+```powershell
+python .\tools\generate_live_hr_results_template.py
