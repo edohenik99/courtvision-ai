@@ -74,7 +74,7 @@ live_hr_props_YYYYMMDD_HHMMSSZ.csv
 
 ## Offline results workflow
 
-Generate a fillable results template from the master odds CSV:
+Generate a fillable strict results template from the master odds CSV:
 
 ```powershell
 python .\tools\generate_live_hr_results_template.py
@@ -106,12 +106,89 @@ Ready to grade: NO
 
 That is not an error. It means the results template has not been filled yet.
 
-## Filling the results file
+## Workbook-based results workflow
 
-After games are final, fill in every row of:
+The workbook workflow is the preferred way to fill results because it includes game, team, player, bookmaker, and price context.
+
+Generate the human-friendly workbook:
+
+```powershell
+python .\tools\generate_live_hr_results_workbook.py --overwrite
+```
+
+Workbook output:
+
+```text
+data/theoddsapi/live_hr_snapshots/live_hr_results_workbook.csv
+```
+
+After games are final, manually fill these columns in the workbook:
+
+```csv
+actual_home_runs,game_status
+```
+
+Use:
+
+```text
+actual_home_runs = 0, 1, 2, etc.
+game_status = final
+```
+
+After filling the workbook, export the strict grader file:
+
+```powershell
+python .\tools\export_live_hr_results_from_workbook.py --overwrite
+```
+
+Strict grader output:
 
 ```text
 data/theoddsapi/live_hr_snapshots/live_hr_results.csv
+```
+
+Check whether the strict results file is ready:
+
+```powershell
+python .\tools\check_live_hr_results_coverage.py
+```
+
+Only run the grader when coverage says:
+
+```text
+Ready to grade: YES
+```
+
+Then run:
+
+```powershell
+python .\tools\grade_live_hr_results.py
+```
+
+Full workbook grading flow:
+
+```powershell
+python .\tools\generate_live_hr_results_workbook.py --overwrite
+# manually fill data/theoddsapi/live_hr_snapshots/live_hr_results_workbook.csv
+python .\tools\export_live_hr_results_from_workbook.py --overwrite
+python .\tools\check_live_hr_results_coverage.py
+python .\tools\grade_live_hr_results.py
+```
+
+## Filling the strict results file directly
+
+The strict results file can still be filled manually, but the workbook workflow is preferred.
+
+Strict results file:
+
+```text
+data/theoddsapi/live_hr_snapshots/live_hr_results.csv
+```
+
+Required columns:
+
+```csv
+event_id,player,actual_home_runs,game_status
 ```
 
 Use:
@@ -143,7 +220,7 @@ Ready to grade: YES
 
 ## Grading results
 
-Only run the grader after the results coverage checker says the file is ready:
+Only run the grader after the results coverage checker says the strict results file is ready:
 
 ```powershell
 python .\tools\grade_live_hr_results.py
@@ -172,17 +249,35 @@ python .\tools\run_live_hr_daily_check.py
 After games are final:
 
 ```powershell
-python .\tools\generate_live_hr_results_template.py
-python .\tools\check_live_hr_results_coverage.py
+python .\tools\generate_live_hr_results_workbook.py --overwrite
 ```
 
-Fill the results CSV manually.
+Fill the workbook manually:
 
-Then run:
+```text
+data/theoddsapi/live_hr_snapshots/live_hr_results_workbook.csv
+```
+
+Then export, check coverage, and grade:
 
 ```powershell
+python .\tools\export_live_hr_results_from_workbook.py --overwrite
 python .\tools\check_live_hr_results_coverage.py
 python .\tools\grade_live_hr_results.py
+```
+
+## Testing
+
+Run the offline results tool tests:
+
+```powershell
+python -m pytest tests/test_live_hr_results_tools.py tests/test_live_hr_results_workbook.py tests/test_live_hr_results_exporter.py
+```
+
+Expected result:
+
+```text
+11 passed
 ```
 
 ## Git workflow
@@ -203,6 +298,15 @@ git push origin main
 
 Do not commit generated runtime files unless intentionally changing the project policy.
 
+Runtime/helper files that should generally stay uncommitted:
+
+```text
+data/theoddsapi/live_hr_snapshots/live_hr_results.csv
+data/theoddsapi/live_hr_snapshots/live_hr_results_workbook.csv
+data/theoddsapi/live_hr_snapshots/live_hr_props_master.csv
+data/theoddsapi/live_hr_snapshots/run_log.csv
+```
+
 ## Current operational reminder
 
 For July 2, 2026:
@@ -214,5 +318,6 @@ For July 2, 2026:
 ```powershell
 python .\tools\run_live_hr_daily_check.py
 python .\tools\check_live_hr_results_coverage.py
+python -m pytest tests/test_live_hr_results_tools.py tests/test_live_hr_results_workbook.py tests/test_live_hr_results_exporter.py
 git status --short
 ```
