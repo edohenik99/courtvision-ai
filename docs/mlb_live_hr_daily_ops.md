@@ -1,4 +1,3 @@
-@'
 # MLB Live HR Daily Ops
 
 ## Daily collection
@@ -44,4 +43,3 @@ Then run:
 ```powershell
 python .\tools\grade_live_hr_results.py
 ```
-'@ | Set-Content docs\mlb_live_hr_daily_ops.md
