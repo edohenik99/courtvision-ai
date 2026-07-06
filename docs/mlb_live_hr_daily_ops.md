@@ -85,6 +85,24 @@ Check timestamped final automation logs in:
 data/theoddsapi/live_hr_snapshots/final_automation_logs/
 ```
 
+## Daily operations report
+
+Generate the offline daily report for a specific local date:
+
+```powershell
+python .\tools\generate_live_hr_daily_report.py --date YYYY-MM-DD
+```
+
+If `--date` is omitted, the report uses the current local date. The command reads
+only local snapshot, run-log, results, and automation-log files. It does not call
+The Odds API or MLB StatsAPI, and it does not run the grader.
+
+Reports are written to:
+
+```text
+data/theoddsapi/live_hr_snapshots/reports/live_hr_daily_report_YYYYMMDD.md
+```
+
 ## If duplicates appear
 
 Run the dedupe command, then rerun the health check:
