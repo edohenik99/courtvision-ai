@@ -35,6 +35,34 @@ Live HR daily check: VALID
 Duplicates: 0
 ```
 
+## Automatic daily run
+
+The Windows automation runner updates the local `main` branch, checks local run-log and master data for today's collection, runs the collector only when no same-day collection is found, and always runs the daily health check. It writes a timestamped transcript containing command output and errors.
+
+It does not grade results, fill results files, use Task Scheduler by itself, or make an API call merely to decide whether today's collection exists.
+
+Manual test command:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\dev\Sport_Project1\tools\run_live_hr_daily_auto.ps1
+```
+
+> **Warning:** Do not manually test the runner on a day already collected unless you have first confirmed that the duplicate guard recognizes today's local run-log or master-data entry.
+
+Create the daily Windows Task Scheduler task:
+
+```powershell
+schtasks /Create /TN "CourtVision MLB Live HR Daily" /SC DAILY /ST 11:30 /TR "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\dev\Sport_Project1\tools\run_live_hr_daily_auto.ps1" /F
+```
+
+Check timestamped automation logs in:
+
+```text
+data/theoddsapi/live_hr_snapshots/automation_logs/
+```
+
+Grading remains manual. Run it only after games are final and results coverage reports `Ready to grade: YES`.
+
 ## If duplicates appear
 
 Run the dedupe command, then rerun the health check:
