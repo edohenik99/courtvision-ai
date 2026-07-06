@@ -55,6 +55,7 @@ data/manual/
 
 # The Odds API live MLB HR collector artifacts
 data/theoddsapi/live_hr_snapshots/automation_logs/
+data/theoddsapi/live_hr_snapshots/final_automation_logs/
 data/theoddsapi/live_hr_snapshots/*.csv
 data/theoddsapi/live_hr_snapshots/*.json
 data/theoddsapi/live_hr_snapshots/*backup*

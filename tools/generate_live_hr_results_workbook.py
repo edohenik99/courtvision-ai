@@ -8,6 +8,7 @@ Offline-only:
 - Adds game/team/time context
 - Adds bookmaker price summary
 - Leaves actual_home_runs and game_status blank for manual filling
+- Can preserve manually filled result fields when regenerating
 
 This file is for humans.
 The strict grader still uses live_hr_results.csv.
@@ -50,6 +51,14 @@ REQUIRED_INPUT_COLUMNS = [
 ]
 
 
+PRESERVED_RESULT_COLUMNS = [
+    "event_id",
+    "player",
+    "actual_home_runs",
+    "game_status",
+]
+
+
 def is_blank(value: str | None) -> bool:
     return value is None or value.strip() == ""
 
@@ -77,7 +86,47 @@ def validate_columns(fieldnames: list[str] | None) -> None:
         )
 
 
-def generate_workbook(input_path: Path, output_path: Path, overwrite: bool) -> int:
+def load_preserved_results(output_path: Path) -> dict[tuple[str, str], dict[str, str]]:
+    preserved_results: dict[tuple[str, str], dict[str, str]] = {}
+
+    with output_path.open("r", newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+
+        if not reader.fieldnames:
+            raise ValueError(f"Existing workbook has no header row: {output_path}")
+
+        missing = [
+            column
+            for column in PRESERVED_RESULT_COLUMNS
+            if column not in reader.fieldnames
+        ]
+        if missing:
+            raise ValueError(
+                f"Existing workbook is missing result columns: {missing}. "
+                "Refusing to overwrite it while --preserve-results is enabled."
+            )
+
+        for row in reader:
+            event_id = (row.get("event_id") or "").strip()
+            player = (row.get("player") or "").strip()
+
+            if not event_id or not player:
+                continue
+
+            preserved_results[(event_id, player)] = {
+                "actual_home_runs": row.get("actual_home_runs") or "",
+                "game_status": row.get("game_status") or "",
+            }
+
+    return preserved_results
+
+
+def generate_workbook(
+    input_path: Path,
+    output_path: Path,
+    overwrite: bool,
+    preserve_results: bool = False,
+) -> int:
     if not input_path.exists():
         raise FileNotFoundError(f"Input CSV not found: {input_path}")
 
@@ -86,6 +135,12 @@ def generate_workbook(input_path: Path, output_path: Path, overwrite: bool) -> i
             f"Output already exists: {output_path}\n"
             "Use --overwrite only if you intentionally want to replace it."
         )
+
+    preserved_results = (
+        load_preserved_results(output_path)
+        if preserve_results and output_path.exists()
+        else {}
+    )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -159,6 +214,10 @@ def generate_workbook(input_path: Path, output_path: Path, overwrite: bool) -> i
         )
 
         all_prices = " | ".join(str(price["label"]) for price in prices)
+        result_values = preserved_results.get(
+            (str(item["event_id"]), str(item["player"])),
+            {"actual_home_runs": "", "game_status": ""},
+        )
 
         output_rows.append(
             {
@@ -171,8 +230,8 @@ def generate_workbook(input_path: Path, output_path: Path, overwrite: bool) -> i
                 "best_bookmaker": best_bookmaker,
                 "best_price": best_price,
                 "all_prices": all_prices,
-                "actual_home_runs": "",
-                "game_status": "",
+                "actual_home_runs": result_values["actual_home_runs"],
+                "game_status": result_values["game_status"],
             }
         )
 
@@ -212,6 +271,14 @@ def main() -> int:
         action="store_true",
         help="Overwrite output file if it already exists.",
     )
+    parser.add_argument(
+        "--preserve-results",
+        action="store_true",
+        help=(
+            "Preserve actual_home_runs and game_status from matching event_id + "
+            "player rows in an existing output workbook."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -219,6 +286,7 @@ def main() -> int:
         input_path=Path(args.input),
         output_path=Path(args.output),
         overwrite=args.overwrite,
+        preserve_results=args.preserve_results,
     )
 
     print(f"Generated results workbook: {args.output}")

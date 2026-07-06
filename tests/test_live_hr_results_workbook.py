@@ -1,3 +1,4 @@
+import csv
 from pathlib import Path
 
 from tools.generate_live_hr_results_workbook import generate_workbook
@@ -104,3 +105,67 @@ def test_generate_live_hr_results_workbook_allows_overwrite(
 
     assert rows == 1
     assert "Aaron Judge" in output_csv.read_text(encoding="utf-8")
+
+
+def test_generate_live_hr_results_workbook_preserves_existing_results(
+    tmp_path: Path,
+) -> None:
+    input_csv = tmp_path / "live_hr_props_master.csv"
+    output_csv = tmp_path / "live_hr_results_workbook.csv"
+
+    input_csv.write_text(
+        "\n".join(
+            [
+                HEADER,
+                "2026-07-03T15:00:00Z,event_1,2026-07-03T23:00:00Z,Yankees,Mets,fanduel,FanDuel,,batter_home_runs,,Aaron Judge,Over,325,0.5,HR",
+                "2026-07-03T15:00:00Z,event_1,2026-07-03T23:00:00Z,Yankees,Mets,betmgm,BetMGM,,batter_home_runs,,Juan Soto,Over,400,0.5,HR",
+                "2026-07-03T15:00:00Z,event_2,2026-07-04T01:00:00Z,Dodgers,Giants,draftkings,DraftKings,,batter_home_runs,,Aaron Judge,Over,350,0.5,HR",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    output_csv.write_text(
+        "\n".join(
+            [
+                ",".join(
+                    [
+                        "commence_time",
+                        "home_team",
+                        "away_team",
+                        "event_id",
+                        "player",
+                        "books_available",
+                        "best_bookmaker",
+                        "best_price",
+                        "all_prices",
+                        "actual_home_runs",
+                        "game_status",
+                    ]
+                ),
+                "2026-07-02T23:00:00Z,Yankees,Mets,event_1,Aaron Judge,DraftKings,DraftKings,300,DraftKings Over 0.5: 300,1,final",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    rows = generate_workbook(
+        input_path=input_csv,
+        output_path=output_csv,
+        overwrite=True,
+        preserve_results=True,
+    )
+
+    assert rows == 3
+
+    with output_csv.open("r", newline="", encoding="utf-8") as f:
+        output_rows = {
+            (row["event_id"], row["player"]): row for row in csv.DictReader(f)
+        }
+
+    assert output_rows[("event_1", "Aaron Judge")]["actual_home_runs"] == "1"
+    assert output_rows[("event_1", "Aaron Judge")]["game_status"] == "final"
+    assert output_rows[("event_1", "Aaron Judge")]["best_price"] == "325"
+    assert output_rows[("event_1", "Juan Soto")]["actual_home_runs"] == ""
+    assert output_rows[("event_1", "Juan Soto")]["game_status"] == ""
+    assert output_rows[("event_2", "Aaron Judge")]["actual_home_runs"] == ""
+    assert output_rows[("event_2", "Aaron Judge")]["game_status"] == ""
