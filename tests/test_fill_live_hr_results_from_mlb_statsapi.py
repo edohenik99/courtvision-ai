@@ -3,6 +3,11 @@ from datetime import date
 from pathlib import Path
 from typing import Mapping
 
+from tools.diagnose_live_hr_missing_results import (
+    REPORT_COLUMNS,
+    diagnose_missing_results,
+    write_csv_report,
+)
 from tools.fill_live_hr_results_from_mlb_statsapi import (
     BOXSCORE_URL,
     SCHEDULE_URL,
@@ -36,6 +41,19 @@ def write_workbook(path: Path, rows: list[dict[str, str]]) -> None:
 def read_workbook(path: Path) -> list[dict[str, str]]:
     with path.open("r", newline="", encoding="utf-8") as handle:
         return list(csv.DictReader(handle))
+
+
+def write_odds_csv(path: Path, *event_ids: str) -> None:
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["event_id", "commence_time"])
+        writer.writeheader()
+        for event_id in event_ids:
+            writer.writerow(
+                {
+                    "event_id": event_id,
+                    "commence_time": "2026-07-02T23:00:00Z",
+                }
+            )
 
 
 def workbook_row(
@@ -266,3 +284,130 @@ def test_normalized_full_name_matches_accents_and_punctuation(tmp_path: Path) ->
 
     assert read_workbook(workbook)[0]["actual_home_runs"] == "2"
     assert normalize_full_name("J.P. Crawford") == normalize_full_name("JP Crawford")
+
+
+def test_diagnoses_missing_player_without_live_network(tmp_path: Path) -> None:
+    workbook = tmp_path / "workbook.csv"
+    odds_csv = tmp_path / "odds.csv"
+    write_workbook(
+        workbook,
+        [
+            workbook_row(
+                "event_1", "Missing Batter", "New York Yankees", "New York Mets"
+            )
+        ],
+    )
+    write_odds_csv(odds_csv, "event_1")
+    api = FakeStatsApi(
+        games=[schedule_game(101, "New York Yankees", "New York Mets", "Final")],
+        boxscores={101: boxscore(("Aaron Judge", 1), ("Juan Soto", 0))},
+    )
+
+    diagnostics = diagnose_missing_results(
+        workbook, odds_csv, date(2026, 7, 2), get_json=api
+    )
+
+    assert len(diagnostics) == 1
+    diagnostic = diagnostics[0]
+    assert diagnostic.diagnosis == "matched_player_missing_from_boxscore"
+    assert diagnostic.matched_game_found is True
+    assert diagnostic.game_final is True
+    assert diagnostic.normalized_player_matched is False
+    assert diagnostic.game_pk == "101"
+    assert len(diagnostic.possible_matches) == 2
+    assert [url for url, _ in api.calls] == [
+        SCHEDULE_URL,
+        BOXSCORE_URL.format(game_pk=101),
+    ]
+    report_path = tmp_path / "report.csv"
+    write_csv_report(report_path, diagnostics)
+    with report_path.open("r", newline="", encoding="utf-8") as handle:
+        report_reader = csv.DictReader(handle)
+        assert tuple(report_reader.fieldnames or ()) == REPORT_COLUMNS
+        assert list(report_reader)[0]["diagnosis"] == (
+            "matched_player_missing_from_boxscore"
+        )
+
+
+def test_diagnostic_suggests_near_name_matches(tmp_path: Path) -> None:
+    workbook = tmp_path / "workbook.csv"
+    odds_csv = tmp_path / "odds.csv"
+    write_workbook(
+        workbook,
+        [workbook_row("event_1", "Aron Judge", "New York Yankees", "New York Mets")],
+    )
+    write_odds_csv(odds_csv, "event_1")
+    api = FakeStatsApi(
+        games=[schedule_game(101, "New York Yankees", "New York Mets", "Final")],
+        boxscores={101: boxscore(("Aaron Judge", 1), ("Juan Soto", 0))},
+    )
+
+    diagnostic = diagnose_missing_results(
+        workbook, odds_csv, date(2026, 7, 2), get_json=api
+    )[0]
+
+    assert diagnostic.diagnosis == "possible_name_mismatch"
+    assert diagnostic.possible_matches[0] == "Aaron Judge [aaron judge]"
+    assert diagnostic.normalized_player == "aron judge"
+
+
+def test_diagnostic_reports_game_not_matched(tmp_path: Path) -> None:
+    workbook = tmp_path / "workbook.csv"
+    odds_csv = tmp_path / "odds.csv"
+    write_workbook(
+        workbook,
+        [workbook_row("event_1", "Aaron Judge", "New York Yankees", "New York Mets")],
+    )
+    write_odds_csv(odds_csv, "event_1")
+    api = FakeStatsApi(games=[], boxscores={})
+
+    diagnostic = diagnose_missing_results(
+        workbook, odds_csv, date(2026, 7, 2), get_json=api
+    )[0]
+
+    assert diagnostic.diagnosis == "game_not_matched"
+    assert diagnostic.matched_game_found is False
+    assert diagnostic.game_pk == ""
+    assert api.calls == [
+        (SCHEDULE_URL, {"sportId": 1, "date": "2026-07-02"})
+    ]
+
+
+def test_diagnostic_reports_final_game_player_without_batting_stats(
+    tmp_path: Path,
+) -> None:
+    workbook = tmp_path / "workbook.csv"
+    odds_csv = tmp_path / "odds.csv"
+    write_workbook(
+        workbook,
+        [workbook_row("event_1", "Bench Player", "New York Yankees", "New York Mets")],
+    )
+    write_odds_csv(odds_csv, "event_1")
+    api = FakeStatsApi(
+        games=[schedule_game(101, "New York Yankees", "New York Mets", "Final")],
+        boxscores={
+            101: {
+                "teams": {
+                    "away": {
+                        "players": {
+                            "ID1": {
+                                "person": {"fullName": "Bench Player"},
+                                "stats": {"batting": {}},
+                            }
+                        }
+                    },
+                    "home": {"players": {}},
+                }
+            }
+        },
+    )
+
+    diagnostic = diagnose_missing_results(
+        workbook, odds_csv, date(2026, 7, 2), get_json=api
+    )[0]
+
+    assert diagnostic.diagnosis == "matched_player_missing_from_boxscore"
+    assert diagnostic.game_final is True
+    assert diagnostic.normalized_player_matched is True
+    assert diagnostic.player_batting_stats_found is False
+    assert diagnostic.player_boxscore_side == "away"

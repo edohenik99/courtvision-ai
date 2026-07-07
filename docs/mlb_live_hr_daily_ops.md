@@ -79,6 +79,22 @@ schtasks /Create /TN "CourtVision MLB HR Finalizer" /SC DAILY /ST 03:30 /TR "pow
 
 The 3:30 AM local finalizer always targets the previous local date. This gives late West Coast games and extra innings more time to reach final status before the MLB StatsAPI fill runs.
 
+If target-date coverage remains incomplete, diagnose the blank workbook rows without
+changing results or running the grader:
+
+```powershell
+python .\tools\diagnose_live_hr_missing_results.py --date YYYY-MM-DD
+```
+
+The diagnostic uses the local workbook and master odds CSV plus MLB StatsAPI schedule
+and boxscore endpoints. Add `--csv-report` to write
+`data/theoddsapi/live_hr_snapshots/reports/missing_results_YYYYMMDD.csv`, or pass an
+explicit path after the flag.
+
+A player absent from a final boxscore remains blank. The filler does not assume zero
+home runs because a sportsbook may treat a non-participant as a void; the diagnostic
+reports the missing player and nearby boxscore names for manual review.
+
 Check timestamped final automation logs in:
 
 ```text
