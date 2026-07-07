@@ -65,11 +65,11 @@ The daily collection runner does not grade results. Grading can remain manual or
 
 ## Automatic final-game run
 
-The final-game automation updates local `main`, runs the offline daily health check, regenerates the results workbook while preserving manually filled `actual_home_runs` and `game_status` values for matching `event_id + player` rows, exports the strict grader CSV, and checks coverage. It runs the grader only when coverage reports `Ready to grade: YES`.
+The final-game automation updates local `main`, runs the offline daily health check, and targets the previous local calendar date. It regenerates the results workbook while preserving existing `actual_home_runs` and `game_status` values for matching `event_id + player` rows, fills that target date from MLB StatsAPI, exports the strict grader CSV, and checks coverage. It runs the grader only when coverage reports `Ready to grade: YES`.
 
 If coverage reports `Ready to grade: NO`, the automation logs `Results incomplete; skipping grader.` and exits successfully. Failures from the daily check, workbook generation, export, or coverage checker still fail the run.
 
-The final-game runner does not call the live odds collector and does not fill game results automatically. It only synchronizes the workbook with the existing master odds CSV and preserves matching manual result entries.
+The final-game runner does not call the live odds collector. It uses MLB StatsAPI only to fill results for the previous local date and preserves matching result entries already present in the workbook.
 
 Create the daily Windows Task Scheduler task:
 
@@ -77,7 +77,7 @@ Create the daily Windows Task Scheduler task:
 schtasks /Create /TN "CourtVision MLB HR Finalizer" /SC DAILY /ST 03:30 /TR "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\dev\Sport_Project1\tools\run_live_hr_final_auto.ps1" /F
 ```
 
-The 3:30 AM local start time gives late West Coast games and extra innings more time to reach final status.
+The 3:30 AM local finalizer always targets the previous local date. This gives late West Coast games and extra innings more time to reach final status before the MLB StatsAPI fill runs.
 
 Check timestamped final automation logs in:
 

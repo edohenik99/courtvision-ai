@@ -3,6 +3,7 @@ $ErrorActionPreference = "Stop"
 $RepoPath = "C:\dev\Sport_Project1"
 $SnapshotPath = Join-Path $RepoPath "data\theoddsapi\live_hr_snapshots"
 $LogDirectory = Join-Path $SnapshotPath "final_automation_logs"
+$TargetDate = (Get-Date).AddDays(-1).ToString("yyyy-MM-dd")
 
 New-Item -ItemType Directory -Path $LogDirectory -Force | Out-Null
 $LogPath = Join-Path $LogDirectory ("live_hr_final_auto_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
@@ -50,6 +51,7 @@ Start-Transcript -Path $LogPath -Append | Out-Null
 try {
     Write-Host "CourtVision MLB Live HR final automation started at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz')."
     Write-Host "Log file: $LogPath"
+    Write-Host "Target date: $TargetDate"
     Set-Location -LiteralPath $RepoPath
 
     Invoke-CheckedCommand -Executable "git" -CommandArguments @("checkout", "main")
@@ -59,6 +61,11 @@ try {
         ".\tools\generate_live_hr_results_workbook.py",
         "--overwrite",
         "--preserve-results"
+    )
+    Invoke-CheckedCommand -Executable "python" -CommandArguments @(
+        ".\tools\fill_live_hr_results_from_mlb_statsapi.py",
+        "--date",
+        $TargetDate
     )
     Invoke-CheckedCommand -Executable "python" -CommandArguments @(
         ".\tools\export_live_hr_results_from_workbook.py",
