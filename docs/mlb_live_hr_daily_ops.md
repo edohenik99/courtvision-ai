@@ -351,6 +351,27 @@ to grade when required result fields for the target date are blank. The 3:30 AM
 finalizer runs these date-scoped commands with the previous local date, so blank
 historical dates do not block the current finalization run.
 
+## Grading performance summary
+
+After date-scoped grading succeeds, generate the offline Markdown performance
+summary:
+
+```powershell
+python .\tools\summarize_live_hr_grades.py --date YYYY-MM-DD
+```
+
+The command reads only the date-scoped grade CSV and does not call an external
+API or run the collector or grader. It writes:
+
+```text
+data/theoddsapi/live_hr_snapshots/reports/live_hr_grade_summary_YYYYMMDD.md
+```
+
+The report includes overall, bookmaker, odds-bucket, player, and available
+game/team performance. Because the grader excludes void rows from its output,
+the summary can report void/excluded counts only when those rows are present in
+the supplied grade CSV.
+
 If the grader reports a blank required field, that usually means `live_hr_results.csv` is incomplete. Run:
 
 ```powershell
