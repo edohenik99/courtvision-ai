@@ -65,9 +65,9 @@ The daily collection runner does not grade results. Grading can remain manual or
 
 ## Automatic final-game run
 
-The final-game automation updates local `main`, runs the offline daily health check, and targets the previous local calendar date. It regenerates the results workbook while preserving existing `actual_home_runs` and `game_status` values for matching `event_id + player` rows, fills that target date from MLB StatsAPI, exports the strict grader CSV, and checks coverage for that date. It grades only that date when coverage reports `Ready to grade: YES`.
+The final-game automation updates local `main`, runs the offline daily health check, and targets the previous local calendar date. It regenerates the results workbook while preserving existing `actual_home_runs` and `game_status` values for matching `event_id + player` rows, fills that target date from MLB StatsAPI, exports the strict grader CSV, and checks coverage for that date. It grades only that date when coverage reports `Ready to grade: YES`, then generates the date-scoped grade summary report after grading succeeds.
 
-If coverage reports `Ready to grade: NO`, the automation logs `Results incomplete; skipping grader.` and exits successfully. Failures from the daily check, workbook generation, export, or coverage checker still fail the run.
+If coverage reports `Ready to grade: NO`, the automation skips both grading and the grade summary, logs why each was skipped, and exits successfully. A grader failure prevents the summary from running. Failures from the daily check, workbook generation, export, coverage checker, grader, or grade summary fail the run.
 
 The final-game runner does not call the live odds collector. It uses MLB StatsAPI only to fill results for the previous local date and preserves matching result entries already present in the workbook. For final games, rostered players without batting stats are marked `void` so non-participants do not block coverage.
 
@@ -371,6 +371,11 @@ The report includes overall, bookmaker, odds-bucket, player, and available
 game/team performance. Because the grader excludes void rows from its output,
 the summary can report void/excluded counts only when those rows are present in
 the supplied grade CSV.
+
+The 3:30 AM finalizer runs this command automatically for the previous local
+date after successful date-scoped grading. No PowerShell automation test was
+added because this repository has no test harness for the finalizer script;
+the offline Python tools remain covered by their targeted tests.
 
 If the grader reports a blank required field, that usually means `live_hr_results.csv` is incomplete. Run:
 

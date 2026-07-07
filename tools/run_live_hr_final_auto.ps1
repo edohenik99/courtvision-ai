@@ -86,10 +86,16 @@ try {
             "--date",
             $TargetDate
         )
-        Write-Host "CourtVision MLB Live HR final automation completed with grading."
+        Invoke-CheckedCommand -Executable "python" -CommandArguments @(
+            ".\tools\summarize_live_hr_grades.py",
+            "--date",
+            $TargetDate
+        )
+        Write-Host "CourtVision MLB Live HR final automation completed with grading and summary."
     }
     elseif ($CoverageOutput -match "Ready to grade:\s*NO") {
         Write-Host "Results incomplete; skipping grader."
+        Write-Host "Grade summary skipped because grading was skipped."
         Write-Host "CourtVision MLB Live HR final automation completed successfully."
     }
     else {
