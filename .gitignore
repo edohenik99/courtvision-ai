@@ -32,6 +32,7 @@ pytest-cache-files-*/
 
 # Data/history files (runtime artifacts)
 data/history/*.csv
+data/history/evidence/day0/*.json
 
 # Coverage / build
 .coverage
