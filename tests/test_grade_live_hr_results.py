@@ -7,6 +7,7 @@ import pytest
 
 from tools.grade_live_hr_results import (
     GRADE_COLUMNS,
+    default_output_path,
     implied_probability,
     main,
     win_profit_1u,
@@ -16,6 +17,7 @@ from tools.grade_live_hr_results import (
 ODDS_COLUMNS = (
     "snapshot_time",
     "event_id",
+    "commence_time",
     "player",
     "side",
     "price",
@@ -37,6 +39,7 @@ def _odds_row(**overrides: object) -> dict[str, object]:
     row: dict[str, object] = {
         "snapshot_time": "2026-07-01T18:20:52Z",
         "event_id": "event-1",
+        "commence_time": "2026-07-06T23:10:00Z",
         "player": "Winning Batter",
         "side": "Over",
         "price": 300,
@@ -50,22 +53,23 @@ def _run_with_temp_csvs(
     tmp_path: Path,
     odds_rows: list[dict[str, object]],
     result_rows: list[dict[str, object]],
+    extra_args: list[str] | None = None,
 ) -> tuple[int, Path]:
     odds_path = tmp_path / "odds.csv"
     results_path = tmp_path / "results.csv"
     output_path = tmp_path / "graded.csv"
     _write_csv(odds_path, ODDS_COLUMNS, odds_rows)
     _write_csv(results_path, RESULTS_COLUMNS, result_rows)
-    exit_code = main(
-        [
-            "--odds-csv",
-            str(odds_path),
-            "--results-csv",
-            str(results_path),
-            "--output-csv",
-            str(output_path),
-        ]
-    )
+    args = [
+        "--odds-csv",
+        str(odds_path),
+        "--results-csv",
+        str(results_path),
+        "--output-csv",
+        str(output_path),
+    ]
+    args.extend(extra_args or [])
+    exit_code = main(args)
     return exit_code, output_path
 
 
@@ -184,3 +188,77 @@ def test_schema_failure_exits_one_without_writing_output(
 
 def test_missing_input_file_exits_one(tmp_path: Path) -> None:
     assert main(["--odds-csv", str(tmp_path / "missing.csv")]) == 1
+
+
+def test_date_scoped_grading_grades_only_requested_date(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    odds_rows = [
+        _odds_row(),
+        _odds_row(
+            event_id="event-2",
+            player="Other Date Batter",
+            commence_time="2026-07-05T19:05:00Z",
+        ),
+    ]
+    result_rows = [
+        {
+            "event_id": "event-1",
+            "player": "Winning Batter",
+            "actual_home_runs": 1,
+            "game_status": "final",
+        },
+        {
+            "event_id": "event-2",
+            "player": "Other Date Batter",
+            "actual_home_runs": "",
+            "game_status": "",
+        },
+    ]
+
+    exit_code, output_path = _run_with_temp_csvs(
+        tmp_path,
+        odds_rows,
+        result_rows,
+        extra_args=["--date", "2026-07-06"],
+    )
+
+    assert exit_code == 0
+    with output_path.open("r", newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    assert len(rows) == 1
+    assert rows[0]["event_id"] == "event-1"
+    assert rows[0]["grade_status"] == "graded"
+    output = capsys.readouterr().out
+    assert "Target date: 2026-07-06" in output
+    assert "Total rows: 1" in output
+
+
+def test_date_scoped_grading_rejects_blank_target_results(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    result_rows = [
+        {
+            "event_id": "event-1",
+            "player": "Winning Batter",
+            "actual_home_runs": 1,
+            "game_status": "",
+        }
+    ]
+
+    exit_code, output_path = _run_with_temp_csvs(
+        tmp_path,
+        [_odds_row()],
+        result_rows,
+        extra_args=["--date", "2026-07-06"],
+    )
+
+    assert exit_code == 1
+    assert not output_path.exists()
+    error = capsys.readouterr().err
+    assert "date 2026-07-06" in error
+    assert "blank required field 'game_status'" in error
+
+
+def test_date_scoped_default_output_filename() -> None:
+    assert default_output_path("2026-07-06").name == "live_hr_grades_20260706.csv"

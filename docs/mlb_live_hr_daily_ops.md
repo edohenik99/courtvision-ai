@@ -65,7 +65,7 @@ The daily collection runner does not grade results. Grading can remain manual or
 
 ## Automatic final-game run
 
-The final-game automation updates local `main`, runs the offline daily health check, and targets the previous local calendar date. It regenerates the results workbook while preserving existing `actual_home_runs` and `game_status` values for matching `event_id + player` rows, fills that target date from MLB StatsAPI, exports the strict grader CSV, and checks coverage. It runs the grader only when coverage reports `Ready to grade: YES`.
+The final-game automation updates local `main`, runs the offline daily health check, and targets the previous local calendar date. It regenerates the results workbook while preserving existing `actual_home_runs` and `game_status` values for matching `event_id + player` rows, fills that target date from MLB StatsAPI, exports the strict grader CSV, and checks coverage for that date. It grades only that date when coverage reports `Ready to grade: YES`.
 
 If coverage reports `Ready to grade: NO`, the automation logs `Results incomplete; skipping grader.` and exits successfully. Failures from the daily check, workbook generation, export, or coverage checker still fail the run.
 
@@ -165,6 +165,17 @@ Check whether the results file is ready for grading:
 ```powershell
 python .\tools\check_live_hr_results_coverage.py
 ```
+
+The command above checks all historical rows in the strict results file. To
+check one game date, use the master odds CSV to scope results by `event_id`:
+
+```powershell
+python .\tools\check_live_hr_results_coverage.py --date YYYY-MM-DD
+```
+
+Date-scoped coverage can be ready even when older or newer dates still contain
+blank results. The report includes the target date and returns `Rows: 0` with
+`Ready to grade: NO` when the master odds CSV has no events for that date.
 
 Expected pre-fill coverage state:
 
@@ -296,6 +307,21 @@ Only run the grader after the results coverage checker says the strict results f
 python .\tools\grade_live_hr_results.py
 ```
 
+The command above preserves the global grading workflow. To grade only one game
+date after its date-scoped coverage is ready, run:
+
+```powershell
+python .\tools\check_live_hr_results_coverage.py --date YYYY-MM-DD
+python .\tools\grade_live_hr_results.py --date YYYY-MM-DD
+```
+
+The date-scoped grader filters both master odds and strict results rows to event
+IDs for that date. Its default output is
+`data/theoddsapi/live_hr_snapshots/live_hr_grades_YYYYMMDD.csv`, and it refuses
+to grade when required result fields for the target date are blank. The 3:30 AM
+finalizer runs these date-scoped commands with the previous local date, so blank
+historical dates do not block the current finalization run.
+
 If the grader reports a blank required field, that usually means `live_hr_results.csv` is incomplete. Run:
 
 ```powershell
@@ -332,8 +358,8 @@ Then export, check coverage, and grade:
 
 ```powershell
 python .\tools\export_live_hr_results_from_workbook.py --overwrite
-python .\tools\check_live_hr_results_coverage.py
-python .\tools\grade_live_hr_results.py
+python .\tools\check_live_hr_results_coverage.py --date YYYY-MM-DD
+python .\tools\grade_live_hr_results.py --date YYYY-MM-DD
 ```
 
 ## Testing
@@ -341,13 +367,13 @@ python .\tools\grade_live_hr_results.py
 Run the offline results tool tests:
 
 ```powershell
-python -m pytest tests/test_live_hr_results_tools.py tests/test_live_hr_results_workbook.py tests/test_live_hr_results_exporter.py
+python -m pytest tests/test_live_hr_results_tools.py tests/test_grade_live_hr_results.py tests/test_live_hr_results_workbook.py tests/test_live_hr_results_exporter.py
 ```
 
 Expected result:
 
 ```text
-11 passed
+24 passed
 ```
 
 ## Git workflow

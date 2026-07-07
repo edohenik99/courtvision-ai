@@ -74,10 +74,18 @@ try {
 
     $CoverageOutput = Invoke-CapturedCheckedCommand `
         -Executable "python" `
-        -CommandArguments @(".\tools\check_live_hr_results_coverage.py")
+        -CommandArguments @(
+            ".\tools\check_live_hr_results_coverage.py",
+            "--date",
+            $TargetDate
+        )
 
     if ($CoverageOutput -match "Ready to grade:\s*YES") {
-        Invoke-CheckedCommand -Executable "python" -CommandArguments @(".\tools\grade_live_hr_results.py")
+        Invoke-CheckedCommand -Executable "python" -CommandArguments @(
+            ".\tools\grade_live_hr_results.py",
+            "--date",
+            $TargetDate
+        )
         Write-Host "CourtVision MLB Live HR final automation completed with grading."
     }
     elseif ($CoverageOutput -match "Ready to grade:\s*NO") {

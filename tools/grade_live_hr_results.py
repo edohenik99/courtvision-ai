@@ -6,6 +6,7 @@ import argparse
 import csv
 import sys
 from dataclasses import dataclass
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Sequence
@@ -18,6 +19,7 @@ DEFAULT_RESULTS_CSV = DATA_DIR / "live_hr_results.csv"
 DEFAULT_OUTPUT_CSV = DATA_DIR / "live_hr_props_graded.csv"
 
 ODDS_REQUIRED_COLUMNS = ("event_id", "player", "side", "price", "point")
+ODDS_DATE_COLUMNS = ("commence_time",)
 RESULTS_REQUIRED_COLUMNS = (
     "event_id",
     "player",
@@ -130,17 +132,53 @@ def _decimal(value: str, column: str, label: str, row_number: int) -> Decimal:
     return number
 
 
-def _load_results(path: Path) -> dict[tuple[str, str], tuple[int, str]]:
+def _validate_target_date(target_date: str) -> str:
+    try:
+        parsed_date = date.fromisoformat(target_date)
+    except ValueError as exc:
+        raise GradingInputError(
+            f"invalid date {target_date!r}; expected YYYY-MM-DD"
+        ) from exc
+    if parsed_date.isoformat() != target_date:
+        raise GradingInputError(
+            f"invalid date {target_date!r}; expected YYYY-MM-DD"
+        )
+    return target_date
+
+
+def _commence_date(value: str, row_number: int) -> str:
+    try:
+        parsed_time = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed_time.date().isoformat()
+    except ValueError as exc:
+        raise GradingInputError(
+            f"odds CSV row {row_number} has invalid commence_time: {value!r}"
+        ) from exc
+
+
+def _load_results(
+    path: Path,
+    event_ids: set[str] | None = None,
+    require_game_status: bool = False,
+) -> dict[tuple[str, str], tuple[int, str]]:
     _, rows = _read_csv(path, RESULTS_REQUIRED_COLUMNS, "results")
     results: dict[tuple[str, str], tuple[int, str]] = {}
 
     for row_number, row in enumerate(rows, start=2):
+        raw_event_id = str(row.get("event_id") or "").strip()
+        if event_ids is not None and raw_event_id not in event_ids:
+            continue
+
         event_id = _required_text(row, "event_id", "results", row_number)
         player = _required_text(row, "player", "results", row_number)
         home_runs_value = _required_text(
             row, "actual_home_runs", "results", row_number
         )
-        game_status = str(row.get("game_status") or "").strip()
+        game_status = (
+            _required_text(row, "game_status", "results", row_number)
+            if require_game_status
+            else str(row.get("game_status") or "").strip()
+        )
         home_runs_decimal = _decimal(
             home_runs_value, "actual_home_runs", "results", row_number
         )
@@ -164,17 +202,53 @@ def _load_results(path: Path) -> dict[tuple[str, str], tuple[int, str]]:
 def grade_live_hr_results(
     odds_path: str | Path = DEFAULT_ODDS_CSV,
     results_path: str | Path = DEFAULT_RESULTS_CSV,
-    output_path: str | Path = DEFAULT_OUTPUT_CSV,
+    output_path: str | Path | None = None,
+    target_date: str | None = None,
 ) -> GradeSummary:
     """Grade local odds, write a separate CSV, and return aggregate results."""
 
     odds_csv = Path(odds_path)
     results_csv = Path(results_path)
-    output_csv = Path(output_path)
-    odds_columns, odds_rows = _read_csv(
-        odds_csv, ODDS_REQUIRED_COLUMNS, "odds"
+    if target_date:
+        target_date = _validate_target_date(target_date)
+    output_csv = (
+        Path(output_path) if output_path else default_output_path(target_date)
     )
-    results = _load_results(results_csv)
+    required_odds_columns = (
+        ODDS_REQUIRED_COLUMNS + ODDS_DATE_COLUMNS
+        if target_date
+        else ODDS_REQUIRED_COLUMNS
+    )
+    odds_columns, odds_rows = _read_csv(
+        odds_csv, required_odds_columns, "odds"
+    )
+
+    if target_date:
+        filtered_odds_rows: list[dict[str, str | None]] = []
+        for row_number, row in enumerate(odds_rows, start=2):
+            commence_time = _required_text(
+                row, "commence_time", "odds", row_number
+            )
+            if _commence_date(commence_time, row_number) == target_date:
+                filtered_odds_rows.append(row)
+        odds_rows = filtered_odds_rows
+        if not odds_rows:
+            raise GradingInputError(f"odds CSV has no rows for date {target_date}")
+
+    target_event_ids = (
+        {
+            str(row.get("event_id") or "").strip()
+            for row in odds_rows
+            if str(row.get("event_id") or "").strip()
+        }
+        if target_date
+        else None
+    )
+    results = _load_results(
+        results_csv,
+        event_ids=target_event_ids,
+        require_game_status=target_date is not None,
+    )
 
     output_columns = [column for column in odds_columns if column not in GRADE_COLUMNS]
     output_columns.extend(GRADE_COLUMNS)
@@ -256,7 +330,15 @@ def grade_live_hr_results(
     )
 
 
-def print_summary(summary: GradeSummary) -> None:
+def default_output_path(target_date: str | None) -> Path:
+    if not target_date:
+        return DEFAULT_OUTPUT_CSV
+    return DATA_DIR / f"live_hr_grades_{target_date.replace('-', '')}.csv"
+
+
+def print_summary(summary: GradeSummary, target_date: str | None = None) -> None:
+    if target_date:
+        print(f"Target date: {target_date}")
     print(f"Total rows: {summary.total_rows}")
     print(f"Graded rows: {summary.graded_rows}")
     print(f"Missing result rows: {summary.missing_result_rows}")
@@ -272,20 +354,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--odds-csv", type=Path, default=DEFAULT_ODDS_CSV)
     parser.add_argument("--results-csv", type=Path, default=DEFAULT_RESULTS_CSV)
-    parser.add_argument("--output-csv", type=Path, default=DEFAULT_OUTPUT_CSV)
+    parser.add_argument("--output-csv", type=Path)
+    parser.add_argument("--date", dest="target_date")
     args = parser.parse_args(argv)
 
     try:
+        target_date = (
+            _validate_target_date(args.target_date) if args.target_date else None
+        )
         summary = grade_live_hr_results(
             odds_path=args.odds_csv,
             results_path=args.results_csv,
             output_path=args.output_csv,
+            target_date=target_date,
         )
     except GradingInputError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        date_context = f" for date {args.target_date}" if args.target_date else ""
+        print(f"ERROR{date_context}: {exc}", file=sys.stderr)
         return 1
 
-    print_summary(summary)
+    print_summary(summary, target_date=target_date)
     return 0
 
 
