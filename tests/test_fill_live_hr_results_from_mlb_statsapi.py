@@ -11,8 +11,10 @@ from tools.diagnose_live_hr_missing_results import (
 from tools.fill_live_hr_results_from_mlb_statsapi import (
     BOXSCORE_URL,
     SCHEDULE_URL,
+    extract_player_home_runs,
     fill_results_from_mlb_statsapi,
     normalize_full_name,
+    normalize_player_name,
 )
 
 
@@ -284,6 +286,62 @@ def test_normalized_full_name_matches_accents_and_punctuation(tmp_path: Path) ->
 
     assert read_workbook(workbook)[0]["actual_home_runs"] == "2"
     assert normalize_full_name("J.P. Crawford") == normalize_full_name("JP Crawford")
+
+
+def test_player_nickname_normalization_matches_james_to_jim(
+    tmp_path: Path,
+) -> None:
+    workbook = tmp_path / "workbook.csv"
+    write_workbook(
+        workbook,
+        [workbook_row("event_1", "James Jarvis", "Atlanta Braves", "New York Mets")],
+    )
+    api = FakeStatsApi(
+        games=[schedule_game(101, "Atlanta Braves", "New York Mets", "Final")],
+        boxscores={101: boxscore(("Jim Jarvis", 1))},
+    )
+
+    summary = fill_results_from_mlb_statsapi(
+        workbook,
+        date(2026, 7, 2),
+        get_json=api,
+    )
+
+    assert normalize_player_name("James Jarvis") == "jim jarvis"
+    assert normalize_player_name("Jim Jarvis") == "jim jarvis"
+    assert read_workbook(workbook)[0]["actual_home_runs"] == "1"
+    assert summary.unmatched_players == 0
+
+
+def test_player_nickname_normalization_preserves_exact_name_matches() -> None:
+    assert normalize_player_name("Aaron Judge") == "aaron judge"
+    assert extract_player_home_runs(boxscore(("Aaron Judge", 2))) == {
+        "aaron judge": 2
+    }
+
+
+def test_player_nickname_normalization_keeps_other_players_unmatched(
+    tmp_path: Path,
+) -> None:
+    workbook = tmp_path / "workbook.csv"
+    write_workbook(
+        workbook,
+        [workbook_row("event_1", "James Jarvis", "Atlanta Braves", "New York Mets")],
+    )
+    api = FakeStatsApi(
+        games=[schedule_game(101, "Atlanta Braves", "New York Mets", "Final")],
+        boxscores={101: boxscore(("Jim Beam", 0))},
+    )
+
+    summary = fill_results_from_mlb_statsapi(
+        workbook,
+        date(2026, 7, 2),
+        get_json=api,
+    )
+
+    assert normalize_player_name("James Jarvis") != normalize_player_name("Jim Beam")
+    assert read_workbook(workbook)[0]["actual_home_runs"] == ""
+    assert summary.unmatched_players == 1
 
 
 def test_diagnoses_missing_player_without_live_network(tmp_path: Path) -> None:

@@ -24,6 +24,9 @@ DEFAULT_WORKBOOK = Path(
 SCHEDULE_URL = "https://statsapi.mlb.com/api/v1/schedule"
 BOXSCORE_URL = "https://statsapi.mlb.com/api/v1/game/{game_pk}/boxscore"
 REQUEST_TIMEOUT_SECONDS = 30
+PLAYER_FIRST_NAME_ALIASES = {
+    "james": "jim",
+}
 
 REQUIRED_COLUMNS = (
     "commence_time",
@@ -75,6 +78,17 @@ def normalize_full_name(value: object) -> str:
         elif character.isspace() or character in "-_/":
             normalized.append(" ")
     return re.sub(r"\s+", " ", "".join(normalized)).strip()
+
+
+def normalize_player_name(value: object) -> str:
+    """Normalize a player name and canonicalize supported first-name aliases."""
+
+    normalized_name = normalize_full_name(value)
+    if not normalized_name:
+        return ""
+    name_parts = normalized_name.split(" ")
+    name_parts[0] = PLAYER_FIRST_NAME_ALIASES.get(name_parts[0], name_parts[0])
+    return " ".join(name_parts)
 
 
 def parse_target_date(value: str) -> date:
@@ -256,7 +270,7 @@ def extract_player_home_runs(payload: JsonObject) -> dict[str, int]:
             full_name = ((player.get("person") or {}).get("fullName"))
             batting = ((player.get("stats") or {}).get("batting") or {})
             home_runs = batting.get("homeRuns")
-            normalized_name = normalize_full_name(full_name)
+            normalized_name = normalize_player_name(full_name)
             if not normalized_name or home_runs is None:
                 continue
             try:
@@ -363,7 +377,7 @@ def fill_results_from_mlb_statsapi(
                 continue
 
             if needs_home_runs:
-                normalized_player = normalize_full_name(row.get("player"))
+                normalized_player = normalize_player_name(row.get("player"))
                 if normalized_player not in home_runs:
                     unmatched_player_keys.add((*key, normalized_player))
                     rows_skipped += 1

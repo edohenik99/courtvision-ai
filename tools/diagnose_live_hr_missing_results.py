@@ -24,6 +24,7 @@ if __package__:
         is_final_game,
         load_workbook,
         normalize_full_name,
+        normalize_player_name,
         parse_commence_time,
         parse_target_date,
         schedule_games_for_date,
@@ -41,6 +42,7 @@ else:
         is_final_game,
         load_workbook,
         normalize_full_name,
+        normalize_player_name,
         parse_commence_time,
         parse_target_date,
         schedule_games_for_date,
@@ -164,7 +166,7 @@ def extract_boxscore_players(payload: dict[str, Any]) -> list[BoxscorePlayer]:
             if not isinstance(player, dict):
                 continue
             name = str(((player.get("person") or {}).get("fullName")) or "").strip()
-            normalized_name = normalize_full_name(name)
+            normalized_name = normalize_player_name(name)
             if not normalized_name:
                 continue
             batting = ((player.get("stats") or {}).get("batting") or {})
@@ -224,7 +226,7 @@ def closest_boxscore_names(
     *,
     limit: int = 5,
 ) -> tuple[tuple[str, ...], float]:
-    normalized_player = normalize_full_name(player)
+    normalized_player = normalize_player_name(player)
     unique_players: dict[str, BoxscorePlayer] = {}
     for candidate in boxscore_players:
         unique_players.setdefault(candidate.normalized_name, candidate)
@@ -327,7 +329,7 @@ def diagnose_missing_results(
         for row_index in row_indexes:
             row = rows[row_index]
             player = str(row.get("player") or "").strip()
-            normalized_player = normalize_full_name(player)
+            normalized_player = normalize_player_name(player)
             exact_matches = [
                 candidate
                 for candidate in boxscore_players
