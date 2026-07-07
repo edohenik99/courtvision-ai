@@ -98,6 +98,35 @@ def test_check_live_hr_results_coverage_reports_ready_file(tmp_path: Path) -> No
     assert report["ready_to_grade"] is True
 
 
+def test_check_live_hr_results_coverage_treats_void_as_resolved(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    results_csv = tmp_path / "live_hr_results.csv"
+    results_csv.write_text(
+        "\n".join(
+            [
+                "event_id,player,actual_home_runs,game_status",
+                "event_1,Aaron Judge,1,final",
+                "event_1,Bench Player,,void",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    report = check_results_coverage(results_csv)
+
+    assert report["total_rows"] == 2
+    assert report["void_rows"] == 1
+    assert report["gradeable_rows"] == 1
+    assert report["missing_actual_home_runs"] == 0
+    assert report["missing_game_status"] == 0
+    assert report["ready_to_grade"] is True
+    assert main(["--results", str(results_csv)]) == 0
+    output = capsys.readouterr().out
+    assert "Void rows: 1" in output
+    assert "Gradeable rows: 1" in output
+
+
 def test_check_live_hr_results_coverage_flags_invalid_home_runs(tmp_path: Path) -> None:
     results_csv = tmp_path / "live_hr_results.csv"
 
@@ -178,6 +207,46 @@ def test_date_scoped_coverage_reports_not_ready_for_target_date_blanks(
     assert report["missing_actual_home_runs"] == 1
     assert report["missing_game_status"] == 1
     assert report["ready_to_grade"] is False
+
+
+def test_date_scoped_coverage_is_ready_with_final_and_void_rows(
+    tmp_path: Path,
+) -> None:
+    odds_csv = tmp_path / "live_hr_props_master.csv"
+    results_csv = tmp_path / "live_hr_results.csv"
+    odds_csv.write_text(
+        "\n".join(
+            [
+                "event_id,commence_time",
+                "event_1,2026-07-06T23:10:00Z",
+                "event_2,2026-07-06T23:20:00Z",
+                "event_3,2026-07-05T19:05:00Z",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    results_csv.write_text(
+        "\n".join(
+            [
+                "event_id,player,actual_home_runs,game_status",
+                "event_1,Aaron Judge,1,final",
+                "event_2,Bench Player,,void",
+                "event_3,Other Date Player,,",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    report = check_results_coverage(
+        results_csv,
+        odds_path=odds_csv,
+        target_date="2026-07-06",
+    )
+
+    assert report["total_rows"] == 2
+    assert report["void_rows"] == 1
+    assert report["gradeable_rows"] == 1
+    assert report["ready_to_grade"] is True
 
 
 def test_date_scoped_coverage_reports_zero_rows_without_crashing(

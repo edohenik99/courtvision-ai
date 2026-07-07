@@ -96,6 +96,7 @@ class MissingResultDiagnostic:
     player_batting_stats_found: bool
     player_boxscore_side: str
     possible_matches: tuple[str, ...]
+    recommendation: str
 
     def as_csv_row(self) -> dict[str, str]:
         return {
@@ -260,7 +261,9 @@ def _missing_row_indexes(
         indexes = [
             row_index
             for row_index in workbook_game.row_indexes
-            if (
+            if str(rows[row_index].get("game_status") or "").strip().casefold()
+            != "void"
+            and (
                 is_blank(rows[row_index].get("actual_home_runs"))
                 or is_blank(rows[row_index].get("game_status"))
             )
@@ -348,7 +351,7 @@ def diagnose_missing_results(
             ):
                 diagnosis = "matched_player_found_in_boxscore"
             elif exact_matches:
-                diagnosis = "matched_player_missing_from_boxscore"
+                diagnosis = "rostered_non_participant"
             elif any(
                 other_key != key
                 for other_key in player_game_keys.get(normalized_player, set())
@@ -358,6 +361,12 @@ def diagnose_missing_results(
                 diagnosis = "possible_name_mismatch"
             else:
                 diagnosis = "matched_player_missing_from_boxscore"
+
+            recommendation = (
+                "set game_status=void; leave actual_home_runs blank"
+                if diagnosis == "rostered_non_participant"
+                else ""
+            )
 
             diagnostics.append(
                 MissingResultDiagnostic(
@@ -385,6 +394,7 @@ def diagnose_missing_results(
                         else ""
                     ),
                     possible_matches=suggestions,
+                    recommendation=recommendation,
                 )
             )
 
@@ -432,6 +442,8 @@ def print_diagnostics(
             f"{'YES' if diagnostic.player_batting_stats_found else 'NO'}"
         )
         print(f"Player boxscore side: {diagnostic.player_boxscore_side or '-'}")
+        if diagnostic.recommendation:
+            print(f"Recommendation: {diagnostic.recommendation}")
         print("Closest boxscore players:")
         if diagnostic.possible_matches:
             for match in diagnostic.possible_matches:

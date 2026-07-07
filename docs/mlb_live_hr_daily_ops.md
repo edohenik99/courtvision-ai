@@ -69,7 +69,7 @@ The final-game automation updates local `main`, runs the offline daily health ch
 
 If coverage reports `Ready to grade: NO`, the automation logs `Results incomplete; skipping grader.` and exits successfully. Failures from the daily check, workbook generation, export, or coverage checker still fail the run.
 
-The final-game runner does not call the live odds collector. It uses MLB StatsAPI only to fill results for the previous local date and preserves matching result entries already present in the workbook.
+The final-game runner does not call the live odds collector. It uses MLB StatsAPI only to fill results for the previous local date and preserves matching result entries already present in the workbook. For final games, rostered players without batting stats are marked `void` so non-participants do not block coverage.
 
 Create the daily Windows Task Scheduler task:
 
@@ -91,9 +91,10 @@ and boxscore endpoints. Add `--csv-report` to write
 `data/theoddsapi/live_hr_snapshots/reports/missing_results_YYYYMMDD.csv`, or pass an
 explicit path after the flag.
 
-A player absent from a final boxscore remains blank. The filler does not assume zero
-home runs because a sportsbook may treat a non-participant as a void; the diagnostic
-reports the missing player and nearby boxscore names for manual review.
+A rostered player without batting stats in a final boxscore keeps a blank
+`actual_home_runs` value and receives `game_status=void`. The diagnostic recommends
+this status without changing files itself. A player name absent from the roster remains
+unresolved for manual review.
 
 Check timestamped final automation logs in:
 
@@ -232,6 +233,15 @@ actual_home_runs = 0, 1, 2, etc.
 game_status = final
 ```
 
+Result statuses have these meanings:
+
+* `final` is a completed, gradeable result and requires `actual_home_runs`.
+* `void` is a rostered non-participant or otherwise non-gradeable prop and keeps
+  `actual_home_runs` blank.
+
+Coverage treats `void` as resolved, while the grader excludes void rows from its
+output, win/loss counts, profit, and ROI calculations.
+
 After filling the workbook, export the strict grader file:
 
 ```powershell
@@ -294,6 +304,9 @@ Use:
 actual_home_runs = 0, 1, 2, etc.
 game_status = final
 ```
+
+For a non-participant, leave `actual_home_runs` blank and set `game_status = void`.
+Void rows are resolved for coverage and excluded from grading.
 
 Example:
 

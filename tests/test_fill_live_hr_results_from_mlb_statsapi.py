@@ -115,6 +115,22 @@ def boxscore(*players: tuple[str, int]) -> dict[str, object]:
     }
 
 
+def boxscore_with_nonparticipant(player: str) -> dict[str, object]:
+    return {
+        "teams": {
+            "away": {
+                "players": {
+                    "ID1": {
+                        "person": {"fullName": player},
+                        "stats": {"batting": {}},
+                    }
+                }
+            },
+            "home": {"players": {}},
+        }
+    }
+
+
 class FakeStatsApi:
     def __init__(
         self,
@@ -242,6 +258,84 @@ def test_preserves_filled_values_unless_overwrite_is_enabled(tmp_path: Path) -> 
     assert rows[1]["game_status"] == "final"
     assert overwritten.rows_filled == 2
     assert overwritten.rows_skipped == 0
+
+
+def test_sets_void_for_final_game_rostered_nonparticipant(tmp_path: Path) -> None:
+    workbook = tmp_path / "workbook.csv"
+    write_workbook(
+        workbook,
+        [workbook_row("event_1", "Bench Player", "New York Yankees", "New York Mets")],
+    )
+    api = FakeStatsApi(
+        games=[schedule_game(101, "New York Yankees", "New York Mets", "Final")],
+        boxscores={101: boxscore_with_nonparticipant("Bench Player")},
+    )
+
+    summary = fill_results_from_mlb_statsapi(
+        workbook,
+        date(2026, 7, 2),
+        get_json=api,
+    )
+
+    row = read_workbook(workbook)[0]
+    assert row["actual_home_runs"] == ""
+    assert row["game_status"] == "void"
+    assert summary.rows_filled == 1
+    assert summary.unmatched_players == 0
+
+
+def test_final_and_void_rows_are_terminal_unless_overwrite_is_enabled(
+    tmp_path: Path,
+) -> None:
+    workbook = tmp_path / "workbook.csv"
+    write_workbook(
+        workbook,
+        [
+            workbook_row(
+                "event_1",
+                "Aaron Judge",
+                "New York Yankees",
+                "New York Mets",
+                actual_home_runs="2",
+                game_status="final",
+            ),
+            workbook_row(
+                "event_1",
+                "Juan Soto",
+                "New York Yankees",
+                "New York Mets",
+                game_status="void",
+            ),
+        ],
+    )
+    api = FakeStatsApi(
+        games=[schedule_game(101, "New York Yankees", "New York Mets", "Final")],
+        boxscores={101: boxscore(("Aaron Judge", 0), ("Juan Soto", 1))},
+    )
+
+    preserved = fill_results_from_mlb_statsapi(
+        workbook,
+        date(2026, 7, 2),
+        get_json=api,
+    )
+
+    rows = read_workbook(workbook)
+    assert (rows[0]["actual_home_runs"], rows[0]["game_status"]) == ("2", "final")
+    assert (rows[1]["actual_home_runs"], rows[1]["game_status"]) == ("", "void")
+    assert preserved.rows_filled == 0
+    assert preserved.rows_skipped == 2
+
+    overwritten = fill_results_from_mlb_statsapi(
+        workbook,
+        date(2026, 7, 2),
+        overwrite_filled=True,
+        get_json=api,
+    )
+
+    rows = read_workbook(workbook)
+    assert (rows[0]["actual_home_runs"], rows[0]["game_status"]) == ("0", "final")
+    assert (rows[1]["actual_home_runs"], rows[1]["game_status"]) == ("1", "final")
+    assert overwritten.rows_filled == 2
 
 
 def test_dry_run_reports_changes_without_modifying_workbook(tmp_path: Path) -> None:
@@ -464,8 +558,11 @@ def test_diagnostic_reports_final_game_player_without_batting_stats(
         workbook, odds_csv, date(2026, 7, 2), get_json=api
     )[0]
 
-    assert diagnostic.diagnosis == "matched_player_missing_from_boxscore"
+    assert diagnostic.diagnosis == "rostered_non_participant"
     assert diagnostic.game_final is True
     assert diagnostic.normalized_player_matched is True
     assert diagnostic.player_batting_stats_found is False
     assert diagnostic.player_boxscore_side == "away"
+    assert diagnostic.recommendation == (
+        "set game_status=void; leave actual_home_runs blank"
+    )

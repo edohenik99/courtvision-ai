@@ -135,6 +135,9 @@ def check_results_coverage(
         missing_actual_home_runs = 0
         missing_game_status = 0
         invalid_actual_home_runs = 0
+        invalid_game_status = 0
+        void_rows = 0
+        gradeable_rows = 0
 
         for row in reader:
             if (
@@ -151,6 +154,12 @@ def check_results_coverage(
             if is_blank(row.get("player")):
                 missing_player += 1
 
+            game_status = str(row.get("game_status") or "").strip().casefold()
+            if game_status == "void":
+                void_rows += 1
+                continue
+
+            gradeable_rows += 1
             actual_home_runs = row.get("actual_home_runs")
 
             if is_blank(actual_home_runs):
@@ -163,8 +172,10 @@ def check_results_coverage(
                 except ValueError:
                     invalid_actual_home_runs += 1
 
-            if is_blank(row.get("game_status")):
+            if not game_status:
                 missing_game_status += 1
+            elif game_status != "final":
+                invalid_game_status += 1
 
     ready_to_grade = (
         total_rows > 0
@@ -173,6 +184,7 @@ def check_results_coverage(
         and missing_actual_home_runs == 0
         and missing_game_status == 0
         and invalid_actual_home_runs == 0
+        and invalid_game_status == 0
     )
 
     return {
@@ -182,6 +194,9 @@ def check_results_coverage(
         "missing_actual_home_runs": missing_actual_home_runs,
         "missing_game_status": missing_game_status,
         "invalid_actual_home_runs": invalid_actual_home_runs,
+        "invalid_game_status": invalid_game_status,
+        "void_rows": void_rows,
+        "gradeable_rows": gradeable_rows,
         "ready_to_grade": ready_to_grade,
     }
 
@@ -197,9 +212,12 @@ def print_report(
     missing_actual_home_runs = int(report["missing_actual_home_runs"])
     missing_game_status = int(report["missing_game_status"])
     invalid_actual_home_runs = int(report["invalid_actual_home_runs"])
+    invalid_game_status = int(report["invalid_game_status"])
+    void_rows = int(report["void_rows"])
+    gradeable_rows = int(report["gradeable_rows"])
     ready_to_grade = bool(report["ready_to_grade"])
 
-    filled_actual_home_runs = total_rows - missing_actual_home_runs
+    filled_actual_home_runs = gradeable_rows - missing_actual_home_runs
     filled_game_status = total_rows - missing_game_status
 
     print("Live HR results coverage")
@@ -207,6 +225,8 @@ def print_report(
     if target_date:
         print(f"Target date: {target_date}")
     print(f"Rows: {total_rows}")
+    print(f"Void rows: {void_rows}")
+    print(f"Gradeable rows: {gradeable_rows}")
     print(f"Filled actual_home_runs: {filled_actual_home_runs}")
     print(f"Filled game_status: {filled_game_status}")
     print(f"Missing event_id: {missing_event_id}")
@@ -214,6 +234,7 @@ def print_report(
     print(f"Missing actual_home_runs: {missing_actual_home_runs}")
     print(f"Missing game_status: {missing_game_status}")
     print(f"Invalid actual_home_runs: {invalid_actual_home_runs}")
+    print(f"Invalid game_status: {invalid_game_status}")
     print(f"Ready to grade: {'YES' if ready_to_grade else 'NO'}")
 
     if not ready_to_grade:

@@ -234,6 +234,49 @@ def test_date_scoped_grading_grades_only_requested_date(
     assert "Total rows: 1" in output
 
 
+def test_grader_excludes_void_rows_from_output_and_calculations(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    odds_rows = [
+        _odds_row(),
+        _odds_row(event_id="event-2", player="Bench Player", price=500),
+    ]
+    result_rows = [
+        {
+            "event_id": "event-1",
+            "player": "Winning Batter",
+            "actual_home_runs": 1,
+            "game_status": "final",
+        },
+        {
+            "event_id": "event-2",
+            "player": "Bench Player",
+            "actual_home_runs": "",
+            "game_status": "void",
+        },
+    ]
+
+    exit_code, output_path = _run_with_temp_csvs(
+        tmp_path,
+        odds_rows,
+        result_rows,
+        extra_args=["--date", "2026-07-06"],
+    )
+
+    assert exit_code == 0
+    with output_path.open("r", newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    assert len(rows) == 1
+    assert rows[0]["event_id"] == "event-1"
+    assert rows[0]["grade_status"] == "graded"
+    output = capsys.readouterr().out
+    assert "Total rows: 2" in output
+    assert "Graded rows: 1" in output
+    assert "Excluded void rows: 1" in output
+    assert "Wins: 1" in output
+    assert "Losses: 0" in output
+
+
 def test_date_scoped_grading_rejects_blank_target_results(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

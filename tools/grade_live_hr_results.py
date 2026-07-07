@@ -46,6 +46,7 @@ class GradeSummary:
     total_rows: int
     graded_rows: int
     missing_result_rows: int
+    excluded_void_rows: int
     wins: int
     losses: int
     total_profit_1u: float
@@ -160,9 +161,9 @@ def _load_results(
     path: Path,
     event_ids: set[str] | None = None,
     require_game_status: bool = False,
-) -> dict[tuple[str, str], tuple[int, str]]:
+) -> dict[tuple[str, str], tuple[int | None, str]]:
     _, rows = _read_csv(path, RESULTS_REQUIRED_COLUMNS, "results")
-    results: dict[tuple[str, str], tuple[int, str]] = {}
+    results: dict[tuple[str, str], tuple[int | None, str]] = {}
 
     for row_number, row in enumerate(rows, start=2):
         raw_event_id = str(row.get("event_id") or "").strip()
@@ -171,22 +172,29 @@ def _load_results(
 
         event_id = _required_text(row, "event_id", "results", row_number)
         player = _required_text(row, "player", "results", row_number)
-        home_runs_value = _required_text(
-            row, "actual_home_runs", "results", row_number
-        )
         game_status = (
             _required_text(row, "game_status", "results", row_number)
             if require_game_status
             else str(row.get("game_status") or "").strip()
         )
-        home_runs_decimal = _decimal(
-            home_runs_value, "actual_home_runs", "results", row_number
-        )
-        if home_runs_decimal < 0 or home_runs_decimal != home_runs_decimal.to_integral_value():
-            raise GradingInputError(
-                f"results CSV row {row_number} has invalid actual_home_runs: "
-                f"{home_runs_value!r}"
+        if game_status.casefold() == "void":
+            parsed_home_runs: int | None = None
+        else:
+            home_runs_value = _required_text(
+                row, "actual_home_runs", "results", row_number
             )
+            home_runs_decimal = _decimal(
+                home_runs_value, "actual_home_runs", "results", row_number
+            )
+            if (
+                home_runs_decimal < 0
+                or home_runs_decimal != home_runs_decimal.to_integral_value()
+            ):
+                raise GradingInputError(
+                    f"results CSV row {row_number} has invalid actual_home_runs: "
+                    f"{home_runs_value!r}"
+                )
+            parsed_home_runs = int(home_runs_decimal)
 
         key = (event_id, player)
         if key in results:
@@ -194,7 +202,7 @@ def _load_results(
                 "results CSV contains duplicate event_id + player key: "
                 f"{event_id!r} + {player!r}"
             )
-        results[key] = (int(home_runs_decimal), game_status)
+        results[key] = (parsed_home_runs, game_status)
 
     return results
 
@@ -256,11 +264,17 @@ def grade_live_hr_results(
     wins = 0
     losses = 0
     missing = 0
+    excluded_void = 0
     total_profit = 0.0
 
     for row_number, row in enumerate(odds_rows, start=2):
         event_id = _required_text(row, "event_id", "odds", row_number)
         player = _required_text(row, "player", "odds", row_number)
+        matched_result = results.get((event_id, player))
+        if matched_result is not None and matched_result[1].casefold() == "void":
+            excluded_void += 1
+            continue
+
         side = _required_text(row, "side", "odds", row_number)
         point_value = _required_text(row, "point", "odds", row_number)
         price_value = _required_text(row, "price", "odds", row_number)
@@ -289,11 +303,15 @@ def grade_live_hr_results(
             }
         )
 
-        matched_result = results.get((event_id, player))
         if matched_result is None:
             missing += 1
         else:
             actual_home_runs, game_status = matched_result
+            if actual_home_runs is None:
+                raise GradingInputError(
+                    "non-void result unexpectedly has blank actual_home_runs: "
+                    f"{event_id!r} + {player!r}"
+                )
             won = actual_home_runs >= 1
             profit = win_profit_1u(price) if won else -1.0
             output_row.update(
@@ -324,6 +342,7 @@ def grade_live_hr_results(
         total_rows=len(odds_rows),
         graded_rows=wins + losses,
         missing_result_rows=missing,
+        excluded_void_rows=excluded_void,
         wins=wins,
         losses=losses,
         total_profit_1u=total_profit,
@@ -342,6 +361,7 @@ def print_summary(summary: GradeSummary, target_date: str | None = None) -> None
     print(f"Total rows: {summary.total_rows}")
     print(f"Graded rows: {summary.graded_rows}")
     print(f"Missing result rows: {summary.missing_result_rows}")
+    print(f"Excluded void rows: {summary.excluded_void_rows}")
     print(f"Wins: {summary.wins}")
     print(f"Losses: {summary.losses}")
     print(f"Total profit_1u: {summary.total_profit_1u:.2f}")

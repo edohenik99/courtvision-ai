@@ -292,6 +292,26 @@ def extract_player_home_runs(payload: JsonObject) -> dict[str, int]:
     return results
 
 
+def extract_boxscore_player_names(payload: JsonObject) -> set[str]:
+    """Return normalized names for every player listed on either game roster."""
+
+    normalized_names: set[str] = set()
+    teams = payload.get("teams") or {}
+    for side in ("away", "home"):
+        players = ((teams.get(side) or {}).get("players") or {})
+        if not isinstance(players, dict):
+            continue
+        for player in players.values():
+            if not isinstance(player, dict):
+                continue
+            normalized_name = normalize_player_name(
+                ((player.get("person") or {}).get("fullName"))
+            )
+            if normalized_name:
+                normalized_names.add(normalized_name)
+    return normalized_names
+
+
 def write_workbook_atomic(
     path: Path,
     fieldnames: list[str],
@@ -350,11 +370,15 @@ def fill_results_from_mlb_statsapi(
         key: game for key, game in matched_games.items() if is_final_game(game)
     }
     home_runs_by_game_pk: dict[str, dict[str, int]] = {}
+    roster_names_by_game_pk: dict[str, set[str]] = {}
     for game in final_games.values():
         game_pk = str(game["gamePk"])
         if game_pk not in home_runs_by_game_pk:
             boxscore_payload = get_json(BOXSCORE_URL.format(game_pk=game_pk), None)
             home_runs_by_game_pk[game_pk] = extract_player_home_runs(boxscore_payload)
+            roster_names_by_game_pk[game_pk] = extract_boxscore_player_names(
+                boxscore_payload
+            )
 
     rows_filled = 0
     rows_skipped = 0
@@ -366,9 +390,16 @@ def fill_results_from_mlb_statsapi(
             rows_skipped += len(workbook_game.row_indexes)
             continue
 
-        home_runs = home_runs_by_game_pk[str(game["gamePk"])]
+        game_pk = str(game["gamePk"])
+        home_runs = home_runs_by_game_pk[game_pk]
+        roster_names = roster_names_by_game_pk[game_pk]
         for row_index in workbook_game.row_indexes:
             row = rows[row_index]
+            existing_status = str(row.get("game_status") or "").strip().casefold()
+            if not overwrite_filled and existing_status in {"final", "void"}:
+                rows_skipped += 1
+                continue
+
             needs_home_runs = overwrite_filled or is_blank(row.get("actual_home_runs"))
             needs_status = overwrite_filled or is_blank(row.get("game_status"))
 
@@ -376,12 +407,22 @@ def fill_results_from_mlb_statsapi(
                 rows_skipped += 1
                 continue
 
-            if needs_home_runs:
-                normalized_player = normalize_player_name(row.get("player"))
-                if normalized_player not in home_runs:
-                    unmatched_player_keys.add((*key, normalized_player))
-                    rows_skipped += 1
+            normalized_player = normalize_player_name(row.get("player"))
+            if normalized_player not in home_runs:
+                if normalized_player in roster_names:
+                    if overwrite_filled:
+                        row["actual_home_runs"] = ""
+                    if needs_status:
+                        row["game_status"] = "void"
+                        rows_filled += 1
+                    else:
+                        rows_skipped += 1
                     continue
+                unmatched_player_keys.add((*key, normalized_player))
+                rows_skipped += 1
+                continue
+
+            if needs_home_runs:
                 row["actual_home_runs"] = str(home_runs[normalized_player])
 
             if needs_status:
