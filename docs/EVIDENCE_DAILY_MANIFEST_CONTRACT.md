@@ -84,6 +84,20 @@ Every failure status requires `failure_reason`. Status describes the final dispo
 
 The manifest is append-only. Append the original daily row as soon as the day's final run disposition is known; never delete, reorder, replace, or silently edit an existing row. Artifact paths and hashes describe what existed at that time and are write-once.
 
+Use the offline appender after the CourtVision run attempt has reached its final disposition:
+
+```powershell
+python scripts/append_evidence_daily_manifest.py `
+  --trial-id nba-forward-2026-01 `
+  --prediction-date 2026-10-20 `
+  --run-status complete `
+  --config-hash <frozen-config-sha256> `
+  --released-recommendation-count 2 `
+  --source-board-path outputs/2026-10-20/source_board.csv
+```
+
+The script requires the manifest to exist, validates this exact schema, obtains `code_sha` from the local Git checkout unless supplied, hashes each existing artifact locally, and appends one row without running predictions or contacting providers. A supplied missing artifact fails by default. `--allow-missing-artifacts` must be explicit; when used, the missing path/hash pair remains blank and the intended repository-relative path is recorded in `notes` so the row remains contract-compliant.
+
 If a recorded value is wrong, retain the original and append a correction row with the same `trial_id`, `run_date`, and `prediction_date`. The correction's `notes` must begin with `CORRECTION:`, identify the superseded row by its `created_at`, and state the reason. Its own `created_at` must be later. Investor reporting may use the latest valid correction, but must disclose the correction count and preserve the superseded rows in the published evidence. Corrections must never be used to erase a failed day or improve results after outcomes are known.
 
 ## Relationship to `evidence_ledger.csv`
