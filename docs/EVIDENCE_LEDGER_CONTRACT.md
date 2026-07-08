@@ -85,6 +85,16 @@ The ledger is append-only: prediction records may be added, but existing records
 
 If a recorded value is wrong, preserve the original evidence and append a clearly labeled correction record under the same `trial_id`, with the reason and the superseded record identity described in `notes`. Never rewrite history to improve trial results. Access controls, backups, or hashes should be used operationally to make unauthorized mutation detectable.
 
+## Appending a recommendation row
+
+Use the offline appender after a prospective recommendation has been released and before its market or game begins:
+
+```powershell
+python scripts/append_evidence_ledger_row.py --trial-id nba-forward-2026-01 --run-date 2026-07-07 --prediction-date 2026-07-08 --code-sha $CODE_SHA --config-hash $CONFIG_HASH --provider-used $PROVIDER --market player_points --player "Player Name" --selection over --line 24.5 --odds -110 --edge 0.042 --confidence 0.61 --kelly-eligible true --recommended-units 0.50
+```
+
+The script is offline-only: it does not fetch provider data or run predictions. It requires the ledger to exist, validates the exact header above, and appends one row without rewriting existing rows. Closing, result, and profit arguments normally remain blank on this first write. Supplying `--closing-line`, `--closing-odds`, `--result`, or `--profit-1u` is reserved for controlled tests or documented post-processing, not normal prospective row creation.
+
 ## Frozen-trial rule
 
 A trial is valid only while its decision policy is frozen. Thresholds, model parameters or artifacts, feature/configuration values, scoring rules, selection gates, Kelly eligibility or sizing rules, provider policy, and other decision-affecting settings must not change during a trial.
