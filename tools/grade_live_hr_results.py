@@ -26,9 +26,19 @@ RESULTS_REQUIRED_COLUMNS = (
     "actual_home_runs",
     "game_status",
 )
+RESULT_REASON_COLUMN = "result_reason"
+VOID_STATUS = "void"
+VOID_CANDIDATE_STATUS = "void_candidate"
+MANUAL_REVIEW_STATUS = "manual_review_required"
+NON_GRADEABLE_STATUSES = {
+    VOID_STATUS,
+    VOID_CANDIDATE_STATUS,
+    MANUAL_REVIEW_STATUS,
+}
 GRADE_COLUMNS = (
     "actual_home_runs",
     "game_status",
+    "result_reason",
     "result",
     "implied_probability",
     "stake_1u",
@@ -42,11 +52,20 @@ class GradingInputError(ValueError):
 
 
 @dataclass(frozen=True)
+class ResultRecord:
+    actual_home_runs: int | None
+    game_status: str
+    result_reason: str
+
+
+@dataclass(frozen=True)
 class GradeSummary:
     total_rows: int
     graded_rows: int
     missing_result_rows: int
     excluded_void_rows: int
+    void_candidate_rows: int
+    manual_review_rows: int
     wins: int
     losses: int
     total_profit_1u: float
@@ -161,9 +180,9 @@ def _load_results(
     path: Path,
     event_ids: set[str] | None = None,
     require_game_status: bool = False,
-) -> dict[tuple[str, str], tuple[int | None, str]]:
+) -> dict[tuple[str, str], ResultRecord]:
     _, rows = _read_csv(path, RESULTS_REQUIRED_COLUMNS, "results")
-    results: dict[tuple[str, str], tuple[int | None, str]] = {}
+    results: dict[tuple[str, str], ResultRecord] = {}
 
     for row_number, row in enumerate(rows, start=2):
         raw_event_id = str(row.get("event_id") or "").strip()
@@ -177,7 +196,8 @@ def _load_results(
             if require_game_status
             else str(row.get("game_status") or "").strip()
         )
-        if game_status.casefold() == "void":
+        result_reason = str(row.get(RESULT_REASON_COLUMN) or "").strip()
+        if game_status.casefold() in NON_GRADEABLE_STATUSES:
             parsed_home_runs: int | None = None
         else:
             home_runs_value = _required_text(
@@ -202,7 +222,11 @@ def _load_results(
                 "results CSV contains duplicate event_id + player key: "
                 f"{event_id!r} + {player!r}"
             )
-        results[key] = (parsed_home_runs, game_status)
+        results[key] = ResultRecord(
+            actual_home_runs=parsed_home_runs,
+            game_status=game_status,
+            result_reason=result_reason,
+        )
 
     return results
 
@@ -265,15 +289,38 @@ def grade_live_hr_results(
     losses = 0
     missing = 0
     excluded_void = 0
+    void_candidates = 0
+    manual_reviews = 0
     total_profit = 0.0
 
     for row_number, row in enumerate(odds_rows, start=2):
         event_id = _required_text(row, "event_id", "odds", row_number)
         player = _required_text(row, "player", "odds", row_number)
         matched_result = results.get((event_id, player))
-        if matched_result is not None and matched_result[1].casefold() == "void":
-            excluded_void += 1
-            continue
+        if matched_result is not None:
+            non_gradeable_status = matched_result.game_status.casefold()
+            if non_gradeable_status in NON_GRADEABLE_STATUSES:
+                if non_gradeable_status == VOID_STATUS:
+                    excluded_void += 1
+                elif non_gradeable_status == VOID_CANDIDATE_STATUS:
+                    void_candidates += 1
+                elif non_gradeable_status == MANUAL_REVIEW_STATUS:
+                    manual_reviews += 1
+                output_row: dict[str, object] = dict(row)
+                output_row.update(
+                    {
+                        "actual_home_runs": "",
+                        "game_status": matched_result.game_status,
+                        "result_reason": matched_result.result_reason,
+                        "result": "",
+                        "implied_probability": "",
+                        "stake_1u": "",
+                        "profit_1u": "",
+                        "grade_status": non_gradeable_status,
+                    }
+                )
+                graded_output.append(output_row)
+                continue
 
         side = _required_text(row, "side", "odds", row_number)
         point_value = _required_text(row, "point", "odds", row_number)
@@ -295,6 +342,7 @@ def grade_live_hr_results(
             {
                 "actual_home_runs": "",
                 "game_status": "",
+                "result_reason": "",
                 "result": "",
                 "implied_probability": implied_probability(price),
                 "stake_1u": 1.0,
@@ -306,7 +354,8 @@ def grade_live_hr_results(
         if matched_result is None:
             missing += 1
         else:
-            actual_home_runs, game_status = matched_result
+            actual_home_runs = matched_result.actual_home_runs
+            game_status = matched_result.game_status
             if actual_home_runs is None:
                 raise GradingInputError(
                     "non-void result unexpectedly has blank actual_home_runs: "
@@ -318,6 +367,7 @@ def grade_live_hr_results(
                 {
                     "actual_home_runs": actual_home_runs,
                     "game_status": game_status,
+                    "result_reason": matched_result.result_reason,
                     "result": "win" if won else "loss",
                     "profit_1u": profit,
                     "grade_status": "graded",
@@ -343,6 +393,8 @@ def grade_live_hr_results(
         graded_rows=wins + losses,
         missing_result_rows=missing,
         excluded_void_rows=excluded_void,
+        void_candidate_rows=void_candidates,
+        manual_review_rows=manual_reviews,
         wins=wins,
         losses=losses,
         total_profit_1u=total_profit,
@@ -362,6 +414,8 @@ def print_summary(summary: GradeSummary, target_date: str | None = None) -> None
     print(f"Graded rows: {summary.graded_rows}")
     print(f"Missing result rows: {summary.missing_result_rows}")
     print(f"Excluded void rows: {summary.excluded_void_rows}")
+    print(f"Void candidate rows: {summary.void_candidate_rows}")
+    print(f"Manual review rows: {summary.manual_review_rows}")
     print(f"Wins: {summary.wins}")
     print(f"Losses: {summary.losses}")
     print(f"Total profit_1u: {summary.total_profit_1u:.2f}")

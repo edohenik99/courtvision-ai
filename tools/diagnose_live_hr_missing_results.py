@@ -69,6 +69,11 @@ REPORT_COLUMNS = (
 )
 ODDS_REQUIRED_COLUMNS = ("event_id", "commence_time")
 NEAR_MATCH_THRESHOLD = 0.78
+NON_GRADEABLE_RESULT_STATUSES = {
+    "void",
+    "void_candidate",
+    "manual_review_required",
+}
 
 
 @dataclass(frozen=True)
@@ -156,33 +161,35 @@ def event_ids_for_date(odds_path: Path, target_date: date) -> set[str]:
 
 
 def extract_boxscore_players(payload: dict[str, Any]) -> list[BoxscorePlayer]:
-    players_by_name_and_side: dict[tuple[str, str], BoxscorePlayer] = {}
+    players_by_identity_and_side: dict[tuple[str, str], BoxscorePlayer] = {}
     teams = payload.get("teams") or {}
 
     for side in ("away", "home"):
         players = ((teams.get(side) or {}).get("players") or {})
         if not isinstance(players, dict):
             continue
-        for player in players.values():
+        for player_key, player in players.items():
             if not isinstance(player, dict):
                 continue
-            name = str(((player.get("person") or {}).get("fullName")) or "").strip()
+            person = player.get("person") or {}
+            name = str(person.get("fullName") or "").strip()
             normalized_name = normalize_player_name(name)
             if not normalized_name:
                 continue
             batting = ((player.get("stats") or {}).get("batting") or {})
             has_batting_stats = isinstance(batting, dict) and bool(batting)
-            key = (normalized_name, side)
-            existing = players_by_name_and_side.get(key)
+            identity = str(person.get("id") or player_key or name).strip()
+            key = (identity, side)
+            existing = players_by_identity_and_side.get(key)
             if existing is None or (has_batting_stats and not existing.has_batting_stats):
-                players_by_name_and_side[key] = BoxscorePlayer(
+                players_by_identity_and_side[key] = BoxscorePlayer(
                     name=name,
                     normalized_name=normalized_name,
                     side=side,
                     has_batting_stats=has_batting_stats,
                 )
 
-    return list(players_by_name_and_side.values())
+    return list(players_by_identity_and_side.values())
 
 
 def build_target_workbook_games(
@@ -262,7 +269,7 @@ def _missing_row_indexes(
             row_index
             for row_index in workbook_game.row_indexes
             if str(rows[row_index].get("game_status") or "").strip().casefold()
-            != "void"
+            not in NON_GRADEABLE_RESULT_STATUSES
             and (
                 is_blank(rows[row_index].get("actual_home_runs"))
                 or is_blank(rows[row_index].get("game_status"))
@@ -346,6 +353,8 @@ def diagnose_missing_results(
                 diagnosis = "game_not_matched"
             elif not game_final:
                 diagnosis = "game_not_final"
+            elif len(exact_matches) > 1:
+                diagnosis = "ambiguous_normalized_player_match"
             elif exact_matches and any(
                 candidate.has_batting_stats for candidate in exact_matches
             ):

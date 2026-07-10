@@ -23,7 +23,13 @@ ODDS_COLUMNS = (
     "price",
     "point",
 )
-RESULTS_COLUMNS = ("event_id", "player", "actual_home_runs", "game_status")
+RESULTS_COLUMNS = (
+    "event_id",
+    "player",
+    "actual_home_runs",
+    "game_status",
+    "result_reason",
+)
 
 
 def _write_csv(
@@ -234,7 +240,7 @@ def test_date_scoped_grading_grades_only_requested_date(
     assert "Total rows: 1" in output
 
 
-def test_grader_excludes_void_rows_from_output_and_calculations(
+def test_grader_excludes_void_rows_from_calculations(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     odds_rows = [
@@ -266,13 +272,79 @@ def test_grader_excludes_void_rows_from_output_and_calculations(
     assert exit_code == 0
     with output_path.open("r", newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
-    assert len(rows) == 1
+    assert len(rows) == 2
     assert rows[0]["event_id"] == "event-1"
     assert rows[0]["grade_status"] == "graded"
+    assert rows[1]["event_id"] == "event-2"
+    assert rows[1]["actual_home_runs"] == ""
+    assert rows[1]["result"] == ""
+    assert rows[1]["profit_1u"] == ""
+    assert rows[1]["grade_status"] == "void"
     output = capsys.readouterr().out
     assert "Total rows: 2" in output
     assert "Graded rows: 1" in output
     assert "Excluded void rows: 1" in output
+    assert "Void candidate rows: 0" in output
+    assert "Manual review rows: 0" in output
+    assert "Wins: 1" in output
+    assert "Losses: 0" in output
+
+
+def test_grader_excludes_void_candidate_and_manual_review_rows_from_calculations(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    odds_rows = [
+        _odds_row(),
+        _odds_row(event_id="event-2", player="Owen Caissie", price=550),
+        _odds_row(event_id="event-3", player="Ambiguous Batter", price=700),
+    ]
+    result_rows = [
+        {
+            "event_id": "event-1",
+            "player": "Winning Batter",
+            "actual_home_runs": 1,
+            "game_status": "final",
+        },
+        {
+            "event_id": "event-2",
+            "player": "Owen Caissie",
+            "actual_home_runs": "",
+            "game_status": "void_candidate",
+            "result_reason": "player_missing_from_boxscore_roster",
+        },
+        {
+            "event_id": "event-3",
+            "player": "Ambiguous Batter",
+            "actual_home_runs": "",
+            "game_status": "manual_review_required",
+            "result_reason": "ambiguous_normalized_player_match",
+        },
+    ]
+
+    exit_code, output_path = _run_with_temp_csvs(
+        tmp_path,
+        odds_rows,
+        result_rows,
+        extra_args=["--date", "2026-07-06"],
+    )
+
+    assert exit_code == 0
+    with output_path.open("r", newline="", encoding="utf-8") as handle:
+        rows = {row["event_id"]: row for row in csv.DictReader(handle)}
+
+    assert rows["event-1"]["grade_status"] == "graded"
+    assert rows["event-2"]["actual_home_runs"] == ""
+    assert rows["event-2"]["result"] == ""
+    assert rows["event-2"]["grade_status"] == "void_candidate"
+    assert rows["event-2"]["result_reason"] == "player_missing_from_boxscore_roster"
+    assert rows["event-3"]["grade_status"] == "manual_review_required"
+    assert rows["event-3"]["result_reason"] == "ambiguous_normalized_player_match"
+
+    output = capsys.readouterr().out
+    assert "Total rows: 3" in output
+    assert "Graded rows: 1" in output
+    assert "Void candidate rows: 1" in output
+    assert "Manual review rows: 1" in output
     assert "Wins: 1" in output
     assert "Losses: 0" in output
 

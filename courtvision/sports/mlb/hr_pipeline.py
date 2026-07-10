@@ -26,6 +26,7 @@ from courtvision.sports.mlb.adapters.provider_factory import (
 )
 from courtvision.sports.mlb.hr_prop_engine import HRPropEngine, HRPropInput, ResearchLabel
 from courtvision.sports.mlb.hr_report import hr_assessments_to_research_artifact
+from courtvision.sports.mlb.player_name_normalization import normalize_mlb_player_name
 from courtvision.sports.mlb.providers.fixture_provider import (
     FIXTURE_PROVIDER_NAME,
     MLBFixtureContextProvider,
@@ -122,6 +123,10 @@ def _normalized_text(value: object) -> str:
     return value.strip().casefold() if isinstance(value, str) else ""
 
 
+def _normalized_player_name(value: object) -> str:
+    return normalize_mlb_player_name(value)
+
+
 def _candidate_game_date(candidate: HRPropInput, report_date: date) -> date:
     return (
         candidate.game_time.date()
@@ -165,11 +170,11 @@ def _context_identity_is_compatible(
 ) -> bool:
     """Reject a key match only when an available identity conflicts."""
 
-    context_player = _normalized_text(_context_player_name(context))
+    context_player = _normalized_player_name(_context_player_name(context))
     context_team = _normalized_text(_context_team(context))
     context_date = _context_game_date(context)
     return not (
-        (context_player and context_player != _normalized_text(player_name))
+        (context_player and context_player != _normalized_player_name(player_name))
         or (context_team and context_team != _normalized_text(team))
         or (context_date is not None and context_date != game_date)
     )
@@ -213,13 +218,13 @@ def _match_context(
                 return context
 
     identity = (
-        _normalized_text(player_name),
+        _normalized_player_name(player_name),
         _normalized_text(team),
         game_date,
     )
     for context in contexts:
         if (
-            _normalized_text(_context_player_name(context)),
+            _normalized_player_name(_context_player_name(context)),
             _normalized_text(_context_team(context)),
             _context_game_date(context),
         ) == identity:
@@ -232,13 +237,13 @@ def _lineup_status(context: MLBHRResearchContext) -> str:
     if lineup is None:
         return "missing"
     player_id = _context_player_id(context)
-    player_name = _normalized_text(_context_player_name(context))
+    player_name = _normalized_player_name(_context_player_name(context))
     player = next(
         (
             item
             for item in lineup.batting_order
             if (player_id and item.player_id == player_id)
-            or _normalized_text(item.player_name) == player_name
+            or _normalized_player_name(item.player_name) == player_name
         ),
         None,
     )

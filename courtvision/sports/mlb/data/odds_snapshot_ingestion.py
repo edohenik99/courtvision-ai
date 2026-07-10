@@ -16,7 +16,6 @@ import math
 from pathlib import Path
 import re
 from typing import Final, Mapping
-import unicodedata
 
 from courtvision.sports.mlb.data_manifest import (
     MLBDataDomain,
@@ -25,6 +24,7 @@ from courtvision.sports.mlb.data_manifest import (
     compute_file_sha256,
     validate_source_manifest,
 )
+from courtvision.sports.mlb.player_name_normalization import normalize_mlb_player_name
 
 
 ODDS_SNAPSHOT_SCHEMA_VERSION: Final = "1.0"
@@ -116,16 +116,9 @@ def normalize_market_type(value: object) -> str:
 
 
 def normalize_player_name(value: object) -> str | None:
-    """Return a conservative Unicode-aware player-name comparison key."""
+    """Return the canonical MLB player-name comparison key."""
 
-    text = _optional_text(value)
-    if text is None:
-        return None
-    text = unicodedata.normalize("NFKC", text).casefold()
-    if "," in text:
-        family, given = text.split(",", 1)
-        text = f"{given} {family}"
-    return re.sub(r"[^\w]+", " ", text, flags=re.UNICODE).strip() or None
+    return normalize_mlb_player_name(value) or None
 
 
 def american_to_decimal(american_odds: int) -> float:

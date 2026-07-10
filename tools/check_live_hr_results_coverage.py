@@ -36,6 +36,15 @@ REQUIRED_COLUMNS = [
     "game_status",
 ]
 ODDS_DATE_COLUMNS = ["event_id", "commence_time"]
+FINAL_STATUS = "final"
+VOID_STATUS = "void"
+VOID_CANDIDATE_STATUS = "void_candidate"
+MANUAL_REVIEW_STATUS = "manual_review_required"
+NON_GRADEABLE_STATUSES = {
+    VOID_STATUS,
+    VOID_CANDIDATE_STATUS,
+    MANUAL_REVIEW_STATUS,
+}
 
 
 def is_blank(value: str | None) -> bool:
@@ -137,6 +146,9 @@ def check_results_coverage(
         invalid_actual_home_runs = 0
         invalid_game_status = 0
         void_rows = 0
+        void_candidate_rows = 0
+        manual_review_rows = 0
+        non_gradeable_rows = 0
         gradeable_rows = 0
 
         for row in reader:
@@ -155,8 +167,14 @@ def check_results_coverage(
                 missing_player += 1
 
             game_status = str(row.get("game_status") or "").strip().casefold()
-            if game_status == "void":
-                void_rows += 1
+            if game_status in NON_GRADEABLE_STATUSES:
+                non_gradeable_rows += 1
+                if game_status == VOID_STATUS:
+                    void_rows += 1
+                elif game_status == VOID_CANDIDATE_STATUS:
+                    void_candidate_rows += 1
+                elif game_status == MANUAL_REVIEW_STATUS:
+                    manual_review_rows += 1
                 continue
 
             gradeable_rows += 1
@@ -174,7 +192,7 @@ def check_results_coverage(
 
             if not game_status:
                 missing_game_status += 1
-            elif game_status != "final":
+            elif game_status != FINAL_STATUS:
                 invalid_game_status += 1
 
     ready_to_grade = (
@@ -196,6 +214,9 @@ def check_results_coverage(
         "invalid_actual_home_runs": invalid_actual_home_runs,
         "invalid_game_status": invalid_game_status,
         "void_rows": void_rows,
+        "void_candidate_rows": void_candidate_rows,
+        "manual_review_rows": manual_review_rows,
+        "non_gradeable_rows": non_gradeable_rows,
         "gradeable_rows": gradeable_rows,
         "ready_to_grade": ready_to_grade,
     }
@@ -214,6 +235,9 @@ def print_report(
     invalid_actual_home_runs = int(report["invalid_actual_home_runs"])
     invalid_game_status = int(report["invalid_game_status"])
     void_rows = int(report["void_rows"])
+    void_candidate_rows = int(report["void_candidate_rows"])
+    manual_review_rows = int(report["manual_review_rows"])
+    non_gradeable_rows = int(report["non_gradeable_rows"])
     gradeable_rows = int(report["gradeable_rows"])
     ready_to_grade = bool(report["ready_to_grade"])
 
@@ -226,6 +250,9 @@ def print_report(
         print(f"Target date: {target_date}")
     print(f"Rows: {total_rows}")
     print(f"Void rows: {void_rows}")
+    print(f"Void candidate rows: {void_candidate_rows}")
+    print(f"Manual review rows: {manual_review_rows}")
+    print(f"Non-gradeable rows: {non_gradeable_rows}")
     print(f"Gradeable rows: {gradeable_rows}")
     print(f"Filled actual_home_runs: {filled_actual_home_runs}")
     print(f"Filled game_status: {filled_game_status}")

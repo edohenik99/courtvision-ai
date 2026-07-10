@@ -25,7 +25,10 @@ COLUMN_ALIASES = {
     "profit": ("profit_1u", "net_profit_1u", "profit", "net_profit"),
 }
 OPTIONAL_COLUMN_ALIASES = {
+    "event_id": ("event_id", "event", "game_id"),
     "grade_status": ("grade_status", "status", "grading_status"),
+    "game_status": ("game_status",),
+    "result_reason": ("result_reason", "void_reason", "grading_skip_reason", "reason"),
     "home_team": ("home_team", "home"),
     "away_team": ("away_team", "away"),
     "team": ("team", "player_team", "batter_team"),
@@ -40,6 +43,8 @@ ODDS_BUCKETS = (
 WIN_VALUES = {"win", "won", "w", "hit"}
 LOSS_VALUES = {"loss", "lost", "l", "miss"}
 VOID_VALUES = {"void", "excluded", "push", "cancelled", "canceled"}
+VOID_CANDIDATE_VALUES = {"void_candidate"}
+MANUAL_REVIEW_VALUES = {"manual_review_required"}
 
 
 class SummaryInputError(ValueError):
@@ -55,6 +60,16 @@ class GradeRow:
     profit: Decimal
     game: str | None = None
     team: str | None = None
+
+
+@dataclass(frozen=True)
+class NonGradeableRow:
+    status: str
+    player: str
+    event_id: str
+    game: str
+    team: str
+    reason: str
 
 
 @dataclass
@@ -86,6 +101,9 @@ class GradeSummary:
     report_path: Path
     total_rows: int
     void_rows: int
+    void_candidate_rows: int
+    manual_review_rows: int
+    non_gradeable_rows: tuple[NonGradeableRow, ...]
     overall: Performance
     bookmaker: dict[str, Performance]
     odds_bucket: dict[str, Performance]
@@ -185,6 +203,17 @@ def _canonical_result(value: str) -> str | None:
     return None
 
 
+def _canonical_non_gradeable_status(value: str) -> str | None:
+    normalized = value.strip().casefold()
+    if normalized in VOID_VALUES:
+        return "void"
+    if normalized in VOID_CANDIDATE_VALUES:
+        return "void_candidate"
+    if normalized in MANUAL_REVIEW_VALUES:
+        return "manual_review_required"
+    return None
+
+
 def odds_bucket(price: Decimal) -> str:
     if price < 300:
         return "< +300"
@@ -203,7 +232,16 @@ def _group_add(groups: dict[str, Performance], key: str, row: GradeRow) -> None:
 
 def _read_grade_rows(
     grade_csv: Path,
-) -> tuple[list[GradeRow], int, int, bool, bool]:
+) -> tuple[
+    list[GradeRow],
+    int,
+    int,
+    int,
+    int,
+    tuple[NonGradeableRow, ...],
+    bool,
+    bool,
+]:
     if not grade_csv.is_file():
         raise SummaryInputError(f"grade CSV does not exist: {grade_csv}")
 
@@ -219,8 +257,11 @@ def _read_grade_rows(
             )
 
             grade_rows: list[GradeRow] = []
+            non_gradeable_rows: list[NonGradeableRow] = []
             total_rows = 0
             void_rows = 0
+            void_candidate_rows = 0
+            manual_review_rows = 0
             for row_number, row in enumerate(reader, start=2):
                 total_rows += 1
                 if None in row:
@@ -235,9 +276,46 @@ def _read_grade_rows(
                     if "grade_status" in optional
                     else ""
                 )
-                status = _canonical_result(raw_status)
-                if result == "void" or status == "void":
-                    void_rows += 1
+                raw_game_status = (
+                    str(row.get(optional["game_status"]) or "").strip()
+                    if "game_status" in optional
+                    else ""
+                )
+                non_gradeable_status = (
+                    _canonical_non_gradeable_status(raw_status)
+                    or _canonical_non_gradeable_status(raw_result)
+                    or _canonical_non_gradeable_status(raw_game_status)
+                )
+                if non_gradeable_status:
+                    if non_gradeable_status == "void":
+                        void_rows += 1
+                    elif non_gradeable_status == "void_candidate":
+                        void_candidate_rows += 1
+                    elif non_gradeable_status == "manual_review_required":
+                        manual_review_rows += 1
+                    home = str(row.get(optional.get("home_team", "")) or "").strip()
+                    away = str(row.get(optional.get("away_team", "")) or "").strip()
+                    game = f"{away} @ {home}" if home and away else ""
+                    non_gradeable_rows.append(
+                        NonGradeableRow(
+                            status=non_gradeable_status,
+                            player=_required_text(
+                                row, columns["player"], "player", row_number
+                            ),
+                            event_id=str(
+                                row.get(optional.get("event_id", "")) or ""
+                            ).strip(),
+                            game=game,
+                            team=str(
+                                row.get(optional.get("team", "")) or ""
+                            ).strip(),
+                            reason=(
+                                str(row.get(optional["result_reason"]) or "").strip()
+                                if "result_reason" in optional
+                                else ""
+                            ),
+                        )
+                    )
                     continue
                 if result not in {"win", "loss"}:
                     continue
@@ -281,6 +359,9 @@ def _read_grade_rows(
         grade_rows,
         total_rows,
         void_rows,
+        void_candidate_rows,
+        manual_review_rows,
+        tuple(non_gradeable_rows),
         "home_team" in optional and "away_team" in optional,
         "team" in optional,
     )
@@ -340,6 +421,25 @@ def _player_table(
     return lines
 
 
+def _non_gradeable_table(rows: tuple[NonGradeableRow, ...]) -> list[str]:
+    lines = [
+        "## Void/manual review rows",
+        "",
+        "| Status | Player | Event ID | Team | Game | Reason |",
+        "|---|---|---|---|---|---|",
+    ]
+    if not rows:
+        lines.append("| No available data |  |  |  |  |  |")
+        return lines
+    for row in rows:
+        lines.append(
+            f"| {_escape(row.status)} | {_escape(row.player)} | "
+            f"{_escape(row.event_id or 'n/a')} | {_escape(row.team or 'n/a')} | "
+            f"{_escape(row.game or 'n/a')} | {_escape(row.reason or 'n/a')} |"
+        )
+    return lines
+
+
 def _render_report(summary: GradeSummary, generated_at: str) -> str:
     overall = summary.overall
     lines = [
@@ -358,10 +458,13 @@ def _render_report(summary: GradeSummary, generated_at: str) -> str:
         f"- Hit rate: {_percent(overall.hit_rate)}",
         f"- Total profit_1u: {_number(overall.profit)}",
         f"- ROI: {_percent(overall.roi)}",
+        f"- Void candidate rows: {summary.void_candidate_rows}",
+        f"- Manual review rows: {summary.manual_review_rows}",
     ]
     if summary.void_rows:
         lines.append(f"- Void/excluded rows present in source: {summary.void_rows}")
 
+    lines.extend(["", *_non_gradeable_table(summary.non_gradeable_rows)])
     lines.extend(["", *_performance_table("Bookmaker performance", "Bookmaker", summary.bookmaker)])
     lines.extend(["", *_performance_table("Odds bucket performance", "Odds bucket", summary.odds_bucket)])
 
@@ -417,7 +520,16 @@ def summarize_live_hr_grades(
     target_date = _validate_target_date(target_date)
     input_path = Path(grade_csv) if grade_csv else default_grade_path(target_date)
     report_path = Path(output_path) if output_path else default_report_path(target_date)
-    rows, total_rows, void_rows, has_games, has_teams = _read_grade_rows(input_path)
+    (
+        rows,
+        total_rows,
+        void_rows,
+        void_candidate_rows,
+        manual_review_rows,
+        non_gradeable_rows,
+        has_games,
+        has_teams,
+    ) = _read_grade_rows(input_path)
 
     overall = Performance()
     bookmaker: dict[str, Performance] = {}
@@ -444,6 +556,9 @@ def summarize_live_hr_grades(
         report_path=report_path,
         total_rows=total_rows,
         void_rows=void_rows,
+        void_candidate_rows=void_candidate_rows,
+        manual_review_rows=manual_review_rows,
+        non_gradeable_rows=non_gradeable_rows,
         overall=overall,
         bookmaker=bookmaker,
         odds_bucket=buckets,
@@ -475,6 +590,8 @@ def print_summary(summary: GradeSummary) -> None:
     print(f"ROI: {_percent(summary.overall.roi)}")
     if summary.void_rows:
         print(f"Void/excluded source rows: {summary.void_rows}")
+    print(f"Void candidate rows: {summary.void_candidate_rows}")
+    print(f"Manual review rows: {summary.manual_review_rows}")
     print(f"Report: {summary.report_path}")
 
 

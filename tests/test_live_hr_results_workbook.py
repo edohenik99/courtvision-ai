@@ -164,8 +164,48 @@ def test_generate_live_hr_results_workbook_preserves_existing_results(
 
     assert output_rows[("event_1", "Aaron Judge")]["actual_home_runs"] == "1"
     assert output_rows[("event_1", "Aaron Judge")]["game_status"] == "final"
+    assert output_rows[("event_1", "Aaron Judge")]["result_reason"] == ""
     assert output_rows[("event_1", "Aaron Judge")]["best_price"] == "325"
     assert output_rows[("event_1", "Juan Soto")]["actual_home_runs"] == ""
     assert output_rows[("event_1", "Juan Soto")]["game_status"] == ""
     assert output_rows[("event_2", "Aaron Judge")]["actual_home_runs"] == ""
     assert output_rows[("event_2", "Aaron Judge")]["game_status"] == ""
+
+
+def test_generate_live_hr_results_workbook_preserves_result_reason(
+    tmp_path: Path,
+) -> None:
+    input_csv = tmp_path / "live_hr_props_master.csv"
+    output_csv = tmp_path / "live_hr_results_workbook.csv"
+
+    input_csv.write_text(
+        "\n".join(
+            [
+                HEADER,
+                "2026-07-03T15:00:00Z,event_1,2026-07-03T23:00:00Z,Marlins,Mariners,betmgm,BetMGM,,batter_home_runs,,Owen Caissie,Over,550,0.5,HR",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    output_csv.write_text(
+        "\n".join(
+            [
+                "commence_time,home_team,away_team,event_id,player,books_available,best_bookmaker,best_price,all_prices,actual_home_runs,game_status,result_reason",
+                "2026-07-03T23:00:00Z,Marlins,Mariners,event_1,Owen Caissie,BetMGM,BetMGM,550,BetMGM Over 0.5: 550,,void_candidate,player_missing_from_boxscore_roster",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    generate_workbook(
+        input_path=input_csv,
+        output_path=output_csv,
+        overwrite=True,
+        preserve_results=True,
+    )
+
+    with output_csv.open("r", newline="", encoding="utf-8") as f:
+        row = next(csv.DictReader(f))
+
+    assert row["game_status"] == "void_candidate"
+    assert row["result_reason"] == "player_missing_from_boxscore_roster"

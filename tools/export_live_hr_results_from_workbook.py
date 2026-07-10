@@ -6,8 +6,8 @@ Offline-only:
 - Reads live_hr_results_workbook.csv
 - Writes live_hr_results.csv with only grader-required columns
 
-Required output columns:
-event_id,player,actual_home_runs,game_status
+Output columns:
+event_id,player,actual_home_runs,game_status,result_reason
 """
 
 from __future__ import annotations
@@ -32,6 +32,7 @@ OUTPUT_COLUMNS = [
     "player",
     "actual_home_runs",
     "game_status",
+    "result_reason",
 ]
 
 
@@ -77,6 +78,7 @@ def export_results_from_workbook(
                     "player": (row.get("player") or "").strip(),
                     "actual_home_runs": (row.get("actual_home_runs") or "").strip(),
                     "game_status": (row.get("game_status") or "").strip(),
+                    "result_reason": (row.get("result_reason") or "").strip(),
                 }
             )
 

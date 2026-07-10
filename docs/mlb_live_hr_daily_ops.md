@@ -61,23 +61,72 @@ Check timestamped automation logs in:
 data/theoddsapi/live_hr_snapshots/automation_logs/
 ```
 
-The daily collection runner does not grade results. Grading can remain manual or use the guarded final-game automation below.
+The daily collection runner does not grade results. Grading can remain manual or use the consolidated nightly finalization below.
 
-## Automatic final-game run
+## Consolidated nightly finalization
 
-The final-game automation updates local `main`, runs the offline daily health check, and targets the previous local calendar date. It regenerates the results workbook while preserving existing `actual_home_runs` and `game_status` values for matching `event_id + player` rows, fills that target date from MLB StatsAPI, exports the strict grader CSV, and checks coverage for that date. It grades only that date when coverage reports `Ready to grade: YES`, then generates the date-scoped grade summary report after grading succeeds.
+The consolidated nightly pipeline is the intended 3:30 AM local automation. It
+updates local `main`, selects completed MLB dates that need processing, runs the
+offline daily health check, regenerates the results workbook with
+`--preserve-results`, fills results from MLB StatsAPI without
+`--overwrite-filled`, exports the strict grader CSV, checks coverage per date,
+grades only dates whose date-scoped coverage reports `Ready to grade: YES`, and
+writes a concise JSON and text run summary.
 
-If coverage reports `Ready to grade: NO`, the automation skips both grading and the grade summary, logs why each was skipped, and exits successfully. A grader failure prevents the summary from running. Failures from the daily check, workbook generation, export, coverage checker, grader, or grade summary fail the run.
+Incomplete dates are skipped without failing the whole run. No-data dates are
+logged and treated as successful skips. Failures from git, the health check,
+workbook generation, result filling, export, coverage execution, grading, or
+grade-summary generation fail the run and appear in the timestamped summaries.
 
-The final-game runner does not call the live odds collector. It uses MLB StatsAPI only to fill results for the previous local date and preserves matching result entries already present in the workbook. For final games, rostered players without batting stats are marked `void` so non-participants do not block coverage.
+The nightly pipeline does not call the live odds collector. It uses MLB StatsAPI
+only for result filling, preserves matching result entries already present in
+the workbook, and relies on the existing date-scoped coverage gate before
+grading. For final games, rostered players without batting stats are marked
+`void` by the existing filler so non-participants do not block coverage.
 
-Create the daily Windows Task Scheduler task:
+Manual dry-run command:
 
 ```powershell
-schtasks /Create /TN "CourtVision MLB HR Finalizer" /SC DAILY /ST 03:30 /TR "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\dev\Sport_Project1\tools\run_live_hr_final_auto.ps1" /F
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\dev\Sport_Project1\tools\run_courtvision_mlb_nightly_pipeline.ps1 -DryRun
 ```
 
-The 3:30 AM local finalizer always targets the previous local date. This gives late West Coast games and extra innings more time to reach final status before the MLB StatsAPI fill runs.
+Manual date-scoped dry-run command:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\dev\Sport_Project1\tools\run_courtvision_mlb_nightly_pipeline.ps1 -DryRun -Date YYYY-MM-DD
+```
+
+The `-DryRun` mode copies the master/workbook/results inputs under
+`automation_logs\dry_run_YYYYMMDD_HHMMSS\` and writes dry-run result, grade, and
+report outputs there. It does not mutate the canonical workbook, strict results
+CSV, grade CSV, or grade summary report. Use `-SkipGit` only for local validation
+when uncommitted work is present; scheduled production runs must omit it.
+
+Manual production test command after review:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\dev\Sport_Project1\tools\run_courtvision_mlb_nightly_pipeline.ps1
+```
+
+Repoint the existing 3:30 AM finalizer task only after a dry-run and manual
+production test have passed:
+
+```powershell
+schtasks /Change /TN "CourtVision MLB HR Finalizer" /TR "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\dev\Sport_Project1\tools\run_courtvision_mlb_nightly_pipeline.ps1" /ST 03:30
+```
+
+Do not disable the existing 2:00 AM Nightly Grader until the new nightly pipeline
+has passed at least one manual production test and one scheduled run. After that
+validation, the review command to disable it is:
+
+```powershell
+schtasks /Change /TN "CourtVision Nightly Grader" /DISABLE
+```
+
+The 3:30 AM local pipeline normally processes yesterday plus the prior completed
+dates in its lookback window. This gives late West Coast games and extra innings
+more time to reach final status before the MLB StatsAPI fill runs, and it retries
+recent incomplete dates idempotently.
 
 If target-date coverage remains incomplete, diagnose the blank workbook rows without
 changing results or running the grader:
@@ -96,10 +145,18 @@ A rostered player without batting stats in a final boxscore keeps a blank
 this status without changing files itself. A player name absent from the roster remains
 unresolved for manual review.
 
-Check timestamped final automation logs in:
+Check timestamped nightly pipeline transcripts, dry-run workspaces, and summary
+files in:
 
 ```text
-data/theoddsapi/live_hr_snapshots/final_automation_logs/
+data/theoddsapi/live_hr_snapshots/automation_logs/
+```
+
+Every run writes:
+
+```text
+data/theoddsapi/live_hr_snapshots/automation_logs/mlb_nightly_summary_YYYYMMDD_HHMMSS.json
+data/theoddsapi/live_hr_snapshots/automation_logs/mlb_nightly_summary_YYYYMMDD_HHMMSS.txt
 ```
 
 ## Daily operations report
@@ -397,7 +454,14 @@ python .\tools\theoddsapi_live_hr_collector.py --quiet
 python .\tools\run_live_hr_daily_check.py
 ```
 
-After games are final:
+After games are final, the consolidated nightly pipeline can perform the whole
+fill/export/coverage/grade flow:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\dev\Sport_Project1\tools\run_courtvision_mlb_nightly_pipeline.ps1 -DryRun -Date YYYY-MM-DD
+```
+
+For manual workbook operation without the pipeline:
 
 ```powershell
 python .\tools\generate_live_hr_results_workbook.py --overwrite --preserve-results
@@ -422,14 +486,12 @@ python .\tools\grade_live_hr_results.py --date YYYY-MM-DD
 Run the offline results tool tests:
 
 ```powershell
-python -m pytest tests/test_live_hr_results_tools.py tests/test_grade_live_hr_results.py tests/test_live_hr_results_workbook.py tests/test_live_hr_results_exporter.py
+python -m pytest tests/test_courtvision_mlb_nightly_pipeline.py tests/test_live_hr_results_tools.py tests/test_grade_live_hr_results.py tests/test_live_hr_results_workbook.py tests/test_live_hr_results_exporter.py tests/test_fill_live_hr_results_from_mlb_statsapi.py tests/test_run_live_hr_daily_check.py tests/test_summarize_live_hr_grades.py tests/test_validate_live_hr_data.py
 ```
 
-Expected result:
-
-```text
-24 passed
-```
+All of these tests are offline. They cover the nightly orchestration decisions,
+date-scoped coverage and grading, result preservation, export behavior, the
+StatsAPI result filler with fakes, data-quality checks, and grade summaries.
 
 ## Git workflow
 

@@ -37,6 +37,7 @@ OUTPUT_COLUMNS = [
     "all_prices",
     "actual_home_runs",
     "game_status",
+    "result_reason",
 ]
 
 
@@ -116,6 +117,7 @@ def load_preserved_results(output_path: Path) -> dict[tuple[str, str], dict[str,
             preserved_results[(event_id, player)] = {
                 "actual_home_runs": row.get("actual_home_runs") or "",
                 "game_status": row.get("game_status") or "",
+                "result_reason": row.get("result_reason") or "",
             }
 
     return preserved_results
@@ -216,7 +218,7 @@ def generate_workbook(
         all_prices = " | ".join(str(price["label"]) for price in prices)
         result_values = preserved_results.get(
             (str(item["event_id"]), str(item["player"])),
-            {"actual_home_runs": "", "game_status": ""},
+            {"actual_home_runs": "", "game_status": "", "result_reason": ""},
         )
 
         output_rows.append(
@@ -232,6 +234,7 @@ def generate_workbook(
                 "all_prices": all_prices,
                 "actual_home_runs": result_values["actual_home_runs"],
                 "game_status": result_values["game_status"],
+                "result_reason": result_values["result_reason"],
             }
         )
 

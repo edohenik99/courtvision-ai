@@ -1,8 +1,10 @@
 import csv
+import json
 from datetime import date
 from pathlib import Path
 from typing import Mapping
 
+from tools import fill_live_hr_results_from_mlb_statsapi as filler
 from tools.diagnose_live_hr_missing_results import (
     REPORT_COLUMNS,
     diagnose_missing_results,
@@ -191,12 +193,14 @@ def test_fills_only_final_matched_games_and_reports_unmatched_rows(
     assert rows[0]["actual_home_runs"] == "1"
     assert rows[0]["game_status"] == "final"
     assert rows[1]["actual_home_runs"] == ""
+    assert rows[1]["game_status"] == "void_candidate"
+    assert rows[1]["result_reason"] == "player_missing_from_boxscore_roster"
     assert rows[2]["actual_home_runs"] == ""
     assert rows[3]["actual_home_runs"] == ""
     assert summary.games_matched == 2
     assert summary.games_final == 1
-    assert summary.rows_filled == 1
-    assert summary.rows_skipped == 3
+    assert summary.rows_filled == 2
+    assert summary.rows_skipped == 2
     assert summary.unmatched_games == 1
     assert summary.unmatched_players == 1
     assert [url for url, _ in api.calls].count(BOXSCORE_URL.format(game_pk=101)) == 1
@@ -280,6 +284,7 @@ def test_sets_void_for_final_game_rostered_nonparticipant(tmp_path: Path) -> Non
     row = read_workbook(workbook)[0]
     assert row["actual_home_runs"] == ""
     assert row["game_status"] == "void"
+    assert row["result_reason"] == "player_rostered_without_batting_stats"
     assert summary.rows_filled == 1
     assert summary.unmatched_players == 0
 
@@ -401,8 +406,8 @@ def test_player_nickname_normalization_matches_james_to_jim(
         get_json=api,
     )
 
-    assert normalize_player_name("James Jarvis") == "jim jarvis"
-    assert normalize_player_name("Jim Jarvis") == "jim jarvis"
+    assert normalize_player_name("James Jarvis") == "james jarvis"
+    assert normalize_player_name("Jim Jarvis") == "james jarvis"
     assert read_workbook(workbook)[0]["actual_home_runs"] == "1"
     assert summary.unmatched_players == 0
 
@@ -435,7 +440,132 @@ def test_player_nickname_normalization_keeps_other_players_unmatched(
 
     assert normalize_player_name("James Jarvis") != normalize_player_name("Jim Beam")
     assert read_workbook(workbook)[0]["actual_home_runs"] == ""
+    assert read_workbook(workbook)[0]["game_status"] == "void_candidate"
     assert summary.unmatched_players == 1
+
+
+def test_player_alias_regressions_fill_unique_statsapi_roster_matches(
+    tmp_path: Path,
+) -> None:
+    cases = [
+        ("Rafael Flores", "Rafael Flores Jr.", "0"),
+        ("Josh Kuroda-Grauer", "Joshua Kuroda-Grauer", "1"),
+        ("Cameron Cauley", "Cam Cauley", "2"),
+    ]
+
+    for index, (workbook_player, statsapi_player, home_runs) in enumerate(
+        cases, start=1
+    ):
+        workbook = tmp_path / f"workbook_{index}.csv"
+        write_workbook(
+            workbook,
+            [
+                workbook_row(
+                    "event_1",
+                    workbook_player,
+                    "Texas Rangers",
+                    "Los Angeles Angels",
+                )
+            ],
+        )
+        api = FakeStatsApi(
+            games=[
+                schedule_game(
+                    100 + index,
+                    "Texas Rangers",
+                    "Los Angeles Angels",
+                    "Final",
+                )
+            ],
+            boxscores={100 + index: boxscore((statsapi_player, int(home_runs)))},
+        )
+
+        summary = fill_results_from_mlb_statsapi(
+            workbook,
+            date(2026, 7, 2),
+            get_json=api,
+        )
+
+        row = read_workbook(workbook)[0]
+        assert row["actual_home_runs"] == home_runs
+        assert row["game_status"] == "final"
+        assert summary.unmatched_players == 0
+
+
+def test_owen_caissie_becomes_void_candidate_when_missing_from_statsapi_roster(
+    tmp_path: Path,
+) -> None:
+    workbook = tmp_path / "workbook.csv"
+    write_workbook(
+        workbook,
+        [
+            workbook_row(
+                "event_1",
+                "Owen Caissie",
+                "Miami Marlins",
+                "Seattle Mariners",
+            )
+        ],
+    )
+    api = FakeStatsApi(
+        games=[schedule_game(101, "Miami Marlins", "Seattle Mariners", "Final")],
+        boxscores={101: boxscore(("Cal Raleigh", 1), ("Josh Naylor", 0))},
+    )
+
+    diagnostics: list[filler.UnmatchedPlayerDiagnostic] = []
+    summary = fill_results_from_mlb_statsapi(
+        workbook,
+        date(2026, 7, 2),
+        unmatched_player_diagnostics=diagnostics,
+        get_json=api,
+    )
+
+    row = read_workbook(workbook)[0]
+    assert row["actual_home_runs"] == ""
+    assert row["game_status"] == "void_candidate"
+    assert row["result_reason"] == "player_missing_from_boxscore_roster"
+    assert summary.rows_filled == 1
+    assert summary.unmatched_players == 1
+    assert diagnostics[0].player == "Owen Caissie"
+    assert diagnostics[0].reason == "player_missing_from_boxscore_roster"
+    assert diagnostics[0].result_status == "void_candidate"
+
+
+def test_multiple_normalized_statsapi_candidates_require_manual_review(
+    tmp_path: Path,
+) -> None:
+    workbook = tmp_path / "workbook.csv"
+    write_workbook(
+        workbook,
+        [
+            workbook_row(
+                "event_1",
+                "Rafael Flores",
+                "Pittsburgh Pirates",
+                "Atlanta Braves",
+            )
+        ],
+    )
+    api = FakeStatsApi(
+        games=[schedule_game(101, "Pittsburgh Pirates", "Atlanta Braves", "Final")],
+        boxscores={101: boxscore(("Rafael Flores", 0), ("Rafael Flores Jr.", 1))},
+    )
+
+    diagnostics: list[filler.UnmatchedPlayerDiagnostic] = []
+    summary = fill_results_from_mlb_statsapi(
+        workbook,
+        date(2026, 7, 2),
+        unmatched_player_diagnostics=diagnostics,
+        get_json=api,
+    )
+
+    row = read_workbook(workbook)[0]
+    assert row["actual_home_runs"] == ""
+    assert row["game_status"] == "manual_review_required"
+    assert row["result_reason"] == "ambiguous_normalized_player_match"
+    assert summary.unmatched_players == 1
+    assert diagnostics[0].reason == "ambiguous_normalized_player_match"
+    assert diagnostics[0].result_status == "manual_review_required"
 
 
 def test_diagnoses_missing_player_without_live_network(tmp_path: Path) -> None:
@@ -566,3 +696,67 @@ def test_diagnostic_reports_final_game_player_without_batting_stats(
     assert diagnostic.recommendation == (
         "set game_status=void; leave actual_home_runs blank"
     )
+
+
+def test_diagnostic_mode_prints_unmatched_players_and_writes_json_report(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    workbook = tmp_path / "workbook.csv"
+    report_dir = tmp_path / "automation_logs"
+    write_workbook(
+        workbook,
+        [
+            workbook_row(
+                "event_1", "Missing Batter", "New York Yankees", "New York Mets"
+            )
+        ],
+    )
+    api = FakeStatsApi(
+        games=[schedule_game(101, "New York Yankees", "New York Mets", "Final")],
+        boxscores={101: boxscore(("Aaron Judge", 1), ("Juan Soto", 0))},
+    )
+    monkeypatch.setattr(filler, "fetch_json", api)
+
+    exit_code = filler.main(
+        [
+            "--date",
+            "2026-07-02",
+            "--workbook",
+            str(workbook),
+            "--dry-run",
+            "--diagnostic",
+            "--diagnostic-report-dir",
+            str(report_dir),
+        ]
+    )
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert "Unmatched player diagnostics" in output
+    assert "Event ID: event_1" in output
+    assert "Away team: New York Mets" in output
+    assert "Home team: New York Yankees" in output
+    assert "Player: Missing Batter" in output
+    assert "Reason: player_missing_from_boxscore_roster" in output
+    assert "Void candidates: 1" in output
+    assert "Manual review rows: 0" in output
+    assert "Classification: void_candidate" in output
+
+    report_paths = list(report_dir.glob("live_hr_unmatched_players_20260702_*.json"))
+    assert len(report_paths) == 1
+    payload = json.loads(report_paths[0].read_text(encoding="utf-8"))
+    assert payload["target_date"] == "2026-07-02"
+    assert payload["summary"]["unmatched_players"] == 1
+    assert payload["void_candidate_count"] == 1
+    assert payload["manual_review_required_count"] == 0
+    assert payload["diagnostic_row_count"] == 1
+    diagnostic = payload["unmatched_players"][0]
+    assert diagnostic["event_id"] == "event_1"
+    assert diagnostic["player"] == "Missing Batter"
+    assert diagnostic["home_team"] == "New York Yankees"
+    assert diagnostic["away_team"] == "New York Mets"
+    assert diagnostic["game_pk"] == "101"
+    assert diagnostic["reason"] == "player_missing_from_boxscore_roster"
+    assert diagnostic["result_status"] == "void_candidate"
