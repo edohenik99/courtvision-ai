@@ -15,10 +15,12 @@ from courtvision.sports.mlb.training.hr_research_baseline import (
     PREDICTION_ELIGIBLE_STATUS,
     PREDICTION_COLUMNS,
     RESULTS_REQUIRED_COLUMNS,
+    SPECIAL_EVENT_EXCLUSION_REASON,
     append_identity_cache_records,
     append_predictions_to_ledger,
     build_advanced_feature_readiness_matrix,
     build_live_hr_research_features,
+    build_validation_gate_report,
     build_prospective_trial_report,
     capture_closing_line_snapshots,
     generate_daily_research_predictions,
@@ -154,6 +156,25 @@ def _prediction_odds(path: Path, *, player: str = "Future Batter") -> Path:
             )
         ],
     )
+    return path
+
+
+def _all_star_odds(path: Path, *, player_count: int = 7) -> Path:
+    rows = [
+        _odds_row(
+            event_id="all-star-2026",
+            player=f"All Star Batter {index}",
+            commence_time="2026-07-15T00:01:00Z",
+            snapshot_time="2026-07-14T15:30:05Z",
+            home_team="National League",
+            away_team="American League",
+            bookmaker_key="fanduel",
+            bookmaker="FanDuel",
+            price=400 + index,
+        )
+        for index in range(player_count)
+    ]
+    _write_csv(path, ODDS_REQUIRED_COLUMNS, rows)
     return path
 
 
@@ -479,6 +500,119 @@ def test_daily_runner_dry_run_idempotency_force_and_no_games(tmp_path: Path) -> 
     assert empty.status == "completed_no_predictions"
     ledger_rows = _read_csv(ledger_path)
     assert sum(row["record_type"] == "prediction" for row in ledger_rows) == 2
+
+
+def test_daily_runner_uses_toronto_date_and_quarantines_all_star_event(
+    tmp_path: Path,
+) -> None:
+    bundle_dir = _train_fixture_model(tmp_path)
+    odds_path = _all_star_odds(tmp_path / "all_star_odds.csv")
+    output_root = tmp_path / "daily_runs"
+    ledger_path = tmp_path / "prospective_ledger.csv"
+
+    dry_july_14 = run_daily_research(
+        target_date="2026-07-14",
+        model_dir=bundle_dir,
+        output_root=output_root,
+        ledger_csv=ledger_path,
+        odds_csv=odds_path,
+        prediction_timestamp="2026-07-14T18:00:00Z",
+        dry_run=True,
+    )
+    dry_july_15 = run_daily_research(
+        target_date="2026-07-15",
+        model_dir=bundle_dir,
+        output_root=output_root,
+        ledger_csv=ledger_path,
+        odds_csv=odds_path,
+        prediction_timestamp="2026-07-14T18:00:00Z",
+        dry_run=True,
+    )
+    written = run_daily_research(
+        target_date="2026-07-14",
+        model_dir=bundle_dir,
+        output_root=output_root,
+        ledger_csv=ledger_path,
+        odds_csv=odds_path,
+        prediction_timestamp="2026-07-14T18:00:00Z",
+    )
+
+    assert dry_july_14.summary["condition"] == "special_event_quarantined"
+    assert dry_july_14.summary["source_row_count"] == 7
+    assert dry_july_14.summary["prediction_count"] == 0
+    assert dry_july_14.summary["excluded_row_count"] == 7
+    assert dry_july_14.summary["exclusion_counts"] == {
+        SPECIAL_EVENT_EXCLUSION_REASON: 7
+    }
+    assert dry_july_14.summary["event_eligibility_counts"] == {
+        "special_event_quarantined": 7
+    }
+    assert dry_july_15.summary["condition"] == "no_games_found"
+    assert dry_july_15.summary["source_row_count"] == 0
+    assert written.status == "completed_no_predictions"
+    assert not ledger_path.exists()
+
+    excluded_rows = _read_csv(written.output_dir / "predictions" / "excluded_rows.csv")
+    assert len(excluded_rows) == 7
+    assert {row["game_date_operating"] for row in excluded_rows} == {"2026-07-14"}
+    assert {row["game_date_utc"] for row in excluded_rows} == {"2026-07-15"}
+    assert {row["event_eligibility_status"] for row in excluded_rows} == {
+        "special_event_quarantined"
+    }
+    assert {row["exclusion_reason"] for row in excluded_rows} == {
+        SPECIAL_EVENT_EXCLUSION_REASON
+    }
+
+    gates = build_validation_gate_report(ledger_path=ledger_path)
+    assert gates["gates"]["prediction_dates"]["observed"] == 0
+    assert gates["gates"]["eligible_player_game_predictions"]["observed"] == 0
+
+
+def test_completed_zero_prediction_run_does_not_block_later_valid_source(
+    tmp_path: Path,
+) -> None:
+    bundle_dir = _train_fixture_model(tmp_path)
+    odds_path = tmp_path / "prediction_odds.csv"
+    _write_csv(
+        odds_path,
+        ODDS_REQUIRED_COLUMNS,
+        [
+            _odds_row(
+                event_id="other-date",
+                player="Other Date Batter",
+                commence_time="2026-07-05T23:00:00Z",
+                snapshot_time="2026-07-05T15:00:00Z",
+            )
+        ],
+    )
+    output_root = tmp_path / "daily_runs"
+    ledger_path = tmp_path / "prospective_ledger.csv"
+
+    empty = run_daily_research(
+        target_date="2026-07-04",
+        model_dir=bundle_dir,
+        output_root=output_root,
+        ledger_csv=ledger_path,
+        odds_csv=odds_path,
+        prediction_timestamp="2026-07-04T17:00:00Z",
+    )
+    _prediction_odds(odds_path, player="Later Valid Batter")
+    valid = run_daily_research(
+        target_date="2026-07-04",
+        model_dir=bundle_dir,
+        output_root=output_root,
+        ledger_csv=ledger_path,
+        odds_csv=odds_path,
+        prediction_timestamp="2026-07-04T17:05:00Z",
+    )
+
+    assert empty.status == "completed_no_predictions"
+    assert empty.summary["prediction_count"] == 0
+    assert empty.summary["idempotency_scope"]["zero_prediction_runs_block_future_runs"] is False
+    assert valid.status == "completed"
+    assert valid.summary["prediction_count"] == 1
+    ledger_rows = _read_csv(ledger_path)
+    assert sum(row["record_type"] == "prediction" for row in ledger_rows) == 1
 
 
 def test_prospective_report_and_readiness_matrix_are_research_only(tmp_path: Path) -> None:

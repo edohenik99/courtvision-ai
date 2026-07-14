@@ -8,8 +8,8 @@ Kelly sizing, bankroll logic, dashboard recommendations, or ROI claims.
 
 ## Current State
 
-Repository inspected on `main` at commit
-`811a07869a14bc865eec74977e6ab741ad0a0f14`.
+Repository inspected for this update on `feat/mlb-hr-prospective-research` at
+commit `49234d31599205ba61ea2fbd26b1a69bf3364b48`.
 
 The local live HR archive currently provides:
 
@@ -99,6 +99,56 @@ latest_snapshot_at_or_before_prediction_timestamp_and_before_game_start
 
 If a game has already begun at prediction time, the predictor excludes it and
 does not create a pregame prediction row.
+
+## Operating Date Semantics
+
+The `--date` argument means the CourtVision operating date in
+`America/Toronto`, not the raw UTC calendar date from the provider timestamp.
+The research tooling parses offset-bearing timestamps, converts them with
+`ZoneInfo("America/Toronto")`, and scopes rows by the Toronto local date. It
+does not use the computer's local timezone and does not hard-code a fixed
+`-04:00` offset, so EST and EDT transitions are handled by timezone data.
+
+Source timestamps remain UTC and are not rewritten. Artifacts distinguish:
+
+- `commence_time` and `commence_time_utc`: immutable UTC game-start timestamp.
+- `game_date_utc`: UTC calendar date from `commence_time_utc`.
+- `game_date_operating`: CourtVision operating date in `America/Toronto`.
+- `game_date`: current research operating date, equal to
+  `game_date_operating`.
+- `operating_timezone`: currently `America/Toronto`.
+
+For example, `2026-07-15T00:01:00Z` converts to
+`2026-07-14 20:01:00 America/Toronto`, so it belongs to operating date
+`2026-07-14`. Running with `--date 2026-07-15` would hide that local July 14
+event and is not an acceptable workaround.
+
+Timezone-naive timestamps are rejected. Invalid timestamps fail the run instead
+of being interpreted as UTC by assumption.
+
+## Special-Event Eligibility
+
+The standard prospective ledger is for ordinary MLB club games only. Event
+eligibility is classified before prediction rows are created:
+
+- `regular_season_eligible`: both teams match the deterministic MLB club
+  allowlist, or a future authoritative event-type field explicitly says
+  regular season.
+- `special_event_quarantined`: the event is explicitly special/exhibition, or
+  the team pair is `National League` versus `American League`.
+- `event_type_unknown` or `manual_review_required`: the current evidence is
+  insufficient to include the event in ordinary regular-season evidence.
+
+The current All-Star detection rule is deliberately narrow and auditable:
+`home_team` and `away_team` equal `National League` and `American League` in
+either order. Those rows are preserved in `excluded_rows.csv` and exclusion
+counts with reason `special_event_out_of_distribution`. They are not silently
+discarded, do not enter `predictions.csv`, do not append to the standard
+prospective ledger, and do not count toward regular-season promotion gates.
+
+If a future special-event research mode is added, it must write to a separate
+output directory and ledger/evidence category, be labelled out-of-distribution,
+and never count toward regular-season promotion gates.
 
 ## Leakage Protections
 
@@ -202,9 +252,12 @@ python -m courtvision.sports.mlb.training.hr_research_baseline run-daily-researc
 ```
 
 Use `--dry-run` to print the same summary without writing artifacts or
-appending the ledger. If a completed run for the same date/model already
-exists, the runner returns that run unless `--force` is supplied. A forced run
-creates a distinct run ID and prediction run nonce.
+appending the ledger. If a completed nonzero prediction run for the same
+date/model already exists, the runner returns that run unless `--force` is
+supplied. A prior `completed_no_predictions` run is not a permanent lock: a
+later source fingerprint or corrected code path may create a new valid run
+without `--force`. Idempotency protects completed prediction evidence, not
+empty preflight states.
 
 Verify prediction artifacts and optional ledger linkage:
 
@@ -269,6 +322,8 @@ Prediction artifacts:
 - `predictions.csv`
 - `excluded_rows.csv`
 - `manifest.json`
+- `manifest.json` embeds source hashes, operating timezone, date semantics,
+  event-eligibility counts, and exclusion counts.
 
 Daily manual run artifacts:
 
@@ -339,6 +394,9 @@ until evidence includes at least:
 - No unresolved leakage findings
 - No prediction artifact mutation findings
 
+Special-event and event-type-unknown rows are excluded before ledger append and
+therefore do not contribute to these regular-season promotion gates.
+
 Even if those thresholds pass, promotion still requires documented human review
 of calibration, market-baseline comparison, closing-line value, and stability by
 date, player group, odds range, sportsbook, park, and model version.
@@ -356,6 +414,12 @@ date, player group, odds range, sportsbook, park, and model version.
   only after the source issue is understood.
 - If settlement is pending, rerun after strict results are final and coverage is
   complete.
+- If source rows exist but predictions remain zero, inspect
+  `predictions\excluded_rows.csv`, `predictions\manifest.json`, or the dry-run
+  summary fields `source_row_count`, `exclusion_counts`, and
+  `event_eligibility_counts`. A condition of `special_event_quarantined` means
+  source rows were found for the operating date but kept out of ordinary
+  regular-season evidence.
 
 ## Advanced Feature Readiness
 

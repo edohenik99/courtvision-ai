@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import csv
+from datetime import datetime, timezone
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
 
 from courtvision.sports.mlb.training.hr_research_baseline import (
     FEATURE_COLUMNS,
+    FEATURE_SCHEMA_VERSION_V1,
     LEDGER_COLUMNS,
     MLBHRResearchBaselineError,
+    MODEL_REQUIRED_INPUT_COLUMNS,
     ODDS_REQUIRED_COLUMNS,
     PREDICTION_ELIGIBLE_STATUS,
     RESEARCH_ONLY_LABEL,
@@ -18,6 +23,7 @@ from courtvision.sports.mlb.training.hr_research_baseline import (
     build_live_hr_research_features,
     build_validation_gate_report,
     chronological_split_rows,
+    courtvision_operating_date,
     generate_daily_research_predictions,
     load_model_bundle,
     predict_model_probability,
@@ -38,6 +44,17 @@ def _write_csv(path: Path, columns: tuple[str, ...], rows: list[dict[str, object
 def _read_csv(path: Path) -> list[dict[str, str]]:
     with path.open("r", newline="", encoding="utf-8") as handle:
         return list(csv.DictReader(handle))
+
+
+def _write_json(path: Path, payload: dict[str, object]) -> None:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    path.write_text(encoded, encoding="utf-8")
 
 
 def _odds_row(**overrides: object) -> dict[str, object]:
@@ -198,6 +215,59 @@ def test_feature_builder_is_deterministic_selects_best_book_and_tracks_exclusion
     assert first.rows[0]["research_label"] == RESEARCH_ONLY_LABEL
 
 
+def test_courtvision_operating_date_uses_toronto_timezone_and_rejects_bad_values(
+    tmp_path: Path,
+) -> None:
+    assert (
+        courtvision_operating_date(
+            datetime.fromisoformat("2026-07-15T00:01:00+00:00")
+        ).isoformat()
+        == "2026-07-14"
+    )
+    assert (
+        courtvision_operating_date(
+            datetime.fromisoformat("2026-07-14T19:00:00+00:00")
+        ).isoformat()
+        == "2026-07-14"
+    )
+    assert (
+        courtvision_operating_date(
+            datetime.fromisoformat("2026-01-15T05:30:00+00:00")
+        ).isoformat()
+        == "2026-01-15"
+    )
+    assert (
+        courtvision_operating_date(
+            datetime.fromisoformat("2026-07-15T04:30:00+00:00")
+        ).isoformat()
+        == "2026-07-15"
+    )
+    assert (
+        courtvision_operating_date(
+            datetime.fromisoformat("2026-07-15T03:59:00+00:00")
+        ).isoformat()
+        == "2026-07-14"
+    )
+    with pytest.raises(MLBHRResearchBaselineError, match="timezone"):
+        courtvision_operating_date(datetime(2026, 7, 15, 0, 1))
+
+    odds_path = tmp_path / "bad_timestamp_odds.csv"
+    results_path = tmp_path / "results.csv"
+    _write_csv(
+        odds_path,
+        ODDS_REQUIRED_COLUMNS,
+        [_odds_row(commence_time="not-a-timestamp")],
+    )
+    _write_csv(results_path, (*RESULTS_REQUIRED_COLUMNS, "result_reason"), [_result_row()])
+
+    with pytest.raises(MLBHRResearchBaselineError, match="ISO datetime"):
+        build_live_hr_research_features(
+            odds_path=odds_path,
+            results_path=results_path,
+            generated_at="2026-07-02T00:00:00Z",
+        )
+
+
 def test_snapshot_cutoff_and_leakage_rows_are_excluded(tmp_path: Path) -> None:
     odds_path = tmp_path / "odds.csv"
     results_path = tmp_path / "results.csv"
@@ -312,6 +382,47 @@ def test_prediction_dry_run_is_immutable_and_blocks_after_start_games(
     }
 
 
+def test_prediction_timing_uses_exact_aware_timestamps_near_midnight(
+    tmp_path: Path,
+) -> None:
+    bundle_dir, _ = _train_fixture_model(tmp_path)
+    odds_path = tmp_path / "near_midnight_odds.csv"
+    _write_csv(
+        odds_path,
+        ODDS_REQUIRED_COLUMNS,
+        [
+            _odds_row(
+                event_id="midnight-event",
+                player="Midnight Batter",
+                commence_time="2026-07-15T00:01:00Z",
+                snapshot_time="2026-07-14T23:55:00Z",
+            )
+        ],
+    )
+
+    before_start = generate_daily_research_predictions(
+        model_bundle_dir=bundle_dir,
+        odds_path=odds_path,
+        target_date="2026-07-14",
+        prediction_timestamp="2026-07-14T23:59:30Z",
+        dry_run=True,
+    )
+    after_start = generate_daily_research_predictions(
+        model_bundle_dir=bundle_dir,
+        odds_path=odds_path,
+        target_date="2026-07-14",
+        prediction_timestamp="2026-07-15T00:02:00Z",
+        dry_run=True,
+    )
+
+    assert len(before_start.predictions) == 1
+    assert before_start.predictions[0]["game_date"] == "2026-07-14"
+    assert before_start.predictions[0]["game_date_utc"] == "2026-07-15"
+    assert before_start.predictions[0]["game_date_operating"] == "2026-07-14"
+    assert len(after_start.predictions) == 0
+    assert after_start.exclusions[0]["exclusion_reason"] == "game_already_started"
+
+
 def test_ledger_settlement_appends_without_mutating_prediction_record(
     tmp_path: Path,
 ) -> None:
@@ -404,6 +515,31 @@ def test_one_class_training_and_corrupted_artifact_fail_closed(tmp_path: Path) -
 
     with pytest.raises(MLBHRResearchBaselineError, match="integrity"):
         load_model_bundle(bundle_dir)
+
+
+def test_existing_v1_model_feature_schema_loads_when_feature_order_matches(
+    tmp_path: Path,
+) -> None:
+    bundle_dir, _ = _train_fixture_model(tmp_path)
+    loaded = load_model_bundle(bundle_dir)
+    original_order = list(loaded.model["feature_order"])
+
+    model_path = bundle_dir / "model.json"
+    metadata_path = bundle_dir / "metadata.json"
+    model_payload = json.loads(model_path.read_text(encoding="utf-8"))
+    metadata_payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    model_payload["feature_schema_version"] = FEATURE_SCHEMA_VERSION_V1
+    metadata_payload["feature_schema_version"] = FEATURE_SCHEMA_VERSION_V1
+    _write_json(model_path, model_payload)
+    metadata_payload["model_json_sha256"] = hashlib.sha256(
+        model_path.read_bytes()
+    ).hexdigest()
+    _write_json(metadata_path, metadata_payload)
+
+    legacy_loaded = load_model_bundle(bundle_dir)
+
+    assert list(legacy_loaded.model["feature_order"]) == original_order
+    assert tuple(legacy_loaded.model["required_input_columns"]) == MODEL_REQUIRED_INPUT_COLUMNS
 
 
 def test_empty_date_feature_build_and_validation_gate_report(tmp_path: Path) -> None:

@@ -24,6 +24,7 @@ import platform
 import subprocess
 import sys
 from typing import Final, Iterable, Iterator, Mapping, Sequence
+from zoneinfo import ZoneInfo
 
 from courtvision.sports.mlb.player_name_normalization import (
     normalize_mlb_player_name,
@@ -32,14 +33,15 @@ from courtvision.sports.mlb.player_name_normalization import (
 
 RESEARCH_ONLY_LABEL: Final = "RESEARCH ONLY - NOT A VALIDATED BETTING PICK"
 APPROVAL_STATUS: Final = "not_approved"
-FEATURE_SCHEMA_VERSION: Final = "mlb-hr-research-feature-v1"
+FEATURE_SCHEMA_VERSION_V1: Final = "mlb-hr-research-feature-v1"
+FEATURE_SCHEMA_VERSION: Final = "mlb-hr-research-feature-v2"
 MODEL_BUNDLE_SCHEMA_VERSION: Final = "mlb-hr-logistic-baseline-bundle-v1"
-PREDICTION_SCHEMA_VERSION: Final = "mlb-hr-research-predictions-v1"
+PREDICTION_SCHEMA_VERSION: Final = "mlb-hr-research-predictions-v2"
 LEDGER_SCHEMA_VERSION: Final = "mlb-hr-prospective-ledger-v1"
 IDENTITY_CACHE_SCHEMA_VERSION: Final = "mlb-hr-player-identity-cache-v1"
 DEFAULT_IDENTITY_MAPPING_VERSION: Final = "research-identity-v1"
 CLOSING_LINE_SCHEMA_VERSION: Final = "mlb-hr-closing-line-evidence-v1"
-DAILY_RUN_SCHEMA_VERSION: Final = "mlb-hr-daily-research-run-v1"
+DAILY_RUN_SCHEMA_VERSION: Final = "mlb-hr-daily-research-run-v2"
 PROSPECTIVE_REPORT_SCHEMA_VERSION: Final = "mlb-hr-prospective-trial-report-v1"
 DEFAULT_REPOSITORY_ROOT: Final = Path(__file__).resolve().parents[4]
 DEFAULT_LIVE_HR_DIR: Final = (
@@ -49,6 +51,62 @@ DEFAULT_ODDS_CSV: Final = DEFAULT_LIVE_HR_DIR / "live_hr_props_master.csv"
 DEFAULT_RESULTS_CSV: Final = DEFAULT_LIVE_HR_DIR / "live_hr_results.csv"
 DEFAULT_ARTIFACT_ROOT: Final = (
     DEFAULT_REPOSITORY_ROOT / "outputs" / "research" / "mlb_hr_baseline"
+)
+COURTVISION_OPERATING_TIMEZONE_NAME: Final = "America/Toronto"
+COURTVISION_OPERATING_TIMEZONE: Final = ZoneInfo(COURTVISION_OPERATING_TIMEZONE_NAME)
+COMPATIBLE_FEATURE_SCHEMA_VERSIONS: Final = frozenset(
+    {FEATURE_SCHEMA_VERSION_V1, FEATURE_SCHEMA_VERSION}
+)
+EVENT_REGULAR_SEASON_ELIGIBLE: Final = "regular_season_eligible"
+EVENT_SPECIAL_QUARANTINED: Final = "special_event_quarantined"
+EVENT_TYPE_UNKNOWN: Final = "event_type_unknown"
+EVENT_MANUAL_REVIEW_REQUIRED: Final = "manual_review_required"
+SPECIAL_EVENT_EXCLUSION_REASON: Final = "special_event_out_of_distribution"
+EVENT_TYPE_UNKNOWN_EXCLUSION_REASON: Final = "event_type_unknown"
+REGULAR_SEASON_TEAM_ALLOWLIST_RULE: Final = (
+    "both_teams_must_match_current_mlb_club_allowlist"
+)
+SPECIAL_EVENT_TEAM_RULE: Final = "national_league_vs_american_league_team_names"
+MLB_REGULAR_SEASON_TEAM_NAMES: Final = frozenset(
+    name.casefold()
+    for name in (
+        "Arizona Diamondbacks",
+        "Athletics",
+        "Atlanta Braves",
+        "Baltimore Orioles",
+        "Boston Red Sox",
+        "Chicago Cubs",
+        "Chicago White Sox",
+        "Cincinnati Reds",
+        "Cleveland Guardians",
+        "Colorado Rockies",
+        "Detroit Tigers",
+        "Houston Astros",
+        "Kansas City Royals",
+        "Los Angeles Angels",
+        "Los Angeles Dodgers",
+        "Miami Marlins",
+        "Milwaukee Brewers",
+        "Minnesota Twins",
+        "New York Mets",
+        "New York Yankees",
+        "Oakland Athletics",
+        "Philadelphia Phillies",
+        "Pittsburgh Pirates",
+        "San Diego Padres",
+        "San Francisco Giants",
+        "Seattle Mariners",
+        "St. Louis Cardinals",
+        "Tampa Bay Rays",
+        "Texas Rangers",
+        "Toronto Blue Jays",
+        "Washington Nationals",
+    )
+)
+SPECIAL_EVENT_TEAM_PAIRS: Final = frozenset(
+    {
+        frozenset({"american league", "national league"}),
+    }
 )
 
 ODDS_REQUIRED_COLUMNS: Final = (
@@ -118,6 +176,10 @@ FEATURE_COLUMNS: Final = (
     "event_id",
     "game_date",
     "commence_time",
+    "commence_time_utc",
+    "game_date_utc",
+    "game_date_operating",
+    "operating_timezone",
     "prediction_timestamp",
     "snapshot_time",
     "player_id",
@@ -127,6 +189,9 @@ FEATURE_COLUMNS: Final = (
     "opponent",
     "home_team",
     "away_team",
+    "event_eligibility_status",
+    "event_eligibility_reason",
+    "event_eligibility_rule",
     "sportsbook",
     "sportsbook_name",
     "market_key",
@@ -172,9 +237,17 @@ EXCLUSION_COLUMNS: Final = (
     "feature_row_id",
     "event_id",
     "game_date",
+    "game_date_utc",
+    "game_date_operating",
+    "operating_timezone",
+    "home_team",
+    "away_team",
     "snapshot_time",
     "player_name",
     "normalized_player_name",
+    "event_eligibility_status",
+    "event_eligibility_reason",
+    "event_eligibility_rule",
     "eligibility_status",
     "exclusion_reason",
     "game_status",
@@ -190,6 +263,10 @@ PREDICTION_COLUMNS: Final = (
     "event_id",
     "game_date",
     "commence_time",
+    "commence_time_utc",
+    "game_date_utc",
+    "game_date_operating",
+    "operating_timezone",
     "player_id",
     "player_name",
     "normalized_player_name",
@@ -197,6 +274,9 @@ PREDICTION_COLUMNS: Final = (
     "opponent",
     "home_team",
     "away_team",
+    "event_eligibility_status",
+    "event_eligibility_reason",
+    "event_eligibility_rule",
     "sportsbook",
     "sportsbook_name",
     "american_odds",
@@ -544,18 +624,200 @@ def _stable_id(*parts: object, length: int | None = None) -> str:
 
 
 def _parse_datetime(value: object, field_name: str) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+        text = value.isoformat()
+    else:
+        text = _clean(value)
+        if not text:
+            raise MLBHRResearchBaselineError(f"{field_name} is required")
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise MLBHRResearchBaselineError(
+                f"{field_name} must be an ISO datetime: {text!r}"
+            ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise MLBHRResearchBaselineError(
+            f"{field_name} must include an explicit timezone offset: {text!r}"
+        )
+    return parsed.astimezone(timezone.utc)
+
+
+def courtvision_operating_date(timestamp: datetime) -> date:
+    """Return the CourtVision Toronto operating date for an aware timestamp."""
+
+    parsed = _parse_datetime(timestamp, "timestamp")
+    return parsed.astimezone(COURTVISION_OPERATING_TIMEZONE).date()
+
+
+def _target_operating_date_text(value: str | None) -> str | None:
+    if value is None:
+        return None
     text = _clean(value)
     if not text:
-        raise MLBHRResearchBaselineError(f"{field_name} is required")
+        return None
     try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        parsed = date.fromisoformat(text)
     except ValueError as exc:
         raise MLBHRResearchBaselineError(
-            f"{field_name} must be an ISO datetime: {text!r}"
+            f"target_date must be YYYY-MM-DD: {text!r}"
         ) from exc
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+    return parsed.isoformat()
+
+
+def _coerce_datetime_utc(
+    value: datetime | str | None,
+    field_name: str,
+    *,
+    default_now: bool = True,
+) -> datetime:
+    if value is None:
+        if default_now:
+            return _utc_now()
+        raise MLBHRResearchBaselineError(f"{field_name} is required")
+    return _parse_datetime(value, field_name)
+
+
+def _event_eligibility_from_row(row: Mapping[str, object]) -> tuple[str, str, str]:
+    home_team = _clean(row.get("home_team"))
+    away_team = _clean(row.get("away_team"))
+    team_pair = frozenset({home_team.casefold(), away_team.casefold()})
+    event_type = _clean(
+        row.get("event_type") or row.get("game_type") or row.get("event_category")
+    ).casefold()
+
+    if event_type:
+        if event_type in {"regular", "regular_season", "regular season"}:
+            return (
+                EVENT_REGULAR_SEASON_ELIGIBLE,
+                "",
+                "authoritative_event_type_regular_season",
+            )
+        if event_type in {
+            "all_star",
+            "all-star",
+            "all star",
+            "exhibition",
+            "special_event",
+            "special event",
+        }:
+            return (
+                EVENT_SPECIAL_QUARANTINED,
+                SPECIAL_EVENT_EXCLUSION_REASON,
+                "authoritative_event_type_special_event",
+            )
+        return (
+            EVENT_MANUAL_REVIEW_REQUIRED,
+            EVENT_TYPE_UNKNOWN_EXCLUSION_REASON,
+            "authoritative_event_type_unrecognized",
+        )
+
+    if team_pair in SPECIAL_EVENT_TEAM_PAIRS:
+        return (
+            EVENT_SPECIAL_QUARANTINED,
+            SPECIAL_EVENT_EXCLUSION_REASON,
+            SPECIAL_EVENT_TEAM_RULE,
+        )
+    if (
+        home_team
+        and away_team
+        and home_team.casefold() in MLB_REGULAR_SEASON_TEAM_NAMES
+        and away_team.casefold() in MLB_REGULAR_SEASON_TEAM_NAMES
+        and home_team.casefold() != away_team.casefold()
+    ):
+        return (EVENT_REGULAR_SEASON_ELIGIBLE, "", REGULAR_SEASON_TEAM_ALLOWLIST_RULE)
+    return (
+        EVENT_TYPE_UNKNOWN,
+        EVENT_TYPE_UNKNOWN_EXCLUSION_REASON,
+        "team_names_not_in_mlb_club_allowlist",
+    )
+
+
+def _event_eligibility_counts(rows: Sequence[Mapping[str, str]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        status = _clean(row.get("event_eligibility_status")) or EVENT_TYPE_UNKNOWN
+        counts[status] = counts.get(status, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _manifest_mapping(value: object) -> Mapping[str, object]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _manifest_int(mapping: Mapping[str, object], key: str) -> int:
+    try:
+        return int(mapping.get(key, 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _manifest_dict(mapping: Mapping[str, object], key: str) -> dict[str, object]:
+    value = mapping.get(key)
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _daily_prediction_summary_fields(
+    prediction_result: PredictionRunResult,
+) -> dict[str, object]:
+    feature_manifest = _manifest_mapping(
+        prediction_result.manifest.get("feature_manifest")
+    )
+    return {
+        "source_row_count": _manifest_int(feature_manifest, "row_count"),
+        "source_excluded_row_count": _manifest_int(
+            feature_manifest, "excluded_row_count"
+        ),
+        "source_eligible_row_count": _manifest_int(
+            feature_manifest, "eligible_row_count"
+        ),
+        "feature_dates": list(feature_manifest.get("dates", []))
+        if isinstance(feature_manifest.get("dates"), list)
+        else [],
+        "exclusion_counts": _manifest_dict(feature_manifest, "exclusion_counts"),
+        "event_eligibility_counts": _manifest_dict(
+            feature_manifest, "event_eligibility_counts"
+        ),
+    }
+
+
+def _normalize_feature_row(row: Mapping[str, str]) -> dict[str, str]:
+    normalized = dict(row)
+    commence_text = _clean(normalized.get("commence_time"))
+    if commence_text:
+        try:
+            commence_time = _parse_datetime(commence_text, "commence_time")
+        except MLBHRResearchBaselineError:
+            commence_time = None
+        if commence_time is not None:
+            if not _clean(normalized.get("commence_time_utc")):
+                normalized["commence_time_utc"] = _iso_z(commence_time)
+            if not _clean(normalized.get("game_date_utc")):
+                normalized["game_date_utc"] = commence_time.date().isoformat()
+            if not _clean(normalized.get("game_date_operating")):
+                normalized["game_date_operating"] = courtvision_operating_date(
+                    commence_time
+                ).isoformat()
+            if not _clean(normalized.get("operating_timezone")):
+                normalized["operating_timezone"] = COURTVISION_OPERATING_TIMEZONE_NAME
+    if not _clean(normalized.get("game_date_operating")) and _clean(
+        normalized.get("game_date")
+    ):
+        normalized["game_date_operating"] = _clean(normalized.get("game_date"))
+    if not _clean(normalized.get("operating_timezone")):
+        normalized["operating_timezone"] = COURTVISION_OPERATING_TIMEZONE_NAME
+    if not _clean(normalized.get("event_eligibility_status")):
+        normalized["event_eligibility_status"] = EVENT_REGULAR_SEASON_ELIGIBLE
+    normalized.setdefault("event_eligibility_reason", "")
+    normalized.setdefault("event_eligibility_rule", "legacy_feature_row")
+    return normalized
+
+
+def _normalize_feature_rows(
+    rows: Sequence[Mapping[str, str]],
+) -> tuple[dict[str, str], ...]:
+    return tuple(_normalize_feature_row(row) for row in rows)
 
 
 def _iso_z(value: datetime) -> str:
@@ -796,7 +1058,15 @@ def _feature_row_from_group(
     snapshot_time, commence_time, american, decimal_odds, implied = _validate_odds_row(
         selected
     )
-    game_date = commence_time.date().isoformat()
+    commence_time_utc = _iso_z(commence_time)
+    game_date_utc = commence_time.date().isoformat()
+    game_date_operating = courtvision_operating_date(commence_time).isoformat()
+    game_date = game_date_operating
+    (
+        event_eligibility_status,
+        event_eligibility_reason,
+        event_eligibility_rule,
+    ) = _event_eligibility_from_row(selected)
     row_prediction_time = prediction_timestamp or snapshot_time
     hours_before_game = (
         commence_time - row_prediction_time
@@ -833,6 +1103,9 @@ def _feature_row_from_group(
     if snapshot_time >= commence_time:
         eligibility_status = "excluded"
         exclusion_reason = "snapshot_not_before_game_start"
+    elif event_eligibility_status != EVENT_REGULAR_SEASON_ELIGIBLE:
+        eligibility_status = event_eligibility_status
+        exclusion_reason = event_eligibility_reason or event_eligibility_status
     elif mode == "prediction":
         if prediction_timestamp is None:
             raise MLBHRResearchBaselineError(
@@ -890,7 +1163,11 @@ def _feature_row_from_group(
         "approval_status": APPROVAL_STATUS,
         "event_id": event_id,
         "game_date": game_date,
-        "commence_time": _iso_z(commence_time),
+        "commence_time": commence_time_utc,
+        "commence_time_utc": commence_time_utc,
+        "game_date_utc": game_date_utc,
+        "game_date_operating": game_date_operating,
+        "operating_timezone": COURTVISION_OPERATING_TIMEZONE_NAME,
         "prediction_timestamp": _iso_z(row_prediction_time),
         "snapshot_time": _iso_z(snapshot_time),
         "player_id": "",
@@ -900,6 +1177,9 @@ def _feature_row_from_group(
         "opponent": "",
         "home_team": _clean(selected.get("home_team")),
         "away_team": _clean(selected.get("away_team")),
+        "event_eligibility_status": event_eligibility_status,
+        "event_eligibility_reason": event_eligibility_reason,
+        "event_eligibility_rule": event_eligibility_rule,
         "sportsbook": _clean(selected.get("bookmaker_key")),
         "sportsbook_name": _clean(selected.get("bookmaker")),
         "market_key": _clean(selected.get("market")),
@@ -972,9 +1252,14 @@ def _selected_snapshot_groups(
     prediction_timestamp: datetime | None,
 ) -> tuple[tuple[Mapping[str, str], ...], ...]:
     grouped: dict[tuple[str, str, str, str, str], list[Mapping[str, str]]] = {}
+    target_operating_date = _target_operating_date_text(target_date)
     for row in odds_rows:
         snapshot_time, commence_time, _, _, _ = _validate_odds_row(row)
-        if target_date and commence_time.date().isoformat() != target_date:
+        if (
+            target_operating_date
+            and courtvision_operating_date(commence_time).isoformat()
+            != target_operating_date
+        ):
             continue
         event_id = _clean(row.get("event_id"))
         normalized = normalize_mlb_player_name(row.get("player"))
@@ -1041,6 +1326,7 @@ def build_live_hr_research_features(
 
     if mode not in {"training", "prediction"}:
         raise MLBHRResearchBaselineError("mode must be 'training' or 'prediction'")
+    target_operating_date = _target_operating_date_text(target_date)
     odds_source = Path(odds_path).expanduser().resolve()
     _, odds_rows = _read_csv(
         odds_source,
@@ -1048,18 +1334,16 @@ def build_live_hr_research_features(
         label="odds",
     )
     odds_sha = _file_sha256(odds_source)
-    parsed_generated_at = (
-        _parse_datetime(generated_at, "generated_at")
-        if generated_at is not None
-        else _utc_now()
-    )
+    parsed_generated_at = _coerce_datetime_utc(generated_at, "generated_at")
     parsed_prediction_ts = (
-        _parse_datetime(prediction_timestamp, "prediction_timestamp")
-        if prediction_timestamp is not None and not isinstance(prediction_timestamp, datetime)
-        else prediction_timestamp
+        _coerce_datetime_utc(
+            prediction_timestamp,
+            "prediction_timestamp",
+            default_now=False,
+        )
+        if prediction_timestamp is not None
+        else None
     )
-    if isinstance(parsed_prediction_ts, datetime) and parsed_prediction_ts.tzinfo is None:
-        parsed_prediction_ts = parsed_prediction_ts.replace(tzinfo=timezone.utc)
     if mode == "prediction" and parsed_prediction_ts is None:
         parsed_prediction_ts = parsed_generated_at
     result_index: Mapping[tuple[str, str], Mapping[str, str]]
@@ -1076,7 +1360,7 @@ def build_live_hr_research_features(
     groups = _selected_snapshot_groups(
         odds_rows,
         mode=mode,
-        target_date=target_date,
+        target_date=target_operating_date,
         prediction_timestamp=parsed_prediction_ts if isinstance(parsed_prediction_ts, datetime) else None,
     )
     commit_sha = _repository_commit_sha(Path(repository_root).expanduser().resolve())
@@ -1113,7 +1397,16 @@ def build_live_hr_research_features(
         "approval_status": APPROVAL_STATUS,
         "mode": mode,
         "generated_at": _iso_z(parsed_generated_at),
-        "target_date": target_date or "",
+        "target_date": target_operating_date or "",
+        "target_date_semantics": "courtvision_operating_date",
+        "operating_timezone": COURTVISION_OPERATING_TIMEZONE_NAME,
+        "date_fields": {
+            "game_date": "CourtVision operating date in America/Toronto",
+            "game_date_operating": "CourtVision operating date in America/Toronto",
+            "game_date_utc": "UTC calendar date from commence_time_utc",
+            "commence_time": "UTC timestamp preserved from source",
+            "commence_time_utc": "UTC timestamp preserved from source",
+        },
         "snapshot_selection_rule": (
             PREDICTION_SNAPSHOT_SELECTION_RULE
             if mode == "prediction"
@@ -1136,6 +1429,7 @@ def build_live_hr_research_features(
         "dates": dates,
         "positive_outcomes": sum(row.get("hit_hr") == "1" for row in eligible_rows),
         "exclusion_counts": _exclusion_counts(exclusions),
+        "event_eligibility_counts": _event_eligibility_counts(rows),
         "missingness": _row_missingness(rows, FEATURE_COLUMNS),
         "source_files": {
             "odds_csv": str(odds_source),
@@ -1410,15 +1704,7 @@ def resolve_player_identities(
     provider candidates are quarantined for manual review.
     """
 
-    timestamp = (
-        _parse_datetime(resolved_at, "resolved_at")
-        if resolved_at is not None and not isinstance(resolved_at, datetime)
-        else resolved_at
-    )
-    if timestamp is None:
-        timestamp = _utc_now()
-    if timestamp.tzinfo is None:
-        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    timestamp = _coerce_datetime_utc(resolved_at, "resolved_at")
     resolved_at_text = _iso_z(timestamp)
     provider_rows = tuple(identity_provider_rows) + _read_identity_provider_rows(
         identity_source_csv
@@ -1710,13 +1996,13 @@ def _training_rows_from_feature_csv(feature_rows_path: str | Path) -> tuple[dict
     invalid_schema = [
         row.get("feature_row_id", f"row {row.get('__row_number')}")
         for row in rows
-        if row.get("feature_schema_version") != FEATURE_SCHEMA_VERSION
+        if row.get("feature_schema_version") not in COMPATIBLE_FEATURE_SCHEMA_VERSIONS
     ]
     if invalid_schema:
         raise MLBHRResearchBaselineError(
             "feature rows use unsupported schema version"
         )
-    return tuple(rows)
+    return _normalize_feature_rows(rows)
 
 
 def _eligible_training_rows(rows: Sequence[Mapping[str, str]]) -> tuple[dict[str, str], ...]:
@@ -2151,11 +2437,7 @@ def train_research_logistic_baseline(
         raise MLBHRResearchBaselineError(
             "chronological training split does not contain both classes"
         )
-    generated = (
-        _parse_datetime(generated_at, "generated_at")
-        if generated_at is not None
-        else _utc_now()
-    )
+    generated = _coerce_datetime_utc(generated_at, "generated_at")
     preprocessor, weights = _fit_logistic(train_rows)
     metrics = {
         split_name: _evaluate_split(
@@ -2338,7 +2620,7 @@ def load_model_bundle(bundle_dir: str | Path) -> ModelBundle:
         raise MLBHRResearchBaselineError("unsupported model schema")
     if metadata_payload.get("model_id") != model_payload.get("model_id"):
         raise MLBHRResearchBaselineError("model_id mismatch inside bundle")
-    if model_payload.get("feature_schema_version") != FEATURE_SCHEMA_VERSION:
+    if model_payload.get("feature_schema_version") not in COMPATIBLE_FEATURE_SCHEMA_VERSIONS:
         raise MLBHRResearchBaselineError("model expects unsupported feature schema")
     if tuple(model_payload.get("required_input_columns", ())) != MODEL_REQUIRED_INPUT_COLUMNS:
         raise MLBHRResearchBaselineError("model required input columns changed")
@@ -2386,19 +2668,12 @@ def generate_daily_research_predictions(
     """Generate immutable current-day research predictions from local odds."""
 
     bundle = load_model_bundle(model_bundle_dir)
-    timestamp = (
-        _parse_datetime(prediction_timestamp, "prediction_timestamp")
-        if prediction_timestamp is not None and not isinstance(prediction_timestamp, datetime)
-        else prediction_timestamp
-    )
-    if timestamp is None:
-        timestamp = _utc_now()
-    if timestamp.tzinfo is None:
-        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    target_operating_date = _target_operating_date_text(target_date)
+    timestamp = _coerce_datetime_utc(prediction_timestamp, "prediction_timestamp")
     feature_result = build_live_hr_research_features(
         odds_path=odds_path,
         results_path=None,
-        target_date=target_date,
+        target_date=target_operating_date,
         prediction_timestamp=timestamp,
         mode="prediction",
         generated_at=timestamp,
@@ -2445,6 +2720,12 @@ def generate_daily_research_predictions(
             "event_id": row.get("event_id", ""),
             "game_date": row.get("game_date", ""),
             "commence_time": row.get("commence_time", ""),
+            "commence_time_utc": row.get("commence_time_utc", row.get("commence_time", "")),
+            "game_date_utc": row.get("game_date_utc", ""),
+            "game_date_operating": row.get("game_date_operating", row.get("game_date", "")),
+            "operating_timezone": row.get(
+                "operating_timezone", COURTVISION_OPERATING_TIMEZONE_NAME
+            ),
             "player_id": row.get("player_id", ""),
             "player_name": row.get("player_name", ""),
             "normalized_player_name": row.get("normalized_player_name", ""),
@@ -2452,6 +2733,9 @@ def generate_daily_research_predictions(
             "opponent": row.get("opponent", ""),
             "home_team": row.get("home_team", ""),
             "away_team": row.get("away_team", ""),
+            "event_eligibility_status": row.get("event_eligibility_status", ""),
+            "event_eligibility_reason": row.get("event_eligibility_reason", ""),
+            "event_eligibility_rule": row.get("event_eligibility_rule", ""),
             "sportsbook": row.get("sportsbook", ""),
             "sportsbook_name": row.get("sportsbook_name", ""),
             "american_odds": row.get("american_odds", ""),
@@ -2483,7 +2767,9 @@ def generate_daily_research_predictions(
         "prediction_timestamp": _iso_z(timestamp),
         "row_count": len(predictions),
         "excluded_row_count": len(feature_result.exclusions),
-        "target_date": target_date or "",
+        "target_date": target_operating_date or "",
+        "target_date_semantics": "courtvision_operating_date",
+        "operating_timezone": COURTVISION_OPERATING_TIMEZONE_NAME,
         "research_label": RESEARCH_ONLY_LABEL,
         "approval_status": APPROVAL_STATUS,
         "rerun_behavior": "creates a new immutable timestamped prediction snapshot",
@@ -2885,15 +3171,7 @@ def settle_prediction_ledger(
     """Append settlement records without mutating original prediction rows."""
 
     ledger = Path(ledger_path).expanduser().resolve()
-    timestamp = (
-        _parse_datetime(settlement_timestamp, "settlement_timestamp")
-        if settlement_timestamp is not None and not isinstance(settlement_timestamp, datetime)
-        else settlement_timestamp
-    )
-    if timestamp is None:
-        timestamp = _utc_now()
-    if timestamp.tzinfo is None:
-        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    timestamp = _coerce_datetime_utc(settlement_timestamp, "settlement_timestamp")
     result_index, duplicate_results, result_path_text, _ = _load_result_index(results_path)
     with _FileLock(ledger):
         _, ledger_rows = _read_ledger(ledger)
@@ -3159,15 +3437,7 @@ def capture_closing_line_snapshots(
     )
     odds_source = Path(odds_path).expanduser().resolve()
     _, odds_rows = _read_csv(odds_source, required_columns=ODDS_REQUIRED_COLUMNS, label="odds")
-    timestamp = (
-        _parse_datetime(captured_at, "captured_at")
-        if captured_at is not None and not isinstance(captured_at, datetime)
-        else captured_at
-    )
-    if timestamp is None:
-        timestamp = _utc_now()
-    if timestamp.tzinfo is None:
-        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    timestamp = _coerce_datetime_utc(captured_at, "captured_at")
     captured_text = _iso_z(timestamp)
 
     records: list[dict[str, str]] = []
@@ -3362,7 +3632,9 @@ def _completed_daily_run(
             continue
         if payload.get("dry_run") is True:
             continue
-        if _clean(payload.get("status")) not in {"completed", "completed_no_predictions"}:
+        if _clean(payload.get("status")) != "completed":
+            continue
+        if _manifest_int(payload, "prediction_count") <= 0:
             continue
         if Path(_clean(payload.get("model_dir"))).expanduser().resolve() != model_dir:
             continue
@@ -3384,12 +3656,19 @@ def _unique_daily_run_dir(date_root: Path, run_id: str) -> tuple[str, Path]:
 def _daily_run_condition(
     prediction_result: PredictionRunResult,
 ) -> str:
-    feature_manifest = prediction_result.manifest.get("feature_manifest")
-    feature_rows = 0
-    if isinstance(feature_manifest, Mapping):
-        feature_rows = int(feature_manifest.get("row_count", 0) or 0)
+    feature_manifest = _manifest_mapping(
+        prediction_result.manifest.get("feature_manifest")
+    )
+    feature_rows = _manifest_int(feature_manifest, "row_count")
+    exclusion_counts = _manifest_dict(feature_manifest, "exclusion_counts")
     if feature_rows == 0:
         return "no_games_found"
+    if (
+        not prediction_result.predictions
+        and exclusion_counts
+        and set(exclusion_counts) == {SPECIAL_EVENT_EXCLUSION_REASON}
+    ):
+        return "special_event_quarantined"
     if not prediction_result.predictions:
         return "no_eligible_players"
     if any(row.get("exclusion_reason") == "game_already_started" for row in prediction_result.exclusions):
@@ -3445,17 +3724,11 @@ def run_daily_research(
         ) from exc
     model_path = Path(model_dir).expanduser().resolve()
     ledger_path = Path(ledger_csv).expanduser().resolve()
+    odds_path = Path(odds_csv).expanduser().resolve()
+    odds_sha256 = _file_sha256(odds_path)
     root = Path(output_root).expanduser().resolve()
     date_root = root / target_date
-    timestamp = (
-        _parse_datetime(prediction_timestamp, "prediction_timestamp")
-        if prediction_timestamp is not None and not isinstance(prediction_timestamp, datetime)
-        else prediction_timestamp
-    )
-    if timestamp is None:
-        timestamp = _utc_now()
-    if timestamp.tzinfo is None:
-        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    timestamp = _coerce_datetime_utc(prediction_timestamp, "prediction_timestamp")
     timestamp_text = _iso_z(timestamp)
 
     if not dry_run and not force:
@@ -3473,7 +3746,7 @@ def run_daily_research(
         DAILY_RUN_SCHEMA_VERSION,
         target_date,
         str(model_path),
-        _file_sha256(odds_csv),
+        odds_sha256,
         timestamp_text,
         length=8,
     )
@@ -3490,7 +3763,7 @@ def run_daily_research(
     if dry_run:
         prediction_result = generate_daily_research_predictions(
             model_bundle_dir=model_path,
-            odds_path=odds_csv,
+            odds_path=odds_path,
             target_date=target_date,
             prediction_timestamp=timestamp,
             dry_run=True,
@@ -3505,6 +3778,9 @@ def run_daily_research(
             write_cache=False,
         )
         condition = _daily_run_condition(prediction_result)
+        prediction_summary_fields = _daily_prediction_summary_fields(
+            prediction_result
+        )
         summary = {
             "daily_run_schema_version": DAILY_RUN_SCHEMA_VERSION,
             "run_id": run_id,
@@ -3513,17 +3789,28 @@ def run_daily_research(
             "dry_run": True,
             "force": force,
             "target_date": target_date,
+            "target_date_semantics": "courtvision_operating_date",
+            "operating_timezone": COURTVISION_OPERATING_TIMEZONE_NAME,
             "model_dir": str(model_path),
-            "odds_csv": str(Path(odds_csv).expanduser().resolve()),
+            "odds_csv": str(odds_path),
+            "source_odds_sha256": odds_sha256,
             "ledger_csv": str(ledger_path),
             "prediction_timestamp": timestamp_text,
             "prediction_run_id": prediction_result.prediction_run_id,
             "prediction_count": len(prediction_result.predictions),
             "excluded_row_count": len(prediction_result.exclusions),
+            **prediction_summary_fields,
             "ledger_appended_rows": 0,
             "identity_resolved_count": identity_result.report.get("resolved_count", 0),
             "identity_unresolved_count": identity_result.report.get("unresolved_count", 0),
             "identity_quarantined_count": identity_result.report.get("quarantined_count", 0),
+            "idempotency_scope": {
+                "target_date": target_date,
+                "model_dir": str(model_path),
+                "source_odds_sha256": odds_sha256,
+                "prediction_status": "dry_run",
+                "zero_prediction_runs_block_future_runs": False,
+            },
             "research_label": RESEARCH_ONLY_LABEL,
             "approval_status": APPROVAL_STATUS,
         }
@@ -3537,7 +3824,7 @@ def run_daily_research(
     predictions_dir = run_dir / "predictions"
     prediction_result = generate_daily_research_predictions(
         model_bundle_dir=model_path,
-        odds_path=odds_csv,
+        odds_path=odds_path,
         output_dir=predictions_dir,
         target_date=target_date,
         prediction_timestamp=timestamp,
@@ -3590,6 +3877,7 @@ def run_daily_research(
 
     condition = _daily_run_condition(prediction_result)
     status = "completed" if prediction_result.predictions else "completed_no_predictions"
+    prediction_summary_fields = _daily_prediction_summary_fields(prediction_result)
     summary = {
         "daily_run_schema_version": DAILY_RUN_SCHEMA_VERSION,
         "run_id": run_id,
@@ -3598,13 +3886,17 @@ def run_daily_research(
         "dry_run": False,
         "force": force,
         "target_date": target_date,
+        "target_date_semantics": "courtvision_operating_date",
+        "operating_timezone": COURTVISION_OPERATING_TIMEZONE_NAME,
         "model_dir": str(model_path),
-        "odds_csv": str(Path(odds_csv).expanduser().resolve()),
+        "odds_csv": str(odds_path),
+        "source_odds_sha256": odds_sha256,
         "ledger_csv": str(ledger_path),
         "prediction_timestamp": timestamp_text,
         "prediction_run_id": prediction_result.prediction_run_id,
         "prediction_count": len(prediction_result.predictions),
         "excluded_row_count": len(prediction_result.exclusions),
+        **prediction_summary_fields,
         "prediction_artifact_dir": str(predictions_dir),
         "ledger_appended_rows": ledger_appended,
         "identity_artifact_dir": str(identity_dir),
@@ -3613,6 +3905,16 @@ def run_daily_research(
         "identity_quarantined_count": identity_result.report.get("quarantined_count", 0),
         "artifact_verification": artifact_verification.summary,
         "ledger_verification": ledger_verification.summary,
+        "idempotency_scope": {
+            "target_date": target_date,
+            "model_dir": str(model_path),
+            "source_odds_sha256": odds_sha256,
+            "prediction_status": status,
+            "zero_prediction_runs_block_future_runs": False,
+            "nonzero_prediction_runs_block_future_runs": bool(
+                prediction_result.predictions
+            ),
+        },
         "research_label": RESEARCH_ONLY_LABEL,
         "approval_status": APPROVAL_STATUS,
     }
@@ -3629,8 +3931,19 @@ def run_daily_research(
 def _load_feature_rows_optional(path: str | Path | None) -> tuple[dict[str, str], ...]:
     if path is None:
         return ()
-    _, rows = _read_csv(path, required_columns=FEATURE_COLUMNS, label="feature rows")
-    return tuple(rows)
+    _, rows = _read_csv(
+        path,
+        required_columns=(
+            "feature_schema_version",
+            "game_date",
+            "event_id",
+            "normalized_player_name",
+            "eligibility_status",
+            *MODEL_REQUIRED_INPUT_COLUMNS,
+        ),
+        label="feature rows",
+    )
+    return _normalize_feature_rows(rows)
 
 
 def _load_ledger_rows_optional(path: str | Path | None) -> tuple[dict[str, str], ...]:
@@ -3908,15 +4221,7 @@ def build_prospective_trial_report(
 ) -> dict[str, object]:
     """Build the prospective MLB HR research evidence report."""
 
-    timestamp = (
-        _parse_datetime(generated_at, "generated_at")
-        if generated_at is not None and not isinstance(generated_at, datetime)
-        else generated_at
-    )
-    if timestamp is None:
-        timestamp = _utc_now()
-    if timestamp.tzinfo is None:
-        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    timestamp = _coerce_datetime_utc(generated_at, "generated_at")
     _, ledger_rows = _read_ledger(Path(ledger_path).expanduser().resolve())
     prediction_rows = [row for row in ledger_rows if row.get("record_type") == "prediction"]
     settlement_rows = [row for row in ledger_rows if row.get("record_type") == "settlement"]
@@ -4337,9 +4642,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.features_csv:
                 _, rows = _read_csv(
                     args.features_csv,
-                    required_columns=FEATURE_COLUMNS,
+                    required_columns=("player_name", "normalized_player_name"),
                     label="feature rows",
                 )
+                rows = _normalize_feature_rows(rows)
             elif args.predictions_csv:
                 _, rows = _read_csv(
                     args.predictions_csv,
@@ -4445,20 +4751,26 @@ __all__ = [
     "APPROVAL_STATUS",
     "CLOSING_LINE_COLUMNS",
     "CLOSING_LINE_SCHEMA_VERSION",
+    "COMPATIBLE_FEATURE_SCHEMA_VERSIONS",
+    "COURTVISION_OPERATING_TIMEZONE",
+    "COURTVISION_OPERATING_TIMEZONE_NAME",
     "DAILY_RUN_SCHEMA_VERSION",
     "DEFAULT_IDENTITY_MAPPING_VERSION",
     "FEATURE_COLUMNS",
     "FEATURE_SCHEMA_VERSION",
+    "FEATURE_SCHEMA_VERSION_V1",
     "IDENTITY_CACHE_COLUMNS",
     "IDENTITY_CACHE_SCHEMA_VERSION",
     "LEDGER_COLUMNS",
     "LEDGER_SCHEMA_VERSION",
     "MLBHRResearchBaselineError",
     "MODEL_BUNDLE_SCHEMA_VERSION",
+    "MODEL_REQUIRED_INPUT_COLUMNS",
     "PREDICTION_COLUMNS",
     "PREDICTION_SCHEMA_VERSION",
     "PROSPECTIVE_REPORT_SCHEMA_VERSION",
     "RESEARCH_ONLY_LABEL",
+    "SPECIAL_EVENT_EXCLUSION_REASON",
     "append_predictions_to_ledger",
     "append_identity_cache_records",
     "american_to_decimal",
@@ -4469,6 +4781,7 @@ __all__ = [
     "build_validation_gate_report",
     "capture_closing_line_snapshots",
     "chronological_split_rows",
+    "courtvision_operating_date",
     "generate_daily_research_predictions",
     "load_model_bundle",
     "main",
