@@ -1,0 +1,559 @@
+{
+  "base_case": {
+    "feature_timestamp_utc": "2026-06-05T18:00:00Z",
+    "feature_cutoff_timestamp_utc": "2026-06-05T18:30:00Z",
+    "source_manifest_id": "nba-player-minutes-fixture-manifest-v1",
+    "repository_commit_sha": "0123456789abcdef0123456789abcdef01234567",
+    "baseline": {
+      "provider_event_id": "odds_evt_20260605_okc_ind",
+      "canonical_event_id": "nba-2026-06-05-okc-ind",
+      "player_id": "nba-player-1628983",
+      "canonical_player_name": "Shai Gilgeous-Alexander",
+      "team": "OKC",
+      "opponent": "IND",
+      "commence_time_utc": "2026-06-06T00:40:00Z",
+      "event_identity_status": "resolved",
+      "player_identity_status": "resolved",
+      "min_avg": 35.2,
+      "min_recent": 36.4,
+      "season_minutes_sample_size": 70,
+      "recent_minutes_sample_size": 8,
+      "recent_minutes_stddev": 2.1,
+      "last_game_minutes": 36.1,
+      "source_timestamp_utc": "2026-06-05T18:00:00Z",
+      "source_reference": "fixture:baseline:stable-high-starter"
+    },
+    "lineup": {
+      "starter_status": "confirmed_starter",
+      "lineup_status": "confirmed",
+      "source_timestamp_utc": "2026-06-05T18:08:00Z",
+      "source_reference": "fixture:lineup:confirmed-starter"
+    },
+    "injury_availability": {
+      "injury_status": "healthy",
+      "availability_status": "available",
+      "source_timestamp_utc": "2026-06-05T18:04:00Z",
+      "source_reference": "fixture:availability:healthy"
+    },
+    "schedule": {
+      "days_rest": 2,
+      "games_last_7_days": 3,
+      "games_last_14_days": 6,
+      "source_timestamp_utc": "2026-06-05T17:45:00Z",
+      "source_reference": "fixture:schedule:normal-rest"
+    },
+    "role_context": {
+      "role_status": "stable",
+      "teammate_absence_context": {
+        "verified": false,
+        "absent_teammates": [],
+        "role_impact_minutes": 0,
+        "review_note": "no reviewed teammate absence impact"
+      },
+      "source_timestamp_utc": "2026-06-05T17:50:00Z",
+      "source_reference": "fixture:role:stable"
+    }
+  },
+  "cases": [
+    {
+      "case_id": "stable_high_minute_starter",
+      "description": "Stable high-minute starter"
+    },
+    {
+      "case_id": "stable_low_minute_starter",
+      "description": "Stable low-minute starter",
+      "overrides": {
+        "baseline": {
+          "player_id": "nba-player-low-starter",
+          "canonical_player_name": "Low Minute Starter",
+          "min_avg": 24.8,
+          "min_recent": 25.6,
+          "recent_minutes_stddev": 1.8,
+          "last_game_minutes": 25.1,
+          "source_reference": "fixture:baseline:stable-low-starter"
+        }
+      }
+    },
+    {
+      "case_id": "stable_bench_player",
+      "description": "Stable bench player",
+      "overrides": {
+        "baseline": {
+          "player_id": "nba-player-bench",
+          "canonical_player_name": "Stable Bench Player",
+          "min_avg": 18.1,
+          "min_recent": 17.4,
+          "recent_minutes_stddev": 2.0,
+          "last_game_minutes": 17.9,
+          "source_reference": "fixture:baseline:stable-bench"
+        },
+        "lineup": {
+          "starter_status": "confirmed_bench",
+          "source_reference": "fixture:lineup:confirmed-bench"
+        }
+      }
+    },
+    {
+      "case_id": "recent_role_increase",
+      "description": "Recent role increase",
+      "overrides": {
+        "baseline": {
+          "player_id": "nba-player-role-up",
+          "canonical_player_name": "Role Increase Player",
+          "min_avg": 25.0,
+          "min_recent": 32.0,
+          "recent_minutes_sample_size": 6,
+          "recent_minutes_stddev": 3.0,
+          "last_game_minutes": 34.0,
+          "source_reference": "fixture:baseline:role-increase"
+        },
+        "role_context": {
+          "role_status": "role_increase_verified",
+          "source_reference": "fixture:role:increase"
+        }
+      }
+    },
+    {
+      "case_id": "recent_role_decrease",
+      "description": "Recent role decrease",
+      "overrides": {
+        "baseline": {
+          "player_id": "nba-player-role-down",
+          "canonical_player_name": "Role Decrease Player",
+          "min_avg": 31.0,
+          "min_recent": 24.0,
+          "recent_minutes_sample_size": 6,
+          "recent_minutes_stddev": 3.5,
+          "last_game_minutes": 23.0,
+          "source_reference": "fixture:baseline:role-decrease"
+        },
+        "role_context": {
+          "role_status": "role_decrease_verified",
+          "source_reference": "fixture:role:decrease"
+        }
+      }
+    },
+    {
+      "case_id": "insufficient_recent_sample",
+      "description": "Insufficient recent sample",
+      "overrides": {
+        "baseline": {
+          "player_id": "nba-player-small-sample",
+          "canonical_player_name": "Small Sample Player",
+          "min_avg": null,
+          "min_recent": 22.0,
+          "season_minutes_sample_size": null,
+          "recent_minutes_sample_size": 2,
+          "recent_minutes_stddev": 4.0,
+          "source_reference": "fixture:baseline:insufficient-recent"
+        }
+      }
+    },
+    {
+      "case_id": "missing_season_minutes",
+      "description": "Missing season minutes",
+      "overrides": {
+        "baseline": {
+          "player_id": "nba-player-missing-season",
+          "canonical_player_name": "Missing Season Player",
+          "min_avg": null,
+          "min_recent": 28.0,
+          "season_minutes_sample_size": null,
+          "recent_minutes_sample_size": 6,
+          "recent_minutes_stddev": 3.0,
+          "source_reference": "fixture:baseline:missing-season"
+        }
+      }
+    },
+    {
+      "case_id": "missing_recent_minutes",
+      "description": "Missing recent minutes",
+      "overrides": {
+        "baseline": {
+          "player_id": "nba-player-missing-recent",
+          "canonical_player_name": "Missing Recent Player",
+          "min_avg": 29.0,
+          "min_recent": null,
+          "recent_minutes_sample_size": null,
+          "recent_minutes_stddev": null,
+          "source_reference": "fixture:baseline:missing-recent"
+        }
+      }
+    },
+    {
+      "case_id": "missing_both_minutes",
+      "description": "Missing both season and recent minutes",
+      "overrides": {
+        "baseline": {
+          "player_id": "nba-player-missing-both",
+          "canonical_player_name": "Missing Both Player",
+          "min_avg": null,
+          "min_recent": null,
+          "season_minutes_sample_size": null,
+          "recent_minutes_sample_size": null,
+          "recent_minutes_stddev": null,
+          "source_reference": "fixture:baseline:missing-both"
+        }
+      }
+    },
+    {
+      "case_id": "high_recent_volatility",
+      "description": "High recent volatility",
+      "overrides": {
+        "baseline": {
+          "player_id": "nba-player-volatile",
+          "canonical_player_name": "Volatile Minutes Player",
+          "min_avg": 30.0,
+          "min_recent": 35.0,
+          "recent_minutes_sample_size": 8,
+          "recent_minutes_stddev": 9.5,
+          "last_game_minutes": 41.0,
+          "source_reference": "fixture:baseline:high-volatility"
+        }
+      }
+    },
+    {
+      "case_id": "confirmed_starter",
+      "description": "Confirmed starter",
+      "overrides": {
+        "baseline": {
+          "player_id": "nba-player-confirmed-starter",
+          "canonical_player_name": "Confirmed Starter",
+          "min_avg": 31.0,
+          "min_recent": 31.5,
+          "source_reference": "fixture:baseline:confirmed-starter"
+        },
+        "lineup": {
+          "starter_status": "confirmed_starter",
+          "source_reference": "fixture:lineup:confirmed-starter-specific"
+        }
+      }
+    },
+    {
+      "case_id": "confirmed_bench_role",
+      "description": "Confirmed bench role",
+      "overrides": {
+        "baseline": {
+          "player_id": "nba-player-confirmed-bench",
+          "canonical_player_name": "Confirmed Bench",
+          "min_avg": 22.0,
+          "min_recent": 21.0,
+          "source_reference": "fixture:baseline:confirmed-bench"
+        },
+        "lineup": {
+          "starter_status": "confirmed_bench",
+          "source_reference": "fixture:lineup:confirmed-bench-specific"
+        }
+      }
+    },
+    {
+      "case_id": "lineup_unconfirmed",
+      "description": "Lineup unconfirmed",
+      "overrides": {
+        "baseline": {
+          "player_id": "nba-player-unconfirmed-lineup",
+          "canonical_player_name": "Unconfirmed Lineup Player",
+          "source_reference": "fixture:baseline:lineup-unconfirmed"
+        },
+        "lineup": {
+          "starter_status": "unknown",
+          "lineup_status": "unconfirmed",
+          "source_reference": "fixture:lineup:unconfirmed"
+        }
+      }
+    },
+    {
+      "case_id": "questionable_player",
+      "description": "Questionable player",
+      "overrides": {
+        "baseline": {
+          "player_id": "nba-player-questionable",
+          "canonical_player_name": "Questionable Player",
+          "source_reference": "fixture:baseline:questionable"
+        },
+        "injury_availability": {
+          "injury_status": "questionable",
+          "availability_status": "questionable",
+          "source_reference": "fixture:availability:questionable"
+        }
+      }
+    },
+    {
+      "case_id": "inactive_player",
+      "description": "Inactive player",
+      "overrides": {
+        "baseline": {
+          "player_id": "nba-player-inactive",
+          "canonical_player_name": "Inactive Player",
+          "source_reference": "fixture:baseline:inactive"
+        },
+        "lineup": {
+          "starter_status": "unknown",
+          "lineup_status": "confirmed"
+        },
+        "injury_availability": {
+          "injury_status": "inactive",
+          "availability_status": "inactive",
+          "source_reference": "fixture:availability:inactive"
+        }
+      }
+    },
+    {
+      "case_id": "player_did_not_dress",
+      "description": "Player did not dress",
+      "overrides": {
+        "baseline": {
+          "player_id": "nba-player-dnd",
+          "canonical_player_name": "Did Not Dress Player",
+          "source_reference": "fixture:baseline:dnd"
+        },
+        "lineup": {
+          "starter_status": "unknown",
+          "lineup_status": "confirmed"
+        },
+        "injury_availability": {
+          "injury_status": "did_not_dress",
+          "availability_status": "did_not_dress",
+          "source_reference": "fixture:availability:dnd"
+        }
+      }
+    },
+    {
+      "case_id": "returning_from_injury",
+      "description": "Player returning from injury",
+      "overrides": {
+        "baseline": {
+          "player_id": "nba-player-returning",
+          "canonical_player_name": "Returning Player",
+          "source_reference": "fixture:baseline:returning"
+        },
+        "injury_availability": {
+          "injury_status": "returning_from_injury",
+          "availability_status": "available",
+          "source_reference": "fixture:availability:returning"
+        },
+        "role_context": {
+          "role_status": "returning_from_injury",
+          "source_reference": "fixture:role:returning"
+        }
+      }
+    },
+    {
+      "case_id": "confirmed_minutes_restriction",
+      "description": "Confirmed minutes restriction",
+      "overrides": {
+        "baseline": {
+          "player_id": "nba-player-restricted",
+          "canonical_player_name": "Restricted Player",
+          "min_avg": 34.0,
+          "min_recent": 35.0,
+          "source_reference": "fixture:baseline:restriction"
+        },
+        "role_context": {
+          "role_status": "minutes_restriction",
+          "minutes_restriction": {
+            "confirmed": true,
+            "minutes_cap": 24,
+            "source_note": "reviewed pregame restriction"
+          },
+          "source_reference": "fixture:role:restriction"
+        }
+      }
+    },
+    {
+      "case_id": "verified_teammate_absence",
+      "description": "Verified teammate absence",
+      "overrides": {
+        "baseline": {
+          "player_id": "nba-player-teammate-out",
+          "canonical_player_name": "Teammate Absence Player",
+          "source_reference": "fixture:baseline:teammate-absence"
+        },
+        "role_context": {
+          "teammate_absence_context": {
+            "verified": true,
+            "absent_teammates": ["Primary Creator"],
+            "role_impact_minutes": 2.5,
+            "review_note": "reviewed on-ball role increase"
+          },
+          "source_reference": "fixture:role:teammate-absence"
+        }
+      }
+    },
+    {
+      "case_id": "back_to_back_game",
+      "description": "Back-to-back game",
+      "overrides": {
+        "baseline": {
+          "player_id": "nba-player-b2b",
+          "canonical_player_name": "Back To Back Player",
+          "source_reference": "fixture:baseline:back-to-back"
+        },
+        "schedule": {
+          "days_rest": 0,
+          "source_reference": "fixture:schedule:back-to-back"
+        }
+      }
+    },
+    {
+      "case_id": "condensed_schedule",
+      "description": "Condensed schedule",
+      "overrides": {
+        "baseline": {
+          "player_id": "nba-player-condensed",
+          "canonical_player_name": "Condensed Schedule Player",
+          "source_reference": "fixture:baseline:condensed"
+        },
+        "schedule": {
+          "days_rest": 1,
+          "games_last_7_days": 5,
+          "games_last_14_days": 9,
+          "source_reference": "fixture:schedule:condensed"
+        }
+      }
+    },
+    {
+      "case_id": "observation_exactly_at_cutoff",
+      "description": "Observation exactly at cutoff",
+      "overrides": {
+        "baseline": {
+          "player_id": "nba-player-cutoff",
+          "canonical_player_name": "Cutoff Boundary Player",
+          "source_timestamp_utc": "2026-06-05T18:30:00Z",
+          "source_reference": "fixture:baseline:at-cutoff"
+        },
+        "lineup": {
+          "source_timestamp_utc": "2026-06-05T18:30:00Z",
+          "source_reference": "fixture:lineup:at-cutoff"
+        },
+        "injury_availability": {
+          "source_timestamp_utc": "2026-06-05T18:30:00Z",
+          "source_reference": "fixture:availability:at-cutoff"
+        },
+        "schedule": {
+          "source_timestamp_utc": "2026-06-05T18:30:00Z",
+          "source_reference": "fixture:schedule:at-cutoff"
+        },
+        "role_context": {
+          "source_timestamp_utc": "2026-06-05T18:30:00Z",
+          "source_reference": "fixture:role:at-cutoff"
+        }
+      }
+    },
+    {
+      "case_id": "observation_after_cutoff",
+      "description": "Observation after cutoff",
+      "expected_error": "feature cutoff",
+      "overrides": {
+        "baseline": {
+          "player_id": "nba-player-after-cutoff",
+          "canonical_player_name": "After Cutoff Player",
+          "source_timestamp_utc": "2026-06-05T18:31:00Z",
+          "source_reference": "fixture:baseline:after-cutoff"
+        }
+      }
+    },
+    {
+      "case_id": "target_game_actual_minutes_supplied",
+      "description": "Target-game actual minutes supplied",
+      "expected_error": "target-game actual minutes",
+      "overrides": {
+        "baseline": {
+          "player_id": "nba-player-leak-actual",
+          "canonical_player_name": "Leak Actual Player",
+          "actual_minutes": 37.0,
+          "source_reference": "fixture:baseline:leak-actual"
+        }
+      }
+    },
+    {
+      "case_id": "target_game_final_stat_row_supplied",
+      "description": "Target-game final-stat row supplied",
+      "expected_error": "target-event final statistics",
+      "overrides": {
+        "target_game_final_stats": [
+          {
+            "player_id": "nba-player-leak-final",
+            "final_points": 32,
+            "actual_minutes": 37.0
+          }
+        ],
+        "baseline": {
+          "player_id": "nba-player-leak-final",
+          "canonical_player_name": "Leak Final Player",
+          "source_reference": "fixture:baseline:leak-final"
+        }
+      }
+    },
+    {
+      "case_id": "timezone_naive_timestamp",
+      "description": "Timezone-naive timestamp",
+      "expected_error": "timezone-aware",
+      "overrides": {
+        "baseline": {
+          "player_id": "nba-player-naive",
+          "canonical_player_name": "Naive Timestamp Player",
+          "source_timestamp_utc": "2026-06-05T18:00:00",
+          "source_reference": "fixture:baseline:naive"
+        }
+      }
+    },
+    {
+      "case_id": "unresolved_player_identity",
+      "description": "Unresolved player identity",
+      "overrides": {
+        "baseline": {
+          "player_id": null,
+          "canonical_player_name": "Unresolved Player",
+          "player_identity_status": "unresolved",
+          "source_reference": "fixture:baseline:player-unresolved"
+        }
+      }
+    },
+    {
+      "case_id": "unresolved_event_identity",
+      "description": "Unresolved event identity",
+      "overrides": {
+        "baseline": {
+          "canonical_event_id": null,
+          "player_id": "nba-player-event-unresolved",
+          "canonical_player_name": "Unresolved Event Player",
+          "event_identity_status": "unresolved",
+          "source_reference": "fixture:baseline:event-unresolved"
+        }
+      }
+    },
+    {
+      "case_id": "conflicting_status_evidence",
+      "description": "Conflicting status evidence",
+      "overrides": {
+        "baseline": {
+          "player_id": "nba-player-conflicting",
+          "canonical_player_name": "Conflicting Status Player",
+          "source_reference": "fixture:baseline:conflicting"
+        },
+        "lineup": {
+          "starter_status": "confirmed_starter",
+          "lineup_status": "confirmed",
+          "source_reference": "fixture:lineup:conflicting"
+        },
+        "injury_availability": {
+          "injury_status": "inactive",
+          "availability_status": "inactive",
+          "source_reference": "fixture:availability:conflicting"
+        }
+      }
+    },
+    {
+      "case_id": "source_fixture_immutability",
+      "description": "Source-fixture immutability",
+      "overrides": {
+        "baseline": {
+          "player_id": "nba-player-immutability",
+          "canonical_player_name": "Immutability Player",
+          "source_reference": "fixture:baseline:immutability"
+        }
+      }
+    }
+  ]
+}
