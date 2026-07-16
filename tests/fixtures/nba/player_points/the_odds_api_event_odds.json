@@ -1,0 +1,38 @@
+{
+  "id": "odds_evt_20260605_okc_ind",
+  "sport_key": "basketball_nba",
+  "commence_time": "2026-06-06T00:40:00Z",
+  "home_team": "Oklahoma City Thunder",
+  "away_team": "Indiana Pacers",
+  "bookmakers": [
+    {
+      "key": "draftkings",
+      "title": "DraftKings",
+      "last_update": "2026-06-05T18:01:00Z",
+      "markets": [
+        {
+          "key": "player_points",
+          "last_update": "2026-06-05T18:02:00Z",
+          "outcomes": [
+            {
+              "name": "Over",
+              "description": "Shai Gilgeous-Alexander",
+              "team": "OKC",
+              "opponent": "IND",
+              "price": -110,
+              "point": 31.5
+            },
+            {
+              "name": "Under",
+              "description": "Shai Gilgeous-Alexander",
+              "team": "OKC",
+              "opponent": "IND",
+              "price": -115,
+              "point": 31.5
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
