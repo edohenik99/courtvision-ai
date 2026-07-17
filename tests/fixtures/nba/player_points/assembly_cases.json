@@ -1,0 +1,405 @@
+{
+  "base_case": {
+    "market": {
+      "provider_event_id": "odds_evt_20260605_okc_ind",
+      "sportsbook": "DraftKings",
+      "market": "player_points",
+      "provider_player_name": "Shai Gilgeous-Alexander",
+      "line": 31.5,
+      "american_odds": -110,
+      "decimal_odds": 1.909091,
+      "implied_probability": 0.52381,
+      "market_timestamp_utc": "2026-06-05T18:02:00Z",
+      "market_source_id": "the-odds-api:odds_evt_20260605_okc_ind:draftkings:player_points:sga:31.5:-110",
+      "market_source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "market_schema_version": "nba-player-points-market-v1"
+    },
+    "crosswalk": {
+      "canonical_event_id": "nba-2026-06-05-okc-ind",
+      "player_id": "nba-player-1628983",
+      "canonical_player_name": "Shai Gilgeous-Alexander",
+      "team": "OKC",
+      "opponent": "IND",
+      "commence_time_utc": "2026-06-06T00:40:00Z",
+      "operating_date": "2026-06-05",
+      "event_identity_status": "resolved",
+      "player_identity_status": "resolved",
+      "event_identity_method": "reviewed_event_mapping",
+      "player_identity_method": "reviewed_player_mapping",
+      "mapping_version": "nba-player-points-crosswalk-mapping-v1",
+      "crosswalk_source_hashes": {
+        "reviewed_event_mapping": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "reviewed_player_mapping": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      }
+    },
+    "minutes": {
+      "canonical_event_id": "nba-2026-06-05-okc-ind",
+      "player_id": "nba-player-1628983",
+      "canonical_player_name": "Shai Gilgeous-Alexander",
+      "team": "OKC",
+      "opponent": "IND",
+      "operating_date": "2026-06-05",
+      "commence_time_utc": "2026-06-06T00:40:00Z",
+      "projected_minutes": 36.5,
+      "projected_minutes_low": 32.0,
+      "projected_minutes_high": 39.5,
+      "minutes_confidence": "high",
+      "minutes_projection_status": "projected",
+      "minutes_projection_method": "offline_fixture_minutes_v1",
+      "minutes_exclusion_reason": "none",
+      "feature_timestamp_utc": "2026-06-05T18:00:00Z",
+      "feature_cutoff_timestamp_utc": "2026-06-05T18:30:00Z",
+      "minutes_source_hashes": {
+        "baseline": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "lineup": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "availability": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      },
+      "feature_schema_version": "nba-player-minutes-feature-v1",
+      "lineup_status": "confirmed",
+      "injury_status": "active",
+      "recent_minutes": 37.2,
+      "season_minutes": 35.8
+    },
+    "projection": {
+      "projected_points": 32.1,
+      "projection_method": "deterministic_fixture_projection_existing_nba_method",
+      "projection_timestamp_utc": "2026-06-05T18:05:00Z",
+      "projection_cutoff_timestamp_utc": "2026-06-05T18:30:00Z",
+      "projection_source": "offline_fixture_projection",
+      "projection_source_id": "projection-fixture-sga-20260605",
+      "projection_source_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+      "projection_schema_version": "nba-player-points-projection-v1"
+    },
+    "probability": null,
+    "provenance": {
+      "prediction_run_id": "run-nba-points-20260605-fixture",
+      "model_id": "nba-player-points-research-model-v1",
+      "repository_commit_sha": "0123456789abcdef0123456789abcdef01234567",
+      "source_manifest_id": "nba-player-points-assembly-fixture-manifest-preview",
+      "prediction_timestamp_utc": "2026-06-05T18:06:00Z",
+      "research_label": "research_only_not_for_betting"
+    }
+  },
+  "cases": [
+    {
+      "case_id": "valid_projection_no_probabilities",
+      "overrides": {}
+    },
+    {
+      "case_id": "valid_probability_research",
+      "overrides": {
+        "probability": {
+          "model_over_probability": 0.56,
+          "model_under_probability": 0.44,
+          "probability_source_id": "validated-prob-fixture-sga-001",
+          "probability_model_id": "nba-probability-validation-fixture-v1",
+          "probability_schema_version": "nba-player-points-probability-v1",
+          "probability_source_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+          "probability_timestamp_utc": "2026-06-05T18:07:00Z",
+          "claims_probability_eligibility": true
+        }
+      }
+    },
+    {
+      "case_id": "missing_projected_minutes",
+      "overrides": {
+        "minutes": {
+          "projected_minutes": null,
+          "projected_minutes_low": null,
+          "projected_minutes_high": null
+        }
+      }
+    },
+    {
+      "case_id": "inactive_minutes_status",
+      "overrides": {
+        "minutes": {
+          "projected_minutes": null,
+          "projected_minutes_low": null,
+          "projected_minutes_high": null,
+          "minutes_confidence": "unavailable",
+          "minutes_projection_status": "inactive",
+          "minutes_exclusion_reason": "inactive pregame status"
+        }
+      }
+    },
+    {
+      "case_id": "lineup_unconfirmed_minutes_status",
+      "overrides": {
+        "minutes": {
+          "minutes_confidence": "low",
+          "minutes_projection_status": "lineup_unconfirmed",
+          "minutes_exclusion_reason": "lineup unconfirmed before cutoff",
+          "lineup_status": "unconfirmed"
+        }
+      }
+    },
+    {
+      "case_id": "unresolved_event_identity",
+      "overrides": {
+        "crosswalk": {
+          "canonical_event_id": null,
+          "event_identity_status": "unresolved",
+          "event_identity_method": "no_reviewed_event_mapping"
+        }
+      }
+    },
+    {
+      "case_id": "unresolved_player_identity",
+      "overrides": {
+        "crosswalk": {
+          "player_id": null,
+          "player_identity_status": "unresolved",
+          "player_identity_method": "no_reviewed_player_mapping"
+        }
+      }
+    },
+    {
+      "case_id": "market_timestamp_after_cutoff",
+      "overrides": {
+        "market": {
+          "market_timestamp_utc": "2026-06-05T19:00:00Z"
+        }
+      }
+    },
+    {
+      "case_id": "projection_timestamp_after_cutoff",
+      "overrides": {
+        "projection": {
+          "projection_timestamp_utc": "2026-06-05T18:45:00Z"
+        }
+      }
+    },
+    {
+      "case_id": "minutes_timestamp_after_cutoff",
+      "overrides": {
+        "minutes": {
+          "feature_timestamp_utc": "2026-06-05T18:45:00Z"
+        }
+      }
+    },
+    {
+      "case_id": "conflicting_player_id",
+      "overrides": {
+        "minutes": {
+          "player_id": "nba-player-conflict"
+        }
+      }
+    },
+    {
+      "case_id": "conflicting_event_id",
+      "overrides": {
+        "minutes": {
+          "canonical_event_id": "nba-2026-06-05-okc-bos"
+        }
+      }
+    },
+    {
+      "case_id": "team_mismatch",
+      "overrides": {
+        "minutes": {
+          "team": "IND"
+        }
+      }
+    },
+    {
+      "case_id": "opponent_mismatch",
+      "overrides": {
+        "minutes": {
+          "opponent": "BOS"
+        }
+      }
+    },
+    {
+      "case_id": "operating_date_mismatch",
+      "overrides": {
+        "crosswalk": {
+          "operating_date": "2026-06-06"
+        }
+      }
+    },
+    {
+      "case_id": "commence_time_mismatch",
+      "overrides": {
+        "minutes": {
+          "commence_time_utc": "2026-06-06T01:30:00Z"
+        }
+      }
+    },
+    {
+      "case_id": "missing_sportsbook",
+      "overrides": {
+        "market": {
+          "sportsbook": ""
+        }
+      }
+    },
+    {
+      "case_id": "missing_line",
+      "overrides": {
+        "market": {
+          "line": null
+        }
+      }
+    },
+    {
+      "case_id": "missing_odds",
+      "overrides": {
+        "market": {
+          "american_odds": null,
+          "decimal_odds": null,
+          "implied_probability": null
+        }
+      }
+    },
+    {
+      "case_id": "missing_market_source_hash",
+      "overrides": {
+        "market": {
+          "market_source_hash": null
+        }
+      }
+    },
+    {
+      "case_id": "missing_projection_source_hash",
+      "overrides": {
+        "projection": {
+          "projection_source_hash": null
+        }
+      }
+    },
+    {
+      "case_id": "missing_minutes_source_hash",
+      "overrides": {
+        "minutes": {
+          "minutes_source_hashes": {
+            "baseline": null,
+            "lineup": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "availability": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+          }
+        }
+      }
+    },
+    {
+      "case_id": "malformed_over_probability",
+      "overrides": {
+        "probability": {
+          "model_over_probability": 1.2,
+          "model_under_probability": 0.0,
+          "probability_source_id": "validated-prob-fixture-sga-001",
+          "probability_model_id": "nba-probability-validation-fixture-v1",
+          "probability_schema_version": "nba-player-points-probability-v1",
+          "probability_source_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+          "probability_timestamp_utc": "2026-06-05T18:07:00Z"
+        }
+      }
+    },
+    {
+      "case_id": "malformed_under_probability",
+      "overrides": {
+        "probability": {
+          "model_over_probability": 0.55,
+          "model_under_probability": "bad",
+          "probability_source_id": "validated-prob-fixture-sga-001",
+          "probability_model_id": "nba-probability-validation-fixture-v1",
+          "probability_schema_version": "nba-player-points-probability-v1",
+          "probability_source_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+          "probability_timestamp_utc": "2026-06-05T18:07:00Z"
+        }
+      }
+    },
+    {
+      "case_id": "probabilities_not_summing_to_one",
+      "overrides": {
+        "probability": {
+          "model_over_probability": 0.6,
+          "model_under_probability": 0.5,
+          "probability_source_id": "validated-prob-fixture-sga-001",
+          "probability_model_id": "nba-probability-validation-fixture-v1",
+          "probability_schema_version": "nba-player-points-probability-v1",
+          "probability_source_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+          "probability_timestamp_utc": "2026-06-05T18:07:00Z"
+        }
+      }
+    },
+    {
+      "case_id": "probability_fields_without_source_version",
+      "overrides": {
+        "probability": {
+          "model_over_probability": 0.55,
+          "model_under_probability": 0.45
+        }
+      }
+    },
+    {
+      "case_id": "multiple_sportsbook_rows",
+      "overrides": {
+        "market": {
+          "sportsbook": "FanDuel",
+          "american_odds": -105,
+          "decimal_odds": 1.952381,
+          "implied_probability": 0.512195,
+          "market_source_id": "the-odds-api:odds_evt_20260605_okc_ind:fanduel:player_points:sga:31.5:-105",
+          "market_source_hash": "3333333333333333333333333333333333333333333333333333333333333333"
+        }
+      }
+    },
+    {
+      "case_id": "identical_duplicate_rows",
+      "overrides": {}
+    },
+    {
+      "case_id": "conflicting_duplicate_rows",
+      "overrides": {
+        "projection": {
+          "projection_source_hash": "4444444444444444444444444444444444444444444444444444444444444444"
+        }
+      }
+    },
+    {
+      "case_id": "target_game_actual_points_leak",
+      "overrides": {
+        "projection": {
+          "target_game_actual_points": 33
+        }
+      }
+    },
+    {
+      "case_id": "target_game_actual_minutes_leak",
+      "overrides": {
+        "projection": {
+          "target_game_actual_minutes": 37.0
+        }
+      }
+    },
+    {
+      "case_id": "source_fixture_immutability",
+      "overrides": {}
+    },
+    {
+      "case_id": "deterministic_repeated_assembly",
+      "overrides": {}
+    },
+    {
+      "case_id": "input_order_independence",
+      "overrides": {
+        "market": {
+          "sportsbook": "BetMGM",
+          "american_odds": -115,
+          "decimal_odds": 1.869565,
+          "implied_probability": 0.534884,
+          "market_source_id": "the-odds-api:odds_evt_20260605_okc_ind:betmgm:player_points:sga:31.5:-115",
+          "market_source_hash": "5555555555555555555555555555555555555555555555555555555555555555"
+        }
+      }
+    },
+    {
+      "case_id": "manifest_hash_change_after_source_change",
+      "overrides": {
+        "market": {
+          "market_source_hash": "6666666666666666666666666666666666666666666666666666666666666666"
+        }
+      }
+    }
+  ]
+}
