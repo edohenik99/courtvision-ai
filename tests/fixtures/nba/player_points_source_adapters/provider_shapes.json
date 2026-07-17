@@ -1,0 +1,399 @@
+{
+  "pregame_odds": {
+    "schema_version": "nba-player-points-provider-pregame-odds-fixture-v1",
+    "provider": "Fixture Pregame Odds Provider",
+    "source_timestamp_utc": "2026-06-05T18:02:00Z",
+    "events": [
+      {
+        "provider_event_id": "odds_evt_20260605_okc_ind",
+        "commence_time_utc": "2026-06-06T00:40:00Z",
+        "home_team": "Oklahoma City Thunder",
+        "away_team": "Indiana Pacers",
+        "default_team": "OKC",
+        "default_opponent": "IND",
+        "source_timestamp_utc": "2026-06-05T18:02:00Z",
+        "bookmakers": [
+          {
+            "key": "draftkings",
+            "title": "DraftKings",
+            "last_update": "2026-06-05T18:02:00Z",
+            "markets": [
+              {
+                "key": "player_points",
+                "last_update": "2026-06-05T18:02:00Z",
+                "outcomes": [
+                  {
+                    "name": "Over",
+                    "side": "over",
+                    "description": "Shai Gilgeous-Alexander",
+                    "provider_player_id": "toa-player-sga",
+                    "team": "OKC",
+                    "opponent": "IND",
+                    "point": 31.5,
+                    "price": -110,
+                    "source_id": "fixture-pregame:sga:draftkings:points"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "key": "fanduel",
+            "title": "FanDuel",
+            "last_update": "2026-06-05T18:03:00Z",
+            "markets": [
+              {
+                "key": "player_points",
+                "last_update": "2026-06-05T18:03:00Z",
+                "outcomes": [
+                  {
+                    "name": "Over",
+                    "side": "over",
+                    "description": "Shai Gilgeous-Alexander",
+                    "provider_player_id": "toa-player-sga",
+                    "team": "OKC",
+                    "opponent": "IND",
+                    "point": 31.5,
+                    "price": -105,
+                    "source_id": "fixture-pregame:sga:fanduel:points"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "schedule_identity": {
+    "schema_version": "nba-player-points-provider-schedule-identity-fixture-v1",
+    "provider": "Fixture Schedule Identity Provider",
+    "source_timestamp_utc": "2026-06-05T17:55:00Z",
+    "events": [
+      {
+        "provider_event_id": "odds_evt_20260605_okc_ind",
+        "commence_time_utc": "2026-06-06T00:40:00Z",
+        "home_team": "Oklahoma City Thunder",
+        "away_team": "Indiana Pacers",
+        "status": "scheduled",
+        "identity_status": "resolved",
+        "canonical_candidates": [
+          {
+            "canonical_event_id": "nba-2026-06-05-okc-ind",
+            "home_team": "OKC",
+            "away_team": "IND"
+          }
+        ]
+      },
+      {
+        "provider_event_id": "ambiguous_evt_20260605_bos_lal",
+        "commence_time_utc": "2026-06-06T01:02:00Z",
+        "home_team": "Boston Celtics",
+        "away_team": "Los Angeles Lakers",
+        "status": "scheduled",
+        "identity_status": "ambiguous",
+        "canonical_candidates": [
+          {
+            "canonical_event_id": "nba-2026-06-05-bos-lal-a",
+            "home_team": "BOS",
+            "away_team": "LAL"
+          },
+          {
+            "canonical_event_id": "nba-2026-06-05-bos-lal-b",
+            "home_team": "BOS",
+            "away_team": "LAL"
+          }
+        ]
+      }
+    ],
+    "players": [
+      {
+        "provider_player_id": "toa-player-sga",
+        "provider_player_name": "Shai Gilgeous-Alexander",
+        "team": "OKC",
+        "identity_status": "resolved",
+        "canonical_candidates": [
+          {
+            "player_id": "nba-player-1628983",
+            "canonical_player_name": "Shai Gilgeous-Alexander",
+            "canonical_team": "OKC",
+            "canonical_event_id": "nba-2026-06-05-okc-ind"
+          }
+        ]
+      },
+      {
+        "provider_player_name": "Alex Smith",
+        "team": "OKC",
+        "identity_status": "ambiguous",
+        "canonical_candidates": [
+          {
+            "player_id": "nba-player-alex-smith-1",
+            "canonical_player_name": "Alex Smith",
+            "canonical_team": "OKC",
+            "canonical_event_id": "nba-2026-06-05-okc-ind"
+          },
+          {
+            "player_id": "nba-player-alex-smith-2",
+            "canonical_player_name": "Alex Smith",
+            "canonical_team": "OKC",
+            "canonical_event_id": "nba-2026-06-05-okc-ind"
+          }
+        ]
+      },
+      {
+        "provider_player_name": "Unmapped Guard",
+        "team": "OKC",
+        "identity_status": "unresolved",
+        "canonical_candidates": []
+      }
+    ],
+    "reviewed_mappings": {
+      "mapping_version": "nba-source-adapter-map-fixture-v1",
+      "source_timestamp_utc": "2026-06-05T17:56:00Z",
+      "event_mappings": [
+        {
+          "provider_name": "fixture_pregame_odds_provider",
+          "provider_event_id": "odds_evt_20260605_okc_ind",
+          "canonical_event_id": "nba-2026-06-05-okc-ind",
+          "canonical_home_team": "OKC",
+          "canonical_away_team": "IND",
+          "mapping_source": "fixture_review",
+          "reviewed_at": "2026-06-05T17:56:00Z",
+          "review_status": "approved",
+          "reviewer": "source-adapter-fixture",
+          "review_reference": "fixture:event:okc-ind"
+        }
+      ],
+      "player_mappings": [
+        {
+          "provider_name": "fixture_pregame_odds_provider",
+          "provider_player_id": "toa-player-sga",
+          "player_id": "nba-player-1628983",
+          "canonical_player_name": "Shai Gilgeous-Alexander",
+          "canonical_team": "OKC",
+          "mapping_type": "identity",
+          "mapping_source": "fixture_review",
+          "reviewed_at": "2026-06-05T17:57:00Z",
+          "review_status": "approved",
+          "reviewer": "source-adapter-fixture",
+          "review_reference": "fixture:player:sga"
+        }
+      ]
+    }
+  },
+  "minutes_inputs": {
+    "schema_version": "nba-player-points-provider-minutes-input-fixture-v1",
+    "provider": "Fixture Minutes Input Provider",
+    "feature_timestamp_utc": "2026-06-05T18:20:00Z",
+    "feature_cutoff_timestamp_utc": "2026-06-05T18:30:00Z",
+    "source_manifest_id": "nba-player-points-source-adapter-minutes-fixture-v1",
+    "repository_commit_sha": "0123456789abcdef0123456789abcdef01234567",
+    "players": [
+      {
+        "provider_event_id": "odds_evt_20260605_okc_ind",
+        "canonical_event_id": "nba-2026-06-05-okc-ind",
+        "provider_player_id": "toa-player-sga",
+        "player_id": "nba-player-1628983",
+        "canonical_player_name": "Shai Gilgeous-Alexander",
+        "team": "OKC",
+        "opponent": "IND",
+        "commence_time_utc": "2026-06-06T00:40:00Z",
+        "event_identity_status": "resolved",
+        "player_identity_status": "resolved",
+        "baseline": {
+          "season_minutes": 35.2,
+          "recent_minutes": 36.4,
+          "season_minutes_sample_size": 70,
+          "recent_minutes_sample_size": 8,
+          "recent_minutes_stddev": 2.1,
+          "last_game_minutes": 36.1,
+          "source_timestamp_utc": "2026-06-05T18:00:00Z",
+          "source_reference": "fixture-provider:baseline:sga"
+        },
+        "lineup": {
+          "starter_status": "confirmed_starter",
+          "lineup_status": "confirmed",
+          "source_timestamp_utc": "2026-06-05T18:08:00Z",
+          "source_reference": "fixture-provider:lineup:sga"
+        },
+        "injury_availability": {
+          "injury_status": "healthy",
+          "availability_status": "available",
+          "source_timestamp_utc": "2026-06-05T18:04:00Z",
+          "source_reference": "fixture-provider:availability:sga"
+        },
+        "schedule": {
+          "days_rest": 2,
+          "games_last_7_days": 3,
+          "games_last_14_days": 6,
+          "source_timestamp_utc": "2026-06-05T17:45:00Z",
+          "source_reference": "fixture-provider:schedule:sga"
+        },
+        "role_context": {
+          "role_status": "stable",
+          "teammate_absence_context": {
+            "verified": false,
+            "absent_teammates": [],
+            "role_impact_minutes": 0,
+            "review_note": "no reviewed teammate absence impact"
+          },
+          "source_timestamp_utc": "2026-06-05T17:50:00Z",
+          "source_reference": "fixture-provider:role:sga"
+        }
+      }
+    ]
+  },
+  "projection_fixture": {
+    "projected_points": 32.1,
+    "projection_method": "frozen_fixture_projection_not_adapter_calculated",
+    "projection_timestamp_utc": "2026-06-05T18:25:00Z",
+    "projection_cutoff_timestamp_utc": "2026-06-05T18:30:00Z",
+    "projection_source": "offline_projection_fixture",
+    "projection_source_id": "projection-fixture-sga-20260605",
+    "projection_source_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+    "projection_schema_version": "nba-player-points-projection-v1"
+  },
+  "closing_odds": {
+    "schema_version": "nba-player-points-provider-closing-odds-fixture-v1",
+    "provider": "Fixture Closing Odds Provider",
+    "source_timestamp_utc": "2026-06-06T00:39:00Z",
+    "events": [
+      {
+        "provider_event_id": "odds_evt_20260605_okc_ind",
+        "commence_time_utc": "2026-06-06T00:40:00Z",
+        "home_team": "Oklahoma City Thunder",
+        "away_team": "Indiana Pacers",
+        "default_team": "OKC",
+        "default_opponent": "IND",
+        "bookmakers": [
+          {
+            "key": "draftkings",
+            "title": "DraftKings",
+            "last_update": "2026-06-06T00:38:55Z",
+            "markets": [
+              {
+                "key": "player_points",
+                "last_update": "2026-06-06T00:38:55Z",
+                "observation_timestamp_utc": "2026-06-06T00:39:00Z",
+                "outcomes": [
+                  {
+                    "name": "Over",
+                    "side": "over",
+                    "description": "Shai Gilgeous-Alexander",
+                    "provider_player_id": "toa-player-sga",
+                    "team": "OKC",
+                    "opponent": "IND",
+                    "point": 32.5,
+                    "price": -115,
+                    "prediction_reference_key": "sga_draftkings",
+                    "source_id": "fixture-closing:sga:draftkings:points"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "final_stats": {
+    "schema_version": "nba-player-points-provider-final-stats-fixture-v1",
+    "provider": "Fixture Final Stats Provider",
+    "source_timestamp_utc": "2026-06-06T04:00:00Z",
+    "games": [
+      {
+        "provider_event_id": "odds_evt_20260605_okc_ind",
+        "canonical_event_id": "nba-2026-06-05-okc-ind",
+        "commence_time_utc": "2026-06-06T00:40:00Z",
+        "home_team": "OKC",
+        "away_team": "IND",
+        "game_status": "final",
+        "game_final": true,
+        "players": [
+          {
+            "source_row_id": "final-sga-valid",
+            "player_id": "nba-player-1628983",
+            "canonical_player_name": "Shai Gilgeous-Alexander",
+            "team": "OKC",
+            "opponent": "IND",
+            "final_points": 35,
+            "actual_minutes": 38.75,
+            "participation_status": "participated"
+          },
+          {
+            "source_row_id": "final-sga-missing-minutes",
+            "player_id": "nba-player-1628983",
+            "canonical_player_name": "Shai Gilgeous-Alexander",
+            "team": "OKC",
+            "opponent": "IND",
+            "final_points": 35,
+            "actual_minutes": null,
+            "participation_status": "participated"
+          },
+          {
+            "source_row_id": "final-sga-zero-minutes",
+            "player_id": "nba-player-1628983",
+            "canonical_player_name": "Shai Gilgeous-Alexander",
+            "team": "OKC",
+            "opponent": "IND",
+            "final_points": 0,
+            "actual_minutes": 0,
+            "participation_status": "participated"
+          },
+          {
+            "source_row_id": "final-sga-dnp",
+            "player_id": "nba-player-1628983",
+            "canonical_player_name": "Shai Gilgeous-Alexander",
+            "team": "OKC",
+            "opponent": "IND",
+            "final_points": null,
+            "actual_minutes": null,
+            "participation_status": "did_not_participate"
+          }
+        ]
+      },
+      {
+        "provider_event_id": "odds_evt_20260605_okc_ind_postponed",
+        "canonical_event_id": "nba-2026-06-05-okc-ind",
+        "commence_time_utc": "2026-06-06T00:40:00Z",
+        "home_team": "OKC",
+        "away_team": "IND",
+        "game_status": "postponed",
+        "game_final": false,
+        "players": [
+          {
+            "source_row_id": "final-sga-postponed",
+            "player_id": "nba-player-1628983",
+            "canonical_player_name": "Shai Gilgeous-Alexander",
+            "team": "OKC",
+            "opponent": "IND",
+            "final_points": null,
+            "actual_minutes": null,
+            "participation_status": "unknown"
+          }
+        ]
+      },
+      {
+        "provider_event_id": "odds_evt_20260605_okc_ind_cancelled",
+        "canonical_event_id": "nba-2026-06-05-okc-ind",
+        "commence_time_utc": "2026-06-06T00:40:00Z",
+        "home_team": "OKC",
+        "away_team": "IND",
+        "game_status": "cancelled",
+        "game_final": false,
+        "players": [
+          {
+            "source_row_id": "final-sga-cancelled",
+            "player_id": "nba-player-1628983",
+            "canonical_player_name": "Shai Gilgeous-Alexander",
+            "team": "OKC",
+            "opponent": "IND",
+            "final_points": null,
+            "actual_minutes": null,
+            "participation_status": "unknown"
+          }
+        ]
+      }
+    ]
+  }
+}
