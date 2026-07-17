@@ -342,6 +342,64 @@ def test_malformed_probability_claiming_probability_eligibility_conflicts() -> N
     assert "claimed probability eligibility" in row.assembly_exclusion_reason
 
 
+def test_crosswalk_quarantined_identity_stays_quarantined_batch_row() -> None:
+    payload = _case_payload(
+        "valid_probability_research",
+        {
+            "crosswalk": {
+                "event_identity_status": "quarantined",
+                "event_identity_method": "manual_quarantine_duplicate_provider_event",
+                "event_identity_quarantine_reason": "manual_quarantine_duplicate_provider_event",
+            },
+        },
+    )
+
+    first = assemble_nba_player_points_batch(
+        [payload],
+        manifest_created_at_utc="2026-06-05T18:06:00Z",
+    )
+    second = assemble_nba_player_points_batch(
+        [payload],
+        manifest_created_at_utc="2026-06-05T18:06:00Z",
+    )
+    row = first.rows[0]
+    repeated = second.rows[0]
+    row_payload = row.to_dict()
+
+    assert row.market_status == "valid"
+    assert row.projection_status == "valid"
+    assert row.minutes_status == "projected"
+    assert row.probability_status == "valid"
+    assert row.assembly_status == "quarantined"
+    assert row.projection_research_eligible is False
+    assert row.probability_research_eligible is False
+    assert row.identity_status == "quarantined"
+    assert "identity evidence is quarantined" in row.assembly_exclusion_reason
+    assert row.identity_status not in {"unresolved", "excluded"}
+    assert row.assembly_status != "excluded"
+    assert first.quarantined_rows == (row,)
+    assert first.eligible_projection_rows == ()
+    assert first.eligible_probability_rows == ()
+    assert first.excluded_rows == ()
+    assert first.conflicting_rows == ()
+    assert first.batch_summary_counts == {
+        "total_rows": 1,
+        "eligible_projection_rows": 0,
+        "eligible_probability_rows": 0,
+        "excluded_rows": 0,
+        "quarantined_rows": 1,
+        "conflicting_rows": 0,
+        "duplicate_diagnostics": 0,
+    }
+    assert row.selected_side is None
+    assert row.probability_based_edge is None
+    assert row.model_edge is None
+    assert "expected_value" not in row_payload
+    assert row.prediction_id == repeated.prediction_id
+    assert row.assembled_record_hash == repeated.assembled_record_hash
+    assert SHA256_RE.fullmatch(row.assembled_record_hash)
+
+
 def test_leakage_rows_are_quarantined() -> None:
     points = _assemble("target_game_actual_points_leak")
     minutes = _assemble("target_game_actual_minutes_leak")

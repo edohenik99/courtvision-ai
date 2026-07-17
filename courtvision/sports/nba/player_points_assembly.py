@@ -1051,6 +1051,11 @@ def _assemble_one(
     exclusion_reasons.extend(crosswalk.pop("exclusion_reasons"))
     conflict_reasons.extend(minutes.pop("conflict_reasons"))
     exclusion_reasons.extend(minutes.pop("exclusion_reasons"))
+    if (
+        crosswalk.get("event_identity_status") == "quarantined"
+        or crosswalk.get("player_identity_status") == "quarantined"
+    ):
+        quarantine_reasons.append("identity evidence is quarantined")
 
     try:
         projection = NBAPlayerPointsProjectionEvidence.from_mapping(
