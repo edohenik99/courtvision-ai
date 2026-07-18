@@ -56,6 +56,21 @@ from courtvision.sports.nba.player_points_settlement_evidence import (
     verify_nba_player_points_settlement_evidence,
     write_nba_player_points_settlement_evidence,
 )
+from courtvision.sports.nba.player_points_settlement_closing_binding import (
+    NBA_PLAYER_POINTS_MANUAL_PLAN_V2_SCHEMA_VERSION,
+    NBA_PLAYER_POINTS_MANUAL_RUN_V2_SCHEMA_VERSION,
+    NBA_PLAYER_POINTS_SETTLEMENT_APPROVAL_CONTRACT_VERSION,
+    NBA_PLAYER_POINTS_SETTLEMENT_APPROVAL_RECEIPT_SCHEMA_VERSION,
+    NBA_PLAYER_POINTS_SETTLEMENT_APPROVAL_REQUEST_SCHEMA_VERSION,
+    NBA_PLAYER_POINTS_SETTLEMENT_EVIDENCE_V2_SCHEMA_VERSION,
+    ClosingEvidenceSnapshot,
+    NBAPlayerPointsClosingBindingError,
+    build_nba_player_points_closing_prerequisite,
+    build_nba_player_points_settlement_approval_envelope,
+    canonical_sha256 as _v2_canonical_sha256,
+    preview_nba_player_points_settlement_evidence_v2_records,
+    write_nba_player_points_settlement_evidence_v2,
+)
 from courtvision.sports.nba.player_points_source_adapters import (
     normalize_closing_player_points_odds,
     normalize_final_stat_sources,
@@ -296,6 +311,7 @@ class _BundleContext:
     bundle_hash: str
     bundle_size_bytes: int
     bundle: Mapping[str, object]
+    bundle_schema_version: str
     repository_root: Path
     current_repository_commit_sha: str
     current_repository_branch: str
@@ -327,6 +343,9 @@ class _PlanBuild:
     settlement_rows: tuple[object, ...] = ()
     closing_config: NBAPlayerPointsClosingWriterConfig | None = None
     settlement_config: NBAPlayerPointsSettlementEvidenceWriterConfig | None = None
+    closing_snapshot: ClosingEvidenceSnapshot | None = None
+    logical_settlement_batch_id: str | None = None
+    settlement_policy_v2: Mapping[str, object] | None = None
 
 
 def run_manual_bundle(
@@ -414,13 +433,28 @@ def run_manual_bundle(
             approval_timestamp_utc=approval_time,
             approval_note=approval_note,
         )
-        return {
+        response = {
             "exit_code": EXIT_CODES["success"],
             "operation_stage": effective_operation,
             "publication_attempted": True,
             "plan": _json_ready(plan_build.plan),
             "receipt": _json_ready(receipt),
         }
+        if context.bundle_schema_version == NBA_PLAYER_POINTS_MANUAL_RUN_V2_SCHEMA_VERSION:
+            receipt_path = context.preview_root / "approval_receipt.json"
+            response["bundle_schema_version"] = context.bundle_schema_version
+            response["plan_schema_version"] = NBA_PLAYER_POINTS_MANUAL_PLAN_V2_SCHEMA_VERSION
+            response["approval_contract_version"] = (
+                NBA_PLAYER_POINTS_SETTLEMENT_APPROVAL_CONTRACT_VERSION
+            )
+            response["evidence_schema_version"] = (
+                NBA_PLAYER_POINTS_SETTLEMENT_EVIDENCE_V2_SCHEMA_VERSION
+            )
+            response["binding_status"] = "closing-bound"
+            response["approval_receipt_sha256"] = (
+                _sha256_bytes(receipt_path.read_bytes()) if receipt_path.exists() else None
+            )
+        return response
 
     raise NBAPlayerPointsBundleError(f"unsupported operation: {effective_operation}")
 
@@ -436,6 +470,10 @@ def bundle_schema_definition() -> Mapping[str, object]:
 
     return {
         "bundle_schema_version": MANUAL_RUN_BUNDLE_SCHEMA_VERSION,
+        "supported_bundle_schema_versions": [
+            MANUAL_RUN_BUNDLE_SCHEMA_VERSION,
+            NBA_PLAYER_POINTS_MANUAL_RUN_V2_SCHEMA_VERSION,
+        ],
         "supported_operations": list(SUPPORTED_OPERATIONS),
         "required_common_fields": [
             "bundle_schema_version",
@@ -477,6 +515,18 @@ def bundle_schema_definition() -> Mapping[str, object]:
                 "final_stat_payloads",
                 "settlement_timestamp_utc",
             ],
+            "settlement_v2": [
+                "logical_settlement_batch_id",
+                "physical_closing_selection_batch_id",
+                "expected_physical_observation_batch_ids",
+                "expected_closing_policy_id",
+                "expected_closing_policy_version",
+                "requested_prediction_ids",
+                "settlement_policy_id",
+                "settlement_policy_version",
+                "final_stat_input_files",
+                "settlement_timestamp_utc",
+            ],
         },
         "path_rules": [
             "all roots are explicit",
@@ -516,7 +566,11 @@ def _load_bundle_context(
         raise NBAPlayerPointsBundleError(
             "approval_digest must be supplied by the operator command, not trusted from the bundle"
         )
-    if bundle_payload.get("bundle_schema_version") != MANUAL_RUN_BUNDLE_SCHEMA_VERSION:
+    bundle_schema_version = bundle_payload.get("bundle_schema_version")
+    if bundle_schema_version not in {
+        MANUAL_RUN_BUNDLE_SCHEMA_VERSION,
+        NBA_PLAYER_POINTS_MANUAL_RUN_V2_SCHEMA_VERSION,
+    }:
         raise NBAPlayerPointsBundleError(
             "unsupported or missing bundle_schema_version"
         )
@@ -527,6 +581,14 @@ def _load_bundle_context(
     if operation_stage not in SUPPORTED_OPERATIONS:
         raise NBAPlayerPointsBundleError(
             f"unsupported operation_stage: {operation_stage!r}"
+        )
+    if (
+        bundle_schema_version == NBA_PLAYER_POINTS_MANUAL_RUN_V2_SCHEMA_VERSION
+        and operation_stage not in {"settlement-plan", "settlement-publish"}
+    ):
+        raise NBAPlayerPointsBundleError(
+            "nba-player-points-manual-run-v2 supports only settlement-plan "
+            "and settlement-publish"
         )
     operating_date = _require_operating_date(
         bundle_payload.get("operating_date"),
@@ -571,6 +633,7 @@ def _load_bundle_context(
         bundle_hash=bundle_snapshot.sha256,
         bundle_size_bytes=bundle_snapshot.size_bytes,
         bundle=MappingProxyType(_json_clone_mapping(bundle_payload)),
+        bundle_schema_version=str(bundle_schema_version),
         repository_root=repo_root,
         current_repository_commit_sha=current_sha,
         current_repository_branch=repository_state.current_branch,
@@ -612,6 +675,8 @@ def _build_plan(context: _BundleContext, operation_stage: str) -> _PlanBuild:
     if operation_stage == "closing-plan":
         return _build_closing_plan(context)
     if operation_stage == "settlement-plan":
+        if context.bundle_schema_version == NBA_PLAYER_POINTS_MANUAL_RUN_V2_SCHEMA_VERSION:
+            return _build_settlement_plan_v2(context)
         return _build_settlement_plan(context)
     raise NBAPlayerPointsBundleError(f"unsupported plan operation: {operation_stage}")
 
@@ -1024,6 +1089,7 @@ def _build_settlement_plan(context: _BundleContext) -> _PlanBuild:
         "diagnostics": _json_ready(settlement_result.diagnostics) if settlement_result else {},
     }
     blocked = _common_publish_blocks(context, structural_errors)
+    blocked.append("closing_bound_settlement_v2_required")
     if not prediction_verify.ok:
         blocked.append("corrupt prerequisite prediction evidence")
     if not settlement_rows:
@@ -1053,6 +1119,360 @@ def _build_settlement_plan(context: _BundleContext) -> _PlanBuild:
         blocked_reasons=blocked,
         settlement_rows=settlement_rows,
         settlement_config=config,
+    )
+
+
+def _build_settlement_plan_v2(context: _BundleContext) -> _PlanBuild:
+    section = _stage_section(context.bundle, "settlement")
+    logical_batch_id = _require_path_id(
+        section.get("logical_settlement_batch_id"),
+        "settlement.logical_settlement_batch_id",
+    )
+    selection_batch_id = _require_path_id(
+        section.get("physical_closing_selection_batch_id"),
+        "settlement.physical_closing_selection_batch_id",
+    )
+    observation_batch_ids = tuple(
+        _require_path_id(item, "settlement.expected_physical_observation_batch_ids[]")
+        for item in _require_sequence(
+            section.get("expected_physical_observation_batch_ids"),
+            "settlement.expected_physical_observation_batch_ids",
+        )
+    )
+    if len(set(observation_batch_ids)) != len(observation_batch_ids):
+        raise NBAPlayerPointsBundleError(
+            "expected_physical_observation_batch_ids must be unique"
+        )
+    policy_id = _require_path_id(
+        section.get("expected_closing_policy_id"),
+        "settlement.expected_closing_policy_id",
+    )
+    policy_version = _require_text(
+        section.get("expected_closing_policy_version"),
+        "settlement.expected_closing_policy_version",
+    )
+    logical_closing_id = (
+        _require_path_id(section.get("logical_closing_id"), "settlement.logical_closing_id")
+        if section.get("logical_closing_id") not in (None, "")
+        else None
+    )
+    prediction_ids = tuple(
+        _require_path_id(item, "settlement.requested_prediction_ids[]")
+        for item in _require_sequence(
+            section.get("requested_prediction_ids"),
+            "settlement.requested_prediction_ids",
+        )
+    )
+    if len(set(prediction_ids)) != len(prediction_ids):
+        raise NBAPlayerPointsBundleError("requested_prediction_ids must be unique")
+    settlement_timestamp = _require_utc_timestamp(
+        section.get("settlement_timestamp_utc"),
+        "settlement.settlement_timestamp_utc",
+    )
+    settlement_policy = NBAPlayerPointsSettlementPolicy(
+        settlement_policy_id=_require_path_id(
+            section.get("settlement_policy_id"),
+            "settlement.settlement_policy_id",
+        ),
+        settlement_policy_version=_require_text(
+            section.get("settlement_policy_version"),
+            "settlement.settlement_policy_version",
+        ),
+    ).to_dict()
+
+    source_files: list[_InputFile] = []
+    final_stat_payloads = _load_input_payloads(
+        context,
+        section,
+        "final_stat_input_files",
+        source_files,
+    )
+    prediction_verify = verify_nba_player_points_evidence(
+        context.evidence_root,
+        NBAPlayerPointsEvidenceWriterConfig(),
+    )
+    structural_errors: list[str] = []
+    if not prediction_verify.ok:
+        structural_errors.append(
+            "prediction evidence invalid: " + "; ".join(prediction_verify.violations)
+        )
+    prediction_rows = _prediction_rows_from_evidence(context, prediction_ids)
+    if len(prediction_rows) != len(prediction_ids):
+        structural_errors.append("one or more requested prediction_ids were not found")
+
+    final_records: list[Mapping[str, object]] = []
+    adapter_details: list[Mapping[str, object]] = []
+    for payload in final_stat_payloads:
+        result = normalize_final_stat_sources(payload)
+        adapter_details.append(_adapter_summary("final_stat", result))
+        final_records.extend(result.normalized_records)
+
+    settlement_result = None
+    if prediction_rows and final_records:
+        try:
+            settlement_result = settle_nba_player_points_predictions(
+                prediction_rows,
+                [_crosswalk_row_from_prediction(row) for row in prediction_rows],
+                final_records,
+                settlement_timestamp_utc=settlement_timestamp,
+                repository_commit_sha=context.repository_commit_sha,
+                research_label=context.research_label,
+            )
+        except Exception as exc:
+            structural_errors.append(f"settlement contract failed: {exc}")
+    else:
+        structural_errors.append("settlement requires prediction rows and final-stat rows")
+    settlement_rows = tuple(settlement_result.rows) if settlement_result else ()
+
+    closing_snapshot: ClosingEvidenceSnapshot | None = None
+    closing_prerequisite: Mapping[str, object] | None = None
+    v2_records: tuple[Mapping[str, object], ...] = ()
+    try:
+        closing_snapshot = build_nba_player_points_closing_prerequisite(
+            context.evidence_root,
+            operating_date=context.operating_date,
+            physical_observation_batch_ids=observation_batch_ids,
+            physical_selection_batch_id=selection_batch_id,
+            prediction_ids=prediction_ids,
+            expected_closing_policy_id=policy_id,
+            expected_closing_policy_version=policy_version,
+            logical_closing_id=logical_closing_id,
+        )
+        closing_prerequisite = closing_snapshot.prerequisite.to_dict()
+        if settlement_rows:
+            v2_records = preview_nba_player_points_settlement_evidence_v2_records(
+                settlement_rows,
+                closing_snapshot.prerequisite,
+            )
+    except NBAPlayerPointsClosingBindingError as exc:
+        structural_errors.append(f"closing prerequisite invalid: {exc}")
+
+    prediction_prerequisites = [
+        {
+            "prediction_id": row.get("prediction_id"),
+            "prediction_run_id": row.get("prediction_run_id"),
+            "prediction_ledger_record_hash": row.get("ledger_record_hash"),
+            "prediction_assembled_record_hash": row.get("assembled_record_hash"),
+            "prediction_evidence_segment": row.get("prediction_evidence_segment"),
+        }
+        for row in prediction_rows
+    ]
+    source_summary = {
+        "source_files": _source_file_summaries(source_files, context.input_root),
+        "adapter_results": adapter_details,
+        "prediction_prerequisites": prediction_prerequisites,
+        "prediction_reference_count": len(prediction_rows),
+    }
+    normalized_preview = {
+        "prediction_rows": _canonical_list(prediction_rows),
+        "final_stat_rows": _canonical_list(final_records),
+        "settlement_rows": [row.to_dict() for row in settlement_rows],
+        "v2_settlement_evidence_envelope_previews": [
+            _json_ready(row) for row in v2_records
+        ],
+        "settlement_diagnostics": (
+            _json_ready(settlement_result.diagnostics) if settlement_result else {}
+        ),
+    }
+    eligibility_summary = _settlement_eligibility_summary(settlement_rows)
+    conflict_report = {
+        "structural_errors": structural_errors,
+        "adapter_conflicts": [
+            detail
+            for detail in adapter_details
+            if int(detail["counts"]["conflicting_records"]) > 0
+        ],
+        "terminal_conflicts": [
+            row.to_dict()
+            for row in settlement_rows
+            if getattr(row, "settlement_status", None) == "conflicting"
+        ],
+        "diagnostics": _json_ready(settlement_result.diagnostics) if settlement_result else {},
+    }
+    blocked = _common_publish_blocks(context, structural_errors)
+    if not prediction_verify.ok:
+        blocked.append("corrupt prerequisite prediction evidence")
+    if closing_snapshot is None:
+        blocked.append("closing prerequisite evidence invalid")
+    if not settlement_rows:
+        blocked.append("no settlement rows were prepared")
+    if any(getattr(row, "settlement_status", None) == "conflicting" for row in settlement_rows):
+        blocked.append("terminal settlement conflict")
+    if _adapter_blocks(adapter_details):
+        blocked.append("source adapters produced invalid, quarantined, or conflicting records")
+
+    integrity_preview = {
+        "prediction_evidence": prediction_verify.to_dict(),
+        "settlement_evidence": verify_nba_player_points_settlement_evidence(
+            context.evidence_root,
+            NBAPlayerPointsSettlementEvidenceWriterConfig(),
+        ).to_dict(),
+        "closing_prerequisite_validation": {
+            "ok": closing_snapshot is not None,
+            "binding_status": "closing-bound" if closing_snapshot is not None else "invalid",
+            "closing_prerequisite_sha256": (
+                closing_snapshot.prerequisite.closing_prerequisite_sha256
+                if closing_snapshot is not None
+                else None
+            ),
+        },
+    }
+    return _finalize_settlement_plan_v2(
+        context,
+        logical_settlement_batch_id=logical_batch_id,
+        settlement_policy=settlement_policy,
+        source_summary=source_summary,
+        normalized_preview=normalized_preview,
+        eligibility_summary=eligibility_summary,
+        conflict_report=conflict_report,
+        integrity_preview=integrity_preview,
+        blocked_reasons=blocked,
+        closing_prerequisite=closing_prerequisite,
+        closing_snapshot=closing_snapshot,
+        settlement_rows=settlement_rows,
+    )
+
+
+def _finalize_settlement_plan_v2(
+    context: _BundleContext,
+    *,
+    logical_settlement_batch_id: str,
+    settlement_policy: Mapping[str, object],
+    source_summary: Mapping[str, object],
+    normalized_preview: Mapping[str, object],
+    eligibility_summary: Mapping[str, object],
+    conflict_report: Mapping[str, object],
+    integrity_preview: Mapping[str, object],
+    blocked_reasons: Sequence[str],
+    closing_prerequisite: Mapping[str, object] | None,
+    closing_snapshot: ClosingEvidenceSnapshot | None,
+    settlement_rows: tuple[object, ...],
+) -> _PlanBuild:
+    blocked = tuple(dict.fromkeys(str(reason) for reason in blocked_reasons if reason))
+    prerequisite_hash = (
+        closing_prerequisite.get("closing_prerequisite_sha256")
+        if isinstance(closing_prerequisite, Mapping)
+        else None
+    )
+    digest_payload = {
+        "approval_contract_version": NBA_PLAYER_POINTS_SETTLEMENT_APPROVAL_CONTRACT_VERSION,
+        "bundle_schema_version": NBA_PLAYER_POINTS_MANUAL_RUN_V2_SCHEMA_VERSION,
+        "bundle_sha256": context.bundle_hash,
+        "bundle_size_bytes": context.bundle_size_bytes,
+        "operation_stage": "settlement-publish",
+        "operating_date": context.operating_date,
+        "repository_commit_sha": context.repository_commit_sha,
+        "current_repository_commit_sha": context.current_repository_commit_sha,
+        "expected_repository_branch": context.expected_repository_branch,
+        "current_repository_branch": context.current_repository_branch,
+        "repository_state": context.repository_state,
+        "research_label": context.research_label,
+        "final_stat_source_summaries": source_summary,
+        "prediction_prerequisite_identities": source_summary.get(
+            "prediction_prerequisites",
+            [],
+        ),
+        "closing_prerequisite": closing_prerequisite,
+        "closing_prerequisite_sha256": prerequisite_hash,
+        "settlement_policy": settlement_policy,
+        "logical_settlement_batch_id": logical_settlement_batch_id,
+        "normalized_final_stat_rows": normalized_preview.get("final_stat_rows", []),
+        "v1_settlement_calculation_rows": normalized_preview.get("settlement_rows", []),
+        "v2_settlement_evidence_envelope_previews": normalized_preview.get(
+            "v2_settlement_evidence_envelope_previews",
+            [],
+        ),
+        "eligibility_summary": eligibility_summary,
+        "conflict_diagnostics": conflict_report,
+        "structural_diagnostics": {
+            "prediction_evidence": integrity_preview.get("prediction_evidence"),
+            "closing_prerequisite_validation": integrity_preview.get(
+                "closing_prerequisite_validation"
+            ),
+        },
+    }
+    approval_digest = _v2_canonical_sha256(digest_payload)
+    approval_request = {
+        "approval_request_schema_version": NBA_PLAYER_POINTS_SETTLEMENT_APPROVAL_REQUEST_SCHEMA_VERSION,
+        "approval_contract_version": NBA_PLAYER_POINTS_SETTLEMENT_APPROVAL_CONTRACT_VERSION,
+        "operation_stage": "settlement-publish",
+        "operator_id": context.operator_id,
+        "approval_digest": approval_digest,
+        "approval_digest_algorithm": "sha256-canonical-json-v2",
+        "publishable": not blocked,
+        "blocked_reasons": list(blocked),
+        "bundle_sha256": context.bundle_hash,
+        "repository_commit_sha": context.repository_commit_sha,
+        "logical_settlement_batch_id": logical_settlement_batch_id,
+        "closing_prerequisite_sha256": prerequisite_hash,
+    }
+    prerequisite = closing_snapshot.prerequisite if closing_snapshot is not None else None
+    plan = {
+        "plan_schema_version": NBA_PLAYER_POINTS_MANUAL_PLAN_V2_SCHEMA_VERSION,
+        "bundle_schema_version": NBA_PLAYER_POINTS_MANUAL_RUN_V2_SCHEMA_VERSION,
+        "approval_contract_version": NBA_PLAYER_POINTS_SETTLEMENT_APPROVAL_CONTRACT_VERSION,
+        "evidence_schema_version": NBA_PLAYER_POINTS_SETTLEMENT_EVIDENCE_V2_SCHEMA_VERSION,
+        "binding_status": "closing-bound" if closing_snapshot is not None else "invalid",
+        "operation_stage": "settlement-plan",
+        "publish_operation_stage": "settlement-publish",
+        "operating_date": context.operating_date,
+        "repository_commit_sha": context.repository_commit_sha,
+        "current_repository_commit_sha": context.current_repository_commit_sha,
+        "expected_repository_branch": context.expected_repository_branch,
+        "current_repository_branch": context.current_repository_branch,
+        "repository_state": _json_ready(context.repository_state),
+        "research_label": context.research_label,
+        "input_root": str(context.input_root),
+        "preview_root": str(context.preview_root),
+        "evidence_root": str(context.evidence_root),
+        "logical_settlement_batch_id": logical_settlement_batch_id,
+        "logical_closing_id": prerequisite.logical_closing_id if prerequisite else None,
+        "physical_observation_batch_ids": (
+            [item.physical_observation_batch_id for item in prerequisite.observation_batches]
+            if prerequisite
+            else []
+        ),
+        "physical_selection_batch_id": (
+            prerequisite.selection_batch.physical_selection_batch_id if prerequisite else None
+        ),
+        "observation_batch_snapshots": (
+            [item.to_dict() for item in prerequisite.observation_batches] if prerequisite else []
+        ),
+        "selection_batch_snapshot": prerequisite.selection_batch.to_dict() if prerequisite else None,
+        "prediction_mapping_count": len(prerequisite.prediction_mappings) if prerequisite else 0,
+        "mapping_aggregate_sha256": prerequisite.mapping_aggregate_sha256 if prerequisite else None,
+        "per_prediction_closing_binding_summary": (
+            [item.to_dict() for item in prerequisite.prediction_mappings] if prerequisite else []
+        ),
+        "closing_prerequisite": closing_prerequisite,
+        "closing_prerequisite_sha256": prerequisite_hash,
+        "settlement_policy": _json_ready(settlement_policy),
+        "source_summary": _json_ready(source_summary),
+        "normalized_preview": _json_ready(normalized_preview),
+        "eligibility_summary": _json_ready(eligibility_summary),
+        "conflict_report": _json_ready(conflict_report),
+        "integrity_preview": _json_ready(integrity_preview),
+        "publishability": {
+            "allowed": not blocked,
+            "blocked_reasons": list(blocked),
+            "documented_blocking_conditions": list(PUBLISHABILITY_BLOCKS),
+        },
+        "approval_digest": approval_digest,
+        "approval_digest_algorithm": "sha256-canonical-json-v2",
+    }
+    return _PlanBuild(
+        plan=MappingProxyType(plan),
+        source_summary=MappingProxyType(dict(source_summary)),
+        normalized_preview=MappingProxyType(dict(normalized_preview)),
+        eligibility_summary=MappingProxyType(dict(eligibility_summary)),
+        conflict_report=MappingProxyType(dict(conflict_report)),
+        integrity_preview=MappingProxyType(dict(integrity_preview)),
+        approval_request=MappingProxyType(approval_request),
+        digest_payload=MappingProxyType(digest_payload),
+        settlement_rows=settlement_rows,
+        closing_snapshot=closing_snapshot,
+        logical_settlement_batch_id=logical_settlement_batch_id,
+        settlement_policy_v2=MappingProxyType(dict(settlement_policy)),
     )
 
 
@@ -1275,6 +1695,117 @@ def _publish_plan(
                 ]
             ),
         )
+    elif (
+        operation_stage == "settlement-publish"
+        and context.bundle_schema_version == NBA_PLAYER_POINTS_MANUAL_RUN_V2_SCHEMA_VERSION
+    ):
+        if (
+            plan_build.closing_snapshot is None
+            or plan_build.logical_settlement_batch_id is None
+            or plan_build.settlement_policy_v2 is None
+        ):
+            raise NBAPlayerPointsPrerequisiteEvidenceError(
+                "closing-bound settlement plan is missing prerequisite state"
+            )
+        try:
+            plan_build.closing_snapshot.assert_unchanged()
+        except NBAPlayerPointsClosingBindingError as exc:
+            if "reparse" in str(exc).casefold() or "path" in str(exc).casefold():
+                raise NBAPlayerPointsPathSecurityError(str(exc)) from exc
+            raise NBAPlayerPointsPrerequisiteEvidenceError(str(exc)) from exc
+        envelope = build_nba_player_points_settlement_approval_envelope(
+            approval_digest=approval_digest,
+            operator_id=approval_operator_id,
+            approval_timestamp_utc=approval_timestamp_utc,
+            bundle_sha256=context.bundle_hash,
+            repository_commit_sha=context.repository_commit_sha,
+            logical_settlement_batch_id=plan_build.logical_settlement_batch_id,
+            closing_prerequisite_sha256=(
+                plan_build.closing_snapshot.prerequisite.closing_prerequisite_sha256
+            ),
+            prediction_ids=[
+                item.prediction_id
+                for item in plan_build.closing_snapshot.prerequisite.prediction_mappings
+            ],
+        )
+        try:
+            result = write_nba_player_points_settlement_evidence_v2(
+                context.evidence_root,
+                plan_build.settlement_rows,
+                plan_build.closing_snapshot,
+                envelope,
+                logical_settlement_batch_id=plan_build.logical_settlement_batch_id,
+                settlement_policy=plan_build.settlement_policy_v2,
+                collection_timestamp_utc=_stage_section(context.bundle, "settlement").get(
+                    "collection_timestamp_utc",
+                    _stage_section(context.bundle, "settlement")["settlement_timestamp_utc"],
+                ),
+                repository_commit_sha=context.repository_commit_sha,
+                writer_timestamp_utc=approval_timestamp_utc,
+            )
+        except NBAPlayerPointsClosingBindingError as exc:
+            message = str(exc)
+            lowered = message.casefold()
+            if "changed after planning" in lowered or "prerequisite" in lowered:
+                raise NBAPlayerPointsPrerequisiteEvidenceError(message) from exc
+            if "reparse" in lowered or "path traversal" in lowered or "symlink" in lowered:
+                raise NBAPlayerPointsPathSecurityError(message) from exc
+            raise NBAPlayerPointsPublicationConflictError(message) from exc
+        verifier = verify_nba_player_points_settlement_evidence(
+            context.evidence_root,
+            NBAPlayerPointsSettlementEvidenceWriterConfig(),
+        )
+        if not verifier.ok:
+            raise NBAPlayerPointsIntegrityError(
+                "closing-bound settlement evidence verification failed: "
+                + "; ".join(verifier.violations)
+            )
+        manifest_path = result.settlement_segment_directory / "settlement_manifest.json"
+        manifest_file_hash = _sha256_bytes(manifest_path.read_bytes())
+        receipt = {
+            "receipt_schema_version": (
+                NBA_PLAYER_POINTS_SETTLEMENT_APPROVAL_RECEIPT_SCHEMA_VERSION
+            ),
+            "approval_contract_version": (
+                NBA_PLAYER_POINTS_SETTLEMENT_APPROVAL_CONTRACT_VERSION
+            ),
+            "approval_envelope_identity": {
+                "file": "approval_envelope.json",
+                "sha256": result.settlement_manifest["approval_envelope_sha256"],
+                "approval_digest": approval_digest,
+            },
+            "physical_settlement_batch_id": result.physical_settlement_batch_id,
+            "logical_settlement_batch_id": result.logical_settlement_batch_id,
+            "settlement_segment_path": str(result.settlement_segment_directory),
+            "settlement_rows_sha256": result.settlement_manifest[
+                "settlement_rows_sha256"
+            ],
+            "manifest_internal_hash": result.settlement_manifest[
+                "settlement_manifest_hash"
+            ],
+            "manifest_file_sha256": manifest_file_hash,
+            "closing_prerequisite_sha256": result.settlement_manifest[
+                "closing_prerequisite_sha256"
+            ],
+            "writer_verifier_result": _json_ready(result.writer_verifier_result),
+            "full_verifier_result": verifier.to_dict(),
+            "publication_result": result.to_dict(),
+            "publication_semantics": (
+                "idempotent_replay"
+                if result.completion_status == "already_complete"
+                else "new_publication"
+            ),
+            "completion_timestamp_utc": approval_timestamp_utc,
+            "operator_id": approval_operator_id,
+            "operator_identity_disclaimer": (
+                "Operator metadata is supplied by the offline caller and is not "
+                "cryptographic proof of the operator's real-world identity."
+            ),
+            "evidence_trust_statement": (
+                "This external receipt is not part of the immutable settlement "
+                "manifest and is not the evidence trust root."
+            ),
+        }
     elif operation_stage == "settlement-publish":
         if plan_build.settlement_config is None:
             raise NBAPlayerPointsPlanNotPublishableError("settlement config missing")
@@ -1320,7 +1851,21 @@ def _publish_plan(
     else:
         raise NBAPlayerPointsBundleError(f"unsupported publish operation: {operation_stage}")
 
-    _write_json_artifact(context.preview_root, "approval_receipt.json", receipt)
+    if (
+        operation_stage == "settlement-publish"
+        and context.bundle_schema_version == NBA_PLAYER_POINTS_MANUAL_RUN_V2_SCHEMA_VERSION
+    ):
+        try:
+            _write_json_artifact(context.preview_root, "approval_receipt.json", receipt)
+        except Exception as exc:
+            receipt = {
+                **dict(receipt),
+                "external_receipt_write_status": "failed",
+                "external_receipt_write_error": str(exc),
+                "evidence_remains_verified": True,
+            }
+    else:
+        _write_json_artifact(context.preview_root, "approval_receipt.json", receipt)
     return receipt
 
 
@@ -1389,6 +1934,26 @@ def _verify_result(context: _BundleContext) -> Mapping[str, object]:
         "prediction_evidence": prediction_report.to_dict(),
         "closing_evidence": closing_report.to_dict(),
         "settlement_evidence": settlement_report.to_dict(),
+        "settlement_binding_status_counts": dict(
+            settlement_report.binding_status_counts
+        ),
+        "settlement_schema_versions": list(settlement_report.schema_versions),
+        "settlement_approval_contract_versions": list(
+            settlement_report.approval_contract_versions
+        ),
+        "closing_prerequisite_hashes": list(
+            settlement_report.closing_prerequisite_hashes
+        ),
+        "logical_settlement_batch_ids": list(
+            settlement_report.logical_settlement_batch_ids
+        ),
+        "physical_settlement_batch_ids": list(
+            settlement_report.physical_settlement_batch_ids
+        ),
+        "legacy_unbound_warning_count": len(settlement_report.warnings),
+        "invalid_evidence_violation_count": len(
+            settlement_report.invalid_evidence_violations
+        ),
         "read_only": True,
         "repairs_attempted": False,
     }
@@ -1821,6 +2386,7 @@ def _has_prerequisite_evidence_block(reasons: object) -> bool:
         "corrupt prerequisite",
         "prediction evidence invalid",
         "closing evidence invalid",
+        "closing prerequisite",
         "settlement evidence invalid",
     )
     return any(

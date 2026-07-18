@@ -3166,6 +3166,35 @@ def _call_failure_hook(failure_hook: FailureHook | None, stage: str) -> None:
         failure_hook(stage)
 
 
+def load_nba_player_points_specific_closing_snapshot(
+    evidence_root: str | Path,
+    *,
+    operating_date: str,
+    physical_observation_batch_ids: Sequence[str],
+    physical_selection_batch_id: str,
+    prediction_ids: Sequence[str],
+    expected_closing_policy_id: str,
+    expected_closing_policy_version: str,
+    logical_closing_id: str | None = None,
+) -> object:
+    """Load only explicitly named physical closing batches into frozen bytes."""
+
+    from courtvision.sports.nba.player_points_settlement_closing_binding import (
+        build_nba_player_points_closing_prerequisite,
+    )
+
+    return build_nba_player_points_closing_prerequisite(
+        evidence_root,
+        operating_date=operating_date,
+        physical_observation_batch_ids=physical_observation_batch_ids,
+        physical_selection_batch_id=physical_selection_batch_id,
+        prediction_ids=prediction_ids,
+        expected_closing_policy_id=expected_closing_policy_id,
+        expected_closing_policy_version=expected_closing_policy_version,
+        logical_closing_id=logical_closing_id,
+    )
+
+
 __all__ = [
     "NBA_PLAYER_POINTS_CLOSING_SCHEMA_VERSION",
     "NBA_PLAYER_POINTS_CLOSING_SELECTION_SCHEMA_VERSION",
@@ -3180,6 +3209,7 @@ __all__ = [
     "closing_observation_schema_definition",
     "closing_selection_schema_definition",
     "default_closing_policy",
+    "load_nba_player_points_specific_closing_snapshot",
     "resolve_nba_player_points_effective_closing_selection",
     "verify_nba_player_points_closing_evidence",
     "write_nba_player_points_closing_evidence",

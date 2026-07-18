@@ -39,6 +39,10 @@ from courtvision.sports.nba.player_points_settlement import (
     NBAPlayerPointsSettlementRow,
     validate_settlement_rows,
 )
+from courtvision.sports.nba.player_points_settlement_closing_binding import (
+    NBA_PLAYER_POINTS_SETTLEMENT_EVIDENCE_V2_SCHEMA_VERSION,
+    verify_nba_player_points_settlement_evidence_v2,
+)
 
 
 NBA_PLAYER_POINTS_SETTLEMENT_EVIDENCE_SCHEMA_VERSION: Final = (
@@ -194,6 +198,16 @@ class NBAPlayerPointsSettlementEvidenceIntegrityReport:
     evidence_root: Path
     settlement_segments: tuple[Mapping[str, object], ...]
     effective_settlements: tuple[Mapping[str, object], ...]
+    binding_status_counts: Mapping[str, int] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    schema_versions: tuple[str, ...] = ()
+    approval_contract_versions: tuple[str, ...] = ()
+    closing_prerequisite_hashes: tuple[str, ...] = ()
+    logical_settlement_batch_ids: tuple[str, ...] = ()
+    physical_settlement_batch_ids: tuple[str, ...] = ()
+    warnings: tuple[Mapping[str, object], ...] = ()
+    invalid_evidence_violations: tuple[Mapping[str, object], ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -205,6 +219,16 @@ class NBAPlayerPointsSettlementEvidenceIntegrityReport:
             ],
             "effective_settlements": [
                 _json_ready(row) for row in self.effective_settlements
+            ],
+            "binding_status_counts": dict(self.binding_status_counts),
+            "schema_versions": list(self.schema_versions),
+            "approval_contract_versions": list(self.approval_contract_versions),
+            "closing_prerequisite_hashes": list(self.closing_prerequisite_hashes),
+            "logical_settlement_batch_ids": list(self.logical_settlement_batch_ids),
+            "physical_settlement_batch_ids": list(self.physical_settlement_batch_ids),
+            "warnings": [_json_ready(item) for item in self.warnings],
+            "invalid_evidence_violations": [
+                _json_ready(item) for item in self.invalid_evidence_violations
             ],
         }
 
@@ -377,6 +401,18 @@ def verify_nba_player_points_settlement_evidence(
     violations: list[str] = []
     segment_reports: list[Mapping[str, object]] = []
     effective_reports: tuple[Mapping[str, object], ...] = ()
+    binding_status_counts = {
+        "legacy-unbound": 0,
+        "closing-bound": 0,
+        "invalid": 0,
+    }
+    schema_versions: set[str] = set()
+    approval_contract_versions: set[str] = set()
+    closing_prerequisite_hashes: set[str] = set()
+    logical_batch_ids: set[str] = set()
+    physical_batch_ids: set[str] = set()
+    warnings: list[Mapping[str, object]] = []
+    invalid_violations: list[Mapping[str, object]] = []
 
     if not root.exists():
         return NBAPlayerPointsSettlementEvidenceIntegrityReport(
@@ -399,9 +435,92 @@ def verify_nba_player_points_settlement_evidence(
         )
 
     for segment in _iter_completed_settlement_segments(root, cfg):
-        report = _verify_settlement_segment(segment, cfg, prediction_index)
+        try:
+            manifest = _read_json_file(segment / NBA_PLAYER_POINTS_SETTLEMENT_MANIFEST_FILE)
+        except NBAPlayerPointsSettlementEvidenceError:
+            manifest = MappingProxyType({})
+        schema_version = manifest.get("schema_version")
+        if isinstance(schema_version, str):
+            schema_versions.add(schema_version)
+        if schema_version == NBA_PLAYER_POINTS_SETTLEMENT_EVIDENCE_V2_SCHEMA_VERSION:
+            v2_report = verify_nba_player_points_settlement_evidence_v2(
+                root,
+                segment=segment,
+            )
+            report = (
+                v2_report.settlement_segments[0]
+                if v2_report.settlement_segments
+                else MappingProxyType(
+                    {
+                        "segment_directory": str(segment),
+                        "manifest": _json_ready(manifest),
+                        "binding_status": "invalid",
+                        "violations": tuple(v2_report.violations),
+                    }
+                )
+            )
+            segment_reports.append(report)
+            if v2_report.ok:
+                binding_status_counts["closing-bound"] += 1
+            else:
+                binding_status_counts["invalid"] += 1
+                violations.extend(v2_report.violations)
+                invalid_violations.extend(
+                    {
+                        "segment_directory": str(segment),
+                        "violation": item,
+                    }
+                    for item in v2_report.violations
+                )
+            approval_contract_versions.update(v2_report.approval_contract_versions)
+            closing_prerequisite_hashes.update(v2_report.closing_prerequisite_hashes)
+            logical_batch_ids.update(v2_report.logical_settlement_batch_ids)
+            physical_batch_ids.update(v2_report.physical_settlement_batch_ids)
+            continue
+
+        legacy_report = _verify_settlement_segment(segment, cfg, prediction_index)
+        legacy_violations = tuple(str(item) for item in legacy_report["violations"])
+        if schema_version == NBA_PLAYER_POINTS_SETTLEMENT_EVIDENCE_SCHEMA_VERSION and not legacy_violations:
+            binding_status_counts["legacy-unbound"] += 1
+            warning = MappingProxyType(
+                {
+                    "code": "legacy_unbound_settlement_evidence",
+                    "binding_status": "legacy-unbound",
+                    "segment_directory": str(segment),
+                    "message": (
+                        "Valid historical v1 settlement evidence is not bound to "
+                        "an exact closing observation and selection."
+                    ),
+                }
+            )
+            warnings.append(warning)
+            report = MappingProxyType(
+                {
+                    **dict(legacy_report),
+                    "binding_status": "legacy-unbound",
+                    "warnings": (warning,),
+                }
+            )
+        else:
+            binding_status_counts["invalid"] += 1
+            violations.extend(legacy_violations)
+            if not legacy_violations:
+                violations.append(f"{segment}: unsupported settlement evidence schema")
+                legacy_violations = (violations[-1],)
+            invalid_violations.extend(
+                {
+                    "segment_directory": str(segment),
+                    "violation": item,
+                }
+                for item in legacy_violations
+            )
+            report = MappingProxyType(
+                {
+                    **dict(legacy_report),
+                    "binding_status": "invalid",
+                }
+            )
         segment_reports.append(report)
-        violations.extend(str(item) for item in report["violations"])
 
     if not violations:
         effective_reports, effective_violations = _build_effective_settlement_reports(root, cfg)
@@ -413,6 +532,14 @@ def verify_nba_player_points_settlement_evidence(
         evidence_root=root,
         settlement_segments=tuple(segment_reports),
         effective_settlements=effective_reports,
+        binding_status_counts=MappingProxyType(binding_status_counts),
+        schema_versions=tuple(sorted(schema_versions)),
+        approval_contract_versions=tuple(sorted(approval_contract_versions)),
+        closing_prerequisite_hashes=tuple(sorted(closing_prerequisite_hashes)),
+        logical_settlement_batch_ids=tuple(sorted(logical_batch_ids)),
+        physical_settlement_batch_ids=tuple(sorted(physical_batch_ids)),
+        warnings=tuple(warnings),
+        invalid_evidence_violations=tuple(invalid_violations),
     )
 
 
@@ -852,6 +979,8 @@ def _build_effective_settlement_reports(
 
     for segment in _iter_completed_settlement_segments(root, config):
         manifest = _read_json_file(segment / NBA_PLAYER_POINTS_SETTLEMENT_MANIFEST_FILE)
+        if manifest.get("schema_version") != NBA_PLAYER_POINTS_SETTLEMENT_EVIDENCE_SCHEMA_VERSION:
+            continue
         for row in _read_jsonl_strict(segment / NBA_PLAYER_POINTS_SETTLEMENT_ROWS_FILE):
             row_hash = str(row["settlement_evidence_record_hash"])
             row_id = str(row["settlement_id"])

@@ -27,6 +27,12 @@ from courtvision.sports.nba.player_points_research_runner import (
     bundle_schema_definition,
     run_manual_bundle,
 )
+from courtvision.sports.nba.player_points_settlement_closing_binding import (
+    NBA_PLAYER_POINTS_MANUAL_PLAN_V2_SCHEMA_VERSION,
+    NBA_PLAYER_POINTS_MANUAL_RUN_V2_SCHEMA_VERSION,
+    NBA_PLAYER_POINTS_SETTLEMENT_APPROVAL_CONTRACT_VERSION,
+    NBA_PLAYER_POINTS_SETTLEMENT_EVIDENCE_V2_SCHEMA_VERSION,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -329,6 +335,62 @@ def _settlement_bundle(
         },
     }
     path = tmp_path / "settlement_bundle.json"
+    _write_json(path, bundle)
+    return path
+
+
+def _settlement_v2_bundle(
+    tmp_path: Path,
+    paths: dict[str, Path],
+    prediction_row: dict[str, object],
+    *,
+    final_stats_payload: dict[str, object],
+    logical_settlement_batch_id: str = "manual-settlement-v2-001",
+) -> Path:
+    _write_json(paths["input_root"] / "final_stats.json", final_stats_payload)
+    evidence_root = paths["evidence_root"] / "nba_player_points_evidence"
+    observation_manifests = sorted(
+        evidence_root.glob("closing/observations/segments/*/*/closing_manifest.json")
+    )
+    selection_manifests = sorted(
+        evidence_root.glob("closing/selections/segments/*/*/selection_manifest.json")
+    )
+    assert observation_manifests and len(selection_manifests) == 1
+    observation_batch_ids = [
+        _read_json(path)["closing_batch_id"] for path in observation_manifests
+    ]
+    selection_manifest = _read_json(selection_manifests[0])
+    bundle = {
+        "bundle_schema_version": NBA_PLAYER_POINTS_MANUAL_RUN_V2_SCHEMA_VERSION,
+        "operation_stage": "settlement-plan",
+        "operating_date": "2026-06-05",
+        "repository_commit_sha": _current_sha(),
+        "research_label": "research_only_not_for_betting",
+        "input_root": str(paths["input_root"]),
+        "preview_root": str(tmp_path / "settlement_v2_previews"),
+        "evidence_root": str(paths["evidence_root"]),
+        "operator_id": "manual-research-operator",
+        "requested_at_utc": "2026-06-06T04:00:00Z",
+        "settlement": {
+            "logical_settlement_batch_id": logical_settlement_batch_id,
+            "physical_closing_selection_batch_id": selection_manifest[
+                "selection_batch_id"
+            ],
+            "expected_physical_observation_batch_ids": observation_batch_ids,
+            "expected_closing_policy_id": (
+                "nba-player-points-same-book-latest-pre-tip-v1"
+            ),
+            "expected_closing_policy_version": "1.0",
+            "requested_prediction_ids": [prediction_row["prediction_id"]],
+            "settlement_policy_id": (
+                "nba-player-points-offline-final-stats-settlement-v1"
+            ),
+            "settlement_policy_version": "1.0",
+            "final_stat_input_files": ["final_stats.json"],
+            "settlement_timestamp_utc": "2026-06-06T04:00:00Z",
+        },
+    }
+    path = tmp_path / "settlement_v2_bundle.json"
     _write_json(path, bundle)
     return path
 
@@ -747,7 +809,16 @@ def test_closing_requires_completed_prediction_evidence(tmp_path: Path) -> None:
 def test_settlement_publish_and_minutes_participation_distinctions(tmp_path: Path) -> None:
     _, _, paths, _, _ = _publish_pregame(tmp_path)
     prediction = _draftkings_prediction(paths["evidence_root"])
-    settlement_path = _settlement_bundle(
+    closing_path = _closing_bundle(tmp_path, paths, prediction["prediction_id"])
+    closing_plan = run_manual_bundle(closing_path)
+    run_manual_bundle(
+        closing_path,
+        publish=True,
+        approval_digest=closing_plan["plan"]["approval_digest"],
+        approval_operator_id="manual-research-operator",
+        approval_timestamp_utc="2026-06-06T00:40:30Z",
+    )
+    settlement_path = _settlement_v2_bundle(
         tmp_path,
         paths,
         prediction,
@@ -761,10 +832,45 @@ def test_settlement_publish_and_minutes_participation_distinctions(tmp_path: Pat
         approval_operator_id="manual-research-operator",
         approval_timestamp_utc="2026-06-06T04:01:00Z",
     )
+    assert plan["plan"]["plan_schema_version"] == NBA_PLAYER_POINTS_MANUAL_PLAN_V2_SCHEMA_VERSION
+    assert plan["plan"]["approval_contract_version"] == (
+        NBA_PLAYER_POINTS_SETTLEMENT_APPROVAL_CONTRACT_VERSION
+    )
+    assert plan["plan"]["binding_status"] == "closing-bound"
+    assert plan["plan"]["per_prediction_closing_binding_summary"][0][
+        "closing_line"
+    ] == "32.5"
     assert plan["plan"]["eligibility_summary"]["settled_rows"] == 1
     assert receipt["receipt"]["publication_result"]["completion_status"] == "complete"
+    assert receipt["binding_status"] == "closing-bound"
+    assert receipt["evidence_schema_version"] == (
+        NBA_PLAYER_POINTS_SETTLEMENT_EVIDENCE_V2_SCHEMA_VERSION
+    )
+    assert receipt["approval_receipt_sha256"]
 
-    missing_path = _settlement_bundle(
+    segment = Path(receipt["receipt"]["settlement_segment_path"])
+    envelope = _read_json(segment / "approval_envelope.json")
+    manifest = _read_json(segment / "settlement_manifest.json")
+    assert "physical_settlement_batch_id" not in envelope
+    assert "manifest_file_sha256" not in envelope
+    assert "approval_envelope_sha256" not in envelope
+    assert "approval_receipt.json" not in manifest["file_inventory"]
+    assert manifest["binding_status"] == "closing-bound"
+    verify_report = receipt["receipt"]["full_verifier_result"]
+    assert verify_report["binding_status_counts"]["closing-bound"] == 1
+    replay = run_manual_bundle(
+        settlement_path,
+        publish=True,
+        approval_digest=plan["plan"]["approval_digest"],
+        approval_operator_id="manual-research-operator",
+        approval_timestamp_utc="2026-06-06T04:01:00Z",
+    )
+    assert replay["plan"]["approval_digest"] == plan["plan"]["approval_digest"]
+    assert replay["receipt"]["publication_result"]["completion_status"] == (
+        "already_complete"
+    )
+
+    missing_path = _settlement_v2_bundle(
         tmp_path / "missing",
         paths,
         prediction,
@@ -774,7 +880,7 @@ def test_settlement_publish_and_minutes_participation_distinctions(tmp_path: Pat
     assert missing["plan"]["eligibility_summary"]["missing_actual_minutes_rows"] == 1
     assert missing["plan"]["eligibility_summary"]["manual_review_rows"] == 1
 
-    zero_path = _settlement_bundle(
+    zero_path = _settlement_v2_bundle(
         tmp_path / "zero",
         paths,
         prediction,
@@ -783,6 +889,40 @@ def test_settlement_publish_and_minutes_participation_distinctions(tmp_path: Pat
     zero = run_manual_bundle(zero_path)
     assert zero["plan"]["eligibility_summary"]["zero_minute_rows"] == 1
     assert zero["plan"]["eligibility_summary"]["dnp_rows"] == 0
+
+
+def test_new_v1_settlement_publication_is_blocked_without_fallback(tmp_path: Path) -> None:
+    _, _, paths, _, _ = _publish_pregame(tmp_path)
+    prediction = _draftkings_prediction(paths["evidence_root"])
+    settlement_path = _settlement_bundle(
+        tmp_path,
+        paths,
+        prediction,
+        final_stats_payload=_single_final_stats(prediction),
+    )
+
+    plan = run_manual_bundle(settlement_path)
+
+    assert plan["exit_code"] == EXIT_CODES["plan_not_publishable"]
+    assert "closing_bound_settlement_v2_required" in plan["plan"]["publishability"][
+        "blocked_reasons"
+    ]
+    with pytest.raises(
+        NBAPlayerPointsPlanNotPublishableError,
+        match="closing_bound_settlement_v2_required",
+    ):
+        run_manual_bundle(
+            settlement_path,
+            publish=True,
+            approval_digest=plan["plan"]["approval_digest"],
+            approval_operator_id="manual-research-operator",
+            approval_timestamp_utc="2026-06-06T04:01:00Z",
+        )
+    assert not (
+        paths["evidence_root"]
+        / "nba_player_points_evidence"
+        / "settlement"
+    ).exists()
 
 
 def test_stage_publications_and_read_only_operations_do_not_mutate_other_evidence(tmp_path: Path) -> None:
@@ -811,7 +951,7 @@ def test_stage_publications_and_read_only_operations_do_not_mutate_other_evidenc
         _snapshot(evidence_root / "runs"),
         _snapshot(evidence_root / "ledgers"),
     )
-    settlement_path = _settlement_bundle(
+    settlement_path = _settlement_v2_bundle(
         root,
         paths,
         prediction,

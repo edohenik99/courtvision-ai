@@ -380,7 +380,13 @@ def test_valid_terminal_settlement_creates_immutable_segment_and_effective_resul
     assert effective["effective_status"] == "settled"
     assert effective["selected_settlement_record"]["final_points"] == 35.0
     assert effective["historical_settlement_count"] == 1
-    assert verify_nba_player_points_settlement_evidence(tmp_path, SETTLEMENT_CONFIG).ok is True
+    report = verify_nba_player_points_settlement_evidence(tmp_path, SETTLEMENT_CONFIG)
+    assert report.ok is True
+    assert report.binding_status_counts["legacy-unbound"] == 1
+    assert report.binding_status_counts["closing-bound"] == 0
+    assert report.binding_status_counts["invalid"] == 0
+    assert report.warnings[0]["code"] == "legacy_unbound_settlement_evidence"
+    assert report.settlement_segments[0]["binding_status"] == "legacy-unbound"
 
 
 def test_pending_to_terminal_revision_preserves_first_segment(tmp_path: Path) -> None:
