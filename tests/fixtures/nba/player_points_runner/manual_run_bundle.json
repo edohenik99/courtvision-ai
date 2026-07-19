@@ -1,0 +1,32 @@
+{
+  "bundle_schema_version": "nba-player-points-manual-run-v1",
+  "operation_stage": "pregame-plan",
+  "operating_date": "2026-06-05",
+  "repository_commit_sha": "9d75e96018451af931de411a013840c0b6309aa5",
+  "research_label": "research_only_not_for_betting",
+  "input_root": "C:/research/nba-player-points/inputs",
+  "preview_root": "C:/research/nba-player-points/previews",
+  "evidence_root": "C:/research/nba-player-points/evidence",
+  "operator_id": "manual-research-operator",
+  "requested_at_utc": "2026-06-05T18:09:00Z",
+  "pregame": {
+    "prediction_run_id": "run-nba-points-manual-20260605",
+    "pregame_odds_payloads": [
+      "pregame_odds.json"
+    ],
+    "schedule_identity_payloads": [
+      "schedule_identity.json"
+    ],
+    "minutes_payloads": [
+      "minutes_inputs.json"
+    ],
+    "projection_payloads": [
+      "projection_evidence.json"
+    ],
+    "feature_cutoff_timestamp_utc": "2026-06-05T18:30:00Z",
+    "prediction_timestamp_utc": "2026-06-05T18:08:00Z",
+    "model_id": "nba-player-points-manual-research-model-v1",
+    "pregame_policy_id": "nba-player-points-manual-pregame-v1",
+    "pregame_policy_version": "1.0"
+  }
+}
