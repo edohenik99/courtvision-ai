@@ -46,3 +46,9 @@ jobs:
 
       - name: Test NBA player points settlement closing binding
         run: python -B -m pytest -p no:cacheprovider tests\test_nba_player_points_settlement_closing_binding.py -q
+
+      - name: Validate MLB HR research syntax
+        run: python -B -m py_compile courtvision\sports\mlb\training\hr_research_baseline.py
+
+      - name: Test MLB HR prospective research
+        run: python -B -m pytest -p no:cacheprovider tests\test_mlb_hr_prospective_research_tooling.py tests\test_mlb_hr_research_baseline.py -q
