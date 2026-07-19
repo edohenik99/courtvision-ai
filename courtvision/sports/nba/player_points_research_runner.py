@@ -124,6 +124,7 @@ APPROVAL_DIGEST_INPUTS: Final = (
     "prerequisite evidence verifier state and hashes",
     "policy IDs and versions",
     "run and batch IDs",
+    "feature cutoff and prediction timestamps where applicable",
     "canonical planned rows and row hashes",
     "eligibility, exclusion, quarantine, conflict, and duplicate counts",
     "evidence_root identity",
@@ -138,6 +139,7 @@ PUBLISHABILITY_BLOCKS: Final = (
     "repository branch or working tree mismatch",
     "target-game leakage",
     "naive timestamps",
+    "feature cutoff after prediction timestamp",
     "path or symlink violation",
     "corrupt prerequisite evidence",
     "approval-digest mismatch",
@@ -685,14 +687,16 @@ def _build_pregame_plan(context: _BundleContext) -> _PlanBuild:
     section = _stage_section(context.bundle, "pregame")
     prediction_run_id = _require_path_id(section.get("prediction_run_id"), "pregame.prediction_run_id")
     model_id = _require_path_id(section.get("model_id"), "pregame.model_id")
-    feature_cutoff = _require_utc_timestamp(
+    feature_cutoff_value = _parse_utc(
         section.get("feature_cutoff_timestamp_utc"),
         "pregame.feature_cutoff_timestamp_utc",
     )
-    prediction_timestamp = _require_utc_timestamp(
+    prediction_timestamp_value = _parse_utc(
         section.get("prediction_timestamp_utc"),
         "pregame.prediction_timestamp_utc",
     )
+    feature_cutoff = _format_utc(feature_cutoff_value)
+    prediction_timestamp = _format_utc(prediction_timestamp_value)
     pregame_policy = {
         "pregame_policy_id": _require_path_id(
             section.get("pregame_policy_id", "nba-player-points-manual-pregame-v1"),
@@ -717,6 +721,11 @@ def _build_pregame_plan(context: _BundleContext) -> _PlanBuild:
     )
 
     structural_errors: list[str] = []
+    if feature_cutoff_value > prediction_timestamp_value:
+        structural_errors.append(
+            "feature_cutoff_timestamp_utc must be at or before "
+            "prediction_timestamp_utc"
+        )
     adapter_details: list[Mapping[str, object]] = []
     market_records: list[Mapping[str, object]] = []
     schedule_rows: list[Mapping[str, object]] = []

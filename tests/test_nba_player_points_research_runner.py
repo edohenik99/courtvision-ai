@@ -184,6 +184,8 @@ def _pregame_bundle(
     policy_version: str = "1.0",
     repository_commit_sha: str | None = None,
     repository_branch: str | None = None,
+    feature_cutoff_timestamp_utc: str = "2026-06-05T18:30:00Z",
+    prediction_timestamp_utc: str = "2026-06-05T18:30:00Z",
 ) -> tuple[Path, dict[str, object], dict[str, Path]]:
     paths = _write_base_inputs(
         tmp_path,
@@ -212,8 +214,8 @@ def _pregame_bundle(
             "schedule_identity_payloads": ["schedule_identity.json"],
             "minutes_payloads": ["minutes_inputs.json"],
             "projection_payloads": projection_refs,
-            "feature_cutoff_timestamp_utc": "2026-06-05T18:30:00Z",
-            "prediction_timestamp_utc": "2026-06-05T18:08:00Z",
+            "feature_cutoff_timestamp_utc": feature_cutoff_timestamp_utc,
+            "prediction_timestamp_utc": prediction_timestamp_utc,
             "model_id": "nba-player-points-manual-model-v1",
             "pregame_policy_id": "nba-player-points-manual-pregame-v1",
             "pregame_policy_version": policy_version,
@@ -423,6 +425,99 @@ def test_dry_run_defaults_to_plan_and_leaves_evidence_root_unchanged(tmp_path: P
         "integrity_preview.json",
         "approval_request.json",
     }
+
+
+@pytest.mark.parametrize(
+    ("feature_cutoff_timestamp_utc", "prediction_timestamp_utc"),
+    [
+        pytest.param(
+            "2026-06-05T18:30:00Z",
+            "2026-06-05T18:30:00Z",
+            id="equal",
+        ),
+        pytest.param(
+            "2026-06-05T18:29:59Z",
+            "2026-06-05T18:30:00Z",
+            id="before",
+        ),
+    ],
+)
+def test_feature_cutoff_at_or_before_prediction_timestamp_is_publishable(
+    tmp_path: Path,
+    feature_cutoff_timestamp_utc: str,
+    prediction_timestamp_utc: str,
+) -> None:
+    bundle_path, _, paths = _pregame_bundle(
+        tmp_path,
+        feature_cutoff_timestamp_utc=feature_cutoff_timestamp_utc,
+        prediction_timestamp_utc=prediction_timestamp_utc,
+    )
+
+    result = run_manual_bundle(bundle_path)
+
+    assert result["exit_code"] == EXIT_CODES["success"]
+    assert result["plan"]["publishability"]["allowed"] is True
+    assert _snapshot(paths["evidence_root"]) == ()
+
+
+def test_feature_cutoff_after_prediction_timestamp_blocks_publication(
+    tmp_path: Path,
+) -> None:
+    bundle_path, _, paths = _pregame_bundle(
+        tmp_path,
+        feature_cutoff_timestamp_utc="2026-06-05T18:30:00Z",
+        prediction_timestamp_utc="2026-06-05T18:29:59Z",
+    )
+
+    result = run_manual_bundle(bundle_path)
+
+    assert result["exit_code"] == EXIT_CODES["plan_not_publishable"]
+    assert result["plan"]["publishability"]["allowed"] is False
+    assert any(
+        "feature_cutoff_timestamp_utc must be at or before prediction_timestamp_utc"
+        in reason
+        for reason in result["plan"]["publishability"]["blocked_reasons"]
+    )
+    with pytest.raises(
+        NBAPlayerPointsPlanNotPublishableError,
+        match="feature_cutoff_timestamp_utc must be at or before",
+    ):
+        run_manual_bundle(
+            bundle_path,
+            publish=True,
+            approval_digest=result["plan"]["approval_digest"],
+            approval_operator_id="manual-research-operator",
+            approval_timestamp_utc="2026-06-05T18:31:00Z",
+        )
+    assert _snapshot(paths["evidence_root"]) == ()
+    assert not (paths["preview_root"] / "approval_receipt.json").exists()
+
+
+def test_feature_cutoff_and_prediction_timestamp_each_bind_approval_digest(
+    tmp_path: Path,
+) -> None:
+    bundle_path, bundle, _ = _pregame_bundle(tmp_path)
+    baseline = run_manual_bundle(bundle_path)
+
+    bundle["pregame"]["feature_cutoff_timestamp_utc"] = "2026-06-05T18:29:59Z"
+    _write_json(bundle_path, bundle)
+    changed_cutoff = run_manual_bundle(bundle_path)
+
+    bundle["pregame"]["feature_cutoff_timestamp_utc"] = "2026-06-05T18:30:00Z"
+    bundle["pregame"]["prediction_timestamp_utc"] = "2026-06-05T18:30:01Z"
+    _write_json(bundle_path, bundle)
+    changed_prediction = run_manual_bundle(bundle_path)
+
+    assert baseline["plan"]["publishability"]["allowed"] is True
+    assert changed_cutoff["plan"]["publishability"]["allowed"] is True
+    assert changed_prediction["plan"]["publishability"]["allowed"] is True
+    assert len(
+        {
+            baseline["plan"]["approval_digest"],
+            changed_cutoff["plan"]["approval_digest"],
+            changed_prediction["plan"]["approval_digest"],
+        }
+    ) == 3
 
 
 def test_approval_digest_is_deterministic_and_bundle_bytes_are_bound(tmp_path: Path) -> None:
