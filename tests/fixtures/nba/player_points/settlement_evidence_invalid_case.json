@@ -1,0 +1,1 @@
+{"fixture_schema_version":"nba-player-points-settlement-invalid-fixture-v1","base_archive":"settlement_evidence_versions.json","base_case":"v2","expected_binding_status":"invalid","mutation":{"path_glob":"settlement/segments/*/*/settlement_rows.jsonl","operation":"append-one-space-byte"}}

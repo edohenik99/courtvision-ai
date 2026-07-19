@@ -1,0 +1,23 @@
+{
+  "provider_name": "nba_final_stats_fixture",
+  "stats_timestamp_utc": "2026-06-06T03:45:00Z",
+  "games": [
+    {
+      "provider_event_id": "stats_game_10403",
+      "canonical_event_id": "nba-2026-06-05-okc-ind",
+      "commence_time_utc": "2026-06-06T00:40:00Z",
+      "home_team": "OKC",
+      "away_team": "IND",
+      "players": [
+        {
+          "player_id": "nba-player-1628983",
+          "player_name": "Shai Gilgeous-Alexander",
+          "team": "OKC",
+          "opponent": "IND",
+          "final_points": 34,
+          "actual_minutes": 38.75
+        }
+      ]
+    }
+  ]
+}

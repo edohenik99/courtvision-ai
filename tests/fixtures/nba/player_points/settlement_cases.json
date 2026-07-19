@@ -1,0 +1,600 @@
+{
+  "schema_version": "nba-player-points-settlement-fixtures-v1",
+  "source_timestamp_utc": "2026-06-06T03:45:00Z",
+  "balldontlie": {
+    "provider_name": "balldontlie",
+    "source_timestamp_utc": "2026-06-06T03:45:00Z",
+    "rows": [
+      {
+        "case_id": "valid_final_points_and_minutes",
+        "source_row_id": "bdl-valid-001",
+        "canonical_event_id": "nba-2026-06-05-okc-ind",
+        "commence_time_utc": "2026-06-06T00:40:00Z",
+        "game": {
+          "id": "bdl-game-10403",
+          "status": "Final",
+          "home_team": {"abbreviation": "OKC"},
+          "visitor_team": {"abbreviation": "IND"}
+        },
+        "player": {
+          "id": "nba-player-1628983",
+          "first_name": "Shai",
+          "last_name": "Gilgeous-Alexander"
+        },
+        "team": {"abbreviation": "OKC"},
+        "opponent": "IND",
+        "pts": 34,
+        "min": "38:45",
+        "participation_status": "participated",
+        "source_timestamp_utc": "2026-06-06T03:45:00Z"
+      },
+      {
+        "case_id": "zero_player_points",
+        "source_row_id": "bdl-zero-points-001",
+        "canonical_event_id": "nba-2026-06-05-okc-ind",
+        "commence_time_utc": "2026-06-06T00:40:00Z",
+        "game": {
+          "id": "bdl-game-10403",
+          "status": "Final",
+          "home_team": {"abbreviation": "OKC"},
+          "visitor_team": {"abbreviation": "IND"}
+        },
+        "player": {
+          "id": "nba-player-1628983",
+          "first_name": "Shai",
+          "last_name": "Gilgeous-Alexander"
+        },
+        "team": {"abbreviation": "OKC"},
+        "opponent": "IND",
+        "pts": 0,
+        "min": "31:30",
+        "participation_status": "participated",
+        "source_timestamp_utc": "2026-06-06T03:45:00Z"
+      },
+      {
+        "case_id": "participated_zero_minutes",
+        "source_row_id": "bdl-zero-minutes-001",
+        "canonical_event_id": "nba-2026-06-05-okc-ind",
+        "commence_time_utc": "2026-06-06T00:40:00Z",
+        "game": {
+          "id": "bdl-game-10403",
+          "status": "Final",
+          "home_team": {"abbreviation": "OKC"},
+          "visitor_team": {"abbreviation": "IND"}
+        },
+        "player": {
+          "id": "nba-player-1628983",
+          "first_name": "Shai",
+          "last_name": "Gilgeous-Alexander"
+        },
+        "team": {"abbreviation": "OKC"},
+        "opponent": "IND",
+        "pts": 0,
+        "min": "0:00",
+        "participation_status": "participated",
+        "source_timestamp_utc": "2026-06-06T03:45:00Z"
+      },
+      {
+        "case_id": "did_not_participate",
+        "source_row_id": "bdl-dnp-001",
+        "canonical_event_id": "nba-2026-06-05-okc-ind",
+        "commence_time_utc": "2026-06-06T00:40:00Z",
+        "game": {
+          "id": "bdl-game-10403",
+          "status": "Final",
+          "home_team": {"abbreviation": "OKC"},
+          "visitor_team": {"abbreviation": "IND"}
+        },
+        "player": {
+          "id": "nba-player-1628983",
+          "first_name": "Shai",
+          "last_name": "Gilgeous-Alexander"
+        },
+        "team": {"abbreviation": "OKC"},
+        "opponent": "IND",
+        "pts": 0,
+        "min": "0:00",
+        "participation_status": "did_not_participate",
+        "source_timestamp_utc": "2026-06-06T03:45:00Z"
+      },
+      {
+        "case_id": "inactive",
+        "source_row_id": "bdl-inactive-001",
+        "canonical_event_id": "nba-2026-06-05-okc-ind",
+        "commence_time_utc": "2026-06-06T00:40:00Z",
+        "game": {
+          "id": "bdl-game-10403",
+          "status": "Final",
+          "home_team": {"abbreviation": "OKC"},
+          "visitor_team": {"abbreviation": "IND"}
+        },
+        "player": {
+          "id": "nba-player-1628983",
+          "first_name": "Shai",
+          "last_name": "Gilgeous-Alexander"
+        },
+        "team": {"abbreviation": "OKC"},
+        "opponent": "IND",
+        "pts": 0,
+        "min": "0:00",
+        "participation_status": "inactive",
+        "source_timestamp_utc": "2026-06-06T03:45:00Z"
+      },
+      {
+        "case_id": "game_not_final",
+        "source_row_id": "bdl-not-final-001",
+        "canonical_event_id": "nba-2026-06-05-okc-ind",
+        "commence_time_utc": "2026-06-06T00:40:00Z",
+        "game": {
+          "id": "bdl-game-10403",
+          "status": "In Progress",
+          "home_team": {"abbreviation": "OKC"},
+          "visitor_team": {"abbreviation": "IND"}
+        },
+        "player": {
+          "id": "nba-player-1628983",
+          "first_name": "Shai",
+          "last_name": "Gilgeous-Alexander"
+        },
+        "team": {"abbreviation": "OKC"},
+        "opponent": "IND",
+        "participation_status": "unknown",
+        "source_timestamp_utc": "2026-06-06T01:12:00Z"
+      },
+      {
+        "case_id": "game_postponed",
+        "source_row_id": "bdl-postponed-001",
+        "canonical_event_id": "nba-2026-06-05-okc-ind",
+        "commence_time_utc": "2026-06-06T00:40:00Z",
+        "game": {
+          "id": "bdl-game-10403",
+          "status": "Postponed",
+          "home_team": {"abbreviation": "OKC"},
+          "visitor_team": {"abbreviation": "IND"}
+        },
+        "player": {
+          "id": "nba-player-1628983",
+          "first_name": "Shai",
+          "last_name": "Gilgeous-Alexander"
+        },
+        "team": {"abbreviation": "OKC"},
+        "opponent": "IND",
+        "participation_status": "unknown",
+        "source_timestamp_utc": "2026-06-06T00:10:00Z"
+      },
+      {
+        "case_id": "missing_actual_minutes",
+        "source_row_id": "bdl-missing-minutes-001",
+        "canonical_event_id": "nba-2026-06-05-okc-ind",
+        "commence_time_utc": "2026-06-06T00:40:00Z",
+        "game": {
+          "id": "bdl-game-10403",
+          "status": "Final",
+          "home_team": {"abbreviation": "OKC"},
+          "visitor_team": {"abbreviation": "IND"}
+        },
+        "player": {
+          "id": "nba-player-1628983",
+          "first_name": "Shai",
+          "last_name": "Gilgeous-Alexander"
+        },
+        "team": {"abbreviation": "OKC"},
+        "opponent": "IND",
+        "pts": 34,
+        "min": null,
+        "participation_status": "participated",
+        "source_timestamp_utc": "2026-06-06T03:45:00Z"
+      },
+      {
+        "case_id": "missing_final_points",
+        "source_row_id": "bdl-missing-points-001",
+        "canonical_event_id": "nba-2026-06-05-okc-ind",
+        "commence_time_utc": "2026-06-06T00:40:00Z",
+        "game": {
+          "id": "bdl-game-10403",
+          "status": "Final",
+          "home_team": {"abbreviation": "OKC"},
+          "visitor_team": {"abbreviation": "IND"}
+        },
+        "player": {
+          "id": "nba-player-1628983",
+          "first_name": "Shai",
+          "last_name": "Gilgeous-Alexander"
+        },
+        "team": {"abbreviation": "OKC"},
+        "opponent": "IND",
+        "min": "38:45",
+        "participation_status": "participated",
+        "source_timestamp_utc": "2026-06-06T03:45:00Z"
+      },
+      {
+        "case_id": "missing_player_id",
+        "source_row_id": "bdl-missing-player-id-001",
+        "canonical_event_id": "nba-2026-06-05-okc-ind",
+        "commence_time_utc": "2026-06-06T00:40:00Z",
+        "game": {
+          "id": "bdl-game-10403",
+          "status": "Final",
+          "home_team": {"abbreviation": "OKC"},
+          "visitor_team": {"abbreviation": "IND"}
+        },
+        "player": {
+          "first_name": "Shai",
+          "last_name": "Gilgeous-Alexander"
+        },
+        "team": {"abbreviation": "OKC"},
+        "opponent": "IND",
+        "pts": 34,
+        "min": "38:45",
+        "participation_status": "participated",
+        "source_timestamp_utc": "2026-06-06T03:45:00Z"
+      },
+      {
+        "case_id": "missing_event_id",
+        "source_row_id": "bdl-missing-event-id-001",
+        "commence_time_utc": "2026-06-06T00:40:00Z",
+        "home_team": "OKC",
+        "away_team": "IND",
+        "player": {
+          "id": "nba-player-1628983",
+          "first_name": "Shai",
+          "last_name": "Gilgeous-Alexander"
+        },
+        "team": {"abbreviation": "OKC"},
+        "opponent": "IND",
+        "game_status": "Final",
+        "pts": 34,
+        "min": "38:45",
+        "participation_status": "participated",
+        "source_timestamp_utc": "2026-06-06T03:45:00Z"
+      },
+      {
+        "case_id": "exact_prediction_id_match",
+        "source_row_id": "bdl-exact-prediction-001",
+        "prediction_id": "pred-nba-points-001",
+        "canonical_event_id": "nba-2026-06-05-okc-ind",
+        "commence_time_utc": "2026-06-06T00:40:00Z",
+        "game": {
+          "id": "bdl-game-10403",
+          "status": "Final",
+          "home_team": {"abbreviation": "OKC"},
+          "visitor_team": {"abbreviation": "IND"}
+        },
+        "player": {
+          "id": "nba-player-1628983",
+          "first_name": "Shai",
+          "last_name": "Gilgeous-Alexander"
+        },
+        "team": {"abbreviation": "OKC"},
+        "opponent": "IND",
+        "pts": 35,
+        "min": "39:00",
+        "participation_status": "participated",
+        "source_timestamp_utc": "2026-06-06T03:46:00Z"
+      },
+      {
+        "case_id": "canonical_event_player_fallback",
+        "source_row_id": "bdl-canonical-fallback-001",
+        "canonical_event_id": "nba-2026-06-05-okc-ind",
+        "commence_time_utc": "2026-06-06T00:40:00Z",
+        "game": {
+          "id": "bdl-game-10403",
+          "status": "Final",
+          "home_team": {"abbreviation": "OKC"},
+          "visitor_team": {"abbreviation": "IND"}
+        },
+        "player": {
+          "id": "nba-player-1628983",
+          "first_name": "Shai",
+          "last_name": "Gilgeous-Alexander"
+        },
+        "team": {"abbreviation": "OKC"},
+        "opponent": "IND",
+        "pts": 36,
+        "min": "37:30",
+        "participation_status": "participated",
+        "source_timestamp_utc": "2026-06-06T03:47:00Z"
+      },
+      {
+        "case_id": "multiple_final_stat_candidates_a",
+        "source_row_id": "bdl-multiple-a",
+        "canonical_event_id": "nba-2026-06-05-okc-ind",
+        "commence_time_utc": "2026-06-06T00:40:00Z",
+        "game": {
+          "id": "bdl-game-10403",
+          "status": "Final",
+          "home_team": {"abbreviation": "OKC"},
+          "visitor_team": {"abbreviation": "IND"}
+        },
+        "player": {
+          "id": "nba-player-1628983",
+          "first_name": "Shai",
+          "last_name": "Gilgeous-Alexander"
+        },
+        "team": {"abbreviation": "OKC"},
+        "opponent": "IND",
+        "pts": 34,
+        "min": "38:45",
+        "participation_status": "participated",
+        "source_timestamp_utc": "2026-06-06T03:45:00Z"
+      },
+      {
+        "case_id": "multiple_final_stat_candidates_b",
+        "source_row_id": "bdl-multiple-b",
+        "canonical_event_id": "nba-2026-06-05-okc-ind",
+        "commence_time_utc": "2026-06-06T00:40:00Z",
+        "game": {
+          "id": "bdl-game-10403",
+          "status": "Final",
+          "home_team": {"abbreviation": "OKC"},
+          "visitor_team": {"abbreviation": "IND"}
+        },
+        "player": {
+          "id": "nba-player-1628983",
+          "first_name": "Shai",
+          "last_name": "Gilgeous-Alexander"
+        },
+        "team": {"abbreviation": "OKC"},
+        "opponent": "IND",
+        "pts": 34,
+        "min": "38:45",
+        "participation_status": "participated",
+        "source_timestamp_utc": "2026-06-06T03:45:30Z"
+      },
+      {
+        "case_id": "conflicting_final_points_a",
+        "source_row_id": "bdl-conflict-points-a",
+        "canonical_event_id": "nba-2026-06-05-okc-ind",
+        "commence_time_utc": "2026-06-06T00:40:00Z",
+        "game": {
+          "id": "bdl-game-10403",
+          "status": "Final",
+          "home_team": {"abbreviation": "OKC"},
+          "visitor_team": {"abbreviation": "IND"}
+        },
+        "player": {
+          "id": "nba-player-1628983",
+          "first_name": "Shai",
+          "last_name": "Gilgeous-Alexander"
+        },
+        "team": {"abbreviation": "OKC"},
+        "opponent": "IND",
+        "pts": 34,
+        "min": "38:45",
+        "participation_status": "participated",
+        "source_timestamp_utc": "2026-06-06T03:45:00Z"
+      },
+      {
+        "case_id": "conflicting_final_points_b",
+        "source_row_id": "bdl-conflict-points-b",
+        "canonical_event_id": "nba-2026-06-05-okc-ind",
+        "commence_time_utc": "2026-06-06T00:40:00Z",
+        "game": {
+          "id": "bdl-game-10403",
+          "status": "Final",
+          "home_team": {"abbreviation": "OKC"},
+          "visitor_team": {"abbreviation": "IND"}
+        },
+        "player": {
+          "id": "nba-player-1628983",
+          "first_name": "Shai",
+          "last_name": "Gilgeous-Alexander"
+        },
+        "team": {"abbreviation": "OKC"},
+        "opponent": "IND",
+        "pts": 35,
+        "min": "38:45",
+        "participation_status": "participated",
+        "source_timestamp_utc": "2026-06-06T03:46:00Z"
+      },
+      {
+        "case_id": "conflicting_actual_minutes_a",
+        "source_row_id": "bdl-conflict-minutes-a",
+        "canonical_event_id": "nba-2026-06-05-okc-ind",
+        "commence_time_utc": "2026-06-06T00:40:00Z",
+        "game": {
+          "id": "bdl-game-10403",
+          "status": "Final",
+          "home_team": {"abbreviation": "OKC"},
+          "visitor_team": {"abbreviation": "IND"}
+        },
+        "player": {
+          "id": "nba-player-1628983",
+          "first_name": "Shai",
+          "last_name": "Gilgeous-Alexander"
+        },
+        "team": {"abbreviation": "OKC"},
+        "opponent": "IND",
+        "pts": 34,
+        "min": "38:45",
+        "participation_status": "participated",
+        "source_timestamp_utc": "2026-06-06T03:45:00Z"
+      },
+      {
+        "case_id": "conflicting_actual_minutes_b",
+        "source_row_id": "bdl-conflict-minutes-b",
+        "canonical_event_id": "nba-2026-06-05-okc-ind",
+        "commence_time_utc": "2026-06-06T00:40:00Z",
+        "game": {
+          "id": "bdl-game-10403",
+          "status": "Final",
+          "home_team": {"abbreviation": "OKC"},
+          "visitor_team": {"abbreviation": "IND"}
+        },
+        "player": {
+          "id": "nba-player-1628983",
+          "first_name": "Shai",
+          "last_name": "Gilgeous-Alexander"
+        },
+        "team": {"abbreviation": "OKC"},
+        "opponent": "IND",
+        "pts": 34,
+        "min": "37:45",
+        "participation_status": "participated",
+        "source_timestamp_utc": "2026-06-06T03:46:00Z"
+      },
+      {
+        "case_id": "duplicate_identical_settlement",
+        "source_row_id": "bdl-duplicate-identical",
+        "canonical_event_id": "nba-2026-06-05-okc-ind",
+        "commence_time_utc": "2026-06-06T00:40:00Z",
+        "game": {
+          "id": "bdl-game-10403",
+          "status": "Final",
+          "home_team": {"abbreviation": "OKC"},
+          "visitor_team": {"abbreviation": "IND"}
+        },
+        "player": {
+          "id": "nba-player-1628983",
+          "first_name": "Shai",
+          "last_name": "Gilgeous-Alexander"
+        },
+        "team": {"abbreviation": "OKC"},
+        "opponent": "IND",
+        "pts": 34,
+        "min": "38:45",
+        "participation_status": "participated",
+        "source_timestamp_utc": "2026-06-06T03:45:00Z"
+      },
+      {
+        "case_id": "duplicate_identical_settlement",
+        "source_row_id": "bdl-duplicate-identical",
+        "canonical_event_id": "nba-2026-06-05-okc-ind",
+        "commence_time_utc": "2026-06-06T00:40:00Z",
+        "game": {
+          "id": "bdl-game-10403",
+          "status": "Final",
+          "home_team": {"abbreviation": "OKC"},
+          "visitor_team": {"abbreviation": "IND"}
+        },
+        "player": {
+          "id": "nba-player-1628983",
+          "first_name": "Shai",
+          "last_name": "Gilgeous-Alexander"
+        },
+        "team": {"abbreviation": "OKC"},
+        "opponent": "IND",
+        "pts": 34,
+        "min": "38:45",
+        "participation_status": "participated",
+        "source_timestamp_utc": "2026-06-06T03:45:00Z"
+      },
+      {
+        "case_id": "source_fixture_immutability",
+        "source_row_id": "bdl-immutability-001",
+        "canonical_event_id": "nba-2026-06-05-okc-ind",
+        "commence_time_utc": "2026-06-06T00:40:00Z",
+        "game": {
+          "id": "bdl-game-10403",
+          "status": "Final",
+          "home_team": {"abbreviation": "OKC"},
+          "visitor_team": {"abbreviation": "IND"}
+        },
+        "player": {
+          "id": "nba-player-1628983",
+          "first_name": "Shai",
+          "last_name": "Gilgeous-Alexander"
+        },
+        "team": {"abbreviation": "OKC"},
+        "opponent": "IND",
+        "pts": 34,
+        "min": "38:45",
+        "participation_status": "participated",
+        "source_timestamp_utc": "2026-06-06T03:45:00Z"
+      }
+    ]
+  },
+  "api_nba": {
+    "provider_name": "api_nba",
+    "source_timestamp_utc": "2026-06-06T03:48:00Z",
+    "rows": [
+      {
+        "case_id": "provider_mapped_event_player_match",
+        "source_row_id": "api-nba-provider-map-001",
+        "provider_event_id": "odds_evt_20260605_okc_ind",
+        "commence_time_utc": "2026-06-06T00:40:00Z",
+        "game_status": "Final",
+        "game_final": true,
+        "home_team": "OKC",
+        "away_team": "IND",
+        "player": {
+          "id": "nba-player-1628983",
+          "firstname": "Shai",
+          "lastname": "Gilgeous-Alexander"
+        },
+        "team": {"code": "OKC"},
+        "opponent": "IND",
+        "points": 33,
+        "min": "36:30",
+        "participation_status": "participated",
+        "source_timestamp_utc": "2026-06-06T03:48:00Z"
+      },
+      {
+        "case_id": "api_nba_capability_sample",
+        "source_row_id": "api-nba-valid-001",
+        "canonical_event_id": "nba-2026-06-05-okc-ind",
+        "provider_event_id": "10403",
+        "commence_time_utc": "2026-06-06T00:40:00Z",
+        "game_status": "Final",
+        "game_final": true,
+        "home_team": "OKC",
+        "away_team": "IND",
+        "player": {
+          "id": "nba-player-1628983",
+          "firstname": "Shai",
+          "lastname": "Gilgeous-Alexander"
+        },
+        "team": {"code": "OKC"},
+        "opponent": "IND",
+        "points": 34,
+        "min": "38:45",
+        "participation_status": "participated",
+        "source_timestamp_utc": "2026-06-06T03:48:00Z"
+      }
+    ]
+  },
+  "sportsdataio": {
+    "provider_name": "sportsdataio",
+    "source_timestamp_utc": "2026-06-06T03:50:00Z",
+    "rows": [
+      {
+        "case_id": "sportsdataio_valid",
+        "source_row_id": "sdio-valid-001",
+        "StatID": "sdio-stat-001",
+        "GameID": "10403",
+        "canonical_event_id": "nba-2026-06-05-okc-ind",
+        "commence_time_utc": "2026-06-06T00:40:00Z",
+        "Status": "Final",
+        "IsClosed": true,
+        "HomeTeam": "OKC",
+        "AwayTeam": "IND",
+        "PlayerID": "nba-player-1628983",
+        "Name": "Shai Gilgeous-Alexander",
+        "Team": "OKC",
+        "Opponent": "IND",
+        "Points": 34,
+        "Minutes": 38.75,
+        "participation_status": "participated",
+        "source_timestamp_utc": "2026-06-06T03:50:00Z"
+      },
+      {
+        "case_id": "game_cancelled",
+        "source_row_id": "sdio-cancelled-001",
+        "StatID": "sdio-stat-cancelled-001",
+        "GameID": "10403",
+        "canonical_event_id": "nba-2026-06-05-okc-ind",
+        "commence_time_utc": "2026-06-06T00:40:00Z",
+        "Status": "Cancelled",
+        "IsClosed": false,
+        "HomeTeam": "OKC",
+        "AwayTeam": "IND",
+        "PlayerID": "nba-player-1628983",
+        "Name": "Shai Gilgeous-Alexander",
+        "Team": "OKC",
+        "Opponent": "IND",
+        "participation_status": "unknown",
+        "source_timestamp_utc": "2026-06-06T03:50:00Z"
+      }
+    ]
+  }
+}

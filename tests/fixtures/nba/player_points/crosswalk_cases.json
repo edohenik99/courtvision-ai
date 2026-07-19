@@ -1,0 +1,464 @@
+{
+  "schema_version": "nba-player-points-crosswalk-fixtures-v1",
+  "source_timestamp_utc": "2026-06-05T18:02:00Z",
+  "schedule_rows": {
+    "okc_ind": {
+      "canonical_event_id": "nba-2026-06-05-okc-ind",
+      "operating_date": "2026-06-05",
+      "commence_time_utc": "2026-06-06T00:40:00Z",
+      "home_team": "OKC",
+      "away_team": "IND"
+    },
+    "okc_ind_alt": {
+      "canonical_event_id": "nba-2026-06-05-okc-ind-alt",
+      "operating_date": "2026-06-05",
+      "commence_time_utc": "2026-06-06T00:45:00Z",
+      "home_team": "OKC",
+      "away_team": "IND"
+    },
+    "bos_lal_a": {
+      "canonical_event_id": "nba-2026-06-05-bos-lal-a",
+      "operating_date": "2026-06-05",
+      "commence_time_utc": "2026-06-06T01:00:00Z",
+      "home_team": "BOS",
+      "away_team": "LAL"
+    },
+    "bos_lal_b": {
+      "canonical_event_id": "nba-2026-06-05-bos-lal-b",
+      "operating_date": "2026-06-05",
+      "commence_time_utc": "2026-06-06T01:05:00Z",
+      "home_team": "BOS",
+      "away_team": "LAL"
+    }
+  },
+  "canonical_player_rows": {
+    "sga": {
+      "canonical_event_id": "nba-2026-06-05-okc-ind",
+      "player_id": "nba-player-1628983",
+      "canonical_player_name": "Shai Gilgeous-Alexander",
+      "canonical_team": "OKC"
+    },
+    "nesmith": {
+      "canonical_event_id": "nba-2026-06-05-okc-ind",
+      "player_id": "nba-player-1626167",
+      "canonical_player_name": "Aaron Nesmith",
+      "canonical_team": "IND"
+    },
+    "sga_lal": {
+      "canonical_event_id": "nba-2026-06-05-okc-ind",
+      "player_id": "nba-player-lal-sga-test",
+      "canonical_player_name": "Shai Gilgeous-Alexander",
+      "canonical_team": "LAL"
+    },
+    "alex_smith_one": {
+      "canonical_event_id": "nba-2026-06-05-okc-ind",
+      "player_id": "nba-player-alex-smith-1",
+      "canonical_player_name": "Alex Smith",
+      "canonical_team": "OKC"
+    },
+    "alex_smith_two": {
+      "canonical_event_id": "nba-2026-06-05-okc-ind",
+      "player_id": "nba-player-alex-smith-2",
+      "canonical_player_name": "Alex Smith",
+      "canonical_team": "OKC"
+    }
+  },
+  "odds_rows": {
+    "exact": {
+      "provider_name": "the_odds_api_nba",
+      "provider_event_id": "odds_evt_20260605_okc_ind",
+      "source_timestamp_utc": "2026-06-05T18:02:00Z",
+      "operating_date": "2026-06-05",
+      "commence_time_utc": "2026-06-06T00:40:00Z",
+      "home_team": "Oklahoma City Thunder",
+      "away_team": "Indiana Pacers",
+      "provider_player_id": "nba-player-1628983",
+      "provider_player_name": "Shai Gilgeous-Alexander",
+      "team": "OKC",
+      "sportsbook": "DraftKings",
+      "side": "over",
+      "line": 31.5
+    },
+    "canonical_event_id": {
+      "provider_name": "the_odds_api_nba",
+      "provider_event_id": "nba-2026-06-05-okc-ind",
+      "source_timestamp_utc": "2026-06-05T18:02:00Z",
+      "operating_date": "2026-06-05",
+      "commence_time_utc": "2026-06-06T00:40:00Z",
+      "home_team": "OKC",
+      "away_team": "IND",
+      "provider_player_name": "Shai Gilgeous-Alexander",
+      "team": "OKC",
+      "sportsbook": "DraftKings",
+      "side": "over",
+      "line": 31.5
+    },
+    "within_tolerance": {
+      "provider_name": "the_odds_api_nba",
+      "provider_event_id": "odds_evt_20260605_okc_ind_within",
+      "source_timestamp_utc": "2026-06-05T18:02:00Z",
+      "operating_date": "2026-06-05",
+      "commence_time_utc": "2026-06-06T00:50:00Z",
+      "home_team": "OKC",
+      "away_team": "IND",
+      "provider_player_name": "Shai Gilgeous-Alexander",
+      "team": "OKC",
+      "sportsbook": "DraftKings",
+      "side": "over",
+      "line": 31.5
+    },
+    "boundary_tolerance": {
+      "provider_name": "the_odds_api_nba",
+      "provider_event_id": "odds_evt_20260605_okc_ind_boundary",
+      "source_timestamp_utc": "2026-06-05T18:02:00Z",
+      "operating_date": "2026-06-05",
+      "commence_time_utc": "2026-06-06T00:55:00Z",
+      "home_team": "OKC",
+      "away_team": "IND",
+      "provider_player_name": "Shai Gilgeous-Alexander",
+      "team": "OKC",
+      "sportsbook": "DraftKings",
+      "side": "over",
+      "line": 31.5
+    },
+    "outside_tolerance": {
+      "provider_name": "the_odds_api_nba",
+      "provider_event_id": "odds_evt_20260605_okc_ind_late",
+      "source_timestamp_utc": "2026-06-05T18:02:00Z",
+      "operating_date": "2026-06-05",
+      "commence_time_utc": "2026-06-06T00:56:00Z",
+      "home_team": "OKC",
+      "away_team": "IND",
+      "provider_player_name": "Shai Gilgeous-Alexander",
+      "team": "OKC",
+      "sportsbook": "DraftKings",
+      "side": "over",
+      "line": 31.5
+    },
+    "reversed_teams": {
+      "provider_name": "the_odds_api_nba",
+      "provider_event_id": "odds_evt_20260605_reversed",
+      "source_timestamp_utc": "2026-06-05T18:02:00Z",
+      "operating_date": "2026-06-05",
+      "commence_time_utc": "2026-06-06T00:40:00Z",
+      "home_team": "Indiana Pacers",
+      "away_team": "Oklahoma City Thunder",
+      "provider_player_name": "Shai Gilgeous-Alexander",
+      "team": "OKC",
+      "sportsbook": "DraftKings",
+      "side": "over",
+      "line": 31.5
+    },
+    "unknown_team_alias": {
+      "provider_name": "the_odds_api_nba",
+      "provider_event_id": "odds_evt_20260605_unknown_team",
+      "source_timestamp_utc": "2026-06-05T18:02:00Z",
+      "operating_date": "2026-06-05",
+      "commence_time_utc": "2026-06-06T00:40:00Z",
+      "home_team": "Oklahoma City Bolts",
+      "away_team": "IND",
+      "provider_player_name": "Shai Gilgeous-Alexander",
+      "team": "OKC",
+      "sportsbook": "DraftKings",
+      "side": "over",
+      "line": 31.5
+    },
+    "alias_player": {
+      "provider_name": "the_odds_api_nba",
+      "provider_event_id": "odds_evt_20260605_okc_ind_alias",
+      "source_timestamp_utc": "2026-06-05T18:02:00Z",
+      "operating_date": "2026-06-05",
+      "commence_time_utc": "2026-06-06T00:40:00Z",
+      "home_team": "OKC",
+      "away_team": "IND",
+      "provider_player_name": "SGA",
+      "team": "OKC",
+      "sportsbook": "DraftKings",
+      "side": "over",
+      "line": 31.5
+    },
+    "name_team_match": {
+      "provider_name": "the_odds_api_nba",
+      "provider_event_id": "odds_evt_20260605_okc_ind_name",
+      "source_timestamp_utc": "2026-06-05T18:02:00Z",
+      "operating_date": "2026-06-05",
+      "commence_time_utc": "2026-06-06T00:40:00Z",
+      "home_team": "OKC",
+      "away_team": "IND",
+      "provider_player_name": "Shai Gilgeous-Alexander",
+      "team": "OKC",
+      "sportsbook": "DraftKings",
+      "side": "over",
+      "line": 31.5
+    },
+    "incompatible_team": {
+      "provider_name": "the_odds_api_nba",
+      "provider_event_id": "odds_evt_20260605_okc_ind_team_mismatch",
+      "source_timestamp_utc": "2026-06-05T18:02:00Z",
+      "operating_date": "2026-06-05",
+      "commence_time_utc": "2026-06-06T00:40:00Z",
+      "home_team": "OKC",
+      "away_team": "IND",
+      "provider_player_name": "Shai Gilgeous-Alexander",
+      "team": "LAL",
+      "sportsbook": "DraftKings",
+      "side": "over",
+      "line": 31.5
+    },
+    "ambiguous_player": {
+      "provider_name": "the_odds_api_nba",
+      "provider_event_id": "odds_evt_20260605_okc_ind_ambiguous_player",
+      "source_timestamp_utc": "2026-06-05T18:02:00Z",
+      "operating_date": "2026-06-05",
+      "commence_time_utc": "2026-06-06T00:40:00Z",
+      "home_team": "OKC",
+      "away_team": "IND",
+      "provider_player_name": "Alex Smith",
+      "team": "OKC",
+      "sportsbook": "DraftKings",
+      "side": "over",
+      "line": 10.5
+    },
+    "unresolved_player": {
+      "provider_name": "the_odds_api_nba",
+      "provider_event_id": "odds_evt_20260605_okc_ind_unresolved_player",
+      "source_timestamp_utc": "2026-06-05T18:02:00Z",
+      "operating_date": "2026-06-05",
+      "commence_time_utc": "2026-06-06T00:40:00Z",
+      "home_team": "OKC",
+      "away_team": "IND",
+      "provider_player_name": "Mystery Guard",
+      "team": "OKC",
+      "sportsbook": "DraftKings",
+      "side": "over",
+      "line": 10.5
+    },
+    "missing_player_name": {
+      "provider_name": "the_odds_api_nba",
+      "provider_event_id": "odds_evt_20260605_okc_ind_missing_player",
+      "source_timestamp_utc": "2026-06-05T18:02:00Z",
+      "operating_date": "2026-06-05",
+      "commence_time_utc": "2026-06-06T00:40:00Z",
+      "home_team": "OKC",
+      "away_team": "IND",
+      "team": "OKC",
+      "sportsbook": "DraftKings",
+      "side": "over",
+      "line": 10.5
+    },
+    "ambiguous_event": {
+      "provider_name": "the_odds_api_nba",
+      "provider_event_id": "odds_evt_20260605_bos_lal",
+      "source_timestamp_utc": "2026-06-05T18:02:00Z",
+      "operating_date": "2026-06-05",
+      "commence_time_utc": "2026-06-06T01:02:00Z",
+      "home_team": "BOS",
+      "away_team": "LAL",
+      "provider_player_name": "Jayson Tatum",
+      "team": "BOS",
+      "sportsbook": "DraftKings",
+      "side": "over",
+      "line": 27.5
+    },
+    "reviewed_event": {
+      "provider_name": "the_odds_api_nba",
+      "provider_event_id": "toa_reviewed_evt_001",
+      "source_timestamp_utc": "2026-06-05T18:02:00Z",
+      "operating_date": "2026-06-05",
+      "commence_time_utc": "2026-06-06T00:40:00Z",
+      "home_team": "OKC",
+      "away_team": "IND",
+      "provider_player_name": "Shai Gilgeous-Alexander",
+      "team": "OKC",
+      "sportsbook": "DraftKings",
+      "side": "over",
+      "line": 31.5
+    },
+    "reviewed_reversed_event": {
+      "provider_name": "the_odds_api_nba",
+      "provider_event_id": "toa_reviewed_reversed_evt_001",
+      "source_timestamp_utc": "2026-06-05T18:02:00Z",
+      "operating_date": "2026-06-05",
+      "commence_time_utc": "2026-06-06T00:40:00Z",
+      "home_team": "IND",
+      "away_team": "OKC",
+      "provider_player_name": "Shai Gilgeous-Alexander",
+      "team": "OKC",
+      "sportsbook": "DraftKings",
+      "side": "over",
+      "line": 31.5
+    },
+    "multi_sportsbook_over": {
+      "provider_name": "the_odds_api_nba",
+      "provider_event_id": "odds_evt_20260605_okc_ind_multi",
+      "source_timestamp_utc": "2026-06-05T18:02:00Z",
+      "operating_date": "2026-06-05",
+      "commence_time_utc": "2026-06-06T00:40:00Z",
+      "home_team": "OKC",
+      "away_team": "IND",
+      "provider_player_name": "Shai Gilgeous-Alexander",
+      "team": "OKC",
+      "sportsbook": "DraftKings",
+      "side": "over",
+      "line": 31.5
+    },
+    "multi_sportsbook_under": {
+      "provider_name": "the_odds_api_nba",
+      "provider_event_id": "odds_evt_20260605_okc_ind_multi",
+      "source_timestamp_utc": "2026-06-05T18:03:00Z",
+      "operating_date": "2026-06-05",
+      "commence_time_utc": "2026-06-06T00:40:00Z",
+      "home_team": "OKC",
+      "away_team": "IND",
+      "provider_player_name": "Shai Gilgeous-Alexander",
+      "team": "OKC",
+      "sportsbook": "FanDuel",
+      "side": "under",
+      "line": 31.5
+    }
+  },
+  "reviewed_mapping": {
+    "schema_version": "nba-player-points-crosswalk-mapping-v1",
+    "mapping_version": "nba-crosswalk-map-fixture-v1",
+    "event_mappings": [
+      {
+        "provider_name": "the_odds_api_nba",
+        "provider_event_id": "toa_reviewed_evt_001",
+        "canonical_event_id": "nba-2026-06-05-okc-ind",
+        "canonical_home_team": "OKC",
+        "canonical_away_team": "IND",
+        "mapping_source": "fixture_review",
+        "reviewed_at": "2026-06-05T19:00:00Z",
+        "review_status": "approved",
+        "reviewer": "research-fixture",
+        "review_reference": "fixture:event:001"
+      },
+      {
+        "provider_name": "the_odds_api_nba",
+        "provider_event_id": "toa_reviewed_reversed_evt_001",
+        "canonical_event_id": "nba-2026-06-05-okc-ind",
+        "canonical_home_team": "OKC",
+        "canonical_away_team": "IND",
+        "mapping_source": "fixture_review",
+        "reviewed_at": "2026-06-05T19:05:00Z",
+        "review_status": "approved",
+        "reviewer": "research-fixture",
+        "review_reference": "fixture:event:reversed",
+        "allow_reversed_teams": true
+      }
+    ],
+    "player_mappings": [
+      {
+        "provider_name": "the_odds_api_nba",
+        "provider_player_id": "toa-player-sga",
+        "player_id": "nba-player-1628983",
+        "canonical_player_name": "Shai Gilgeous-Alexander",
+        "canonical_team": "OKC",
+        "mapping_type": "identity",
+        "mapping_source": "fixture_review",
+        "reviewed_at": "2026-06-05T19:10:00Z",
+        "review_status": "approved",
+        "reviewer": "research-fixture",
+        "review_reference": "fixture:player:id"
+      },
+      {
+        "provider_name": "the_odds_api_nba",
+        "provider_player_name": "SGA",
+        "player_id": "nba-player-1628983",
+        "canonical_player_name": "Shai Gilgeous-Alexander",
+        "canonical_team": "OKC",
+        "mapping_type": "alias",
+        "mapping_source": "fixture_review",
+        "reviewed_at": "2026-06-05T19:15:00Z",
+        "review_status": "approved",
+        "reviewer": "research-fixture",
+        "review_reference": "fixture:player:alias"
+      }
+    ]
+  },
+  "conflicting_player_mapping": {
+    "schema_version": "nba-player-points-crosswalk-mapping-v1",
+    "mapping_version": "nba-crosswalk-map-conflict-v1",
+    "event_mappings": [],
+    "player_mappings": [
+      {
+        "provider_name": "the_odds_api_nba",
+        "provider_player_id": "toa-conflict-player",
+        "player_id": "nba-player-1",
+        "canonical_player_name": "Conflict One",
+        "canonical_team": "OKC",
+        "mapping_type": "identity",
+        "mapping_source": "fixture_review",
+        "reviewed_at": "2026-06-05T19:20:00Z",
+        "review_status": "approved"
+      },
+      {
+        "provider_name": "the_odds_api_nba",
+        "provider_player_id": "toa-conflict-player",
+        "player_id": "nba-player-2",
+        "canonical_player_name": "Conflict Two",
+        "canonical_team": "OKC",
+        "mapping_type": "identity",
+        "mapping_source": "fixture_review",
+        "reviewed_at": "2026-06-05T19:21:00Z",
+        "review_status": "approved"
+      }
+    ]
+  },
+  "duplicate_player_mapping": {
+    "schema_version": "nba-player-points-crosswalk-mapping-v1",
+    "mapping_version": "nba-crosswalk-map-duplicate-v1",
+    "event_mappings": [],
+    "player_mappings": [
+      {
+        "provider_name": "the_odds_api_nba",
+        "provider_player_name": "SGA",
+        "player_id": "nba-player-1628983",
+        "canonical_player_name": "Shai Gilgeous-Alexander",
+        "canonical_team": "OKC",
+        "mapping_type": "alias",
+        "mapping_source": "fixture_review",
+        "reviewed_at": "2026-06-05T19:22:00Z",
+        "review_status": "approved"
+      },
+      {
+        "provider_name": "the_odds_api_nba",
+        "provider_player_name": "SGA",
+        "player_id": "nba-player-1628983",
+        "canonical_player_name": "Shai Gilgeous-Alexander",
+        "canonical_team": "OKC",
+        "mapping_type": "alias",
+        "mapping_source": "fixture_review",
+        "reviewed_at": "2026-06-05T19:23:00Z",
+        "review_status": "approved"
+      }
+    ]
+  },
+  "conflicting_event_mapping": {
+    "schema_version": "nba-player-points-crosswalk-mapping-v1",
+    "mapping_version": "nba-crosswalk-map-event-conflict-v1",
+    "event_mappings": [
+      {
+        "provider_name": "the_odds_api_nba",
+        "provider_event_id": "toa-conflict-event",
+        "canonical_event_id": "nba-2026-06-05-okc-ind",
+        "canonical_home_team": "OKC",
+        "canonical_away_team": "IND",
+        "mapping_source": "fixture_review",
+        "reviewed_at": "2026-06-05T19:24:00Z",
+        "review_status": "approved"
+      },
+      {
+        "provider_name": "the_odds_api_nba",
+        "provider_event_id": "toa-conflict-event",
+        "canonical_event_id": "nba-2026-06-05-bos-lal-a",
+        "canonical_home_team": "BOS",
+        "canonical_away_team": "LAL",
+        "mapping_source": "fixture_review",
+        "reviewed_at": "2026-06-05T19:25:00Z",
+        "review_status": "approved"
+      }
+    ],
+    "player_mappings": []
+  }
+}
