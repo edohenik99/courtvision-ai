@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "courtvision.lifecycle.player_availability_observed_payload.v1",
+  "title": "CourtVision PLAYER_AVAILABILITY_OBSERVED payload v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "payload_schema_version",
+    "observation_identity",
+    "prediction_run_id",
+    "correlation_id",
+    "canonical_event_id",
+    "canonical_participant_id",
+    "canonical_team_id",
+    "identity_resolution_status",
+    "unresolved_identity_fields",
+    "provider_name",
+    "provider_event_id",
+    "provider_participant_id",
+    "sport",
+    "league",
+    "player_name",
+    "team_name",
+    "team_abbr",
+    "availability_status_raw",
+    "availability_status_normalized",
+    "injury_type",
+    "injury_detail",
+    "lineup_status",
+    "starter_status",
+    "participation_status",
+    "provider_reported_at_utc",
+    "effective_at_utc",
+    "ingested_at_utc",
+    "source_payload_ref",
+    "source_payload_sha256",
+    "evidence_retention_level",
+    "normalization_version"
+  ],
+  "properties": {
+    "payload_schema_version": {"const": 1},
+    "observation_identity": {"type": "string"},
+    "prediction_run_id": {"type": "string"},
+    "correlation_id": {"type": "string"},
+    "canonical_event_id": {"type": ["string", "null"]},
+    "canonical_participant_id": {"type": ["string", "null"]},
+    "canonical_team_id": {"type": ["string", "null"]},
+    "identity_resolution_status": {
+      "enum": ["RESOLVED", "UNRESOLVED", "CONFLICT"]
+    },
+    "unresolved_identity_fields": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "provider_name": {"type": "string"},
+    "provider_event_id": {"type": ["string", "integer", "number", "null"]},
+    "provider_participant_id": {"type": ["string", "integer", "number", "null"]},
+    "sport": {"const": "BASKETBALL"},
+    "league": {"const": "NBA"},
+    "player_name": {"type": ["string", "null"]},
+    "team_name": {"type": ["string", "null"]},
+    "team_abbr": {"type": ["string", "null"]},
+    "availability_status_raw": {"type": ["string", "null"]},
+    "availability_status_normalized": {
+      "enum": [
+        "UNKNOWN",
+        "ACTIVE",
+        "AVAILABLE",
+        "QUESTIONABLE",
+        "DOUBTFUL",
+        "OUT",
+        "INACTIVE",
+        "STARTING",
+        "NOT_STARTING"
+      ]
+    },
+    "injury_type": {"type": ["string", "null"]},
+    "injury_detail": {"type": ["string", "null"]},
+    "lineup_status": {"type": ["string", "null"]},
+    "starter_status": {"type": ["string", "null"]},
+    "participation_status": {"type": ["string", "null"]},
+    "provider_reported_at_utc": {"type": ["string", "null"], "format": "date-time"},
+    "effective_at_utc": {"type": ["string", "null"], "format": "date-time"},
+    "ingested_at_utc": {"type": "string", "format": "date-time"},
+    "source_payload_ref": {"type": "string"},
+    "source_payload_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "evidence_retention_level": {
+      "enum": ["FULL_RAW", "SANITIZED_RAW", "NORMALIZED_ONLY", "HASH_REFERENCE_ONLY"]
+    },
+    "normalization_version": {"type": "string"}
+  }
+}

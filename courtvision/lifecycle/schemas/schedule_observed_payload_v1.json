@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "courtvision.lifecycle.schedule_observed_payload.v1",
+  "title": "CourtVision SCHEDULE_OBSERVED payload v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "payload_schema_version",
+    "observation_identity",
+    "prediction_run_id",
+    "correlation_id",
+    "canonical_event_id",
+    "event_identity_resolution_status",
+    "provider_name",
+    "provider_event_id",
+    "league",
+    "sport",
+    "season",
+    "operating_date",
+    "home_team_id",
+    "away_team_id",
+    "home_team_name",
+    "away_team_name",
+    "scheduled_start_at_utc",
+    "provider_reported_at_utc",
+    "ingested_at_utc",
+    "game_status_raw",
+    "game_status_normalized",
+    "doubleheader_sequence",
+    "venue",
+    "source_payload_ref",
+    "source_payload_sha256",
+    "evidence_retention_level",
+    "normalization_version"
+  ],
+  "properties": {
+    "payload_schema_version": {"const": 1},
+    "observation_identity": {"type": "string"},
+    "prediction_run_id": {"type": "string"},
+    "correlation_id": {"type": "string"},
+    "canonical_event_id": {"type": ["string", "null"]},
+    "event_identity_resolution_status": {
+      "enum": ["RESOLVED", "UNRESOLVED", "CONFLICT"]
+    },
+    "provider_name": {"type": "string"},
+    "provider_event_id": {"type": ["string", "integer", "number", "null"]},
+    "league": {"const": "NBA"},
+    "sport": {"const": "BASKETBALL"},
+    "season": {"type": ["string", "integer", "number", "null"]},
+    "operating_date": {"type": "string", "format": "date"},
+    "home_team_id": {"type": ["string", "integer", "number", "null"]},
+    "away_team_id": {"type": ["string", "integer", "number", "null"]},
+    "home_team_name": {"type": ["string", "null"]},
+    "away_team_name": {"type": ["string", "null"]},
+    "scheduled_start_at_utc": {"type": ["string", "null"], "format": "date-time"},
+    "provider_reported_at_utc": {"type": ["string", "null"], "format": "date-time"},
+    "ingested_at_utc": {"type": "string", "format": "date-time"},
+    "game_status_raw": {"type": ["string", "null"]},
+    "game_status_normalized": {
+      "enum": [
+        "SCHEDULED",
+        "DELAYED",
+        "IN_PROGRESS",
+        "FINAL",
+        "POSTPONED",
+        "CANCELLED",
+        "SUSPENDED",
+        "UNKNOWN"
+      ]
+    },
+    "doubleheader_sequence": {"type": ["string", "integer", "number", "null"]},
+    "venue": {"type": ["string", "integer", "number", "null"]},
+    "source_payload_ref": {"type": "string"},
+    "source_payload_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "evidence_retention_level": {
+      "enum": ["FULL_RAW", "SANITIZED_RAW", "NORMALIZED_ONLY", "HASH_REFERENCE_ONLY"]
+    },
+    "normalization_version": {"type": "string"}
+  }
+}
