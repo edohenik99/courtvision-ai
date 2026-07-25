@@ -324,7 +324,7 @@ Write-Host "[START] Pipeline" -ForegroundColor Yellow
 $pipelineExitCode = Invoke-LoggedCommand `
     -LogPath $RunLog `
     -Exe $PyExe `
-    -Arguments ($PyArgsPrefix + @("courtvision_ai.py", "--prediction-date", $Date, "--predict-only", "--verbose-outputs")) `
+        -Arguments ($PyArgsPrefix + @("courtvision_ai.py", "predict", "--sport", "nba", "--mode", "production", "--prediction-date", $Date, "--predict-only", "--verbose-outputs")) `
     -StreamToConsole:$VerboseMode
 if ($pipelineExitCode -ne 0) {
     Stop-StageFailure -Stage "Pipeline" -ExitCode $pipelineExitCode -LogPath $RunLog

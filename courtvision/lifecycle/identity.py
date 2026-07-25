@@ -57,6 +57,7 @@ _KNOWN_MARKETS = {
     "player_rebounds",
     "player_rebounds_assists",
     "player_steals",
+    "player_home_runs",
     "team_total",
 }
 
@@ -72,6 +73,9 @@ _MARKET_ALIASES = {
     "steals": "player_steals",
     "threes": "player_3pt_made",
     "three_pointers": "player_3pt_made",
+    "batter_home_runs": "player_home_runs",
+    "home_runs": "player_home_runs",
+    "player_hr": "player_home_runs",
 }
 
 

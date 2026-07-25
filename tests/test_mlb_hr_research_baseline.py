@@ -572,3 +572,72 @@ def test_ledger_schema_constant_matches_written_file(tmp_path: Path) -> None:
     report = build_validation_gate_report(ledger_path=ledger_path)
 
     assert report["approval_status"] == "not_approved"
+
+
+def test_canonical_application_matches_legacy_mlb_prediction_bytes(
+    tmp_path: Path,
+) -> None:
+    from courtvision.sports.mlb.training.hr_research_baseline import (
+        _file_sha256,
+        _generate_daily_research_predictions_internal,
+    )
+
+    bundle_dir, _ = _train_fixture_model(tmp_path)
+    odds_path = tmp_path / "parity_odds.csv"
+    _write_csv(
+        odds_path,
+        ODDS_REQUIRED_COLUMNS,
+        [
+            _odds_row(
+                event_id="parity-event",
+                player="Parity Batter",
+                commence_time="2026-07-04T23:00:00Z",
+                snapshot_time="2026-07-04T15:00:00Z",
+            )
+        ],
+    )
+    timestamp = "2026-07-04T17:00:00Z"
+    canonical_dry = generate_daily_research_predictions(
+        model_bundle_dir=bundle_dir,
+        odds_path=odds_path,
+        target_date="2026-07-04",
+        prediction_timestamp=timestamp,
+        dry_run=True,
+    )
+    legacy_dir = tmp_path / "legacy_predictions"
+    canonical_dir = tmp_path / "canonical_predictions"
+    legacy = _generate_daily_research_predictions_internal(
+        model_bundle_dir=bundle_dir,
+        odds_path=odds_path,
+        output_dir=legacy_dir,
+        target_date="2026-07-04",
+        prediction_timestamp=timestamp,
+        dry_run=False,
+        prediction_run_id=canonical_dry.prediction_run_id,
+    )
+    canonical = generate_daily_research_predictions(
+        model_bundle_dir=bundle_dir,
+        odds_path=odds_path,
+        output_dir=canonical_dir,
+        target_date="2026-07-04",
+        prediction_timestamp=timestamp,
+        dry_run=False,
+    )
+
+    assert canonical.predictions == legacy.predictions
+    assert canonical.exclusions == legacy.exclusions
+    assert [
+        row["model_probability"] for row in canonical.predictions
+    ] == [row["model_probability"] for row in legacy.predictions]
+    assert [
+        row["probability_edge"] for row in canonical.predictions
+    ] == [row["probability_edge"] for row in legacy.predictions]
+    assert [
+        row["feature_schema_version"] for row in canonical.predictions
+    ] == [row["feature_schema_version"] for row in legacy.predictions]
+    assert _file_sha256(legacy_dir / "predictions.csv") == _file_sha256(
+        canonical_dir / "predictions.csv"
+    )
+    assert canonical.manifest["predictions_csv_sha256"] == _file_sha256(
+        canonical_dir / "predictions.csv"
+    )

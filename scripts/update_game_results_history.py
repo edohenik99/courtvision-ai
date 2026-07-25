@@ -26,7 +26,11 @@ from courtvision.ratings.power_ratings_store import (
     append_game_results,
     games_df_to_results,
 )
-from courtvision_ai import CourtVisionAI
+from courtvision.operations import CourtVisionOperations, operations_client
+
+# Test/integration compatibility name; this is the restricted operations
+# facade, not the prediction runtime.
+CourtVisionAI = CourtVisionOperations
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -50,7 +54,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--runtime-root",
         default="outputs/runtime",
-        help="Runtime outputs root for CourtVisionAI (default: outputs/runtime)",
+        help="Runtime outputs root for non-prediction operations (default: outputs/runtime)",
     )
     parser.add_argument(
         "--dry-run",
@@ -86,10 +90,10 @@ def main(argv: list[str] | None = None) -> int:
     results_path = history_root / GAME_RESULTS_FILENAME
 
     try:
-        ai = CourtVisionAI(out_dir=args.runtime_root)
-        client = ai._get_client()
+        operations = CourtVisionAI(out_dir=args.runtime_root)
+        client = operations_client(operations)
     except Exception as exc:
-        print(f"ERROR: Could not initialise CourtVisionAI client: {exc}", file=sys.stderr)
+        print(f"ERROR: Could not initialise provider client: {exc}", file=sys.stderr)
         return 1
 
     all_results_frames: list[pd.DataFrame] = []
