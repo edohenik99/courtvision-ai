@@ -81,6 +81,11 @@ from courtvision.runtime_markets import (
     partial_fill_markets,
 )
 from courtvision.runtime_outputs import OutputLayoutConfig, OutputLayoutPolicy
+from courtvision.shadow_lifecycle import (
+    ShadowLifecycleHooks,
+    ShadowLifecycleInitializationError,
+    load_shadow_lifecycle_hooks,
+)
 from courtvision.runtime_selection import (
     BoardVolumeConfig,
     BoardVolumePolicy,
@@ -4054,6 +4059,11 @@ class CourtVisionAI:
         print(f"[COUNT] active_odds_fetch_path=courtvision_ai.py:predict:client.get_odds", flush=True)
         print(f"[COUNT] games_for_odds={len(game_ids)}", flush=True)
         odds_raw = client.get_odds(prediction_date, game_ids=game_ids)
+        odds_observation_source = (
+            odds_raw.copy(deep=True)
+            if isinstance(odds_raw, pd.DataFrame)
+            else pd.DataFrame()
+        )
         print(f"[COUNT] odds_rows_after_fetch={len(odds_raw) if hasattr(odds_raw, '__len__') else 0}", flush=True)
         _player_lookup_size = getattr(client, "_last_player_lookup_size", 0)
 
@@ -4144,6 +4154,29 @@ class CourtVisionAI:
         if hasattr(odds_raw, "__len__") and len(odds_raw) == 0:
             print("[DIAGNOSIS] active odds fetch returned zero rows", flush=True)
         print(f"[STAGE] provider_fetch_complete games={len(games)} odds={len(odds_raw)} injuries={len(injuries_raw) if isinstance(injuries_raw, pd.DataFrame) else 0}")
+        shadow_observer = getattr(self, "_shadow_lifecycle_observer", None)
+        if callable(shadow_observer):
+            provider_name = str(
+                getattr(client, "_primary_source", None)
+                or getattr(client, "provider_name", None)
+                or (
+                    "balldontlie"
+                    if isinstance(client, BallDontLieClient)
+                    else type(client).__name__
+                )
+            ).strip().lower()
+            shadow_observer(
+                prediction_date=prediction_date,
+                games_raw=games_raw,
+                games=games,
+                odds_provider_rows=odds_observation_source,
+                odds=odds,
+                injuries_raw=injuries_raw,
+                injuries=injuries,
+                schedule_provider_name=provider_name,
+                market_provider_name=provider_name,
+                availability_provider_name=f"{provider_name}_{injury_source}",
+            )
         if injuries.empty:
             self.logger.warning(
                 "injury_data_empty_after_normalization prediction_date=%s source=%s",
@@ -9099,6 +9132,13 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     ai: Optional[CourtVisionAI] = None
     fit_metrics: Optional[dict[str, Any]] = None
+    lifecycle_hooks: Optional[ShadowLifecycleHooks] = None
+    lifecycle_run: Any = None
+    lifecycle_observation_state: dict[str, Any] = {
+        "enabled": False,
+        "batch": None,
+        "error": None,
+    }
 
     try:
         print("[STAGE] config_load_start")
@@ -9139,6 +9179,114 @@ def main(argv: Optional[list[str]] = None) -> int:
         if run_predict:
             print(f"[STAGE] prediction_pipeline_start date={args.prediction_date}")
             print(f"[predict] Running predictions for {args.prediction_date} ...")
+            try:
+                lifecycle_hooks = load_shadow_lifecycle_hooks()
+                if lifecycle_hooks is not None:
+                    lifecycle_run = lifecycle_hooks.begin_shadow_run(
+                        ai,
+                        repository_root=Path(__file__).resolve().parent,
+                        prediction_date=args.prediction_date,
+                        verbose_outputs=args.verbose_outputs,
+                        force_output_overwrite=args.force_output_overwrite,
+                    )
+            except ShadowLifecycleInitializationError as shadow_import_exc:
+                lifecycle_hooks = None
+                lifecycle_run = None
+                print(
+                    "[SHADOW_LIFECYCLE] "
+                    f"status={shadow_import_exc.status} "
+                    "stage=INITIALIZATION "
+                    f"classification={shadow_import_exc.classification} "
+                    f"error_type={shadow_import_exc.cause_type}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                ai.logger.exception(
+                    "shadow_lifecycle_import_error classification=%s error=%s",
+                    shadow_import_exc.classification,
+                    shadow_import_exc,
+                )
+            except Exception as shadow_start_exc:
+                lifecycle_hooks = None
+                lifecycle_run = None
+                print(
+                    "[SHADOW_LIFECYCLE] status=DEGRADED "
+                    "stage=INITIALIZATION "
+                    "classification=LIFECYCLE_INITIALIZATION_FAILURE "
+                    f"error_type={type(shadow_start_exc).__name__}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                ai.logger.exception(
+                    "shadow_lifecycle_start_error error=%s",
+                    shadow_start_exc,
+                )
+            if lifecycle_run is not None:
+                print(
+                    "[SHADOW_LIFECYCLE] "
+                    f"status=STARTED prediction_run_id={lifecycle_run.prediction_run_id}",
+                    flush=True,
+                )
+                observations_enabled = bool(
+                    getattr(lifecycle_hooks, "observations_enabled", False)
+                )
+                lifecycle_observation_state["enabled"] = observations_enabled
+                observation_prepare = getattr(
+                    lifecycle_hooks, "prepare_observation_batch", None
+                )
+                observation_init_error = getattr(
+                    lifecycle_hooks, "observation_initialization_error", None
+                )
+                if observations_enabled and observation_init_error:
+                    lifecycle_observation_state["error"] = str(
+                        observation_init_error
+                    )
+                    observation_line = (
+                        "[SHADOW_LIFECYCLE_OBSERVATIONS] "
+                        "status=DEGRADED stage=INITIALIZATION "
+                        "classification=OBSERVATION_IMPORT_FAILURE"
+                    )
+                    print(observation_line, file=sys.stderr, flush=True)
+                    ai.logger.error(observation_line)
+                elif observations_enabled and callable(observation_prepare):
+                    def _capture_shadow_observations(**source_values: Any) -> None:
+                        try:
+                            lifecycle_observation_state["batch"] = (
+                                observation_prepare(
+                                    prediction_run_id=(
+                                        lifecycle_run.prediction_run_id
+                                    ),
+                                    clock=lifecycle_run.clock,
+                                    **source_values,
+                                )
+                            )
+                        except Exception as observation_exc:
+                            lifecycle_observation_state["error"] = (
+                                f"{type(observation_exc).__name__}: "
+                                f"{str(observation_exc)[:500]}"
+                            )
+                            observation_line = (
+                                "[SHADOW_LIFECYCLE_OBSERVATIONS] "
+                                "status=DEGRADED stage=CAPTURE "
+                                f"classification=OBSERVATION_CAPTURE_FAILURE "
+                                f"error_type={type(observation_exc).__name__}"
+                            )
+                            print(
+                                observation_line,
+                                file=sys.stderr,
+                                flush=True,
+                            )
+                            ai.logger.exception(
+                                "shadow_lifecycle_observation_capture_error "
+                                "error=%s",
+                                observation_exc,
+                            )
+
+                    setattr(
+                        ai,
+                        "_shadow_lifecycle_observer",
+                        _capture_shadow_observations,
+                    )
             prediction_outputs = ai.predict(args.prediction_date)
             print("[STAGE] prediction_pipeline_complete")
             summary = dict(prediction_outputs.get("summary", {}))
@@ -9152,6 +9300,40 @@ def main(argv: Optional[list[str]] = None) -> int:
                 force_output_overwrite=args.force_output_overwrite,
             )
             print("[STAGE] artifact_write_complete")
+            if lifecycle_hooks is not None and lifecycle_run is not None:
+                if lifecycle_observation_state["enabled"]:
+                    shadow_result = lifecycle_hooks.publish_shadow_after_board(
+                        lifecycle_run,
+                        board_path=output_paths["elite_board"],
+                        observations_enabled=True,
+                        observation_batch=lifecycle_observation_state["batch"],
+                        observation_capture_error=(
+                            lifecycle_observation_state["error"]
+                        ),
+                    )
+                else:
+                    shadow_result = lifecycle_hooks.publish_shadow_after_board(
+                        lifecycle_run,
+                        board_path=output_paths["elite_board"],
+                    )
+                shadow_line = (
+                    "[SHADOW_LIFECYCLE] "
+                    f"status={shadow_result.status} "
+                    f"prediction_run_id={shadow_result.prediction_run_id} "
+                    f"commit_status={shadow_result.commit_status or 'NOT_COMMITTED'} "
+                    f"message={shadow_result.message}"
+                )
+                print(
+                    shadow_line,
+                    file=(
+                        sys.stdout
+                        if shadow_result.status == "PASS"
+                        else sys.stderr
+                    ),
+                    flush=True,
+                )
+                if shadow_result.status != "PASS":
+                    ai.logger.error(shadow_line)
 
             if args.send_telegram:
                 sent = ai.send_telegram_top_plays(
@@ -9196,6 +9378,36 @@ def main(argv: Optional[list[str]] = None) -> int:
                 print(f"{label}: {path}")
 
     except Exception as exc:
+        if (
+            lifecycle_hooks is not None
+            and lifecycle_run is not None
+            and not lifecycle_run.terminal
+        ):
+            try:
+                failure_status = lifecycle_hooks.record_failed_shadow_run(
+                    lifecycle_run, exc
+                )
+                print(
+                    "[SHADOW_LIFECYCLE] "
+                    f"status=RUN_FAILED_RECORDED "
+                    f"prediction_run_id={lifecycle_run.prediction_run_id} "
+                    f"commit_status={failure_status or 'NOT_COMMITTED'}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            except Exception as shadow_exc:
+                print(
+                    "[SHADOW_LIFECYCLE] status=DEGRADED "
+                    f"prediction_run_id={lifecycle_run.prediction_run_id} "
+                    f"failure_record_error={type(shadow_exc).__name__}: {shadow_exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                if ai is not None:
+                    ai.logger.exception(
+                        "shadow_lifecycle_failure_record_error error=%s",
+                        shadow_exc,
+                    )
         if ai is not None:
             ai.logger.exception("cli_failure error=%s", exc)
         print(f"[error] {exc}", file=sys.stderr)

@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "courtvision.lifecycle.prediction_published_payload.v1",
+  "title": "CourtVision PREDICTION_PUBLISHED payload v1",
+  "type": "object",
+  "required": [
+    "payload_schema_version",
+    "publication_authority",
+    "canonical_runtime_authority",
+    "prediction_run_id",
+    "published_at_utc",
+    "operating_date",
+    "operating_timezone",
+    "board_path",
+    "board_artifact_sha256",
+    "board_file_size_bytes",
+    "board_row_index",
+    "canonical_board_row",
+    "published_prediction",
+    "identity",
+    "entry_market_state",
+    "schedule_state",
+    "availability_state",
+    "model_config_provenance",
+    "feature_snapshot_reference",
+    "feature_snapshot_sha256",
+    "evidence_refs"
+  ],
+  "properties": {
+    "payload_schema_version": {"const": 1},
+    "publication_authority": {"const": "SHADOW_ONLY"},
+    "canonical_runtime_authority": {"const": "CSV_RUNTIME_PIPELINE"},
+    "prediction_run_id": {"type": "string"},
+    "published_at_utc": {"type": "string", "format": "date-time"},
+    "operating_date": {"type": "string", "format": "date"},
+    "operating_timezone": {"const": "America/Toronto"},
+    "board_path": {"type": "string"},
+    "board_artifact_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "board_file_size_bytes": {"type": "integer", "minimum": 0},
+    "board_row_index": {"type": "integer", "minimum": 0},
+    "canonical_board_row": {"type": "object"},
+    "published_prediction": {"type": "object"},
+    "identity": {"type": "object"},
+    "entry_market_state": {"type": "object"},
+    "schedule_state": {"type": "object"},
+    "availability_state": {"type": "object"},
+    "model_config_provenance": {"type": "object"},
+    "feature_snapshot_reference": {"type": "string"},
+    "feature_snapshot_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "evidence_refs": {"type": "object"}
+  }
+}
