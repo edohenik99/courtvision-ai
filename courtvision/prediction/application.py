@@ -157,6 +157,7 @@ class ShadowPredictionLifecycle:
             observation_state: dict[str, Any] = {
                 "enabled": bool(
                     getattr(hooks, "observations_enabled", False)
+                    and request.sport == "nba"
                 ),
                 "batch": None,
                 "error": getattr(
@@ -381,6 +382,7 @@ class PredictionApplicationService:
         publication: PublicationOutcome,
         failure_classification: str | None = None,
     ) -> dict[str, Any]:
+        summary = engine_prediction.outputs.get("summary")
         return {
             "manifest_schema_version": 1,
             "run_id": run_id,
@@ -396,6 +398,10 @@ class PredictionApplicationService:
             "command": request.metadata.get("command", ""),
             "lifecycle_status": lifecycle_status,
             "failure_classification": failure_classification,
+            "engine_status": engine_prediction.status,
+            "result_summary": (
+                dict(summary) if isinstance(summary, Mapping) else {}
+            ),
             "model_version": engine_prediction.model_version,
             "provider_provenance": dict(
                 engine_prediction.provider_provenance
@@ -503,11 +509,14 @@ class PredictionApplicationService:
                     normalized_request,
                     publication,
                 )
-                final_status = (
-                    "SUCCESS"
-                    if lifecycle_status in {"PASS", "DISABLED"}
-                    else "DEGRADED"
-                )
+                if lifecycle_status in {"PASS", "DISABLED"}:
+                    final_status = (
+                        str(engine_prediction.status)
+                        if engine_prediction.status
+                        else "SUCCESS"
+                    )
+                else:
+                    final_status = "DEGRADED"
                 if manifest_path is not None:
                     final_manifest = self._manifest_payload(
                         request=normalized_request,

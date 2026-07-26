@@ -48,7 +48,9 @@ unregistered combination fails before engine execution.
 ID and output root, dry-run/overwrite choices, and entrypoint metadata.
 
 `EnginePrediction` carries the engine's existing output object together with
-provider/data provenance and model version.
+provider/data provenance, model version, and an optional sport-engine outcome
+status. The status lets a healthy sport-specific no-data result remain
+distinct from application or lifecycle degradation.
 
 `PredictionResult` carries the normalized request identity, run ID, overall
 status, original outputs, artifact paths, provenance, lifecycle outcome,
@@ -73,10 +75,23 @@ delegate to this boundary.
 ### MLB research
 
 ```powershell
-python courtvision_ai.py predict --sport mlb --mode research `
-  --prediction-date YYYY-MM-DD --model-dir PATH --odds-csv PATH `
-  --output-dir PATH
+py -3.13 courtvision_ai.py predict --sport mlb --mode research `
+  --prediction-date YYYY-MM-DD
 ```
+
+The canonical CLI resolves omitted paths without network access:
+
+- model: the bundle with the latest `training_timestamp` under
+  `outputs/research/mlb_hr_baseline/models` that passes the existing
+  `load_model_bundle()` integrity contract; incomplete, corrupt, unrelated,
+  and `.pytest_tmp*` directories are ignored;
+- odds: `data/theoddsapi/live_hr_snapshots/live_hr_props_master.csv`;
+- output:
+  `outputs/research/mlb_hr_baseline/daily_runs/YYYY-MM-DD`.
+
+Explicit `--model-dir`, `--odds-csv`, and `--output-dir` values take
+precedence. The default odds source is local-only; the command never calls a
+paid API. `--dry-run` computes the same result without writing artifacts.
 
 The existing `predict` and `run-daily-research` subcommands in
 `hr_research_baseline.py`, and its public
@@ -128,9 +143,29 @@ result. Engine/publication exceptions trigger the lifecycle failure hook and
 are re-raised, preserving CLI exit behavior.
 
 If lifecycle is disabled, a successful publication returns
-`lifecycle_status=DISABLED`. If lifecycle initialization or completion
-degrades, the result is `DEGRADED`, not `SUCCESS`; the Streamlit UI does not
-show a success message.
+`lifecycle_status=DISABLED`. MLB dry runs do not start a publication
+lifecycle. The optional observation capture adapter is currently NBA-shaped,
+so it is not attached to MLB runs; MLB lifecycle publication still records and
+reconciles the immutable prediction artifact. If lifecycle initialization or
+completion degrades, the application result is `DEGRADED`; the Streamlit UI
+does not show a success message.
+
+MLB application statuses are:
+
+- `PASS`: one or more model predictions were produced and any requested
+  publication completed;
+- `NO_DATA`: the local CSV contains no rows whose `commence_time` maps to the
+  requested CourtVision operating date;
+- `NO_ELIGIBLE_PREDICTIONS`: requested-date rows exist, but all consolidated
+  rows were excluded by existing research eligibility rules;
+- `DEGRADED`: lifecycle or dependency integrity was impaired or processing
+  could not be guaranteed;
+- `FAILED`: a terminal CLI validation, dependency, engine, or publication
+  exception;
+- `PROTECTED_NO_OP`: a verified immutable output package already exists.
+
+`PROTECTED_NO_OP` does not start a new lifecycle run or acquire a publication
+lock. It returns the existing artifact paths without altering their bytes.
 
 The former real-run initialization `NameError` was caused by
 `courtvision/lifecycle/publication.py` using `os.environ` without importing
@@ -160,6 +195,20 @@ transaction. Sport adapters retain their existing output layouts:
 The shared manifest records run identity, sport, mode, prediction date, model
 version, entrypoint/command, provider or data provenance, lifecycle status,
 artifact paths, row counts, hashes, and sizes.
+
+The MLB prediction manifest and `exclusion_summary.json` also record
+`exclusion_reasons` and these stage counts:
+
+- all local CSV rows loaded;
+- raw rows matching the requested operating date;
+- rows passing the canonical HR market contract;
+- rows after snapshot/player/market consolidation;
+- feature-valid rows;
+- final eligible rows.
+
+The canonical date is derived from `commence_time` in
+`America/Toronto`. Snapshot timestamps remain timing/leakage inputs and are
+not silently substituted for the game operating date.
 
 ## Concurrency and overwrite safety
 

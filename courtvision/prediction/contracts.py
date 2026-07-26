@@ -43,6 +43,7 @@ class EnginePrediction:
     outputs: Mapping[str, Any]
     provider_provenance: Mapping[str, Any] = field(default_factory=dict)
     model_version: str | None = None
+    status: str | None = None
 
 
 @runtime_checkable

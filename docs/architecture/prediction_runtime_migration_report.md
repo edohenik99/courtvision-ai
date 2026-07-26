@@ -14,6 +14,39 @@ selection, injury handling, Kelly rules, grading rules, or output locations.
 No live or paid API was used during development. No historical or canonical
 production artifact was overwritten.
 
+### MLB canonical CLI hardening
+
+The remaining MLB usability and healthy-zero classification work was completed
+after the architecture migration:
+
+- `--model-dir`, `--odds-csv`, and `--output-dir` are optional on the canonical
+  CLI and resolve to validated local defaults;
+- the latest-model resolver sorts valid bundles by `training_timestamp` and
+  ignores corrupt, incomplete, unrelated, and `.pytest_tmp*` directories;
+- the canonical local odds default is
+  `data/theoddsapi/live_hr_snapshots/live_hr_props_master.csv`;
+- the default output is
+  `outputs/research/mlb_hr_baseline/daily_runs/YYYY-MM-DD`;
+- explicit CLI paths retain highest priority;
+- healthy zero-prediction runs return `NO_DATA` or
+  `NO_ELIGIBLE_PREDICTIONS`, not `DEGRADED`;
+- existing verified immutable output returns `PROTECTED_NO_OP` with its
+  artifact paths and without starting lifecycle work;
+- `exclusion_reasons`, stage counts, and `exclusion_summary.json` make
+  eligibility outcomes observable without changing model or feature
+  mathematics.
+
+The final simple command is:
+
+```powershell
+py -3.13 courtvision_ai.py predict --sport mlb --mode research `
+  --prediction-date YYYY-MM-DD
+```
+
+The requested date uses the CourtVision operating date obtained by converting
+`commence_time` to `America/Toronto`; snapshot collection date is not used as a
+substitute.
+
 ## Issues and root causes
 
 1. **Orchestration was attached to entrypoints.** The CLI, daily script,
@@ -191,6 +224,13 @@ MLB boundaries, and structured lifecycle identity.
 `tests/test_mlb_hr_research_baseline.py` adds old-internal versus canonical
 research parity for rows, probabilities, edges, feature identities, immutable
 CSV bytes, and SHA-256 metadata.
+
+It also covers MLB `PASS`, `NO_DATA`, `NO_ELIGIBLE_PREDICTIONS`, structured
+exclusion totals, operating-timezone date filtering, latest-valid-model
+selection, canonical local odds/output defaults, explicit override priority,
+structured dependency failure, immutable `PROTECTED_NO_OP`, diagnostics
+publication, and terminal lock release. Existing NBA application and
+architecture tests remain unchanged and passing.
 
 The injury-context and team-lookup regression tests now inspect
 `_predict_internal()`, the approved active NBA implementation, because public

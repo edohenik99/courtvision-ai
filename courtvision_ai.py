@@ -9261,9 +9261,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Allow protected operator board CSVs to be overwritten intentionally.",
     )
-    parser.add_argument("--model-dir", help="MLB research model bundle directory.")
-    parser.add_argument("--odds-csv", help="MLB local odds snapshot CSV.")
-    parser.add_argument("--output-dir", help="MLB immutable prediction output directory.")
+    parser.add_argument(
+        "--model-dir",
+        help="MLB research model bundle directory (defaults to latest valid local bundle).",
+    )
+    parser.add_argument(
+        "--odds-csv",
+        help="MLB local odds snapshot CSV (defaults to the canonical local archive).",
+    )
+    parser.add_argument(
+        "--output-dir",
+        help="MLB immutable prediction output directory (defaults to the dated daily-run path).",
+    )
     parser.add_argument("--prediction-timestamp", help="MLB prediction timestamp (ISO-8601).")
     parser.add_argument("--dry-run", action="store_true", help="Compute MLB research predictions without writing artifacts.")
     return parser
@@ -9278,29 +9287,37 @@ def _run_mlb_prediction_cli(args: argparse.Namespace, parser: argparse.ArgumentP
         )
     if not args.prediction_date:
         parser.error("MLB research prediction requires --prediction-date.")
-    if not args.model_dir:
-        parser.error("MLB research prediction requires --model-dir.")
-    if not args.output_dir and not args.dry_run:
-        parser.error(
-            "MLB research prediction requires --output-dir unless --dry-run is used."
-        )
     if args.force_output_overwrite:
         parser.error(
             "MLB research prediction artifacts are immutable and cannot be force-overwritten."
         )
 
     from courtvision.sports.mlb.training.hr_research_baseline import (
-        DEFAULT_ODDS_CSV,
         generate_daily_research_predictions,
+        resolve_mlb_output_dir,
     )
 
+    resolved_output_dir = resolve_mlb_output_dir(
+        args.output_dir,
+        target_date=args.prediction_date,
+    )
     result = generate_daily_research_predictions(
         model_bundle_dir=args.model_dir,
-        odds_path=args.odds_csv or DEFAULT_ODDS_CSV,
-        output_dir=args.output_dir,
+        odds_path=args.odds_csv,
+        output_dir=resolved_output_dir,
         target_date=args.prediction_date,
         prediction_timestamp=args.prediction_timestamp,
         dry_run=args.dry_run,
+    )
+    diagnostics = dict(result.input_diagnostics)
+    exclusion_reasons = dict(result.exclusion_reasons)
+    resolved_model_dir = result.resolved_model_dir
+    resolved_odds_csv = result.resolved_odds_csv
+    top_exclusion_reasons = dict(
+        sorted(
+            exclusion_reasons.items(),
+            key=lambda item: (-int(item[1]), str(item[0])),
+        )[:5]
     )
     print(
         json.dumps(
@@ -9311,9 +9328,35 @@ def _run_mlb_prediction_cli(args: argparse.Namespace, parser: argparse.ArgumentP
                 "prediction_date": args.prediction_date,
                 "status": result.application_status,
                 "lifecycle_status": result.lifecycle_status,
+                "resolved_model_dir": (
+                    str(resolved_model_dir) if resolved_model_dir else ""
+                ),
+                "resolved_odds_csv": (
+                    str(resolved_odds_csv) if resolved_odds_csv else ""
+                ),
+                "resolved_output_dir": str(resolved_output_dir),
+                "input_row_count": diagnostics.get("input_row_count", 0),
+                "requested_date_row_count": diagnostics.get(
+                    "requested_date_row_count", 0
+                ),
+                "deduplicated_row_count": diagnostics.get(
+                    "deduplicated_row_count", 0
+                ),
+                "market_filtered_row_count": diagnostics.get(
+                    "market_filtered_row_count", 0
+                ),
+                "feature_validated_row_count": diagnostics.get(
+                    "feature_validated_row_count", 0
+                ),
+                "eligible_row_count": diagnostics.get(
+                    "eligible_row_count", 0
+                ),
                 "prediction_count": len(result.predictions),
                 "excluded_row_count": len(result.exclusions),
+                "exclusion_reasons": exclusion_reasons,
+                "top_exclusion_reasons": top_exclusion_reasons,
                 "output_dir": str(result.output_dir) if result.output_dir else "",
+                "artifact_paths": dict(result.artifact_paths),
                 "application_manifest": (
                     str(result.application_manifest_path)
                     if result.application_manifest_path
@@ -9340,7 +9383,23 @@ def main(argv: Optional[list[str]] = None) -> int:
         try:
             return _run_mlb_prediction_cli(args, parser)
         except Exception as exc:
-            print(f"[error] {exc}", file=sys.stderr)
+            print(
+                json.dumps(
+                    {
+                        "sport": "mlb",
+                        "mode": "research",
+                        "prediction_date": args.prediction_date or "",
+                        "status": "FAILED",
+                        "lifecycle_status": getattr(
+                            exc, "lifecycle_status", "NOT_STARTED"
+                        ),
+                        "failure_classification": type(exc).__name__,
+                        "error": str(exc),
+                    },
+                    indent=2,
+                ),
+                file=sys.stderr,
+            )
             return 1
 
     if args.fit_only and args.predict_only:

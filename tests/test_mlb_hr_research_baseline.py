@@ -5,9 +5,11 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import courtvision_ai
 from courtvision.sports.mlb.training.hr_research_baseline import (
     FEATURE_COLUMNS,
     FEATURE_SCHEMA_VERSION_V1,
@@ -27,6 +29,9 @@ from courtvision.sports.mlb.training.hr_research_baseline import (
     generate_daily_research_predictions,
     load_model_bundle,
     predict_model_probability,
+    resolve_mlb_model_bundle,
+    resolve_mlb_odds_csv,
+    resolve_mlb_output_dir,
     settle_prediction_ledger,
     train_research_logistic_baseline,
     write_feature_artifacts,
@@ -380,6 +385,396 @@ def test_prediction_dry_run_is_immutable_and_blocks_after_start_games(
     assert {row["exclusion_reason"] for row in first.exclusions} == {
         "game_already_started"
     }
+    assert first.application_status == "PASS"
+    assert first.lifecycle_status == "DISABLED"
+    assert first.exclusion_reasons == {"game_already_started": 1}
+    assert sum(first.exclusion_reasons.values()) == len(first.exclusions)
+    assert first.input_diagnostics == {
+        "input_row_count": 2,
+        "requested_date_row_count": 2,
+        "market_filtered_row_count": 2,
+        "deduplicated_row_count": 2,
+        "feature_validated_row_count": 2,
+        "eligible_row_count": 1,
+    }
+
+
+def test_zero_prediction_statuses_and_date_diagnostics(
+    tmp_path: Path,
+) -> None:
+    bundle_dir, _ = _train_fixture_model(tmp_path)
+    odds_path = tmp_path / "prediction_odds.csv"
+    _write_csv(
+        odds_path,
+        ODDS_REQUIRED_COLUMNS,
+        [
+            _odds_row(
+                event_id="started-event",
+                player="Started Batter",
+                commence_time="2026-07-04T16:00:00Z",
+                snapshot_time="2026-07-04T15:00:00Z",
+            )
+        ],
+    )
+
+    zero_pick = generate_daily_research_predictions(
+        model_bundle_dir=bundle_dir,
+        odds_path=odds_path,
+        target_date="2026-07-04",
+        prediction_timestamp="2026-07-04T17:00:00Z",
+        dry_run=True,
+    )
+    no_data = generate_daily_research_predictions(
+        model_bundle_dir=bundle_dir,
+        odds_path=odds_path,
+        target_date="2026-07-05",
+        prediction_timestamp="2026-07-05T17:00:00Z",
+        dry_run=True,
+    )
+
+    assert zero_pick.application_status == "NO_ELIGIBLE_PREDICTIONS"
+    assert zero_pick.lifecycle_status == "DISABLED"
+    assert zero_pick.exclusion_reasons == {"game_already_started": 1}
+    assert sum(zero_pick.exclusion_reasons.values()) == len(
+        zero_pick.exclusions
+    )
+    assert zero_pick.input_diagnostics["requested_date_row_count"] == 1
+    assert zero_pick.input_diagnostics["eligible_row_count"] == 0
+    assert no_data.application_status == "NO_DATA"
+    assert no_data.lifecycle_status == "DISABLED"
+    assert no_data.input_diagnostics["input_row_count"] == 1
+    assert no_data.input_diagnostics["requested_date_row_count"] == 0
+    assert no_data.input_diagnostics["eligible_row_count"] == 0
+    assert no_data.exclusion_reasons == {}
+
+
+def test_prediction_defaults_select_latest_valid_local_inputs(
+    tmp_path: Path,
+) -> None:
+    odds_path, results_path = _write_training_fixture(tmp_path / "training")
+    features = build_live_hr_research_features(
+        odds_path=odds_path,
+        results_path=results_path,
+        generated_at="2026-07-04T00:00:00Z",
+    )
+    feature_paths = write_feature_artifacts(
+        features, tmp_path / "feature_artifacts"
+    )
+    model_root = tmp_path / "models"
+    older = train_research_logistic_baseline(
+        feature_rows_path=feature_paths["feature_rows_csv"],
+        output_root=model_root,
+        model_version="older",
+        generated_at="2026-07-04T01:00:00Z",
+    )
+    newer = train_research_logistic_baseline(
+        feature_rows_path=feature_paths["feature_rows_csv"],
+        output_root=model_root,
+        model_version="newer",
+        generated_at="2026-07-05T01:00:00Z",
+    )
+    (model_root / ".pytest_tmp-noise").mkdir()
+    (model_root / "incomplete").mkdir()
+    (model_root / "incomplete" / "metadata.json").write_text(
+        "{}", encoding="utf-8"
+    )
+    (model_root / "unrelated").mkdir()
+
+    repository_root = tmp_path / "repository"
+    canonical_odds = (
+        repository_root
+        / "data"
+        / "theoddsapi"
+        / "live_hr_snapshots"
+        / "live_hr_props_master.csv"
+    )
+    _write_csv(canonical_odds, ODDS_REQUIRED_COLUMNS, [_odds_row()])
+    artifact_root = repository_root / "outputs" / "research" / "mlb_hr_baseline"
+
+    assert resolve_mlb_model_bundle(model_root=model_root) == newer.bundle_dir
+    assert (
+        resolve_mlb_model_bundle(
+            older.bundle_dir,
+            model_root=tmp_path / "unused-model-root",
+        )
+        == older.bundle_dir
+    )
+    assert (
+        resolve_mlb_odds_csv(repository_root=repository_root)
+        == canonical_odds.resolve()
+    )
+    explicit_odds = tmp_path / "explicit_odds.csv"
+    _write_csv(explicit_odds, ODDS_REQUIRED_COLUMNS, [_odds_row()])
+    assert (
+        resolve_mlb_odds_csv(
+            explicit_odds,
+            repository_root=tmp_path / "unused-repository",
+        )
+        == explicit_odds.resolve()
+    )
+    assert resolve_mlb_output_dir(
+        None,
+        target_date="2026-07-25",
+        artifact_root=artifact_root,
+    ) == (artifact_root / "daily_runs" / "2026-07-25").resolve()
+    explicit_output = tmp_path / "explicit-output"
+    assert resolve_mlb_output_dir(
+        explicit_output,
+        target_date="2026-07-25",
+        artifact_root=tmp_path / "unused-artifacts",
+    ) == explicit_output.resolve()
+
+
+def test_lifecycle_locks_release_for_all_healthy_mlb_terminal_states(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COURTVISION_LIFECYCLE_SHADOW", "0")
+    bundle_dir, _ = _train_fixture_model(tmp_path)
+    odds_path = tmp_path / "prediction_odds.csv"
+    _write_csv(
+        odds_path,
+        ODDS_REQUIRED_COLUMNS,
+        [
+            _odds_row(
+                event_id="timing-event",
+                player="Timing Batter",
+                commence_time="2026-07-04T16:00:00Z",
+                snapshot_time="2026-07-04T15:00:00Z",
+            )
+        ],
+    )
+    cases = (
+        ("pass", "2026-07-04", "2026-07-04T15:30:00Z", "PASS"),
+        (
+            "excluded",
+            "2026-07-04",
+            "2026-07-04T17:00:00Z",
+            "NO_ELIGIBLE_PREDICTIONS",
+        ),
+        ("no-data", "2026-07-05", "2026-07-05T17:00:00Z", "NO_DATA"),
+    )
+
+    for label, target_date, timestamp, expected_status in cases:
+        output_dir = tmp_path / label / target_date
+        result = generate_daily_research_predictions(
+            model_bundle_dir=bundle_dir,
+            odds_path=odds_path,
+            output_dir=output_dir,
+            target_date=target_date,
+            prediction_timestamp=timestamp,
+        )
+        assert result.application_status == expected_status
+        assert result.lifecycle_status == "DISABLED"
+        assert not (
+            output_dir.parent
+            / f".prediction_mlb_research_{target_date}.lock"
+        ).exists()
+        assert (output_dir / "exclusion_summary.json").is_file()
+
+
+def test_lifecycle_enabled_zero_pick_is_not_degraded_by_nba_observer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle_dir, _ = _train_fixture_model(tmp_path)
+    odds_path = tmp_path / "prediction_odds.csv"
+    _write_csv(
+        odds_path,
+        ODDS_REQUIRED_COLUMNS,
+        [
+            _odds_row(
+                event_id="started-event",
+                player="Started Batter",
+                commence_time="2026-07-04T16:00:00Z",
+                snapshot_time="2026-07-04T15:00:00Z",
+            )
+        ],
+    )
+    context = SimpleNamespace(terminal=False)
+    publication_kwargs: dict[str, object] = {}
+    begin_count = 0
+
+    def begin(*args: object, **kwargs: object) -> object:
+        nonlocal begin_count
+        begin_count += 1
+        return context
+
+    def publish(run: object, **kwargs: object) -> object:
+        publication_kwargs.update(kwargs)
+        context.terminal = True
+        return SimpleNamespace(status="PASS")
+
+    import courtvision.shadow_lifecycle as shadow_lifecycle
+
+    monkeypatch.setattr(
+        shadow_lifecycle,
+        "load_shadow_lifecycle_hooks",
+        lambda: SimpleNamespace(
+            begin_shadow_run=begin,
+            publish_shadow_after_board=publish,
+            record_failed_shadow_run=lambda *args, **kwargs: None,
+            observations_enabled=True,
+            prepare_observation_batch=lambda **kwargs: (_ for _ in ()).throw(
+                AssertionError("NBA observer must not run for MLB")
+            ),
+            observation_initialization_error=None,
+        ),
+    )
+    output_dir = tmp_path / "lifecycle-enabled" / "2026-07-04"
+    result = generate_daily_research_predictions(
+        model_bundle_dir=bundle_dir,
+        odds_path=odds_path,
+        output_dir=output_dir,
+        target_date="2026-07-04",
+        prediction_timestamp="2026-07-04T17:00:00Z",
+        repository_root=tmp_path,
+    )
+
+    assert result.application_status == "NO_ELIGIBLE_PREDICTIONS"
+    assert result.lifecycle_status == "PASS"
+    assert begin_count == 1
+    assert "observations_enabled" not in publication_kwargs
+    prediction_manifest = json.loads(
+        (output_dir / "manifest.json").read_text(encoding="utf-8")
+    )
+    application_manifest = json.loads(
+        (output_dir / "application_manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    exclusion_summary = json.loads(
+        (output_dir / "exclusion_summary.json").read_text(encoding="utf-8")
+    )
+    assert prediction_manifest["status"] == "NO_ELIGIBLE_PREDICTIONS"
+    assert prediction_manifest["exclusion_reasons"] == {
+        "game_already_started": 1
+    }
+    assert application_manifest["status"] == "NO_ELIGIBLE_PREDICTIONS"
+    assert application_manifest["lifecycle_status"] == "PASS"
+    assert application_manifest["result_summary"]["exclusion_reasons"] == {
+        "game_already_started": 1
+    }
+    assert sum(exclusion_summary["exclusion_reasons"].values()) == (
+        exclusion_summary["excluded_row_count"]
+    )
+    assert not (
+        output_dir.parent
+        / ".prediction_mlb_research_2026-07-04.lock"
+    ).exists()
+
+    invalid_odds_path = tmp_path / "invalid_prediction_odds.csv"
+    _write_csv(
+        invalid_odds_path,
+        ODDS_REQUIRED_COLUMNS,
+        [_odds_row(point=1.5)],
+    )
+    invalid_output = tmp_path / "invalid" / "2026-07-04"
+    with pytest.raises(
+        MLBHRResearchBaselineError,
+        match="not an Over 0.5 HR market",
+    ):
+        generate_daily_research_predictions(
+            model_bundle_dir=bundle_dir,
+            odds_path=invalid_odds_path,
+            output_dir=invalid_output,
+            target_date="2026-07-04",
+            prediction_timestamp="2026-07-04T17:00:00Z",
+            repository_root=tmp_path,
+        )
+    assert begin_count == 1
+    assert not invalid_output.exists()
+
+
+def test_cli_overrides_failure_status_and_protected_no_op(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("COURTVISION_LIFECYCLE_SHADOW", "0")
+    bundle_dir, _ = _train_fixture_model(tmp_path)
+    odds_path = tmp_path / "prediction_odds.csv"
+    _write_csv(
+        odds_path,
+        ODDS_REQUIRED_COLUMNS,
+        [
+            _odds_row(
+                event_id="started-event",
+                player="Started Batter",
+                commence_time="2026-07-04T16:00:00Z",
+                snapshot_time="2026-07-04T15:00:00Z",
+            )
+        ],
+    )
+    output_dir = tmp_path / "daily_runs" / "2026-07-04"
+    args = [
+        "predict",
+        "--sport",
+        "mlb",
+        "--mode",
+        "research",
+        "--prediction-date",
+        "2026-07-04",
+        "--prediction-timestamp",
+        "2026-07-04T17:00:00Z",
+        "--model-dir",
+        str(bundle_dir),
+        "--odds-csv",
+        str(odds_path),
+        "--output-dir",
+        str(output_dir),
+    ]
+
+    assert courtvision_ai.main(args) == 0
+    first_output = capsys.readouterr().out
+    assert '"status": "NO_ELIGIBLE_PREDICTIONS"' in first_output
+    assert f'"resolved_model_dir": "{str(bundle_dir.resolve()).replace(chr(92), chr(92) * 2)}"' in first_output
+    assert f'"resolved_odds_csv": "{str(odds_path.resolve()).replace(chr(92), chr(92) * 2)}"' in first_output
+    assert f'"resolved_output_dir": "{str(output_dir.resolve()).replace(chr(92), chr(92) * 2)}"' in first_output
+    assert (output_dir / "exclusion_summary.json").is_file()
+    lock_path = (
+        output_dir.parent
+        / ".prediction_mlb_research_2026-07-04.lock"
+    )
+    assert not lock_path.exists()
+    before_hashes = {
+        path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in output_dir.iterdir()
+        if path.is_file()
+    }
+
+    assert courtvision_ai.main(args) == 0
+    second_output = capsys.readouterr().out
+    assert '"status": "PROTECTED_NO_OP"' in second_output
+    assert not lock_path.exists()
+    assert before_hashes == {
+        path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in output_dir.iterdir()
+        if path.is_file()
+    }
+
+    protected_with_missing_dependency = [
+        *args[:],
+    ]
+    missing_index = (
+        protected_with_missing_dependency.index("--odds-csv") + 1
+    )
+    protected_with_missing_dependency[missing_index] = str(
+        tmp_path / "missing.csv"
+    )
+    assert courtvision_ai.main(protected_with_missing_dependency) == 0
+    protected_output = capsys.readouterr().out
+    assert '"status": "PROTECTED_NO_OP"' in protected_output
+
+    failed_args = [*protected_with_missing_dependency]
+    failure_output_index = failed_args.index("--output-dir") + 1
+    failed_args[failure_output_index] = str(
+        tmp_path / "failure" / "2026-07-04"
+    )
+    assert courtvision_ai.main(failed_args) == 1
+    failure = capsys.readouterr()
+    assert '"status": "FAILED"' in failure.err
+    assert '"lifecycle_status": "NOT_STARTED"' in failure.err
 
 
 def test_prediction_timing_uses_exact_aware_timestamps_near_midnight(
@@ -419,6 +814,7 @@ def test_prediction_timing_uses_exact_aware_timestamps_near_midnight(
     assert before_start.predictions[0]["game_date"] == "2026-07-14"
     assert before_start.predictions[0]["game_date_utc"] == "2026-07-15"
     assert before_start.predictions[0]["game_date_operating"] == "2026-07-14"
+    assert before_start.input_diagnostics["requested_date_row_count"] == 1
     assert len(after_start.predictions) == 0
     assert after_start.exclusions[0]["exclusion_reason"] == "game_already_started"
 

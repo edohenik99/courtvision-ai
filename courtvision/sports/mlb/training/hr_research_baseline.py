@@ -31,6 +31,7 @@ from courtvision.sports.mlb.player_name_normalization import (
 )
 from courtvision.prediction import (
     CallbackPredictionPublisher,
+    DisabledPredictionLifecycle,
     EnginePrediction,
     NoArtifactPublisher,
     PredictionApplicationService,
@@ -66,6 +67,7 @@ DEFAULT_RESULTS_CSV: Final = DEFAULT_LIVE_HR_DIR / "live_hr_results.csv"
 DEFAULT_ARTIFACT_ROOT: Final = (
     DEFAULT_REPOSITORY_ROOT / "outputs" / "research" / "mlb_hr_baseline"
 )
+DEFAULT_MODEL_ROOT: Final = DEFAULT_ARTIFACT_ROOT / "models"
 COURTVISION_OPERATING_TIMEZONE_NAME: Final = "America/Toronto"
 COURTVISION_OPERATING_TIMEZONE: Final = ZoneInfo(COURTVISION_OPERATING_TIMEZONE_NAME)
 COMPATIBLE_FEATURE_SCHEMA_VERSIONS: Final = frozenset(
@@ -452,6 +454,12 @@ class PredictionRunResult:
     application_status: str | None = None
     lifecycle_status: str | None = None
     application_manifest_path: Path | None = None
+    exclusion_reasons: Mapping[str, int] = field(default_factory=dict)
+    input_diagnostics: Mapping[str, int] = field(default_factory=dict)
+    artifact_paths: Mapping[str, str] = field(default_factory=dict)
+    resolved_model_dir: Path | None = None
+    resolved_odds_csv: Path | None = None
+    resolved_output_dir: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1324,6 +1332,36 @@ def _selected_snapshot_groups(
     return tuple(selected_groups)
 
 
+def _input_stage_diagnostics(
+    odds_rows: Sequence[Mapping[str, str]],
+    *,
+    target_operating_date: str | None,
+    selected_groups: Sequence[Sequence[Mapping[str, str]]],
+    feature_rows: Sequence[Mapping[str, str]],
+    eligible_row_count: int,
+) -> dict[str, int]:
+    requested_date_row_count = 0
+    for row in odds_rows:
+        _, commence_time, _, _, _ = _validate_odds_row(row)
+        if (
+            target_operating_date is None
+            or courtvision_operating_date(commence_time).isoformat()
+            == target_operating_date
+        ):
+            requested_date_row_count += 1
+    return {
+        "input_row_count": len(odds_rows),
+        "requested_date_row_count": requested_date_row_count,
+        # Unsupported/non-HR rows fail the existing loader contract rather
+        # than being silently filtered, so every retained requested-date row
+        # has passed the canonical market validation.
+        "market_filtered_row_count": requested_date_row_count,
+        "deduplicated_row_count": len(selected_groups),
+        "feature_validated_row_count": len(feature_rows),
+        "eligible_row_count": eligible_row_count,
+    }
+
+
 def build_live_hr_research_features(
     *,
     odds_path: str | Path = DEFAULT_ODDS_CSV,
@@ -1407,6 +1445,13 @@ def build_live_hr_research_features(
         PREDICTION_ELIGIBLE_STATUS if mode == "prediction" else TRAINING_ELIGIBLE_STATUS
     )
     eligible_rows = [row for row in rows if row.get("eligibility_status") == eligible_status]
+    input_diagnostics = _input_stage_diagnostics(
+        odds_rows,
+        target_operating_date=target_operating_date,
+        selected_groups=groups,
+        feature_rows=rows,
+        eligible_row_count=len(eligible_rows),
+    )
     dates = sorted({row["game_date"] for row in rows if row.get("game_date")})
     manifest = {
         "feature_schema_version": FEATURE_SCHEMA_VERSION,
@@ -1433,6 +1478,8 @@ def build_live_hr_research_features(
         "row_count": len(rows),
         "eligible_row_count": len(eligible_rows),
         "excluded_row_count": len(exclusions),
+        "input_diagnostics": input_diagnostics,
+        **input_diagnostics,
         "unique_games": len({row["event_id"] for row in rows if row.get("event_id")}),
         "unique_players": len(
             {
@@ -2655,6 +2702,87 @@ def load_model_bundle(bundle_dir: str | Path) -> ModelBundle:
     return ModelBundle(bundle_dir=root, metadata=metadata_payload, model=model_payload)
 
 
+def resolve_mlb_model_bundle(
+    model_bundle_dir: str | Path | None = None,
+    *,
+    model_root: str | Path = DEFAULT_MODEL_ROOT,
+) -> Path:
+    """Resolve an explicit bundle or the latest valid local research bundle."""
+
+    if model_bundle_dir is not None:
+        return load_model_bundle(model_bundle_dir).bundle_dir
+    root = Path(model_root).expanduser().resolve()
+    if not root.is_dir():
+        raise MLBHRResearchBaselineError(
+            f"MLB research model root does not exist: {root}"
+        )
+    valid: list[tuple[str, str, Path]] = []
+    for candidate in root.iterdir():
+        if (
+            not candidate.is_dir()
+            or candidate.name.startswith(".pytest_tmp")
+        ):
+            continue
+        try:
+            bundle = load_model_bundle(candidate)
+        except MLBHRResearchBaselineError:
+            continue
+        trained_at = _clean(bundle.metadata.get("training_timestamp"))
+        valid.append((trained_at, bundle.model_id, bundle.bundle_dir))
+    if not valid:
+        raise MLBHRResearchBaselineError(
+            f"no valid MLB research model bundle found under {root}"
+        )
+    return max(valid, key=lambda item: (item[0], item[1], str(item[2])))[2]
+
+
+def resolve_mlb_odds_csv(
+    odds_path: str | Path | None = None,
+    *,
+    repository_root: str | Path = DEFAULT_REPOSITORY_ROOT,
+) -> Path:
+    """Resolve the explicit local odds archive or the canonical free source."""
+
+    source = (
+        Path(odds_path)
+        if odds_path is not None
+        else (
+            Path(repository_root)
+            / "data"
+            / "theoddsapi"
+            / "live_hr_snapshots"
+            / "live_hr_props_master.csv"
+        )
+    )
+    resolved = source.expanduser().resolve()
+    if not resolved.is_file():
+        raise MLBHRResearchBaselineError(
+            f"MLB local odds CSV does not exist: {resolved}"
+        )
+    return resolved
+
+
+def resolve_mlb_output_dir(
+    output_dir: str | Path | None,
+    *,
+    target_date: str,
+    artifact_root: str | Path = DEFAULT_ARTIFACT_ROOT,
+) -> Path:
+    """Resolve the explicit output or the canonical date-specific run path."""
+
+    prediction_date = _target_operating_date_text(target_date)
+    if prediction_date is None:
+        raise MLBHRResearchBaselineError(
+            "target_date is required to resolve the MLB output directory"
+        )
+    source = (
+        Path(output_dir)
+        if output_dir is not None
+        else Path(artifact_root) / "daily_runs" / prediction_date
+    )
+    return source.expanduser().resolve()
+
+
 def predict_model_probability(
     row: Mapping[str, str],
     bundle: ModelBundle,
@@ -2669,6 +2797,18 @@ def predict_model_probability(
     if not isinstance(preprocessor, Mapping) or not isinstance(weights, list):
         raise MLBHRResearchBaselineError("invalid loaded model payload")
     return _predict_probability(row, preprocessor=preprocessor, weights=[float(w) for w in weights])
+
+
+def _prediction_outcome_status(
+    *,
+    prediction_count: int,
+    input_diagnostics: Mapping[str, object],
+) -> str:
+    if prediction_count > 0:
+        return "PASS"
+    if _manifest_int(input_diagnostics, "requested_date_row_count") == 0:
+        return "NO_DATA"
+    return "NO_ELIGIBLE_PREDICTIONS"
 
 
 def _generate_daily_research_predictions_internal(
@@ -2780,6 +2920,14 @@ def _generate_daily_research_predictions_internal(
         }
         predictions.append({column: prediction.get(column, "") for column in PREDICTION_COLUMNS})
 
+    input_diagnostics = _manifest_dict(
+        feature_result.manifest, "input_diagnostics"
+    )
+    exclusion_reasons = _exclusion_counts(feature_result.exclusions)
+    outcome_status = _prediction_outcome_status(
+        prediction_count=len(predictions),
+        input_diagnostics=input_diagnostics,
+    )
     manifest: dict[str, object] = {
         "prediction_schema_version": PREDICTION_SCHEMA_VERSION,
         "prediction_run_id": run_id,
@@ -2788,6 +2936,11 @@ def _generate_daily_research_predictions_internal(
         "prediction_timestamp": _iso_z(timestamp),
         "row_count": len(predictions),
         "excluded_row_count": len(feature_result.exclusions),
+        "eligible_row_count": len(eligible_rows),
+        "status": outcome_status,
+        "exclusion_reasons": exclusion_reasons,
+        "input_diagnostics": input_diagnostics,
+        **input_diagnostics,
         "target_date": target_operating_date or "",
         "target_date_semantics": "courtvision_operating_date",
         "operating_timezone": COURTVISION_OPERATING_TIMEZONE_NAME,
@@ -2825,6 +2978,24 @@ def _generate_daily_research_predictions_internal(
             artifact_label="mlb_prediction_exclusions",
             create_once=True,
         )
+        publish_json(
+            written_dir / "exclusion_summary.json",
+            {
+                "prediction_date": target_operating_date
+                or courtvision_operating_date(timestamp).isoformat(),
+                "status": outcome_status,
+                "excluded_row_count": len(feature_result.exclusions),
+                "exclusion_reasons": exclusion_reasons,
+                "input_diagnostics": input_diagnostics,
+            },
+            prediction_date=target_operating_date
+            or courtvision_operating_date(timestamp).isoformat(),
+            caller="mlb_hr_research_baseline:internal_engine",
+            artifact_label="mlb_prediction_exclusion_summary",
+            create_once=True,
+            trailing_newline=True,
+            sort_keys=True,
+        )
         manifest["predictions_csv_sha256"] = _file_sha256(predictions_path)
         publish_json(
             written_dir / "manifest.json",
@@ -2843,6 +3014,20 @@ def _generate_daily_research_predictions_internal(
         exclusions=feature_result.exclusions,
         manifest=manifest,
         output_dir=written_dir,
+        application_status=outcome_status,
+        lifecycle_status="DISABLED",
+        exclusion_reasons=exclusion_reasons,
+        input_diagnostics={
+            str(key): int(value)
+            for key, value in input_diagnostics.items()
+        },
+        resolved_model_dir=bundle.bundle_dir,
+        resolved_odds_csv=Path(odds_path).expanduser().resolve(),
+        resolved_output_dir=(
+            Path(output_dir).expanduser().resolve()
+            if output_dir is not None
+            else None
+        ),
     )
 
 
@@ -2894,8 +3079,16 @@ class _MLBHRResearchPredictionEngine:
                 "predictions": prediction_run.predictions,
                 "exclusions": prediction_run.exclusions,
                 "summary": {
+                    "status": prediction_run.manifest.get("status"),
                     "prediction_count": len(prediction_run.predictions),
                     "excluded_row_count": len(prediction_run.exclusions),
+                    "eligible_row_count": prediction_run.manifest.get(
+                        "eligible_row_count", 0
+                    ),
+                    "exclusion_reasons": dict(
+                        prediction_run.exclusion_reasons
+                    ),
+                    **dict(prediction_run.input_diagnostics),
                     "research_label": RESEARCH_ONLY_LABEL,
                 },
             },
@@ -2909,13 +3102,172 @@ class _MLBHRResearchPredictionEngine:
             model_version=str(
                 prediction_run.manifest.get("model_version", "")
             ),
+            status=str(prediction_run.manifest.get("status", "")) or None,
         )
+
+
+def _load_existing_prediction_run(
+    output_dir: Path,
+    *,
+    target_date: str,
+    resolved_model_dir: Path | None,
+    resolved_odds_csv: Path | None,
+    repository_root: str | Path,
+) -> PredictionRunResult:
+    required_paths = {
+        "predictions": output_dir / "predictions.csv",
+        "excluded_rows": output_dir / "excluded_rows.csv",
+        "manifest": output_dir / "manifest.json",
+    }
+    missing = [
+        path.name for path in required_paths.values() if not path.is_file()
+    ]
+    if missing:
+        raise MLBHRResearchBaselineError(
+            "prediction output directory already exists but is incomplete: "
+            + ", ".join(sorted(missing))
+        )
+    verification = verify_prediction_artifacts(predictions_root=output_dir)
+    if not verification.passed:
+        raise MLBHRResearchBaselineError(
+            "existing immutable prediction output failed verification: "
+            + "; ".join(verification.errors)
+        )
+    _, predictions = _read_csv(
+        required_paths["predictions"],
+        required_columns=PREDICTION_COLUMNS,
+        label="predictions",
+    )
+    _, exclusions = _read_csv(
+        required_paths["excluded_rows"],
+        required_columns=EXCLUSION_COLUMNS,
+        label="prediction exclusions",
+    )
+    try:
+        manifest = json.loads(
+            required_paths["manifest"].read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError) as exc:
+        raise MLBHRResearchBaselineError(
+            f"could not read existing prediction manifest: {exc}"
+        ) from exc
+    if not isinstance(manifest, dict):
+        raise MLBHRResearchBaselineError(
+            "existing prediction manifest must be a JSON object"
+        )
+    manifest_date = _clean(manifest.get("target_date"))
+    if manifest_date and manifest_date != target_date:
+        raise MLBHRResearchBaselineError(
+            "existing prediction manifest target_date does not match "
+            f"{target_date}"
+        )
+    if resolved_model_dir is None:
+        manifest_model_path = _clean(manifest.get("resolved_model_dir"))
+        resolved_model_dir = (
+            Path(manifest_model_path).expanduser().resolve()
+            if manifest_model_path
+            else (
+                DEFAULT_MODEL_ROOT
+                / _clean(manifest.get("model_id"))
+            ).resolve()
+        )
+    if resolved_odds_csv is None:
+        provenance = _manifest_mapping(manifest.get("data_provenance"))
+        manifest_odds_path = (
+            _clean(manifest.get("resolved_odds_csv"))
+            or _clean(provenance.get("odds_path"))
+        )
+        resolved_odds_csv = (
+            Path(manifest_odds_path).expanduser().resolve()
+            if manifest_odds_path
+            else (
+                Path(repository_root)
+                / "data"
+                / "theoddsapi"
+                / "live_hr_snapshots"
+                / "live_hr_props_master.csv"
+            ).resolve()
+        )
+    feature_manifest = _manifest_mapping(manifest.get("feature_manifest"))
+    input_diagnostics = _manifest_dict(manifest, "input_diagnostics")
+    if not input_diagnostics:
+        input_diagnostics = _manifest_dict(
+            feature_manifest, "input_diagnostics"
+        )
+    if not input_diagnostics:
+        source_hashes = _manifest_mapping(
+            feature_manifest.get("source_hashes")
+        )
+        expected_odds_sha = _clean(
+            source_hashes.get("odds_csv_sha256")
+        )
+        if (
+            expected_odds_sha
+            and resolved_odds_csv.is_file()
+            and expected_odds_sha == _file_sha256(resolved_odds_csv)
+        ):
+            rebuilt = build_live_hr_research_features(
+                odds_path=resolved_odds_csv,
+                results_path=None,
+                target_date=target_date,
+                prediction_timestamp=manifest.get("prediction_timestamp"),
+                mode="prediction",
+                generated_at=manifest.get("prediction_timestamp"),
+                repository_root=repository_root,
+            )
+            input_diagnostics = _manifest_dict(
+                rebuilt.manifest, "input_diagnostics"
+            )
+    exclusion_reasons = _manifest_dict(manifest, "exclusion_reasons")
+    if not exclusion_reasons:
+        exclusion_reasons = _manifest_dict(
+            feature_manifest, "exclusion_counts"
+        )
+    artifact_paths = {
+        label: str(path) for label, path in required_paths.items()
+    }
+    optional_paths = {
+        "exclusion_summary": output_dir / "exclusion_summary.json",
+        "application_manifest": output_dir / "application_manifest.json",
+    }
+    artifact_paths.update(
+        {
+            label: str(path)
+            for label, path in optional_paths.items()
+            if path.is_file()
+        }
+    )
+    application_manifest = optional_paths["application_manifest"]
+    return PredictionRunResult(
+        prediction_run_id=_clean(manifest.get("prediction_run_id")),
+        predictions=predictions,
+        exclusions=exclusions,
+        manifest=manifest,
+        output_dir=output_dir,
+        application_status="PROTECTED_NO_OP",
+        lifecycle_status="PROTECTED_NO_OP",
+        application_manifest_path=(
+            application_manifest if application_manifest.is_file() else None
+        ),
+        exclusion_reasons={
+            str(key): int(value)
+            for key, value in exclusion_reasons.items()
+        },
+        input_diagnostics={
+            str(key): int(value)
+            for key, value in input_diagnostics.items()
+        },
+        artifact_paths=artifact_paths,
+        resolved_model_dir=resolved_model_dir,
+        resolved_odds_csv=resolved_odds_csv,
+        resolved_output_dir=output_dir,
+    )
 
 
 def generate_daily_research_predictions(
     *,
-    model_bundle_dir: str | Path,
-    odds_path: str | Path = DEFAULT_ODDS_CSV,
+    model_bundle_dir: str | Path | None = None,
+    odds_path: str | Path | None = None,
     output_dir: str | Path | None = None,
     target_date: str | None = None,
     prediction_timestamp: datetime | str | None = None,
@@ -2939,13 +3291,37 @@ def generate_daily_research_predictions(
         else None
     )
     if resolved_output is not None and not dry_run and resolved_output.exists():
-        raise MLBHRResearchBaselineError(
-            f"prediction output directory already exists: {resolved_output}"
+        return _load_existing_prediction_run(
+            resolved_output,
+            target_date=prediction_date,
+            resolved_model_dir=(
+                Path(model_bundle_dir).expanduser().resolve()
+                if model_bundle_dir is not None
+                else None
+            ),
+            resolved_odds_csv=(
+                Path(odds_path).expanduser().resolve()
+                if odds_path is not None
+                else None
+            ),
+            repository_root=repository_root,
         )
+    resolved_model_dir = resolve_mlb_model_bundle(model_bundle_dir)
+    resolved_odds_csv = resolve_mlb_odds_csv(
+        odds_path,
+        repository_root=repository_root,
+    )
+    _, preflight_odds_rows = _read_csv(
+        resolved_odds_csv,
+        required_columns=ODDS_REQUIRED_COLUMNS,
+        label="odds",
+    )
+    for preflight_row in preflight_odds_rows:
+        _validate_odds_row(preflight_row)
 
     engine = _MLBHRResearchPredictionEngine(
-        model_bundle_dir=model_bundle_dir,
-        odds_path=odds_path,
+        model_bundle_dir=resolved_model_dir,
+        odds_path=resolved_odds_csv,
         prediction_timestamp=timestamp,
         repository_root=repository_root,
         run_nonce=run_nonce,
@@ -2982,6 +3358,26 @@ def generate_daily_research_predictions(
             artifact_label="mlb_prediction_exclusions",
             create_once=True,
         )
+        exclusion_summary_path = publish_json(
+            resolved_output / "exclusion_summary.json",
+            {
+                "prediction_date": request.prediction_date,
+                "status": prediction_run.manifest.get("status"),
+                "excluded_row_count": len(prediction_run.exclusions),
+                "exclusion_reasons": dict(
+                    prediction_run.exclusion_reasons
+                ),
+                "input_diagnostics": dict(
+                    prediction_run.input_diagnostics
+                ),
+            },
+            prediction_date=request.prediction_date,
+            caller="mlb_hr_research_baseline:prediction_application",
+            artifact_label="mlb_prediction_exclusion_summary",
+            create_once=True,
+            trailing_newline=True,
+            sort_keys=True,
+        )
         staged_metadata = current_publication_metadata()
         manifest = dict(prediction_run.manifest)
         predictions_metadata = staged_metadata.get("mlb_predictions")
@@ -2994,6 +3390,9 @@ def generate_daily_research_predictions(
                 "sport": "mlb",
                 "mode": "research",
                 "run_id": run_id,
+                "resolved_model_dir": str(resolved_model_dir),
+                "resolved_odds_csv": str(resolved_odds_csv),
+                "resolved_output_dir": str(resolved_output),
                 "data_provenance": dict(
                     engine_prediction.provider_provenance
                 ),
@@ -3017,6 +3416,7 @@ def generate_daily_research_predictions(
         return {
             "predictions": predictions_path,
             "excluded_rows": exclusions_path,
+            "exclusion_summary": exclusion_summary_path,
             "manifest": manifest_path,
         }
 
@@ -3042,8 +3442,8 @@ def generate_daily_research_predictions(
         + timestamp.strftime("%Y%m%dT%H%M%SZ")
         + "-"
         + _stable_id(
-            str(Path(model_bundle_dir).expanduser().resolve()),
-            _file_sha256(odds_path),
+            str(resolved_model_dir),
+            _file_sha256(resolved_odds_csv),
             prediction_date,
             run_nonce or "",
             length=8,
@@ -3060,8 +3460,12 @@ def generate_daily_research_predictions(
     service = PredictionApplicationService(
         registry=PredictionEngineRegistry([engine]),
         publisher=publisher,
-        lifecycle=ShadowPredictionLifecycle(
-            repository_root=repository_root,
+        lifecycle=(
+            DisabledPredictionLifecycle()
+            if dry_run or resolved_output is None
+            else ShadowPredictionLifecycle(
+                repository_root=repository_root,
+            )
         ),
     )
     application_result = service.run(
@@ -3105,6 +3509,12 @@ def generate_daily_research_predictions(
             if application_result.manifest_path
             else None
         ),
+        exclusion_reasons=prediction_run.exclusion_reasons,
+        input_diagnostics=prediction_run.input_diagnostics,
+        artifact_paths=dict(application_result.artifact_paths),
+        resolved_model_dir=resolved_model_dir,
+        resolved_odds_csv=resolved_odds_csv,
+        resolved_output_dir=resolved_output,
     )
 
 
@@ -5096,6 +5506,9 @@ __all__ = [
     "load_model_bundle",
     "main",
     "predict_model_probability",
+    "resolve_mlb_model_bundle",
+    "resolve_mlb_odds_csv",
+    "resolve_mlb_output_dir",
     "resolve_player_identities",
     "run_daily_research",
     "settle_prediction_ledger",
