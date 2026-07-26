@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import dataclasses
 from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime
 import json
 from pathlib import Path
 from threading import Barrier
+from typing import Any, Callable, Mapping, NotRequired, TypedDict, Unpack
 from uuid import uuid4
 
 import pytest
@@ -48,6 +50,27 @@ FINAL_SETTLEMENT_ID = "settlement_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 CORRECTION_ID = (
     "settlement_correction_0123456789abcdef0123456789abcdef"
 )
+
+
+class _SettlementOptions(TypedDict):
+    outcome: str
+    result_source: str
+    source_record_id: str
+    settlement_run_id: str
+    result_evidence: Mapping[str, Any]
+    final_score: str | Mapping[str, Any] | None
+    lifecycle_root: Path
+    clock: FixedClock
+    settlement_id_factory: Callable[[], str]
+    transaction_id_factory: Callable[[], str]
+    failure_hook: NotRequired[Callable[[str], None] | None]
+
+
+class _SettlementOverrides(TypedDict, total=False):
+    result_evidence: Mapping[str, Any]
+    final_score: str | Mapping[str, Any] | None
+    settlement_id_factory: Callable[[], str]
+    failure_hook: Callable[[str], None] | None
 
 
 def _candidate(*, sport: str = "basketball", **updates: object) -> dict[str, object]:
@@ -119,9 +142,9 @@ def _settle(
     clock_at: datetime = SETTLED_AT,
     settlement_id: str = SETTLEMENT_ID,
     transaction_id: str = "official-pick-settlement-test-001",
-    **updates: object,
+    **updates: Unpack[_SettlementOverrides],
 ):
-    options: dict[str, object] = {
+    options: _SettlementOptions = {
         "outcome": outcome,
         "result_source": "fixture.boxscore",
         "source_record_id": "boxscore-game-001",
@@ -133,7 +156,14 @@ def _settle(
         "settlement_id_factory": lambda: settlement_id,
         "transaction_id_factory": lambda: transaction_id,
     }
-    options.update(updates)
+    if "result_evidence" in updates:
+        options["result_evidence"] = updates["result_evidence"]
+    if "final_score" in updates:
+        options["final_score"] = updates["final_score"]
+    if "settlement_id_factory" in updates:
+        options["settlement_id_factory"] = updates["settlement_id_factory"]
+    if "failure_hook" in updates:
+        options["failure_hook"] = updates["failure_hook"]
     return settle_official_pick(pick_id, **options)
 
 
@@ -519,9 +549,14 @@ def test_official_settlement_report_joins_only_committed_pick_ids(
     assert dataset.excluded_observation_count == 1
     assert dataset.excluded_candidate_count == 1
     assert dataset.excluded_legacy_count == 1
-    assert dataset.bankroll_calculated is False
-    assert dataset.kelly_calculated is False
+    assert not hasattr(dataset, "bankroll_calculated")
+    assert not hasattr(dataset, "kelly_calculated")
+    dataset_dict = dataclasses.asdict(dataset)
+    assert "bankroll_calculated" not in dataset_dict
+    assert "kelly_calculated" not in dataset_dict
     serialized = json.dumps(dataset.to_rows()).lower()
+    assert "bankroll_calculated" not in serialized
+    assert "kelly_calculated" not in serialized
     assert "bankroll" not in serialized
     assert "kelly" not in serialized
     assert "pick_ffffffffffffffffffffffffffffffff" not in serialized

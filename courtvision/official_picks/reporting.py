@@ -73,8 +73,6 @@ class OfficialPickSettlementReportDataset:
     excluded_observation_count: int
     excluded_candidate_count: int
     excluded_legacy_count: int
-    bankroll_calculated: bool = False
-    kelly_calculated: bool = False
 
     def to_rows(self) -> tuple[dict[str, Any], ...]:
         return tuple(
