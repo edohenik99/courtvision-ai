@@ -1,11 +1,18 @@
 # Risks, Gaps, And Technical Debt
 
+## Foundation Implementation Status (2026-07-26)
+
+| Finding | Status | Implemented here | Still open |
+| --- | --- | --- | --- |
+| F-001 | Foundation implemented | Canonical frozen `OfficialPick`, UUID-based immutable `pick_id`, separate deterministic idempotency key, explicit promotion, transactional append-only lifecycle publication, provenance, replay/conflict handling, and strict read validation. | Existing settlement/grading consumers still need migration to `pick_id`; no historical IDs were guessed or backfilled. |
+| F-002 | Partially implemented | Market observations and model candidates have explicit non-pick record kinds; official-pick report inputs exclude them; mixed official-pick ROI inputs fail; observation/candidate performance labels forbid betting-ROI claims; MLB/NBA runtimes do not auto-promote. | Existing MLB observation grader remains an observation-analysis workflow and has not been rewritten; official settlement and end-to-end official-pick performance reporting remain future work. |
+
 ## Findings Register
 
 | ID | Severity | Area | Finding | Impact | Recommendation |
 | --- | --- | --- | --- | --- | --- |
-| F-001 | Critical | Pick identity | CourtVision lacks a universal immutable official `pick_id` across sports and workflows. | Duplicate grading, ambiguous settlement, weak auditability. | Add official picks table/schema before expanding live picks. |
-| F-002 | Critical | MLB HR | MLB HR market observations can be mistaken for official picks. | Misleading ROI/performance and bankroll risk. | Separate observation grading from official pick grading in code, files, and reports. |
+| F-001 | Critical | Pick identity | A universal immutable official `pick_id` foundation now exists, but legacy settlement/grading consumers are not yet migrated. | Duplicate grading and ambiguous settlement remain possible outside the new boundary. | Migrate settlement and official reports to require committed `pick_id`. |
+| F-002 | Critical | MLB HR | MLB HR market observations are explicitly non-picks in the new boundary, but legacy observation grading/reporting still exists. | Legacy outputs can remain misleading if presented without the required observation-performance label. | Route MLB reports through the shared record-kind/report boundary; do not promote historical observations. |
 | F-003 | Critical | Evidence | Prospective evidence is incomplete for trustworthy live/bankroll claims. | Live-pick trust is not established. | Run controlled paper trials with frozen manifests and settlement. |
 | F-004 | High | Bankroll | Kelly staking exists before sufficient forward evidence is proven. | Real-money recommendations could outpace validation. | Keep Kelly gated/disabled for unproven sports and require evidence gates. |
 | F-005 | High | MLB results | HR settlement is hybrid and can leave blanks/void candidates/manual review. | Not every row is ready to grade; silent gaps can skew summaries. | Add explicit reconciliation queue and unresolved-row SLA. |
@@ -53,8 +60,10 @@
 ## Top Five Blockers To Trustworthy Live Picks
 
 1. Prospective evidence is incomplete.
-2. Official pick identity is not first-class and immutable.
-3. MLB HR currently grades market observations, not official picks.
+2. Official pick identity is first-class for new explicit promotions, but
+   settlement and legacy consumers are not migrated.
+3. MLB HR still grades market observations; those rows remain non-picks and must
+   be labeled observation performance.
 4. Result settlement remains partially manual/hybrid.
 5. Automation/config/deployment is too local and mutable for strong auditability.
 
