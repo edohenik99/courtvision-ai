@@ -8,7 +8,15 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from courtvision_ai import CourtVisionAI
+from courtvision.operations import (
+    CourtVisionOperations,
+    normalize_operation_stats,
+    operations_client,
+)
+
+# Compatibility injection name retained for tests and callers. It points to the
+# restricted non-prediction facade, not the CourtVision prediction runtime.
+CourtVisionAI = CourtVisionOperations
 from courtvision.calibration.buckets import abs_edge_bucket as _abs_edge_bucket
 from courtvision.context.game_context import is_identity_quarantined
 from courtvision.market_intelligence.market_snapshots import market_snapshot_key
@@ -1302,10 +1310,12 @@ def _runtime_outputs_root(runtime_root: Path) -> Path:
 
 def _load_player_stats_for_date(prediction_date: str, runtime_root: Path) -> pd.DataFrame:
     try:
-        ai = CourtVisionAI(out_dir=str(_runtime_outputs_root(runtime_root)))
-        client = ai._get_client()
+        ai = CourtVisionOperations(
+            out_dir=str(_runtime_outputs_root(runtime_root))
+        )
+        client = operations_client(ai)
         raw_stats = client.get_stats(str(prediction_date), str(prediction_date))
-        stats = ai._normalize_stats(raw_stats)
+        stats = normalize_operation_stats(ai, raw_stats)
         return stats.copy() if isinstance(stats, pd.DataFrame) else pd.DataFrame()
     except Exception as exc:
         print(
@@ -1317,8 +1327,10 @@ def _load_player_stats_for_date(prediction_date: str, runtime_root: Path) -> pd.
 
 def _load_games_for_date(prediction_date: str, runtime_root: Path) -> pd.DataFrame:
     try:
-        ai = CourtVisionAI(out_dir=str(_runtime_outputs_root(runtime_root)))
-        client = ai._get_client()
+        ai = CourtVisionOperations(
+            out_dir=str(_runtime_outputs_root(runtime_root))
+        )
+        client = operations_client(ai)
         raw_games = client.get_games(str(prediction_date))
         return raw_games.copy() if isinstance(raw_games, pd.DataFrame) else pd.DataFrame()
     except Exception as exc:

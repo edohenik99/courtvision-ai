@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import pytest
 
 import courtvision_streamlit_app as app
 
@@ -51,6 +52,44 @@ def _normal_pick(player: str, *, market: str = "player_points") -> dict[str, obj
         "kelly_eligible": True,
         "final_decision": "BET_READY",
     }
+
+
+@pytest.mark.parametrize(
+    ("status", "lifecycle_status", "expected_level", "message_fragment"),
+    [
+        ("SUCCESS", "PASS", "success", "publication completed"),
+        ("SUCCESS", "DISABLED", "info", "lifecycle disabled"),
+        ("SUCCESS", "DEGRADED", "warning", "lifecycle status is DEGRADED"),
+        ("FAILED", "NOT_STARTED", "error", "run failed"),
+        (
+            "PROTECTED_NO_OP",
+            "PROTECTED_NO_OP",
+            "info",
+            "no files were changed",
+        ),
+        (
+            "NO_ELIGIBLE_PREDICTIONS",
+            "PASS",
+            "info",
+            "eligibility rules",
+        ),
+    ],
+)
+def test_prediction_application_outcome_classification(
+    status: str,
+    lifecycle_status: str,
+    expected_level: str,
+    message_fragment: str,
+) -> None:
+    level, message = app.classify_prediction_application_outcome(
+        status=status,
+        lifecycle_status=lifecycle_status,
+        run_id="run-123",
+    )
+
+    assert level == expected_level
+    assert message_fragment in message
+    assert "run-123" in message
 
 
 class _FakeStreamlit:

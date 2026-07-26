@@ -1,8 +1,8 @@
-"""Canonical CourtVision runtime and CLI entry point.
+"""CourtVision NBA runtime implementation and supported multi-sport CLI.
 
 Governance note:
-- `courtvision_ai.py` is the only live runtime entry point today.
-- This file should stay orchestration-focused.
+- Prediction-producing entrypoints delegate to `PredictionApplicationService`.
+- This file remains the supported CLI and the active NBA engine adapter.
 - New scoring, grading, filtering, and market logic belongs in `courtvision/`.
 - When legacy logic here changes, prefer extracting a package-owned module and
   delegating to it instead of adding another unique implementation here.
@@ -81,9 +81,22 @@ from courtvision.runtime_markets import (
     partial_fill_markets,
 )
 from courtvision.runtime_outputs import OutputLayoutConfig, OutputLayoutPolicy
+from courtvision.prediction import (
+    CallbackPredictionPublisher,
+    DisabledPredictionLifecycle,
+    EnginePrediction,
+    NoArtifactPublisher,
+    PredictionApplicationService,
+    PredictionEngineRegistry,
+    PredictionRequest,
+    ShadowPredictionLifecycle,
+)
+from courtvision.prediction.publication import (
+    publish_dataframe as _publish_prediction_dataframe,
+    publish_json as _publish_prediction_json,
+    publish_text as _publish_prediction_text,
+)
 from courtvision.shadow_lifecycle import (
-    ShadowLifecycleHooks,
-    ShadowLifecycleInitializationError,
     load_shadow_lifecycle_hooks,
 )
 from courtvision.runtime_selection import (
@@ -4028,6 +4041,34 @@ class CourtVisionAI:
         return metrics
 
     def predict(self, prediction_date: str) -> dict[str, Any]:
+        """Compatibility wrapper over the canonical prediction application."""
+
+        request = PredictionRequest(
+            sport="nba",
+            prediction_date=prediction_date,
+            mode="production",
+            out_dir=str(self.out_dir),
+            metadata={
+                "entrypoint": "courtvision_ai.py:CourtVisionAI.predict",
+                "command": "CourtVisionAI.predict compatibility call",
+                "compatibility_wrapper": True,
+            },
+        )
+        service = PredictionApplicationService(
+            registry=PredictionEngineRegistry([_NBAPredictionEngine(self)]),
+            publisher=NoArtifactPublisher(),
+            # This method preserves the historical in-memory return contract
+            # and does not publish a canonical board.  Lifecycle publication
+            # therefore belongs to the supported CLI/UI adapter, where a
+            # primary artifact exists and the chain can be completed.
+            lifecycle=DisabledPredictionLifecycle(),
+        )
+        result = service.run(request)
+        return dict(result.outputs)
+
+    def _predict_internal(self, prediction_date: str) -> dict[str, Any]:
+        """Existing NBA engine implementation; call only via the application."""
+
         self.logger.info("predict_start prediction_date=%s", prediction_date)
         print(f"[STAGE] predict_method_start date={prediction_date}")
         client = self._get_client()
@@ -8097,6 +8138,54 @@ class CourtVisionAI:
         self._append_history(self.run_log_path, df)
 
 
+class _NBAPredictionEngine:
+    """Adapter exposing the existing NBA implementation to the registry."""
+
+    sport = "nba"
+    modes = frozenset({"production"})
+
+    def __init__(self, runtime: Any) -> None:
+        self.runtime = runtime
+
+    def execute(self, request: PredictionRequest) -> EnginePrediction:
+        internal = getattr(self.runtime, "_predict_internal", None)
+        if callable(internal):
+            outputs = internal(request.prediction_date)
+        else:
+            # Compatibility for injected test runtimes and phased migrations.
+            outputs = self.runtime.predict(request.prediction_date)
+        summary = dict(outputs.get("summary", {}))
+        odds_diagnostics = summary.get("odds_diagnostics", {})
+        client = getattr(self.runtime, "client", None)
+        provider_provenance = {
+            "provider": str(
+                getattr(client, "_primary_source", None)
+                or getattr(client, "provider_name", None)
+                or (type(client).__name__ if client is not None else "unknown")
+            ),
+            "fetch_status": (
+                odds_diagnostics.get("fetch_status")
+                if isinstance(odds_diagnostics, Mapping)
+                else None
+            ),
+            "raw_rows": (
+                odds_diagnostics.get("raw_rows")
+                if isinstance(odds_diagnostics, Mapping)
+                else None
+            ),
+            "supported_rows": (
+                odds_diagnostics.get("supported_rows")
+                if isinstance(odds_diagnostics, Mapping)
+                else None
+            ),
+        }
+        return EnginePrediction(
+            outputs=dict(outputs),
+            provider_provenance=provider_provenance,
+            model_version=str(summary.get("pipeline_mode") or "nba-runtime"),
+        )
+
+
 def _cli_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if not isinstance(df, pd.DataFrame):
         return pd.DataFrame()
@@ -8164,20 +8253,15 @@ def _write_prediction_dataframe(
     protect_existing: bool = False,
     force_overwrite: bool = False,
 ) -> None:
-    _log_prediction_artifact_write(
-        requested_prediction_date=requested_prediction_date,
-        output_path=path,
+    _publish_prediction_dataframe(
+        path,
+        _cli_dataframe(df),
+        prediction_date=requested_prediction_date,
         caller=caller,
         artifact_label=artifact_label,
+        protect_existing=protect_existing,
+        force_overwrite=force_overwrite,
     )
-    if protect_existing:
-        _guard_no_existing_artifact(
-            output_path=path,
-            force=force_overwrite,
-            caller=caller,
-            artifact_label=artifact_label,
-        )
-    _write_dataframe(path, df)
 
 
 def _write_prediction_json(
@@ -8188,13 +8272,13 @@ def _write_prediction_json(
     caller: str,
     artifact_label: str,
 ) -> None:
-    _log_prediction_artifact_write(
-        requested_prediction_date=requested_prediction_date,
-        output_path=path,
+    _publish_prediction_json(
+        path,
+        payload,
+        prediction_date=requested_prediction_date,
         caller=caller,
         artifact_label=artifact_label,
     )
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def _write_prediction_text(
@@ -8205,13 +8289,13 @@ def _write_prediction_text(
     caller: str,
     artifact_label: str,
 ) -> None:
-    _log_prediction_artifact_write(
-        requested_prediction_date=requested_prediction_date,
-        output_path=path,
+    _publish_prediction_text(
+        path,
+        text,
+        prediction_date=requested_prediction_date,
         caller=caller,
         artifact_label=artifact_label,
     )
-    path.write_text(text, encoding="utf-8")
 
 
 def _refresh_elite_audit_summary(
@@ -8389,6 +8473,7 @@ def _write_grading_outputs(
     verbose_outputs: bool = False,
 ) -> dict[str, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
+    grading_artifact_caller = "courtvision_ai.py:_write_grading_outputs"
     incremental_graded = _finalized_grading_rows(_cli_dataframe(grading_df))
     cumulative_feedback_rows, cumulative_final_rows = _read_cumulative_grading_feedback(out_dir, prediction_date)
     graded = cumulative_final_rows.copy() if not cumulative_final_rows.empty else incremental_graded.copy()
@@ -8427,10 +8512,28 @@ def _write_grading_outputs(
     )
 
     if not preserved_existing:
-        _write_dataframe(paths["grading_results"], graded)
-        paths["grading_summary_json"].write_text(json.dumps(summary_payload, indent=2), encoding="utf-8")
+        _write_prediction_dataframe(
+            paths["grading_results"],
+            graded,
+            requested_prediction_date=prediction_date,
+            caller=grading_artifact_caller,
+            artifact_label="grading_results",
+        )
+        _write_prediction_json(
+            paths["grading_summary_json"],
+            summary_payload,
+            requested_prediction_date=prediction_date,
+            caller=grading_artifact_caller,
+            artifact_label="grading_summary_json",
+        )
         if "grading_summary_csv" in paths:
-            _write_dataframe(paths["grading_summary_csv"], summary_df)
+            _write_prediction_dataframe(
+                paths["grading_summary_csv"],
+                summary_df,
+                requested_prediction_date=prediction_date,
+                caller=grading_artifact_caller,
+                artifact_label="grading_summary_csv",
+            )
 
     grading_results_rows_written = existing_results_rows if preserved_existing else int(len(graded))
     grading_summary_rows_written = existing_summary_rows if preserved_existing else summary_rows
@@ -8451,17 +8554,17 @@ def _write_grading_outputs(
     _log_kelly_metadata_diagnostics(out_dir, prediction_date, diagnostics_graded)
     for line in kelly_perf_log_lines(summary_payload.get("kelly_decision_performance", {})):
         print(line, flush=True)
-    paths["player_points_calibration_json"].write_text(
-        json.dumps(
-            {
-                "prediction_date": prediction_date,
-                "player_points_calibration": points_calibration_payload,
-                "player_points_uplift_audit": points_uplift_audit_payload,
-                "elite_filter_replay": replay_summary_payload,
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
+    _write_prediction_json(
+        paths["player_points_calibration_json"],
+        {
+            "prediction_date": prediction_date,
+            "player_points_calibration": points_calibration_payload,
+            "player_points_uplift_audit": points_uplift_audit_payload,
+            "elite_filter_replay": replay_summary_payload,
+        },
+        requested_prediction_date=prediction_date,
+        caller=grading_artifact_caller,
+        artifact_label="player_points_calibration_json",
     )
     return paths
 
@@ -9085,9 +9188,83 @@ def _write_cli_outputs(
     return paths
 
 
+def run_nba_prediction_application(
+    runtime: Any,
+    *,
+    prediction_date: str,
+    out_dir: str | Path,
+    fit_metrics: Optional[dict[str, Any]] = None,
+    verbose_outputs: bool = False,
+    force_output_overwrite: bool = False,
+    entrypoint: str = "courtvision_ai.py",
+    command: str = "courtvision_ai.py predict --sport nba --mode production",
+    hooks_loader: Any = None,
+) -> Any:
+    """Run and publish one NBA prediction request through the shared service."""
+
+    resolved_out_dir = Path(out_dir)
+
+    def publish(
+        request: PredictionRequest,
+        run_id: str,
+        engine_prediction: EnginePrediction,
+    ) -> Mapping[str, Path]:
+        return _write_cli_outputs(
+            out_dir=resolved_out_dir,
+            prediction_date=request.prediction_date,
+            fit_metrics=fit_metrics,
+            prediction_outputs=dict(engine_prediction.outputs),
+            verbose_outputs=verbose_outputs,
+            force_output_overwrite=force_output_overwrite,
+        )
+
+    service = PredictionApplicationService(
+        registry=PredictionEngineRegistry([_NBAPredictionEngine(runtime)]),
+        publisher=CallbackPredictionPublisher(
+            publish,
+            primary_artifact_label="elite_board",
+        ),
+        lifecycle=ShadowPredictionLifecycle(
+            repository_root=Path(__file__).resolve().parent,
+            hooks_loader=hooks_loader,
+        ),
+    )
+    return service.run(
+        PredictionRequest(
+            sport="nba",
+            prediction_date=prediction_date,
+            mode="production",
+            out_dir=str(resolved_out_dir),
+            force_overwrite=force_output_overwrite,
+            metadata={
+                "entrypoint": entrypoint,
+                "command": command,
+                "verbose_outputs": verbose_outputs,
+            },
+        )
+    )
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run CourtVision AI model fitting and/or prediction from the command line.",
+    )
+    parser.add_argument(
+        "command",
+        nargs="?",
+        choices=("predict",),
+        help="Canonical command form. Existing flag-only usage remains supported.",
+    )
+    parser.add_argument(
+        "--sport",
+        choices=("nba", "mlb"),
+        default="nba",
+        help="Prediction sport. MLB is research-only.",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("production", "research"),
+        help="Prediction mode (NBA=production, MLB=research).",
     )
     parser.add_argument("--prediction-date", help="Prediction date in YYYY-MM-DD format.")
     parser.add_argument("--train-start", help="Training start date in YYYY-MM-DD format.")
@@ -9103,7 +9280,113 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Allow protected operator board CSVs to be overwritten intentionally.",
     )
+    parser.add_argument(
+        "--model-dir",
+        help="MLB research model bundle directory (defaults to latest valid local bundle).",
+    )
+    parser.add_argument(
+        "--odds-csv",
+        help="MLB local odds snapshot CSV (defaults to the canonical local archive).",
+    )
+    parser.add_argument(
+        "--output-dir",
+        help="MLB immutable prediction output directory (defaults to the dated daily-run path).",
+    )
+    parser.add_argument("--prediction-timestamp", help="MLB prediction timestamp (ISO-8601).")
+    parser.add_argument("--dry-run", action="store_true", help="Compute MLB research predictions without writing artifacts.")
     return parser
+
+
+def _run_mlb_prediction_cli(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    if (args.mode or "research") != "research":
+        parser.error("MLB prediction supports --mode research only.")
+    if args.fit_only or args.grade_date or args.train_start or args.train_end:
+        parser.error(
+            "MLB research prediction cannot be combined with NBA fit or grading flags."
+        )
+    if not args.prediction_date:
+        parser.error("MLB research prediction requires --prediction-date.")
+    if args.force_output_overwrite:
+        parser.error(
+            "MLB research prediction artifacts are immutable and cannot be force-overwritten."
+        )
+
+    from courtvision.sports.mlb.training.hr_research_baseline import (
+        generate_daily_research_predictions,
+        resolve_mlb_output_dir,
+    )
+
+    resolved_output_dir = resolve_mlb_output_dir(
+        args.output_dir,
+        target_date=args.prediction_date,
+    )
+    result = generate_daily_research_predictions(
+        model_bundle_dir=args.model_dir,
+        odds_path=args.odds_csv,
+        output_dir=resolved_output_dir,
+        target_date=args.prediction_date,
+        prediction_timestamp=args.prediction_timestamp,
+        dry_run=args.dry_run,
+    )
+    diagnostics = dict(result.input_diagnostics)
+    exclusion_reasons = dict(result.exclusion_reasons)
+    resolved_model_dir = result.resolved_model_dir
+    resolved_odds_csv = result.resolved_odds_csv
+    top_exclusion_reasons = dict(
+        sorted(
+            exclusion_reasons.items(),
+            key=lambda item: (-int(item[1]), str(item[0])),
+        )[:5]
+    )
+    print(
+        json.dumps(
+            {
+                "run_id": result.prediction_run_id,
+                "sport": "mlb",
+                "mode": "research",
+                "prediction_date": args.prediction_date,
+                "status": result.application_status,
+                "lifecycle_status": result.lifecycle_status,
+                "resolved_model_dir": (
+                    str(resolved_model_dir) if resolved_model_dir else ""
+                ),
+                "resolved_odds_csv": (
+                    str(resolved_odds_csv) if resolved_odds_csv else ""
+                ),
+                "resolved_output_dir": str(resolved_output_dir),
+                "input_row_count": diagnostics.get("input_row_count", 0),
+                "requested_date_row_count": diagnostics.get(
+                    "requested_date_row_count", 0
+                ),
+                "deduplicated_row_count": diagnostics.get(
+                    "deduplicated_row_count", 0
+                ),
+                "market_filtered_row_count": diagnostics.get(
+                    "market_filtered_row_count", 0
+                ),
+                "feature_validated_row_count": diagnostics.get(
+                    "feature_validated_row_count", 0
+                ),
+                "eligible_row_count": diagnostics.get(
+                    "eligible_row_count", 0
+                ),
+                "prediction_count": len(result.predictions),
+                "excluded_row_count": len(result.exclusions),
+                "exclusion_reasons": exclusion_reasons,
+                "top_exclusion_reasons": top_exclusion_reasons,
+                "output_dir": str(result.output_dir) if result.output_dir else "",
+                "artifact_paths": dict(result.artifact_paths),
+                "application_manifest": (
+                    str(result.application_manifest_path)
+                    if result.application_manifest_path
+                    else ""
+                ),
+                "research_label": "RESEARCH ONLY - NOT A VALIDATED BETTING PICK",
+            },
+            indent=2,
+        )
+    )
+    return 0
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -9111,11 +9394,44 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
 
+    if args.sport == "mlb":
+        if args.command != "predict" and not args.predict_only:
+            parser.error(
+                "MLB research generation requires the predict command or --predict-only."
+            )
+        try:
+            return _run_mlb_prediction_cli(args, parser)
+        except Exception as exc:
+            print(
+                json.dumps(
+                    {
+                        "sport": "mlb",
+                        "mode": "research",
+                        "prediction_date": args.prediction_date or "",
+                        "status": "FAILED",
+                        "lifecycle_status": getattr(
+                            exc, "lifecycle_status", "NOT_STARTED"
+                        ),
+                        "failure_classification": type(exc).__name__,
+                        "error": str(exc),
+                    },
+                    indent=2,
+                ),
+                file=sys.stderr,
+            )
+            return 1
+
     if args.fit_only and args.predict_only:
         parser.error("Choose only one of --fit-only or --predict-only.")
 
     run_fit = args.fit_only or (not args.predict_only and bool(args.train_start and args.train_end))
-    run_predict = args.predict_only or (not args.fit_only and bool(args.prediction_date))
+    run_predict = (
+        args.predict_only
+        or args.command == "predict"
+        or (not args.fit_only and bool(args.prediction_date))
+    )
+    if (args.mode or "production") != "production":
+        parser.error("NBA prediction supports --mode production only.")
     run_grade = bool(args.grade_date)
 
     if run_fit and (not args.train_start or not args.train_end):
@@ -9132,14 +9448,6 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     ai: Optional[CourtVisionAI] = None
     fit_metrics: Optional[dict[str, Any]] = None
-    lifecycle_hooks: Optional[ShadowLifecycleHooks] = None
-    lifecycle_run: Any = None
-    lifecycle_observation_state: dict[str, Any] = {
-        "enabled": False,
-        "batch": None,
-        "error": None,
-    }
-
     try:
         print("[STAGE] config_load_start")
         _load_env_file()
@@ -9179,161 +9487,33 @@ def main(argv: Optional[list[str]] = None) -> int:
         if run_predict:
             print(f"[STAGE] prediction_pipeline_start date={args.prediction_date}")
             print(f"[predict] Running predictions for {args.prediction_date} ...")
-            try:
-                lifecycle_hooks = load_shadow_lifecycle_hooks()
-                if lifecycle_hooks is not None:
-                    lifecycle_run = lifecycle_hooks.begin_shadow_run(
-                        ai,
-                        repository_root=Path(__file__).resolve().parent,
-                        prediction_date=args.prediction_date,
-                        verbose_outputs=args.verbose_outputs,
-                        force_output_overwrite=args.force_output_overwrite,
-                    )
-            except ShadowLifecycleInitializationError as shadow_import_exc:
-                lifecycle_hooks = None
-                lifecycle_run = None
-                print(
-                    "[SHADOW_LIFECYCLE] "
-                    f"status={shadow_import_exc.status} "
-                    "stage=INITIALIZATION "
-                    f"classification={shadow_import_exc.classification} "
-                    f"error_type={shadow_import_exc.cause_type}",
-                    file=sys.stderr,
-                    flush=True,
-                )
-                ai.logger.exception(
-                    "shadow_lifecycle_import_error classification=%s error=%s",
-                    shadow_import_exc.classification,
-                    shadow_import_exc,
-                )
-            except Exception as shadow_start_exc:
-                lifecycle_hooks = None
-                lifecycle_run = None
-                print(
-                    "[SHADOW_LIFECYCLE] status=DEGRADED "
-                    "stage=INITIALIZATION "
-                    "classification=LIFECYCLE_INITIALIZATION_FAILURE "
-                    f"error_type={type(shadow_start_exc).__name__}",
-                    file=sys.stderr,
-                    flush=True,
-                )
-                ai.logger.exception(
-                    "shadow_lifecycle_start_error error=%s",
-                    shadow_start_exc,
-                )
-            if lifecycle_run is not None:
-                print(
-                    "[SHADOW_LIFECYCLE] "
-                    f"status=STARTED prediction_run_id={lifecycle_run.prediction_run_id}",
-                    flush=True,
-                )
-                observations_enabled = bool(
-                    getattr(lifecycle_hooks, "observations_enabled", False)
-                )
-                lifecycle_observation_state["enabled"] = observations_enabled
-                observation_prepare = getattr(
-                    lifecycle_hooks, "prepare_observation_batch", None
-                )
-                observation_init_error = getattr(
-                    lifecycle_hooks, "observation_initialization_error", None
-                )
-                if observations_enabled and observation_init_error:
-                    lifecycle_observation_state["error"] = str(
-                        observation_init_error
-                    )
-                    observation_line = (
-                        "[SHADOW_LIFECYCLE_OBSERVATIONS] "
-                        "status=DEGRADED stage=INITIALIZATION "
-                        "classification=OBSERVATION_IMPORT_FAILURE"
-                    )
-                    print(observation_line, file=sys.stderr, flush=True)
-                    ai.logger.error(observation_line)
-                elif observations_enabled and callable(observation_prepare):
-                    def _capture_shadow_observations(**source_values: Any) -> None:
-                        try:
-                            lifecycle_observation_state["batch"] = (
-                                observation_prepare(
-                                    prediction_run_id=(
-                                        lifecycle_run.prediction_run_id
-                                    ),
-                                    clock=lifecycle_run.clock,
-                                    **source_values,
-                                )
-                            )
-                        except Exception as observation_exc:
-                            lifecycle_observation_state["error"] = (
-                                f"{type(observation_exc).__name__}: "
-                                f"{str(observation_exc)[:500]}"
-                            )
-                            observation_line = (
-                                "[SHADOW_LIFECYCLE_OBSERVATIONS] "
-                                "status=DEGRADED stage=CAPTURE "
-                                f"classification=OBSERVATION_CAPTURE_FAILURE "
-                                f"error_type={type(observation_exc).__name__}"
-                            )
-                            print(
-                                observation_line,
-                                file=sys.stderr,
-                                flush=True,
-                            )
-                            ai.logger.exception(
-                                "shadow_lifecycle_observation_capture_error "
-                                "error=%s",
-                                observation_exc,
-                            )
-
-                    setattr(
-                        ai,
-                        "_shadow_lifecycle_observer",
-                        _capture_shadow_observations,
-                    )
-            prediction_outputs = ai.predict(args.prediction_date)
-            print("[STAGE] prediction_pipeline_complete")
-            summary = dict(prediction_outputs.get("summary", {}))
             print("[STAGE] artifact_write_start")
-            output_paths = _write_cli_outputs(
-                out_dir=Path(args.out_dir),
+            application_result = run_nba_prediction_application(
+                ai,
                 prediction_date=args.prediction_date,
+                out_dir=args.out_dir,
                 fit_metrics=fit_metrics,
-                prediction_outputs=prediction_outputs,
                 verbose_outputs=args.verbose_outputs,
                 force_output_overwrite=args.force_output_overwrite,
+                entrypoint="courtvision_ai.py",
+                command=(
+                    "courtvision_ai.py predict --sport nba "
+                    f"--mode production --prediction-date {args.prediction_date}"
+                ),
+                hooks_loader=load_shadow_lifecycle_hooks,
             )
+            prediction_outputs = dict(application_result.outputs)
+            print("[STAGE] prediction_pipeline_complete")
+            summary = dict(prediction_outputs.get("summary", {}))
+            output_paths = dict(application_result.artifact_paths)
             print("[STAGE] artifact_write_complete")
-            if lifecycle_hooks is not None and lifecycle_run is not None:
-                if lifecycle_observation_state["enabled"]:
-                    shadow_result = lifecycle_hooks.publish_shadow_after_board(
-                        lifecycle_run,
-                        board_path=output_paths["elite_board"],
-                        observations_enabled=True,
-                        observation_batch=lifecycle_observation_state["batch"],
-                        observation_capture_error=(
-                            lifecycle_observation_state["error"]
-                        ),
-                    )
-                else:
-                    shadow_result = lifecycle_hooks.publish_shadow_after_board(
-                        lifecycle_run,
-                        board_path=output_paths["elite_board"],
-                    )
-                shadow_line = (
-                    "[SHADOW_LIFECYCLE] "
-                    f"status={shadow_result.status} "
-                    f"prediction_run_id={shadow_result.prediction_run_id} "
-                    f"commit_status={shadow_result.commit_status or 'NOT_COMMITTED'} "
-                    f"message={shadow_result.message}"
-                )
-                print(
-                    shadow_line,
-                    file=(
-                        sys.stdout
-                        if shadow_result.status == "PASS"
-                        else sys.stderr
-                    ),
-                    flush=True,
-                )
-                if shadow_result.status != "PASS":
-                    ai.logger.error(shadow_line)
+            print(
+                "[PREDICTION_APPLICATION] "
+                f"run_id={application_result.run_id} "
+                f"status={application_result.status} "
+                f"lifecycle_status={application_result.lifecycle_status}",
+                flush=True,
+            )
 
             if args.send_telegram:
                 sent = ai.send_telegram_top_plays(
@@ -9378,36 +9558,6 @@ def main(argv: Optional[list[str]] = None) -> int:
                 print(f"{label}: {path}")
 
     except Exception as exc:
-        if (
-            lifecycle_hooks is not None
-            and lifecycle_run is not None
-            and not lifecycle_run.terminal
-        ):
-            try:
-                failure_status = lifecycle_hooks.record_failed_shadow_run(
-                    lifecycle_run, exc
-                )
-                print(
-                    "[SHADOW_LIFECYCLE] "
-                    f"status=RUN_FAILED_RECORDED "
-                    f"prediction_run_id={lifecycle_run.prediction_run_id} "
-                    f"commit_status={failure_status or 'NOT_COMMITTED'}",
-                    file=sys.stderr,
-                    flush=True,
-                )
-            except Exception as shadow_exc:
-                print(
-                    "[SHADOW_LIFECYCLE] status=DEGRADED "
-                    f"prediction_run_id={lifecycle_run.prediction_run_id} "
-                    f"failure_record_error={type(shadow_exc).__name__}: {shadow_exc}",
-                    file=sys.stderr,
-                    flush=True,
-                )
-                if ai is not None:
-                    ai.logger.exception(
-                        "shadow_lifecycle_failure_record_error error=%s",
-                        shadow_exc,
-                    )
         if ai is not None:
             ai.logger.exception("cli_failure error=%s", exc)
         print(f"[error] {exc}", file=sys.stderr)

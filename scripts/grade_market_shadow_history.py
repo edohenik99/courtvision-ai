@@ -357,7 +357,11 @@ def _provider_component_actual_lookup(
         return lookup
 
     try:
-        from courtvision_ai import CourtVisionAI
+        from courtvision.operations import (
+            CourtVisionOperations,
+            normalize_operation_stats,
+            operations_client,
+        )
     except Exception as exc:
         for date in dates:
             lookup.provider_errors_by_date[date] = f"provider_import_failed:{type(exc).__name__}"
@@ -365,10 +369,10 @@ def _provider_component_actual_lookup(
 
     try:
         outputs_root = runtime_root.parent if runtime_root.name == "runtime" else runtime_root
-        ai = CourtVisionAI(out_dir=str(outputs_root))
+        ai = CourtVisionOperations(out_dir=str(outputs_root))
         if hasattr(ai, "runtime_dir"):
             ai.runtime_dir = runtime_root
-        client = ai._get_client()
+        client = operations_client(ai)
     except Exception as exc:
         for date in dates:
             lookup.provider_errors_by_date[date] = f"provider_init_failed:{type(exc).__name__}"
@@ -377,7 +381,7 @@ def _provider_component_actual_lookup(
     for prediction_date in dates:
         try:
             raw_stats = client.get_stats(prediction_date, prediction_date)
-            stats = ai._normalize_stats(raw_stats)
+            stats = normalize_operation_stats(ai, raw_stats)
         except Exception as exc:
             lookup.provider_errors_by_date[prediction_date] = f"provider_fetch_failed:{type(exc).__name__}"
             continue

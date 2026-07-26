@@ -1,6 +1,6 @@
 """Regression test for team_lookup NameError fix.
 
-Ensures CourtVisionAI.predict() properly defines team_lookup
+Ensures the active CourtVisionAI NBA engine implementation defines team_lookup
 from team_baselines before using it in helper method calls.
 
 Related to fix for:
@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
 class TestTeamLookupDefined:
-    """Test that team_lookup is properly defined in predict()."""
+    """Test that team_lookup is properly defined in the active NBA engine."""
 
     def test_team_lookup_built_from_team_baselines(self):
         """Verify team_lookup is built from team_baselines with team_abbr column."""
@@ -93,23 +93,27 @@ class TestTeamLookupDefined:
         assert opponent_row["team_abbr"] == "LAL"
 
     def test_predict_source_has_team_lookup_defined(self):
-        """Verify the predict() source code defines team_lookup before use."""
+        """Verify the active NBA implementation defines team_lookup before use."""
         import ast
 
         source_path = Path(__file__).parent.parent / "courtvision_ai.py"
         source = source_path.read_text(encoding="utf-8")
 
-        # Parse the source to find the predict method
+        # The public predict() method is now a thin canonical-service wrapper.
+        # Inspect the approved internal NBA engine implementation instead.
         tree = ast.parse(source)
 
-        # Find predict method
+        # Find the active implementation method.
         predict_method = None
         for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == "predict":
+            if (
+                isinstance(node, ast.FunctionDef)
+                and node.name == "_predict_internal"
+            ):
                 predict_method = node
                 break
 
-        assert predict_method is not None, "predict() method not found"
+        assert predict_method is not None, "_predict_internal() method not found"
 
         # Check that team_lookup is assigned before any calls using it
         source_lines = source.split("\n")

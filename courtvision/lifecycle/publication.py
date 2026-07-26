@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import csv
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
+import os
 from pathlib import Path
 import re
 from typing import Any, Mapping, Sequence
@@ -85,6 +86,14 @@ class ShadowRunContext:
     model_manifest: Mapping[str, Any]
     git_provenance: Mapping[str, Any]
     terminal: bool = False
+    entrypoint: str = "courtvision_ai.py"
+    sport: str = "nba"
+    mode: str = "production"
+    actor_id: str = "prediction_application"
+    command: str = "courtvision_ai.py"
+    identity_sport: str = "basketball"
+    league: str = "NBA"
+    request_metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +117,13 @@ def begin_shadow_run(
     clock: Clock | None = None,
     lifecycle_root: str | Path | None = None,
     environ: Mapping[str, str] | None = None,
+    run_id: str | None = None,
+    entrypoint: str = "courtvision_ai.py",
+    sport: str = "nba",
+    mode: str = "production",
+    actor_id: str = "prediction_application",
+    command: str | None = None,
+    request_metadata: Mapping[str, Any] | None = None,
 ) -> ShadowRunContext | None:
     """Create one run identity if and only if shadow lifecycle is enabled."""
 
@@ -121,7 +137,13 @@ def begin_shadow_run(
         else root / "data" / "lifecycle"
     )
     started = active_clock.now()
-    run_id = str(uuid4())
+    prediction_run_id = str(run_id or uuid4())
+    normalized_sport = str(sport).strip().lower() or "nba"
+    identity_sport, league = _lifecycle_identity_domain(normalized_sport)
+    normalized_entrypoint = str(entrypoint).strip() or "prediction_application"
+    normalized_actor_id = str(actor_id).strip() or "prediction_application"
+    normalized_command = str(command).strip() if command else normalized_entrypoint
+    sanitized_request_metadata = sanitize_evidence(dict(request_metadata or {}))
     git = capture_git_provenance(root)
     config_snapshot = safe_runtime_config_snapshot(
         runtime,
@@ -157,6 +179,16 @@ def begin_shadow_run(
         {
             "available_model_artifacts": model_manifest,
             "runtime_config_hash": config_hash,
+            "prediction_request": {
+                "entrypoint": normalized_entrypoint,
+                "sport": normalized_sport,
+                "mode": str(mode).strip().lower() or "production",
+                "prediction_date": str(prediction_date),
+                "run_id": prediction_run_id,
+                "actor_id": normalized_actor_id,
+                "command": normalized_command,
+                "metadata": sanitized_request_metadata,
+            },
         }
     )
     reproducibility = (
@@ -166,7 +198,7 @@ def begin_shadow_run(
     )
     run_reason = _run_reason(environ)
     manifest = RunManifest(
-        prediction_run_id=run_id,
+        prediction_run_id=prediction_run_id,
         run_mode=RunMode.SHADOW.value,
         run_reason=run_reason,
         parent_run_id=None,
@@ -202,7 +234,7 @@ def begin_shadow_run(
         reproducibility_level=reproducibility,
     )
     return ShadowRunContext(
-        prediction_run_id=run_id,
+        prediction_run_id=prediction_run_id,
         prediction_date=str(prediction_date),
         repository_root=root,
         lifecycle_root=storage_root,
@@ -211,6 +243,14 @@ def begin_shadow_run(
         config_snapshot=config_snapshot,
         model_manifest=model_manifest,
         git_provenance=git,
+        entrypoint=normalized_entrypoint,
+        sport=normalized_sport,
+        mode=str(mode).strip().lower() or "production",
+        actor_id=normalized_actor_id,
+        command=normalized_command,
+        identity_sport=identity_sport,
+        league=league,
+        request_metadata=sanitized_request_metadata,
     )
 
 
@@ -279,7 +319,7 @@ def publish_shadow_after_board(
             completed_manifest,
             events,
             evidence_objects=evidence,
-            command="courtvision_ai.py shadow publication",
+            command=f"{context.command} shadow publication",
         )
         committed_events = read_segment_events(commit.segment_directory)
         report = reconcile_board_with_events(
@@ -365,7 +405,11 @@ def record_failed_shadow_run(
     failed_manifest = replace(context.run_manifest, completed_at_utc=completed_at)
     started = EventEnvelope.create(
         event_type=EventType.RUN_STARTED,
-        payload=_run_event_payload(failed_manifest, status="STARTED"),
+        payload=_run_event_payload(
+            failed_manifest,
+            status="STARTED",
+            context=context,
+        ),
         payload_schema_version=1,
         prediction_run_id=context.prediction_run_id,
         event_sequence=1,
@@ -374,7 +418,7 @@ def record_failed_shadow_run(
         operating_date=context.prediction_date,
         operating_timezone=OPERATING_TIMEZONE,
         actor_type="SYSTEM",
-        actor_id="courtvision_ai.py",
+        actor_id=context.actor_id,
         correlation_id=context.prediction_run_id,
         idempotency_key=f"RUN_STARTED:{context.prediction_run_id}",
         code_sha=failed_manifest.git_commit_sha,
@@ -398,7 +442,7 @@ def record_failed_shadow_run(
         operating_date=context.prediction_date,
         operating_timezone=OPERATING_TIMEZONE,
         actor_type="SYSTEM",
-        actor_id="courtvision_ai.py",
+        actor_id=context.actor_id,
         correlation_id=context.prediction_run_id,
         idempotency_key=f"RUN_FAILED:{context.prediction_run_id}",
         code_sha=failed_manifest.git_commit_sha,
@@ -413,7 +457,7 @@ def record_failed_shadow_run(
         failed_manifest,
         (started, failed),
         evidence_objects=evidence,
-        command="courtvision_ai.py shadow failed run",
+        command=f"{context.command} shadow failed run",
     )
     context.run_manifest = failed_manifest
     context.terminal = True
@@ -467,7 +511,11 @@ def _prepare_successful_publication(
     events: list[EventEnvelope] = []
     started = EventEnvelope.create(
         event_type=EventType.RUN_STARTED,
-        payload=_run_event_payload(completed_manifest, status="STARTED"),
+        payload=_run_event_payload(
+            completed_manifest,
+            status="STARTED",
+            context=context,
+        ),
         payload_schema_version=1,
         prediction_run_id=context.prediction_run_id,
         event_sequence=1,
@@ -476,7 +524,7 @@ def _prepare_successful_publication(
         operating_date=context.prediction_date,
         operating_timezone=OPERATING_TIMEZONE,
         actor_type="SYSTEM",
-        actor_id="courtvision_ai.py",
+        actor_id=context.actor_id,
         correlation_id=context.prediction_run_id,
         idempotency_key=f"RUN_STARTED:{context.prediction_run_id}",
         source_refs={
@@ -529,8 +577,8 @@ def _prepare_successful_publication(
         row = dict(raw_row)
         inputs = identity_inputs_from_board_row(row)
         identity = derive_publication_identity(
-            sport="basketball",
-            league="NBA",
+            sport=context.identity_sport,
+            league=context.league,
             prediction_run_id=context.prediction_run_id,
             **inputs,
         )
@@ -688,7 +736,7 @@ def _prepare_successful_publication(
             operating_date=context.prediction_date,
             operating_timezone=OPERATING_TIMEZONE,
             actor_type="SYSTEM",
-            actor_id="courtvision_ai.py",
+            actor_id=context.actor_id,
             correlation_id=context.prediction_run_id,
             idempotency_key=idempotency_key,
             source_refs=evidence_refs,
@@ -702,7 +750,11 @@ def _prepare_successful_publication(
         events.append(event)
         previous_hash = event.event_hash
     completed_payload = {
-        **_run_event_payload(completed_manifest, status="COMPLETED"),
+        **_run_event_payload(
+            completed_manifest,
+            status="COMPLETED",
+            context=context,
+        ),
         "canonical_board_published": True,
         "publication_event_count": len(rows),
         "board_path": board_reference,
@@ -742,7 +794,7 @@ def _prepare_successful_publication(
         operating_date=context.prediction_date,
         operating_timezone=OPERATING_TIMEZONE,
         actor_type="SYSTEM",
-        actor_id="courtvision_ai.py",
+        actor_id=context.actor_id,
         correlation_id=context.prediction_run_id,
         idempotency_key=f"RUN_COMPLETED:{context.prediction_run_id}",
         source_refs={"board_artifact": _evidence_ref(board_object)},
@@ -794,13 +846,28 @@ def _provenance_evidence(
                 "runtime_config": context.config_snapshot,
                 "model_artifacts": context.model_manifest,
                 "git": context.git_provenance,
+                "prediction_request": {
+                    "entrypoint": context.entrypoint,
+                    "sport": context.sport,
+                    "mode": context.mode,
+                    "run_id": context.prediction_run_id,
+                    "actor_id": context.actor_id,
+                    "command": context.command,
+                    "prediction_date": context.prediction_date,
+                    "metadata": dict(context.request_metadata),
+                },
             },
         ),
     )
 
 
-def _run_event_payload(manifest: RunManifest, *, status: str) -> dict[str, Any]:
-    return {
+def _run_event_payload(
+    manifest: RunManifest,
+    *,
+    status: str,
+    context: ShadowRunContext | None = None,
+) -> dict[str, Any]:
+    payload = {
         "run_event_schema_version": 1,
         "status": status,
         "prediction_run_id": manifest.prediction_run_id,
@@ -815,6 +882,26 @@ def _run_event_payload(manifest: RunManifest, *, status: str) -> dict[str, Any]:
         ),
         "reproducibility_level": manifest.reproducibility_level,
     }
+    if context is not None:
+        payload["prediction_request"] = {
+            "entrypoint": context.entrypoint,
+            "sport": context.sport,
+            "mode": context.mode,
+            "run_id": context.prediction_run_id,
+            "command": context.command,
+            "actor_id": context.actor_id,
+            "prediction_date": context.prediction_date,
+        }
+    return payload
+
+
+def _lifecycle_identity_domain(sport: str) -> tuple[str, str]:
+    normalized = str(sport).strip().lower()
+    if normalized == "nba":
+        return "basketball", "NBA"
+    if normalized == "mlb":
+        return "baseball", "MLB"
+    return normalized or "unknown", normalized.upper() or "UNKNOWN"
 
 
 def _published_prediction(row: Mapping[str, str]) -> dict[str, Any]:

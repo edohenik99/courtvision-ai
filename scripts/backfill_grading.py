@@ -14,7 +14,13 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from courtvision_ai import CourtVisionAI, FINAL_GRADING_RESULTS, _to_str_dict, _write_grading_outputs
+from courtvision_ai import FINAL_GRADING_RESULTS, _to_str_dict, _write_grading_outputs
+from courtvision.operations import (
+    CourtVisionOperations,
+    grade_operation_prediction,
+    normalize_operation_stats,
+    operations_client,
+)
 
 
 UNRESOLVED_RESULT = "unresolved"
@@ -151,7 +157,7 @@ def backfill_result_feedback(
     runtime_root: Path,
     out_dir: Path,
     write: bool,
-    ai_factory: Callable[[Path], CourtVisionAI] | None = None,
+    ai_factory: Callable[[Path], Any] | None = None,
 ) -> BackfillStats:
     runtime_root = Path(runtime_root)
     out_dir = Path(out_dir)
@@ -181,7 +187,14 @@ def backfill_result_feedback(
         if key and key not in final_by_key:
             final_by_key[key] = _to_str_dict(final_row)
 
-    ai = (ai_factory or (lambda base_out_dir: CourtVisionAI(out_dir=str(base_out_dir))))(_artifact_out_dir(runtime_root, out_dir))
+    ai = (
+        ai_factory
+        or (
+            lambda base_out_dir: CourtVisionOperations(
+                out_dir=str(base_out_dir)
+            )
+        )
+    )(_artifact_out_dir(runtime_root, out_dir))
     if hasattr(ai, "runtime_dir"):
         ai.runtime_dir = runtime_root
     if hasattr(ai, "runtime_history_dir"):
@@ -215,10 +228,13 @@ def backfill_result_feedback(
                 continue
 
             if client is None:
-                client = ai._get_client()
+                client = operations_client(ai)
             if date not in stats_cache:
                 raw_stats = client.get_stats(str(date), str(date))
-                stats_cache[str(date)] = ai._normalize_stats(raw_stats)
+                stats_cache[str(date)] = normalize_operation_stats(
+                    ai,
+                    raw_stats,
+                )
             if date not in games_cache:
                 raw_games = client.get_games(str(date))
                 games_cache[str(date)] = (
@@ -231,7 +247,8 @@ def backfill_result_feedback(
             row_for_grade["prediction_date_str"] = str(date)
             row_for_grade["grade_key"] = key
             diagnostics: dict[str, Any] = {}
-            graded = ai._grade_single_prediction(
+            graded = grade_operation_prediction(
+                ai,
                 row_for_grade,
                 stats_cache[str(date)],
                 games_cache[str(date)],

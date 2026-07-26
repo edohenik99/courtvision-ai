@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import statistics
+import warnings
 from collections import defaultdict
 from datetime import datetime
 
@@ -10,6 +11,8 @@ from courtvision.config import Settings
 from courtvision.market.value_engine import ValueEngine
 from courtvision.models import Game, Injury, PlayerGameStats, PlayerProjection
 from courtvision.reporting.text_report import TextReportWriter
+
+PREDICTION_ENGINE_STATUS = "legacy-unused"
 
 
 class CourtVisionPro:
@@ -23,6 +26,12 @@ class CourtVisionPro:
         self.logger.setLevel(logging.INFO)
 
     def predict(self, prediction_date: str) -> dict[str, str]:
+        warnings.warn(
+            "CourtVisionPro.predict is legacy-unused and is not an approved "
+            "live entrypoint. Use PredictionApplicationService.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.logger.info("starting prediction run for %s", prediction_date)
 
         # Log provider configuration at start of run

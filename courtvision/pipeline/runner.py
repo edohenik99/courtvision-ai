@@ -3,10 +3,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+import warnings
 
 import pandas as pd
 
 from courtvision.artifact_guard import log_prediction_artifact_write
+from courtvision.prediction.publication import (
+    publish_dataframe,
+    publish_json,
+    publish_text,
+)
 from .contracts import PipelineManifest
 from .stages import stage
 
@@ -84,7 +90,13 @@ def write_manifest(manifest: PipelineManifest, out_dir: str | Path) -> Path:
 
 
 def save_prediction_boards(prediction_date: str, prediction_outputs: dict[str, Any], out_dir: str | Path) -> None:
-    """Save prediction boards to disk and print summary."""
+    """Deprecated board-writer compatibility surface using approved publication."""
+    warnings.warn(
+        "save_prediction_boards is deprecated; live entrypoints must use "
+        "PredictionApplicationService.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     import json
     from pathlib import Path
 
@@ -121,7 +133,13 @@ def save_prediction_boards(prediction_date: str, prediction_outputs: dict[str, A
                 "courtvision.pipeline.runner:save_prediction_boards",
                 board_name,
             )
-            board_data.to_csv(csv_path, index=False)
+            publish_dataframe(
+                csv_path,
+                board_data,
+                prediction_date=prediction_date,
+                caller="courtvision.pipeline.runner:save_prediction_boards",
+                artifact_label=board_name,
+            )
 
             raw_txt_path = boards_dir / f"{board_name}.txt"
             _log_and_guard_board_write(
@@ -130,12 +148,21 @@ def save_prediction_boards(prediction_date: str, prediction_outputs: dict[str, A
                 "courtvision.pipeline.runner:save_prediction_boards",
                 f"{board_name}_raw_preview",
             )
-            with open(raw_txt_path, 'w', encoding='utf-8') as f:
-                f.write(f"{board_name.upper()} BOARD ({len(board_data)} rows)\n")
-                f.write("=" * 50 + "\n")
-                f.write(board_data.head(10).to_string(index=False))
-                if len(board_data) > 10:
-                    f.write(f"\n... and {len(board_data) - 10} more rows\n")
+            raw_text = (
+                f"{board_name.upper()} BOARD ({len(board_data)} rows)\n"
+                + "=" * 50
+                + "\n"
+                + board_data.head(10).to_string(index=False)
+            )
+            if len(board_data) > 10:
+                raw_text += f"\n... and {len(board_data) - 10} more rows\n"
+            publish_text(
+                raw_txt_path,
+                raw_text,
+                prediction_date=prediction_date,
+                caller="courtvision.pipeline.runner:save_prediction_boards",
+                artifact_label=f"{board_name}_raw_preview",
+            )
 
             desired_columns = ['prediction_date', 'selection', 'team', 'opponent', 'sportsbook_line', 'odds', 'model_projection', 'edge', 'confidence']
             if 'letter_grade' in board_data.columns:
@@ -149,17 +176,26 @@ def save_prediction_boards(prediction_date: str, prediction_outputs: dict[str, A
                 "courtvision.pipeline.runner:save_prediction_boards",
                 f"{board_name}_clean_preview",
             )
-            with open(clean_txt_path, 'w', encoding='utf-8') as f:
-                f.write(f"{board_name.upper()} CLEAN BOARD ({len(board_data)} rows)\n")
-                f.write("=" * 80 + "\n")
-                if available_columns:
-                    clean_df = board_data[available_columns].copy()
-                    for col in ['sportsbook_line', 'odds', 'model_projection', 'edge', 'confidence']:
-                        if col in clean_df.columns:
-                            clean_df[col] = clean_df[col].astype(float).round(2)
-                    f.write(clean_df.to_string(index=False, justify='left'))
-                else:
-                    f.write("No data available\n")
+            clean_text = (
+                f"{board_name.upper()} CLEAN BOARD ({len(board_data)} rows)\n"
+                + "=" * 80
+                + "\n"
+            )
+            if available_columns:
+                clean_df = board_data[available_columns].copy()
+                for col in ['sportsbook_line', 'odds', 'model_projection', 'edge', 'confidence']:
+                    if col in clean_df.columns:
+                        clean_df[col] = clean_df[col].astype(float).round(2)
+                clean_text += clean_df.to_string(index=False, justify='left')
+            else:
+                clean_text += "No data available\n"
+            publish_text(
+                clean_txt_path,
+                clean_text,
+                prediction_date=prediction_date,
+                caller="courtvision.pipeline.runner:save_prediction_boards",
+                artifact_label=f"{board_name}_clean_preview",
+            )
 
             saved_boards.append((board_name, len(board_data), str(csv_path), str(raw_txt_path), str(clean_txt_path)))
         elif isinstance(board_data, (list, tuple)):
@@ -172,8 +208,13 @@ def save_prediction_boards(prediction_date: str, prediction_outputs: dict[str, A
                 "courtvision.pipeline.runner:save_prediction_boards",
                 board_name,
             )
-            with open(json_path, 'w', encoding='utf-8') as f:
-                json.dump(board_data, f, indent=2, default=str)
+            publish_json(
+                json_path,
+                json.loads(json.dumps(board_data, default=str)),
+                prediction_date=prediction_date,
+                caller="courtvision.pipeline.runner:save_prediction_boards",
+                artifact_label=board_name,
+            )
             saved_boards.append((board_name, len(board_data), str(json_path), None))
 
     if saved_boards:

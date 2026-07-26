@@ -13,7 +13,12 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from courtvision_ai import CourtVisionAI
+from courtvision.operations import (
+    CourtVisionOperations,
+    append_operation_history,
+    normalize_operation_stats,
+    operations_client,
+)
 from scripts.repair_pending_grades import COMBO_MARKET_COMPONENTS, MARKET_TYPE_ALIASES, SUPPORTED_MARKETS
 
 
@@ -286,7 +291,7 @@ def prefill_actual_feedback_for_date(
     prediction_date: str,
     runtime_root: str | Path = "outputs/runtime",
     dry_run: bool = False,
-    ai_factory: Callable[[Path], CourtVisionAI] | None = None,
+    ai_factory: Callable[[Path], Any] | None = None,
 ) -> dict[str, Any]:
     runtime_root_path = Path(runtime_root)
     board_path = runtime_root_path / "operator" / f"full_market_board_{prediction_date}.csv"
@@ -305,7 +310,12 @@ def prefill_actual_feedback_for_date(
     if "prediction_date" in board.columns:
         board = board[board["prediction_date"].astype(str).eq(str(prediction_date))].copy()
 
-    ai = (ai_factory or (lambda out_dir: CourtVisionAI(out_dir=str(out_dir))))(_runtime_outputs_root(runtime_root_path))
+    ai = (
+        ai_factory
+        or (
+            lambda out_dir: CourtVisionOperations(out_dir=str(out_dir))
+        )
+    )(_runtime_outputs_root(runtime_root_path))
     if hasattr(ai, "runtime_dir"):
         ai.runtime_dir = runtime_root_path
     if hasattr(ai, "runtime_history_dir"):
@@ -314,10 +324,10 @@ def prefill_actual_feedback_for_date(
         ai.feedback_path = feedback_path
 
     try:
-        client = ai._get_client()
+        client = operations_client(ai)
         raw_games = client.get_games(str(prediction_date))
         raw_stats = client.get_stats(str(prediction_date), str(prediction_date))
-        stats = ai._normalize_stats(raw_stats)
+        stats = normalize_operation_stats(ai, raw_stats)
     except Exception as exc:
         return {
             "status": "provider_fetch_failed",
@@ -371,7 +381,7 @@ def prefill_actual_feedback_for_date(
     prefilled_rows = int(len(feedback_rows))
     if prefilled_rows and not dry_run:
         feedback_path.parent.mkdir(parents=True, exist_ok=True)
-        ai._append_history(feedback_path, feedback_rows)
+        append_operation_history(ai, feedback_path, feedback_rows)
 
     return {
         "status": "ok" if prefilled_rows else "already_prefilled_or_no_gradeable_rows",

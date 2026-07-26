@@ -41,7 +41,11 @@ _REPO_ROOT = Path(__file__).resolve().parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from courtvision_ai import CourtVisionAI  # noqa: E402  (engine — untouched)
+from courtvision_ai import (  # noqa: E402
+    CourtVisionAI,
+    run_nba_prediction_application,
+)
+from courtvision.prediction import PredictionRunConflictError  # noqa: E402
 from courtvision.streamlit_review_artifacts import (  # noqa: E402
     PHASE15_READINESS_LABELS,
     extract_quality_review_statuses,
@@ -97,6 +101,79 @@ def numeric_column_or_default(
 ) -> pd.Series:
     series = column_or_default(df, column, default)
     return cast(pd.Series, pd.to_numeric(series, errors="coerce").fillna(default))
+
+
+def classify_prediction_application_outcome(
+    *,
+    status: str,
+    lifecycle_status: str,
+    run_id: str,
+) -> tuple[str, str]:
+    """Return the Streamlit message level and copy for a structured result."""
+
+    normalized_status = str(status).strip().upper() or "UNKNOWN"
+    normalized_lifecycle = (
+        str(lifecycle_status).strip().upper() or "UNKNOWN"
+    )
+    run_suffix = f" Run ID: {run_id}" if str(run_id).strip() else ""
+
+    if normalized_status == "FAILED":
+        return (
+            "error",
+            f"Prediction run failed. Lifecycle status: "
+            f"{normalized_lifecycle}.{run_suffix}",
+        )
+    if normalized_status == "PROTECTED_NO_OP":
+        return (
+            "info",
+            "Existing prediction artifacts were protected; no files were "
+            f"changed.{run_suffix}",
+        )
+    if normalized_status in {"NO_DATA", "NO_ELIGIBLE_PREDICTIONS"}:
+        outcome = (
+            "No prediction data was available."
+            if normalized_status == "NO_DATA"
+            else "No predictions met the existing eligibility rules."
+        )
+        level = (
+            "info"
+            if normalized_lifecycle in {"PASS", "DISABLED"}
+            else "warning"
+        )
+        lifecycle_copy = (
+            ""
+            if normalized_lifecycle in {"PASS", "DISABLED"}
+            else f" Lifecycle status: {normalized_lifecycle}."
+        )
+        return level, f"{outcome}{lifecycle_copy}{run_suffix}"
+    if normalized_status in {"SUCCESS", "PASS"}:
+        if normalized_lifecycle == "PASS":
+            return (
+                "success",
+                f"Prediction publication completed.{run_suffix}",
+            )
+        if normalized_lifecycle == "DISABLED":
+            return (
+                "info",
+                "Prediction publication completed with shadow lifecycle "
+                f"disabled.{run_suffix}",
+            )
+        return (
+            "warning",
+            "Prediction artifacts were published, but lifecycle status is "
+            f"{normalized_lifecycle}.{run_suffix}",
+        )
+    if normalized_status == "DEGRADED":
+        return (
+            "warning",
+            "Prediction run completed in a degraded state. Lifecycle status: "
+            f"{normalized_lifecycle}.{run_suffix}",
+        )
+    return (
+        "warning",
+        f"Prediction run returned status {normalized_status} with lifecycle "
+        f"status {normalized_lifecycle}.{run_suffix}",
+    )
 
 
 APP_TITLE = "CourtVision"
@@ -632,6 +709,8 @@ def init_state() -> None:
     st.session_state.setdefault("last_prediction_date", None)
     st.session_state.setdefault("active_view", "today")
     st.session_state.setdefault("missing_files", set())
+    st.session_state.setdefault("prediction_run_in_progress", False)
+    st.session_state.setdefault("latest_prediction_application", None)
 
 
 def bump_history_refresh() -> None:
@@ -3149,7 +3228,15 @@ def main() -> None:
         if mutation_actions_enabled(VIEW_ONLY_DEMO_MODE):
             fit_clicked = st.button("Fit / Refresh Model", width="stretch")
             predict_clicked = st.button(
-                "Run Predictions", type="primary", width="stretch"
+                "Run Predictions",
+                type="primary",
+                width="stretch",
+                disabled=bool(
+                    st.session_state.get(
+                        "prediction_run_in_progress",
+                        False,
+                    )
+                ),
             )
             reload_history_clicked = st.button("Reload History", width="stretch")
         else:
@@ -3207,13 +3294,59 @@ def main() -> None:
 
     if predict_clicked:
         with st.spinner("Scoring markets..."):
+            st.session_state["prediction_run_in_progress"] = True
             try:
-                outputs = ai.predict(prediction_date_text)
+                application_result = run_nba_prediction_application(
+                    ai,
+                    prediction_date=prediction_date_text,
+                    out_dir=resolved_out_dir_text,
+                    entrypoint="courtvision_streamlit_app.py",
+                    command=(
+                        "courtvision_streamlit_app.py prediction action "
+                        f"--prediction-date {prediction_date_text}"
+                    ),
+                )
+                outputs = dict(application_result.outputs)
                 st.session_state["latest_prediction"] = outputs
+                application_payload = {
+                    "run_id": application_result.run_id,
+                    "sport": application_result.sport,
+                    "prediction_date": application_result.prediction_date,
+                    "status": application_result.status,
+                    "lifecycle_status": application_result.lifecycle_status,
+                    "artifact_paths": dict(
+                        application_result.artifact_paths
+                    ),
+                    "failure_classification": (
+                        application_result.failure_classification
+                    ),
+                }
+                st.session_state[
+                    "latest_prediction_application"
+                ] = application_payload
                 bump_history_refresh()
+                message_level, message = (
+                    classify_prediction_application_outcome(
+                        status=application_result.status,
+                        lifecycle_status=application_result.lifecycle_status,
+                        run_id=application_result.run_id,
+                    )
+                )
+                getattr(st, message_level)(message)
+                st.json(application_payload)
+            except PredictionRunConflictError as exc:
+                st.warning(
+                    "A prediction run is already active for this sport/date. "
+                    f"{exc}"
+                )
             except Exception as exc:
-                st.error(f"Prediction run failed: {exc}")
+                st.error(
+                    "Prediction run failed "
+                    f"({type(exc).__name__}): {exc}"
+                )
                 render_action_debug_details(traceback_text=traceback.format_exc())
+            finally:
+                st.session_state["prediction_run_in_progress"] = False
 
     runtime_payload = load_runtime_prediction_cached(
         resolved_out_dir_text,

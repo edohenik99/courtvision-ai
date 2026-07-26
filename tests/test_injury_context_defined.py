@@ -1,7 +1,7 @@
 """Regression test for injury_context NameError fix.
 
-Ensures CourtVisionAI.predict() extracts injury_context from
-PredictionResult instead of using undefined variable.
+Ensures the active CourtVisionAI NBA engine implementation extracts
+injury_context from PredictionResult instead of using an undefined variable.
 
 Related to fix for:
 NameError: name 'injury_context' is not defined
@@ -86,23 +86,27 @@ class TestInjuryContextDefined:
         assert passed is not None
 
     def test_predict_source_uses_result_injury_context(self):
-        """Verify predict() source extracts injury_context from result."""
+        """Verify the active NBA implementation extracts injury context."""
         import ast
 
         source_path = Path(__file__).parent.parent / "courtvision_ai.py"
         source = source_path.read_text(encoding="utf-8", errors="ignore")
 
-        # Parse the source to find the predict method
+        # The public predict() method is now a thin canonical-service wrapper.
+        # Inspect the approved internal NBA engine implementation instead.
         tree = ast.parse(source)
 
-        # Find predict method
+        # Find the active implementation method.
         predict_method = None
         for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == "predict":
+            if (
+                isinstance(node, ast.FunctionDef)
+                and node.name == "_predict_internal"
+            ):
                 predict_method = node
                 break
 
-        assert predict_method is not None, "predict() method not found"
+        assert predict_method is not None, "_predict_internal() method not found"
 
         # Check that injury_context is extracted from result
         source_lines = source.split("\n")
@@ -113,7 +117,7 @@ class TestInjuryContextDefined:
 
         # Should extract injury_context from result
         assert "result.injury_context" in predict_source, (
-            "predict() should extract injury_context from result"
+            "_predict_internal() should extract injury_context from result"
         )
 
         # Should define injury_context before using it in calls
