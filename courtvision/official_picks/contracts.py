@@ -1,4 +1,4 @@
-"""Canonical immutable contracts for explicitly promoted official picks."""
+"""Canonical immutable contracts for official-pick publication and settlement."""
 
 from __future__ import annotations
 
@@ -25,10 +25,19 @@ from courtvision.lifecycle.identity import (
 OFFICIAL_PICK_SCHEMA_VERSION = 1
 OFFICIAL_PICK_PAYLOAD_SCHEMA_VERSION = 1
 OFFICIAL_PICK_PROMOTION_POLICY_VERSION = "1.0"
+OFFICIAL_PICK_SETTLEMENT_SCHEMA_VERSION = 1
+OFFICIAL_PICK_SETTLEMENT_PAYLOAD_SCHEMA_VERSION = 1
+OFFICIAL_PICK_SETTLEMENT_POLICY_VERSION = "1.0"
+OFFICIAL_PICK_SETTLEMENT_CORRECTION_SCHEMA_VERSION = 1
+OFFICIAL_PICK_SETTLEMENT_CORRECTION_PAYLOAD_SCHEMA_VERSION = 1
 
 
 class OfficialPickValidationError(ValueError):
     """Raised before a malformed official pick can enter the ledger."""
+
+
+class OfficialPickSettlementValidationError(ValueError):
+    """Raised before a malformed official-pick settlement can enter the ledger."""
 
 
 class PickRecordKind(str, Enum):
@@ -52,6 +61,25 @@ class OfficialPickStatus(str, Enum):
 class OfficialPickSourceType(str, Enum):
     CANDIDATE = "CANDIDATE"
     OBSERVATION = "OBSERVATION"
+
+
+class OfficialPickSettlementStatus(str, Enum):
+    UNRESOLVED = "UNRESOLVED"
+    FINAL = "FINAL"
+
+
+class OfficialPickSettlementOutcome(str, Enum):
+    WIN = "WIN"
+    LOSS = "LOSS"
+    PUSH = "PUSH"
+    VOID = "VOID"
+    CANCELLED = "CANCELLED"
+    UNRESOLVED = "UNRESOLVED"
+
+
+class OfficialPickSettlementTransitionSlot(str, Enum):
+    INITIAL = "INITIAL"
+    FINALIZATION = "FINALIZATION"
 
 
 def _required_text(value: Any, field_name: str) -> str:
@@ -130,6 +158,59 @@ def _enum_value(value: Any, enum_type: type[Enum], field_name: str) -> str:
             f"{field_name} must be one of {sorted(allowed)}"
         )
     return raw
+
+
+def _settlement_required_text(value: Any, field_name: str) -> str:
+    try:
+        return _required_text(value, field_name)
+    except OfficialPickValidationError as exc:
+        raise OfficialPickSettlementValidationError(str(exc)) from exc
+
+
+def _settlement_utc(value: str | datetime, field_name: str) -> datetime:
+    try:
+        return _utc(value, field_name)
+    except OfficialPickValidationError as exc:
+        raise OfficialPickSettlementValidationError(str(exc)) from exc
+
+
+def _settlement_enum_value(
+    value: Any, enum_type: type[Enum], field_name: str
+) -> str:
+    try:
+        return _enum_value(value, enum_type, field_name)
+    except OfficialPickValidationError as exc:
+        raise OfficialPickSettlementValidationError(str(exc)) from exc
+
+
+def _evidence_mapping(value: Any, field_name: str) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or not value:
+        raise OfficialPickSettlementValidationError(
+            f"{field_name} must be a non-empty mapping"
+        )
+    result = dict(value)
+    if any(not str(key).strip() for key in result):
+        raise OfficialPickSettlementValidationError(
+            f"{field_name} keys must be non-empty"
+        )
+    return result
+
+
+def _final_score(value: Any) -> str | dict[str, Any] | None:
+    if value is None:
+        return None
+    if isinstance(value, Mapping):
+        if not value:
+            raise OfficialPickSettlementValidationError(
+                "final_score mapping must not be empty"
+            )
+        return dict(value)
+    text = str(value).strip()
+    if not text or text.casefold() in {"nan", "none", "null", "unknown"}:
+        raise OfficialPickSettlementValidationError(
+            "final_score must be meaningful when supplied"
+        )
+    return text
 
 
 def _canonical_market_key(value: Any, *, sport: str, league: str) -> str | None:
@@ -429,13 +510,386 @@ class OfficialPickPromotionRequest:
             ) from exc
 
 
+@dataclass(frozen=True, slots=True)
+class OfficialPickSettlement:
+    """One immutable settlement decision for a committed official pick."""
+
+    settlement_id: str
+    pick_id: str
+    settlement_status: str
+    outcome: str
+    final_score: str | Mapping[str, Any] | None
+    result_evidence: Mapping[str, Any]
+    settled_at: datetime
+    result_source: str
+    source_record_id: str
+    settlement_run_id: str
+    idempotency_key: str
+    provenance: Mapping[str, Any]
+    schema_version: int = OFFICIAL_PICK_SETTLEMENT_SCHEMA_VERSION
+    record_kind: str = field(
+        default=PickRecordKind.SETTLED_OFFICIAL_PICK.value,
+        init=False,
+    )
+
+    def __post_init__(self) -> None:
+        settlement_id = _settlement_required_text(
+            self.settlement_id, "settlement_id"
+        )
+        if re.fullmatch(r"settlement_[0-9a-f]{32}", settlement_id) is None:
+            raise OfficialPickSettlementValidationError(
+                "settlement_id must be an assigned settlement_<uuid4 hex> identifier"
+            )
+        pick_id = _settlement_required_text(self.pick_id, "pick_id")
+        if re.fullmatch(r"pick_[0-9a-f]{32}", pick_id) is None:
+            raise OfficialPickSettlementValidationError(
+                "pick_id must be a committed pick_<uuid4 hex> identifier"
+            )
+        status = _settlement_enum_value(
+            self.settlement_status,
+            OfficialPickSettlementStatus,
+            "settlement_status",
+        )
+        outcome = _settlement_enum_value(
+            self.outcome,
+            OfficialPickSettlementOutcome,
+            "outcome",
+        )
+        if (
+            status == OfficialPickSettlementStatus.UNRESOLVED.value
+        ) != (outcome == OfficialPickSettlementOutcome.UNRESOLVED.value):
+            raise OfficialPickSettlementValidationError(
+                "UNRESOLVED status and outcome must be used together"
+            )
+        final_score = _final_score(self.final_score)
+        if (
+            status == OfficialPickSettlementStatus.UNRESOLVED.value
+            and final_score is not None
+        ):
+            raise OfficialPickSettlementValidationError(
+                "UNRESOLVED settlement must not contain final_score"
+            )
+        if self.schema_version != OFFICIAL_PICK_SETTLEMENT_SCHEMA_VERSION:
+            raise OfficialPickSettlementValidationError(
+                "unsupported official-pick settlement schema_version"
+            )
+        if self.record_kind != PickRecordKind.SETTLED_OFFICIAL_PICK.value:
+            raise OfficialPickSettlementValidationError(
+                "record_kind must be SETTLED_OFFICIAL_PICK"
+            )
+        idempotency_key = _settlement_required_text(
+            self.idempotency_key, "idempotency_key"
+        )
+        if re.fullmatch(r"opsetidem_[0-9a-f]{64}", idempotency_key) is None:
+            raise OfficialPickSettlementValidationError(
+                "idempotency_key must be a generated official-pick settlement key"
+            )
+        if not isinstance(self.provenance, Mapping):
+            raise OfficialPickSettlementValidationError(
+                "provenance must be a mapping"
+            )
+        provenance = dict(self.provenance)
+        required_provenance = {
+            "settlement_service": "courtvision.official_picks.settlement",
+            "settlement_policy_version": OFFICIAL_PICK_SETTLEMENT_POLICY_VERSION,
+        }
+        for key, expected in required_provenance.items():
+            if provenance.get(key) != expected:
+                raise OfficialPickSettlementValidationError(
+                    f"provenance.{key} must equal {expected!r}"
+                )
+        _settlement_required_text(
+            provenance.get("settlement_actor"),
+            "provenance.settlement_actor",
+        )
+
+        object.__setattr__(self, "settlement_id", settlement_id)
+        object.__setattr__(self, "pick_id", pick_id)
+        object.__setattr__(self, "settlement_status", status)
+        object.__setattr__(self, "outcome", outcome)
+        object.__setattr__(self, "final_score", final_score)
+        object.__setattr__(
+            self,
+            "result_evidence",
+            _evidence_mapping(self.result_evidence, "result_evidence"),
+        )
+        object.__setattr__(
+            self, "settled_at", _settlement_utc(self.settled_at, "settled_at")
+        )
+        object.__setattr__(
+            self,
+            "result_source",
+            _settlement_required_text(self.result_source, "result_source"),
+        )
+        object.__setattr__(
+            self,
+            "source_record_id",
+            _settlement_required_text(
+                self.source_record_id, "source_record_id"
+            ),
+        )
+        object.__setattr__(
+            self,
+            "settlement_run_id",
+            _settlement_required_text(
+                self.settlement_run_id, "settlement_run_id"
+            ),
+        )
+        object.__setattr__(self, "idempotency_key", idempotency_key)
+        object.__setattr__(self, "provenance", provenance)
+
+    def to_dict(self) -> dict[str, Any]:
+        final_score = (
+            dict(self.final_score)
+            if isinstance(self.final_score, Mapping)
+            else self.final_score
+        )
+        return {
+            "settlement_id": self.settlement_id,
+            "pick_id": self.pick_id,
+            "settlement_status": self.settlement_status,
+            "outcome": self.outcome,
+            "final_score": final_score,
+            "result_evidence": dict(self.result_evidence),
+            "settled_at": format_utc_datetime(self.settled_at),
+            "result_source": self.result_source,
+            "source_record_id": self.source_record_id,
+            "settlement_run_id": self.settlement_run_id,
+            "idempotency_key": self.idempotency_key,
+            "provenance": dict(self.provenance),
+            "schema_version": self.schema_version,
+            "record_kind": self.record_kind,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "OfficialPickSettlement":
+        data = dict(value)
+        record_kind = data.pop(
+            "record_kind", PickRecordKind.SETTLED_OFFICIAL_PICK.value
+        )
+        if record_kind != PickRecordKind.SETTLED_OFFICIAL_PICK.value:
+            raise OfficialPickSettlementValidationError(
+                "record_kind must be SETTLED_OFFICIAL_PICK"
+            )
+        data["settled_at"] = _settlement_utc(
+            data.get("settled_at"), "settled_at"
+        )
+        try:
+            return cls(**data)
+        except TypeError as exc:
+            raise OfficialPickSettlementValidationError(
+                f"official-pick settlement schema mismatch: {exc}"
+            ) from exc
+
+
+@dataclass(frozen=True, slots=True)
+class OfficialPickSettlementCorrection:
+    """Append-only correction to one final official-pick settlement."""
+
+    correction_id: str
+    original_settlement_id: str
+    pick_id: str
+    correction_reason: str
+    corrected_outcome: str
+    corrected_final_score: str | Mapping[str, Any] | None
+    corrected_result_evidence: Mapping[str, Any]
+    corrected_at: datetime
+    result_source: str
+    source_record_id: str
+    correction_run_id: str
+    idempotency_key: str
+    provenance: Mapping[str, Any]
+    schema_version: int = OFFICIAL_PICK_SETTLEMENT_CORRECTION_SCHEMA_VERSION
+    record_kind: str = field(
+        default="OFFICIAL_PICK_SETTLEMENT_CORRECTION",
+        init=False,
+    )
+
+    def __post_init__(self) -> None:
+        correction_id = _settlement_required_text(
+            self.correction_id, "correction_id"
+        )
+        if re.fullmatch(
+            r"settlement_correction_[0-9a-f]{32}", correction_id
+        ) is None:
+            raise OfficialPickSettlementValidationError(
+                "correction_id must be an assigned settlement_correction_<uuid4 hex> identifier"
+            )
+        original_settlement_id = _settlement_required_text(
+            self.original_settlement_id, "original_settlement_id"
+        )
+        if re.fullmatch(
+            r"settlement_[0-9a-f]{32}", original_settlement_id
+        ) is None:
+            raise OfficialPickSettlementValidationError(
+                "original_settlement_id must reference a settlement_<uuid4 hex>"
+            )
+        pick_id = _settlement_required_text(self.pick_id, "pick_id")
+        if re.fullmatch(r"pick_[0-9a-f]{32}", pick_id) is None:
+            raise OfficialPickSettlementValidationError(
+                "pick_id must be a committed pick_<uuid4 hex> identifier"
+            )
+        corrected_outcome = _settlement_enum_value(
+            self.corrected_outcome,
+            OfficialPickSettlementOutcome,
+            "corrected_outcome",
+        )
+        if corrected_outcome == OfficialPickSettlementOutcome.UNRESOLVED.value:
+            raise OfficialPickSettlementValidationError(
+                "a correction must contain a final corrected_outcome"
+            )
+        idempotency_key = _settlement_required_text(
+            self.idempotency_key, "idempotency_key"
+        )
+        if re.fullmatch(r"opcoridem_[0-9a-f]{64}", idempotency_key) is None:
+            raise OfficialPickSettlementValidationError(
+                "idempotency_key must be a generated settlement correction key"
+            )
+        if self.schema_version != OFFICIAL_PICK_SETTLEMENT_CORRECTION_SCHEMA_VERSION:
+            raise OfficialPickSettlementValidationError(
+                "unsupported settlement correction schema_version"
+            )
+        if self.record_kind != "OFFICIAL_PICK_SETTLEMENT_CORRECTION":
+            raise OfficialPickSettlementValidationError(
+                "record_kind must be OFFICIAL_PICK_SETTLEMENT_CORRECTION"
+            )
+        if not isinstance(self.provenance, Mapping):
+            raise OfficialPickSettlementValidationError(
+                "provenance must be a mapping"
+            )
+        provenance = dict(self.provenance)
+        required_provenance = {
+            "correction_service": "courtvision.official_picks.settlement",
+            "settlement_policy_version": OFFICIAL_PICK_SETTLEMENT_POLICY_VERSION,
+        }
+        for key, expected in required_provenance.items():
+            if provenance.get(key) != expected:
+                raise OfficialPickSettlementValidationError(
+                    f"provenance.{key} must equal {expected!r}"
+                )
+        _settlement_required_text(
+            provenance.get("correction_actor"),
+            "provenance.correction_actor",
+        )
+
+        object.__setattr__(self, "correction_id", correction_id)
+        object.__setattr__(
+            self, "original_settlement_id", original_settlement_id
+        )
+        object.__setattr__(self, "pick_id", pick_id)
+        object.__setattr__(
+            self,
+            "correction_reason",
+            _settlement_required_text(
+                self.correction_reason, "correction_reason"
+            ),
+        )
+        object.__setattr__(self, "corrected_outcome", corrected_outcome)
+        object.__setattr__(
+            self,
+            "corrected_final_score",
+            _final_score(self.corrected_final_score),
+        )
+        object.__setattr__(
+            self,
+            "corrected_result_evidence",
+            _evidence_mapping(
+                self.corrected_result_evidence,
+                "corrected_result_evidence",
+            ),
+        )
+        object.__setattr__(
+            self, "corrected_at", _settlement_utc(self.corrected_at, "corrected_at")
+        )
+        object.__setattr__(
+            self,
+            "result_source",
+            _settlement_required_text(self.result_source, "result_source"),
+        )
+        object.__setattr__(
+            self,
+            "source_record_id",
+            _settlement_required_text(
+                self.source_record_id, "source_record_id"
+            ),
+        )
+        object.__setattr__(
+            self,
+            "correction_run_id",
+            _settlement_required_text(
+                self.correction_run_id, "correction_run_id"
+            ),
+        )
+        object.__setattr__(self, "idempotency_key", idempotency_key)
+        object.__setattr__(self, "provenance", provenance)
+
+    def to_dict(self) -> dict[str, Any]:
+        corrected_final_score = (
+            dict(self.corrected_final_score)
+            if isinstance(self.corrected_final_score, Mapping)
+            else self.corrected_final_score
+        )
+        return {
+            "correction_id": self.correction_id,
+            "original_settlement_id": self.original_settlement_id,
+            "pick_id": self.pick_id,
+            "correction_reason": self.correction_reason,
+            "corrected_outcome": self.corrected_outcome,
+            "corrected_final_score": corrected_final_score,
+            "corrected_result_evidence": dict(
+                self.corrected_result_evidence
+            ),
+            "corrected_at": format_utc_datetime(self.corrected_at),
+            "result_source": self.result_source,
+            "source_record_id": self.source_record_id,
+            "correction_run_id": self.correction_run_id,
+            "idempotency_key": self.idempotency_key,
+            "provenance": dict(self.provenance),
+            "schema_version": self.schema_version,
+            "record_kind": self.record_kind,
+        }
+
+    @classmethod
+    def from_dict(
+        cls, value: Mapping[str, Any]
+    ) -> "OfficialPickSettlementCorrection":
+        data = dict(value)
+        record_kind = data.pop(
+            "record_kind", "OFFICIAL_PICK_SETTLEMENT_CORRECTION"
+        )
+        if record_kind != "OFFICIAL_PICK_SETTLEMENT_CORRECTION":
+            raise OfficialPickSettlementValidationError(
+                "record_kind must be OFFICIAL_PICK_SETTLEMENT_CORRECTION"
+            )
+        data["corrected_at"] = _settlement_utc(
+            data.get("corrected_at"), "corrected_at"
+        )
+        try:
+            return cls(**data)
+        except TypeError as exc:
+            raise OfficialPickSettlementValidationError(
+                f"settlement correction schema mismatch: {exc}"
+            ) from exc
+
+
 __all__ = [
     "OFFICIAL_PICK_PAYLOAD_SCHEMA_VERSION",
     "OFFICIAL_PICK_PROMOTION_POLICY_VERSION",
     "OFFICIAL_PICK_SCHEMA_VERSION",
+    "OFFICIAL_PICK_SETTLEMENT_CORRECTION_PAYLOAD_SCHEMA_VERSION",
+    "OFFICIAL_PICK_SETTLEMENT_CORRECTION_SCHEMA_VERSION",
+    "OFFICIAL_PICK_SETTLEMENT_PAYLOAD_SCHEMA_VERSION",
+    "OFFICIAL_PICK_SETTLEMENT_POLICY_VERSION",
+    "OFFICIAL_PICK_SETTLEMENT_SCHEMA_VERSION",
     "OfficialPick",
     "OfficialPickDesignation",
     "OfficialPickPromotionRequest",
+    "OfficialPickSettlement",
+    "OfficialPickSettlementCorrection",
+    "OfficialPickSettlementOutcome",
+    "OfficialPickSettlementStatus",
+    "OfficialPickSettlementTransitionSlot",
+    "OfficialPickSettlementValidationError",
     "OfficialPickSourceType",
     "OfficialPickStatus",
     "OfficialPickValidationError",

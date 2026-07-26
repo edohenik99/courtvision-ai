@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "courtvision.lifecycle.official_pick_settlement_correction_payload.v1",
+  "title": "CourtVision official pick settlement correction payload v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "payload_schema_version",
+    "settlement_policy_version",
+    "settlement_authority",
+    "correction_content_sha256",
+    "official_pick_settlement_correction"
+  ],
+  "properties": {
+    "payload_schema_version": {"const": 1},
+    "settlement_policy_version": {"const": "1.0"},
+    "settlement_authority": {"const": "PAPER_RESEARCH_ONLY"},
+    "correction_content_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "official_pick_settlement_correction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "correction_id",
+        "original_settlement_id",
+        "pick_id",
+        "correction_reason",
+        "corrected_outcome",
+        "corrected_final_score",
+        "corrected_result_evidence",
+        "corrected_at",
+        "result_source",
+        "source_record_id",
+        "correction_run_id",
+        "idempotency_key",
+        "provenance",
+        "schema_version",
+        "record_kind"
+      ],
+      "properties": {
+        "correction_id": {
+          "type": "string",
+          "pattern": "^settlement_correction_[0-9a-f]{32}$"
+        },
+        "original_settlement_id": {
+          "type": "string",
+          "pattern": "^settlement_[0-9a-f]{32}$"
+        },
+        "pick_id": {
+          "type": "string",
+          "pattern": "^pick_[0-9a-f]{32}$"
+        },
+        "correction_reason": {"type": "string", "minLength": 1},
+        "corrected_outcome": {
+          "enum": ["WIN", "LOSS", "PUSH", "VOID", "CANCELLED"]
+        },
+        "corrected_final_score": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "string", "minLength": 1},
+            {"type": "object", "minProperties": 1}
+          ]
+        },
+        "corrected_result_evidence": {
+          "type": "object",
+          "minProperties": 1
+        },
+        "corrected_at": {"type": "string", "format": "date-time"},
+        "result_source": {"type": "string", "minLength": 1},
+        "source_record_id": {"type": "string", "minLength": 1},
+        "correction_run_id": {"type": "string", "minLength": 1},
+        "idempotency_key": {
+          "type": "string",
+          "pattern": "^opcoridem_[0-9a-f]{64}$"
+        },
+        "provenance": {
+          "type": "object",
+          "required": [
+            "correction_service",
+            "correction_actor",
+            "settlement_policy_version"
+          ],
+          "properties": {
+            "correction_service": {
+              "const": "courtvision.official_picks.settlement"
+            },
+            "correction_actor": {"type": "string", "minLength": 1},
+            "settlement_policy_version": {"const": "1.0"}
+          }
+        },
+        "schema_version": {"const": 1},
+        "record_kind": {
+          "const": "OFFICIAL_PICK_SETTLEMENT_CORRECTION"
+        }
+      }
+    }
+  }
+}

@@ -4,7 +4,9 @@ Status: implemented foundation, paper/research only.
 
 This document describes the canonical official-pick identity layer. It does not
 authorize live wagering, Kelly sizing, bankroll use, automatic candidate
-promotion, settlement completion, or claims of forward predictive validity.
+promotion, historical backfilling, or claims of forward predictive validity.
+Paper/research settlement is documented separately in
+`official_pick_settlement_lifecycle.md`.
 
 ## Four Distinct Record Kinds
 
@@ -94,10 +96,11 @@ The existing lifecycle writer supplies:
 - verification before and after commit.
 
 Committed segments are append-only. There is no official-pick update or overwrite
-API. Any future correction must append an
+API. Any future correction to the published pick identity must append an
 `OFFICIAL_PICK_CORRECTION_RECORDED` lifecycle event that references the event it
-corrects; it must never rewrite the published `OfficialPick`. Correction
-authoring is intentionally not activated in this phase.
+corrects; it must never rewrite the published `OfficialPick`. Published-pick
+correction authoring is intentionally not activated. Settlement corrections
+use the distinct `OFFICIAL_PICK_SETTLEMENT_CORRECTION_RECORDED` event.
 
 ## Explicit Promotion API
 
@@ -148,9 +151,13 @@ deliberate operation with its own event and actor provenance.
   analysis` and forbids a betting-ROI claim.
 - `validate_settlement_pick_reference(...)` requires `pick_id` and verifies
   that it exists in the committed ledger.
+- `build_official_pick_settlement_dataset(...)` reconstructs committed picks
+  and settlement state from the ledger, joins strictly by `pick_id`, and reports
+  unresolved official picks separately without Kelly or bankroll calculations.
 
 This phase does not rewrite the existing NBA or MLB grading pipelines. It
-creates the strict contract those pipelines must use in the settlement phase.
+creates the strict contract those pipelines must use if they are migrated.
+See `official_pick_settlement_lifecycle.md` for settlement and correction rules.
 
 ## Legacy Migration Policy
 
@@ -169,8 +176,10 @@ It never creates a `pick_id`.
 
 - No pipeline automatically produces official picks.
 - Live designation and bankroll/Kelly output remain blocked.
-- Settlement lifecycle events and official-pick ROI computation are not
-  implemented here; only their identity/reporting boundaries are.
+- Append-only paper/research settlement and correction events are implemented,
+  but no existing grader invokes them automatically.
+- The official settlement dataset does not calculate ROI, Kelly, stake, profit,
+  or bankroll values.
 - Existing legacy grading reports have not been migrated wholesale.
 - No historical IDs are backfilled.
 - Forward paper-trial evidence is still required before any live-readiness
