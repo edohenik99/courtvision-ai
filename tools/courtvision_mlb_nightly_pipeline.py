@@ -503,6 +503,7 @@ def run_pipeline(
     skip_git: bool = False,
     masker: SecretMasker | None = None,
 ) -> PipelineResult:
+    original_cwd = Path.cwd()
     masker = masker or SecretMasker()
     log = PipelineLog(masker)
     today = today or started_at.date()
@@ -934,14 +935,17 @@ def run_pipeline(
                 }
         log.write(f"ERROR: {masked_error}")
     finally:
-        ended_at = datetime.now().astimezone()
-        summary["run_end_time"] = ended_at.isoformat(timespec="seconds")
-        json_summary_path, text_summary_path = write_summary_files(
-            summary, paths, run_id
-        )
-        log.stage("Summary")
-        log.write(f"JSON summary: {json_summary_path}")
-        log.write(f"Text summary: {text_summary_path}")
+        try:
+            ended_at = datetime.now().astimezone()
+            summary["run_end_time"] = ended_at.isoformat(timespec="seconds")
+            json_summary_path, text_summary_path = write_summary_files(
+                summary, paths, run_id
+            )
+            log.stage("Summary")
+            log.write(f"JSON summary: {json_summary_path}")
+            log.write(f"Text summary: {text_summary_path}")
+        finally:
+            os.chdir(original_cwd)
 
     return PipelineResult(
         exit_code=exit_code,

@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "courtvision.lifecycle.official_pick_published_payload.v1",
+  "title": "CourtVision official pick published payload v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "payload_schema_version",
+    "promotion_policy_version",
+    "publication_authority",
+    "promotion_content_sha256",
+    "official_pick"
+  ],
+  "properties": {
+    "payload_schema_version": {"const": 1},
+    "promotion_policy_version": {"const": "1.0"},
+    "publication_authority": {"enum": ["PAPER_RESEARCH_ONLY"]},
+    "promotion_content_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "official_pick": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pick_id",
+        "sport",
+        "league",
+        "event_id",
+        "event_start_time",
+        "prediction_date",
+        "market_key",
+        "selection",
+        "line",
+        "odds",
+        "sportsbook",
+        "player_id",
+        "player_name",
+        "team_id",
+        "model_name",
+        "model_version",
+        "run_id",
+        "published_at",
+        "source_candidate_id",
+        "source_observation_id",
+        "status",
+        "designation",
+        "idempotency_key",
+        "provenance",
+        "schema_version",
+        "record_kind"
+      ],
+      "properties": {
+        "pick_id": {"type": "string", "pattern": "^pick_[0-9a-f]{32}$"},
+        "sport": {"type": "string", "minLength": 1},
+        "league": {"type": "string", "minLength": 1},
+        "event_id": {"type": "string", "minLength": 1},
+        "event_start_time": {"type": "string", "format": "date-time"},
+        "prediction_date": {"type": "string", "format": "date"},
+        "market_key": {"type": "string", "minLength": 1},
+        "selection": {"enum": ["OVER", "UNDER", "YES", "NO", "HOME", "AWAY"]},
+        "line": {"type": "string"},
+        "odds": {"type": "number"},
+        "sportsbook": {"type": "string", "minLength": 1},
+        "player_id": {"type": ["string", "null"]},
+        "player_name": {"type": ["string", "null"]},
+        "team_id": {"type": ["string", "null"]},
+        "model_name": {"type": "string", "minLength": 1},
+        "model_version": {"type": "string", "minLength": 1},
+        "run_id": {"type": "string", "minLength": 1},
+        "published_at": {"type": "string", "format": "date-time"},
+        "source_candidate_id": {"type": ["string", "null"]},
+        "source_observation_id": {"type": ["string", "null"]},
+        "status": {"const": "PUBLISHED"},
+        "designation": {"enum": ["PAPER", "RESEARCH"]},
+        "idempotency_key": {
+          "type": "string",
+          "pattern": "^opidem_[0-9a-f]{64}$"
+        },
+        "provenance": {"type": "object"},
+        "schema_version": {"const": 1},
+        "record_kind": {"const": "OFFICIAL_PICK"}
+      }
+    }
+  }
+}

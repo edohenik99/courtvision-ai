@@ -379,3 +379,27 @@ def test_api_keys_are_not_exposed_in_logs_or_summary(tmp_path: Path) -> None:
     assert secret not in log_text
     assert secret not in json_text
     assert "apiKey=[MASKED]" in log_text
+
+
+def test_pipeline_restores_caller_working_directory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    caller_directory = tmp_path / "caller"
+    repo_root = tmp_path / "repository"
+    caller_directory.mkdir()
+    paths = _paths(repo_root)
+    _write_master(paths.master_csv, [])
+    monkeypatch.chdir(caller_directory)
+
+    result = run_pipeline(
+        paths=paths,
+        runner=FakeRunner(),
+        run_id="20260710_033000",
+        started_at=datetime(2026, 7, 10, 3, 30),
+        today=date(2026, 7, 10),
+        target_dates=["2026-07-09"],
+        skip_git=True,
+    )
+
+    assert result.exit_code == 0
+    assert Path.cwd() == caller_directory
