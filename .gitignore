@@ -89,3 +89,7 @@ tools/theoddsapi_current_hr_probe.py
 tools/theoddsapi_clean_hr_probe.py
 tools/theoddsapi_2025_historical_hr_probe.py
 tools/__pycache__/
+data/lifecycle/
+lifecycle_stabilization_baseline_hashes.csv
+prediction_entrypoint_scan.csv
+prediction_entrypoint_scan.txt
