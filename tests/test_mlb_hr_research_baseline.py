@@ -686,6 +686,59 @@ def test_lifecycle_enabled_zero_pick_is_not_degraded_by_nba_observer(
     assert not invalid_output.exists()
 
 
+def test_lifecycle_enabled_realistic_mlb_prediction_resolves_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COURTVISION_LIFECYCLE_SHADOW", "1")
+    monkeypatch.setenv("COURTVISION_LIFECYCLE_OBSERVATIONS", "0")
+    bundle_dir, _ = _train_fixture_model(tmp_path)
+    odds_path = tmp_path / "prediction_odds.csv"
+    _write_csv(
+        odds_path,
+        ODDS_REQUIRED_COLUMNS,
+        [
+            _odds_row(
+                event_id="mlb-event-2026-07-04-nyy-tor",
+                player="Aaron Judge",
+                market="batter_home_runs_alternate",
+                point=0.5,
+                side="Over",
+                commence_time="2026-07-04T23:00:00Z",
+                snapshot_time="2026-07-04T15:00:00Z",
+            )
+        ],
+    )
+    output_dir = tmp_path / "mlb-lifecycle" / "2026-07-04"
+
+    result = generate_daily_research_predictions(
+        model_bundle_dir=bundle_dir,
+        odds_path=odds_path,
+        output_dir=output_dir,
+        target_date="2026-07-04",
+        prediction_timestamp="2026-07-04T17:00:00Z",
+        repository_root=tmp_path,
+    )
+
+    assert result.application_status == "PASS"
+    assert result.lifecycle_status == "PASS"
+    assert len(result.predictions) == 1
+    prediction = result.predictions[0]
+    assert prediction["event_id"] == "mlb-event-2026-07-04-nyy-tor"
+    assert prediction["market_key"] == "batter_home_runs_alternate"
+    assert prediction["point"] == "0.5"
+    reports = list(
+        (tmp_path / "data" / "lifecycle" / "reconciliation").rglob(
+            "*.json"
+        )
+    )
+    assert len(reports) == 1
+    report = json.loads(reports[0].read_text(encoding="utf-8"))["report"]
+    assert report["status"] == "PASS"
+    assert report["unresolved_identity_count"] == 0
+    assert report["matched_row_count"] == 1
+
+
 def test_cli_overrides_failure_status_and_protected_no_op(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

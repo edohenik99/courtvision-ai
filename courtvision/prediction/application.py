@@ -5,9 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from contextlib import nullcontext
 from datetime import date, datetime, timezone
+import errno
 import json
 import os
 from pathlib import Path
+import socket
 import sys
 from typing import Any, Callable, Mapping, Protocol
 from uuid import uuid4
@@ -32,6 +34,12 @@ class PredictionRequestError(ValueError):
 
 class PredictionRunConflictError(RuntimeError):
     """Raised when another process owns the same sport/date run lock."""
+
+
+PREDICTION_LOCK_STALE_SECONDS_ENV = (
+    "COURTVISION_PREDICTION_LOCK_STALE_SECONDS"
+)
+DEFAULT_PREDICTION_LOCK_STALE_SECONDS = 6 * 60 * 60
 
 
 @dataclass(slots=True)
@@ -261,45 +269,331 @@ class ShadowPredictionLifecycle:
 
 
 class PredictionRunLock:
-    """Create-exclusive lock protecting one sport/date/mode publication."""
+    """Create-exclusive lock with conservative, claimed stale recovery.
 
-    def __init__(self, path: Path, *, run_id: str) -> None:
+    Same-host locks are reclaimed only when their recorded PID is
+    demonstrably dead. Corrupt metadata must exceed
+    ``COURTVISION_PREDICTION_LOCK_STALE_SECONDS`` (six hours by default).
+    Valid cross-host locks require operator recovery because their process
+    liveness cannot be established locally.
+    """
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        run_id: str,
+        sport: str = "unknown",
+        mode: str = "unknown",
+        prediction_date: str = "unknown",
+        stale_after_seconds: float | None = None,
+        hostname: str | None = None,
+    ) -> None:
         self.path = path
         self.run_id = run_id
+        self.sport = str(sport)
+        self.mode = str(mode)
+        self.prediction_date = str(prediction_date)
+        self.hostname = str(hostname or socket.gethostname())
+        self.stale_after_seconds = (
+            float(stale_after_seconds)
+            if stale_after_seconds is not None
+            else self._configured_stale_seconds()
+        )
+        if self.stale_after_seconds <= 0:
+            raise ValueError("prediction lock stale threshold must be positive")
+        self._owner_token = uuid4().hex
         self._fd: int | None = None
+
+    @staticmethod
+    def _configured_stale_seconds() -> float:
+        raw = os.environ.get(PREDICTION_LOCK_STALE_SECONDS_ENV, "").strip()
+        if not raw:
+            return float(DEFAULT_PREDICTION_LOCK_STALE_SECONDS)
+        try:
+            value = float(raw)
+        except ValueError:
+            return float(DEFAULT_PREDICTION_LOCK_STALE_SECONDS)
+        return (
+            value
+            if value > 0
+            else float(DEFAULT_PREDICTION_LOCK_STALE_SECONDS)
+        )
+
+    @property
+    def _reclamation_path(self) -> Path:
+        return self.path.with_name(f"{self.path.name}.reclaim")
+
+    def _metadata(self, *, owner_token: str, role: str) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "role": role,
+            "owner_token": owner_token,
+            "run_id": self.run_id,
+            "pid": os.getpid(),
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+            "hostname": self.hostname,
+            "sport": self.sport,
+            "mode": self.mode,
+            "prediction_date": self.prediction_date,
+        }
+
+    def _create_owned_file(
+        self,
+        path: Path,
+        *,
+        owner_token: str,
+        role: str,
+    ) -> int:
+        fd = os.open(
+            str(path),
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+        )
+        payload = (
+            json.dumps(
+                self._metadata(owner_token=owner_token, role=role),
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode("utf-8")
+        try:
+            written = 0
+            while written < len(payload):
+                count = os.write(fd, payload[written:])
+                if count <= 0:
+                    raise OSError("short write while creating prediction lock")
+                written += count
+            os.fsync(fd)
+        except Exception:
+            os.close(fd)
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            raise
+        return fd
+
+    @staticmethod
+    def _read_metadata(
+        path: Path,
+    ) -> tuple[dict[str, Any] | None, os.stat_result | None]:
+        try:
+            snapshot = path.stat()
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
+            try:
+                return None, path.stat()
+            except OSError:
+                return None, None
+        return (
+            payload if isinstance(payload, dict) else None,
+            snapshot,
+        )
+
+    @staticmethod
+    def _structured_owner(
+        metadata: Mapping[str, Any] | None,
+    ) -> tuple[int, str] | None:
+        if metadata is None:
+            return None
+        pid = metadata.get("pid")
+        hostname = metadata.get("hostname")
+        required_text = (
+            metadata.get("run_id"),
+            metadata.get("created_at_utc"),
+            hostname,
+            metadata.get("sport"),
+            metadata.get("mode"),
+            metadata.get("prediction_date"),
+            metadata.get("owner_token"),
+        )
+        if (
+            isinstance(pid, bool)
+            or not isinstance(pid, int)
+            or pid <= 0
+            or any(not isinstance(value, str) or not value.strip()
+                   for value in required_text)
+        ):
+            return None
+        try:
+            created = datetime.fromisoformat(
+                str(metadata["created_at_utc"])
+            )
+            date.fromisoformat(str(metadata["prediction_date"]))
+        except ValueError:
+            return None
+        if created.tzinfo is None:
+            return None
+        return pid, str(hostname)
+
+    @staticmethod
+    def _process_is_alive(pid: int) -> bool | None:
+        if pid == os.getpid():
+            return True
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError as exc:
+            if exc.errno in {errno.ESRCH, errno.EINVAL}:
+                return False
+            if getattr(exc, "winerror", None) in {87, 1168}:
+                return False
+            if exc.errno == errno.EPERM:
+                return True
+            return None
+        return True
+
+    def _stale_snapshot(self, path: Path) -> os.stat_result | None:
+        metadata, snapshot = self._read_metadata(path)
+        if snapshot is None:
+            return None
+        owner = self._structured_owner(metadata)
+        if owner is not None:
+            pid, hostname = owner
+            if hostname.casefold() != self.hostname.casefold():
+                return None
+            return (
+                snapshot
+                if self._process_is_alive(pid) is False
+                else None
+            )
+        age_seconds = max(
+            0.0,
+            datetime.now(timezone.utc).timestamp() - snapshot.st_mtime,
+        )
+        return (
+            snapshot
+            if age_seconds >= self.stale_after_seconds
+            else None
+        )
+
+    @staticmethod
+    def _same_snapshot(
+        left: os.stat_result,
+        right: os.stat_result,
+    ) -> bool:
+        return (
+            left.st_dev,
+            left.st_ino,
+            left.st_size,
+            left.st_mtime_ns,
+        ) == (
+            right.st_dev,
+            right.st_ino,
+            right.st_size,
+            right.st_mtime_ns,
+        )
+
+    def _unlink_if_unchanged(
+        self,
+        path: Path,
+        snapshot: os.stat_result,
+    ) -> bool:
+        try:
+            current = path.stat()
+            if not self._same_snapshot(snapshot, current):
+                return False
+            path.unlink()
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+
+    def _remove_if_owned(self, path: Path, owner_token: str) -> None:
+        metadata, snapshot = self._read_metadata(path)
+        if (
+            snapshot is None
+            or metadata is None
+            or metadata.get("owner_token") != owner_token
+        ):
+            return
+        self._unlink_if_unchanged(path, snapshot)
+
+    def _clear_stale_reclamation_claim(self) -> bool:
+        if not self._reclamation_path.exists():
+            return True
+        snapshot = self._stale_snapshot(self._reclamation_path)
+        if snapshot is None:
+            return False
+        return self._unlink_if_unchanged(
+            self._reclamation_path,
+            snapshot,
+        )
+
+    def _reclaim_and_acquire(self) -> bool:
+        stale_lock = self._stale_snapshot(self.path)
+        if stale_lock is None:
+            return False
+
+        claim_token = uuid4().hex
+        claim_fd: int | None = None
+        for _attempt in range(2):
+            if not self._clear_stale_reclamation_claim():
+                return False
+            try:
+                claim_fd = self._create_owned_file(
+                    self._reclamation_path,
+                    owner_token=claim_token,
+                    role="reclamation",
+                )
+                break
+            except FileExistsError:
+                continue
+        if claim_fd is None:
+            return False
+        os.close(claim_fd)
+
+        try:
+            stale_lock = self._stale_snapshot(self.path)
+            if stale_lock is not None:
+                if not self._unlink_if_unchanged(self.path, stale_lock):
+                    return False
+            elif self.path.exists():
+                return False
+            try:
+                self._fd = self._create_owned_file(
+                    self.path,
+                    owner_token=self._owner_token,
+                    role="prediction",
+                )
+            except FileExistsError:
+                return False
+            return True
+        finally:
+            self._remove_if_owned(
+                self._reclamation_path,
+                claim_token,
+            )
 
     def __enter__(self) -> "PredictionRunLock":
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            self._fd = os.open(
-                str(self.path),
-                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+        if not self._clear_stale_reclamation_claim():
+            raise PredictionRunConflictError(
+                f"prediction run lock reclamation already active for "
+                f"{self.path}"
             )
-            os.write(
-                self._fd,
-                json.dumps(
-                    {
-                        "run_id": self.run_id,
-                        "pid": os.getpid(),
-                        "created_at_utc": datetime.now(
-                            timezone.utc
-                        ).isoformat(),
-                    }
-                ).encode("utf-8"),
+        try:
+            self._fd = self._create_owned_file(
+                self.path,
+                owner_token=self._owner_token,
+                role="prediction",
             )
         except FileExistsError as exc:
-            raise PredictionRunConflictError(
-                f"prediction run already active for lock {self.path}"
-            ) from exc
+            if not self._reclaim_and_acquire():
+                raise PredictionRunConflictError(
+                    f"prediction run already active for lock {self.path}"
+                ) from exc
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
         if self._fd is not None:
             os.close(self._fd)
-        try:
-            self.path.unlink()
-        except FileNotFoundError:
-            pass
+            self._fd = None
+        self._remove_if_owned(self.path, self._owner_token)
 
 
 class PredictionApplicationService:
@@ -443,7 +737,13 @@ class PredictionApplicationService:
         publication = PublicationOutcome()
         manifest_path: Path | None = None
         lock_context = (
-            PredictionRunLock(lock_path, run_id=run_id)
+            PredictionRunLock(
+                lock_path,
+                run_id=run_id,
+                sport=sport,
+                mode=mode,
+                prediction_date=prediction_date,
+            )
             if bool(
                 normalized_request.metadata.get(
                     "lock_enabled",
@@ -566,6 +866,7 @@ class PredictionApplicationService:
 
 
 __all__ = [
+    "DEFAULT_PREDICTION_LOCK_STALE_SECONDS",
     "DisabledPredictionLifecycle",
     "LifecycleRunState",
     "PredictionApplicationService",
@@ -573,5 +874,6 @@ __all__ = [
     "PredictionRequestError",
     "PredictionRunConflictError",
     "PredictionRunLock",
+    "PREDICTION_LOCK_STALE_SECONDS_ENV",
     "ShadowPredictionLifecycle",
 ]

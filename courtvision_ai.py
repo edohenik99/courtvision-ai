@@ -8473,6 +8473,7 @@ def _write_grading_outputs(
     verbose_outputs: bool = False,
 ) -> dict[str, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
+    grading_artifact_caller = "courtvision_ai.py:_write_grading_outputs"
     incremental_graded = _finalized_grading_rows(_cli_dataframe(grading_df))
     cumulative_feedback_rows, cumulative_final_rows = _read_cumulative_grading_feedback(out_dir, prediction_date)
     graded = cumulative_final_rows.copy() if not cumulative_final_rows.empty else incremental_graded.copy()
@@ -8511,10 +8512,28 @@ def _write_grading_outputs(
     )
 
     if not preserved_existing:
-        _write_dataframe(paths["grading_results"], graded)
-        paths["grading_summary_json"].write_text(json.dumps(summary_payload, indent=2), encoding="utf-8")
+        _write_prediction_dataframe(
+            paths["grading_results"],
+            graded,
+            requested_prediction_date=prediction_date,
+            caller=grading_artifact_caller,
+            artifact_label="grading_results",
+        )
+        _write_prediction_json(
+            paths["grading_summary_json"],
+            summary_payload,
+            requested_prediction_date=prediction_date,
+            caller=grading_artifact_caller,
+            artifact_label="grading_summary_json",
+        )
         if "grading_summary_csv" in paths:
-            _write_dataframe(paths["grading_summary_csv"], summary_df)
+            _write_prediction_dataframe(
+                paths["grading_summary_csv"],
+                summary_df,
+                requested_prediction_date=prediction_date,
+                caller=grading_artifact_caller,
+                artifact_label="grading_summary_csv",
+            )
 
     grading_results_rows_written = existing_results_rows if preserved_existing else int(len(graded))
     grading_summary_rows_written = existing_summary_rows if preserved_existing else summary_rows
@@ -8535,17 +8554,17 @@ def _write_grading_outputs(
     _log_kelly_metadata_diagnostics(out_dir, prediction_date, diagnostics_graded)
     for line in kelly_perf_log_lines(summary_payload.get("kelly_decision_performance", {})):
         print(line, flush=True)
-    paths["player_points_calibration_json"].write_text(
-        json.dumps(
-            {
-                "prediction_date": prediction_date,
-                "player_points_calibration": points_calibration_payload,
-                "player_points_uplift_audit": points_uplift_audit_payload,
-                "elite_filter_replay": replay_summary_payload,
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
+    _write_prediction_json(
+        paths["player_points_calibration_json"],
+        {
+            "prediction_date": prediction_date,
+            "player_points_calibration": points_calibration_payload,
+            "player_points_uplift_audit": points_uplift_audit_payload,
+            "elite_filter_replay": replay_summary_payload,
+        },
+        requested_prediction_date=prediction_date,
+        caller=grading_artifact_caller,
+        artifact_label="player_points_calibration_json",
     )
     return paths
 

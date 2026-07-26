@@ -217,6 +217,23 @@ and prediction date. A concurrent attempt fails with
 `PredictionRunConflictError`. The Streamlit button also uses a session guard
 and is disabled while its request is running.
 
+Each lock records its run ID, PID, UTC creation time, hostname, sport, mode,
+and prediction date. On the same host, a lock is reclaimed only when its PID
+is demonstrably no longer alive. Corrupt or incomplete lock metadata is
+reclaimed only after six hours by default. Set
+`COURTVISION_PREDICTION_LOCK_STALE_SECONDS` to a positive number of seconds to
+change that conservative threshold. Valid locks from another host are never
+reclaimed automatically because local PID checks cannot prove that owner is
+dead.
+
+Stale reclamation uses an adjacent create-exclusive reclamation claim so
+competing retries cannot both take ownership. A live lock, a recent corrupt
+lock, or a lock whose liveness cannot be established continues to raise
+`PredictionRunConflictError`. Operators should first verify that no prediction
+process is running; manual deletion is reserved for a valid cross-host lock
+whose owner is known to be gone. Normal and exceptional context-manager exits
+remove only the lock owned by that run.
+
 The lock does not replace artifact guards. Existing NBA protections and MLB
 create-once behavior still reject silent overwrites unless the established
 explicit force option applies.

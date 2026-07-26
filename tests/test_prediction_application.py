@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
+import socket
+import time
 
 import pandas as pd
 import pytest
@@ -20,8 +23,10 @@ from courtvision.prediction import (
     PredictionApplicationService,
     PredictionEngineRegistry,
     PredictionRequest,
+    PredictionRunConflictError,
     ShadowPredictionLifecycle,
 )
+from courtvision.prediction.application import PredictionRunLock
 from courtvision.prediction.publication import publish_dataframe, publish_text
 
 
@@ -245,6 +250,225 @@ def test_publication_failure_rolls_back_every_staged_prediction_file(
         )
     assert not (tmp_path / f"player_predictions_{prediction_date}.csv").exists()
     assert not (tmp_path / f"game_predictions_{prediction_date}.csv").exists()
+
+
+def test_late_publication_failure_rolls_back_prediction_and_grading_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prediction_date = "2026-07-25"
+    initial_outputs = _operator_fixture(prediction_date)
+    initial_outputs["grading_results"] = pd.DataFrame(
+        [
+            {
+                "prediction_date": prediction_date,
+                "player_name": "Fixture Player A",
+                "market_type": "player_points",
+                "selection": "over",
+                "sportsbook_line": 24.5,
+                "actual_value": 27,
+                "result": "win",
+                "graded_result": "win",
+            }
+        ]
+    )
+    paths = courtvision_ai._write_cli_outputs(
+        out_dir=tmp_path,
+        prediction_date=prediction_date,
+        fit_metrics=None,
+        prediction_outputs=initial_outputs,
+    )
+    restored_paths = {
+        label: Path(paths[label])
+        for label in ("player_predictions", "grading_results")
+    }
+    restored_bytes = {
+        label: path.read_bytes() for label, path in restored_paths.items()
+    }
+    removed_paths = {
+        label: Path(paths[label])
+        for label in ("game_predictions", "grading_summary_json")
+    }
+    for path in removed_paths.values():
+        path.unlink()
+
+    failed_outputs = _operator_fixture(prediction_date)
+    failed_outputs["grading_results"] = pd.DataFrame(
+        [
+            {
+                "prediction_date": prediction_date,
+                "player_name": "Fixture Player B",
+                "market_type": "player_rebounds",
+                "selection": "under",
+                "sportsbook_line": 8.5,
+                "actual_value": 10,
+                "result": "loss",
+                "graded_result": "loss",
+            }
+        ]
+    )
+    runtime = type(
+        "Runtime",
+        (),
+        {"_predict_internal": lambda self, date: failed_outputs},
+    )()
+    original_write_text = courtvision_ai._write_prediction_text
+
+    def fail_final_report_write(*args: object, **kwargs: object) -> None:
+        if kwargs.get("artifact_label") == "top_plays_report":
+            raise RuntimeError("injected late staged write failure")
+        original_write_text(*args, **kwargs)
+
+    monkeypatch.setattr(
+        courtvision_ai,
+        "_write_prediction_text",
+        fail_final_report_write,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="injected late staged write failure",
+    ):
+        courtvision_ai.run_nba_prediction_application(
+            runtime,
+            prediction_date=prediction_date,
+            out_dir=tmp_path,
+            force_output_overwrite=True,
+            entrypoint="grading-rollback-test",
+            hooks_loader=lambda: None,
+        )
+
+    for label, path in restored_paths.items():
+        assert path.read_bytes() == restored_bytes[label]
+    for path in removed_paths.values():
+        assert not path.exists()
+    assert not list(tmp_path.rglob("*.stage"))
+    assert not list(tmp_path.rglob("*.backup"))
+
+
+def _lock_metadata(
+    *,
+    run_id: str,
+    pid: int,
+    owner_token: str,
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "role": "prediction",
+        "owner_token": owner_token,
+        "run_id": run_id,
+        "pid": pid,
+        "created_at_utc": "2026-07-25T12:00:00+00:00",
+        "hostname": socket.gethostname(),
+        "sport": "nba",
+        "mode": "production",
+        "prediction_date": "2026-07-25",
+    }
+
+
+def _prediction_lock(
+    path: Path,
+    *,
+    run_id: str,
+    stale_after_seconds: float = 60,
+) -> PredictionRunLock:
+    return PredictionRunLock(
+        path,
+        run_id=run_id,
+        sport="nba",
+        mode="production",
+        prediction_date="2026-07-25",
+        stale_after_seconds=stale_after_seconds,
+    )
+
+
+def test_active_prediction_lock_remains_protected_and_records_metadata(
+    tmp_path: Path,
+) -> None:
+    lock_path = tmp_path / "prediction.lock"
+    with _prediction_lock(lock_path, run_id="active-run"):
+        metadata = json.loads(lock_path.read_text(encoding="utf-8"))
+        assert metadata["pid"] == os.getpid()
+        assert metadata["sport"] == "nba"
+        assert metadata["mode"] == "production"
+        assert metadata["prediction_date"] == "2026-07-25"
+        assert metadata["hostname"] == socket.gethostname()
+        assert metadata["created_at_utc"]
+        with pytest.raises(PredictionRunConflictError):
+            with _prediction_lock(lock_path, run_id="contending-run"):
+                pass
+
+
+def test_dead_pid_prediction_lock_is_reclaimed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock_path = tmp_path / "prediction.lock"
+    lock_path.write_text(
+        json.dumps(
+            _lock_metadata(
+                run_id="dead-run",
+                pid=999_999_999,
+                owner_token="dead-owner",
+            )
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        PredictionRunLock,
+        "_process_is_alive",
+        staticmethod(lambda pid: False),
+    )
+
+    with _prediction_lock(lock_path, run_id="replacement-run"):
+        metadata = json.loads(lock_path.read_text(encoding="utf-8"))
+        assert metadata["run_id"] == "replacement-run"
+
+    assert not lock_path.exists()
+    assert not lock_path.with_name(f"{lock_path.name}.reclaim").exists()
+
+
+def test_old_corrupt_prediction_lock_is_reclaimed(tmp_path: Path) -> None:
+    lock_path = tmp_path / "prediction.lock"
+    lock_path.write_text("{corrupt", encoding="utf-8")
+    old_time = time.time() - 120
+    os.utime(lock_path, (old_time, old_time))
+
+    with _prediction_lock(lock_path, run_id="replacement-run"):
+        assert json.loads(lock_path.read_text(encoding="utf-8"))[
+            "run_id"
+        ] == "replacement-run"
+
+    assert not lock_path.exists()
+
+
+def test_recent_corrupt_prediction_lock_is_not_reclaimed(
+    tmp_path: Path,
+) -> None:
+    lock_path = tmp_path / "prediction.lock"
+    lock_path.write_text("{corrupt", encoding="utf-8")
+
+    with pytest.raises(PredictionRunConflictError):
+        with _prediction_lock(lock_path, run_id="blocked-run"):
+            pass
+
+    assert lock_path.read_text(encoding="utf-8") == "{corrupt"
+
+
+def test_prediction_lock_normal_and_exception_exits_remove_owned_lock(
+    tmp_path: Path,
+) -> None:
+    normal_path = tmp_path / "normal.lock"
+    with _prediction_lock(normal_path, run_id="normal-run"):
+        assert normal_path.exists()
+    assert not normal_path.exists()
+
+    exception_path = tmp_path / "exception.lock"
+    with pytest.raises(RuntimeError, match="injected"):
+        with _prediction_lock(exception_path, run_id="exception-run"):
+            assert exception_path.exists()
+            raise RuntimeError("injected")
+    assert not exception_path.exists()
 
 
 def test_real_lifecycle_initialization_records_request_and_verifies_chain(

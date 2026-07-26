@@ -103,6 +103,79 @@ def numeric_column_or_default(
     return cast(pd.Series, pd.to_numeric(series, errors="coerce").fillna(default))
 
 
+def classify_prediction_application_outcome(
+    *,
+    status: str,
+    lifecycle_status: str,
+    run_id: str,
+) -> tuple[str, str]:
+    """Return the Streamlit message level and copy for a structured result."""
+
+    normalized_status = str(status).strip().upper() or "UNKNOWN"
+    normalized_lifecycle = (
+        str(lifecycle_status).strip().upper() or "UNKNOWN"
+    )
+    run_suffix = f" Run ID: {run_id}" if str(run_id).strip() else ""
+
+    if normalized_status == "FAILED":
+        return (
+            "error",
+            f"Prediction run failed. Lifecycle status: "
+            f"{normalized_lifecycle}.{run_suffix}",
+        )
+    if normalized_status == "PROTECTED_NO_OP":
+        return (
+            "info",
+            "Existing prediction artifacts were protected; no files were "
+            f"changed.{run_suffix}",
+        )
+    if normalized_status in {"NO_DATA", "NO_ELIGIBLE_PREDICTIONS"}:
+        outcome = (
+            "No prediction data was available."
+            if normalized_status == "NO_DATA"
+            else "No predictions met the existing eligibility rules."
+        )
+        level = (
+            "info"
+            if normalized_lifecycle in {"PASS", "DISABLED"}
+            else "warning"
+        )
+        lifecycle_copy = (
+            ""
+            if normalized_lifecycle in {"PASS", "DISABLED"}
+            else f" Lifecycle status: {normalized_lifecycle}."
+        )
+        return level, f"{outcome}{lifecycle_copy}{run_suffix}"
+    if normalized_status in {"SUCCESS", "PASS"}:
+        if normalized_lifecycle == "PASS":
+            return (
+                "success",
+                f"Prediction publication completed.{run_suffix}",
+            )
+        if normalized_lifecycle == "DISABLED":
+            return (
+                "info",
+                "Prediction publication completed with shadow lifecycle "
+                f"disabled.{run_suffix}",
+            )
+        return (
+            "warning",
+            "Prediction artifacts were published, but lifecycle status is "
+            f"{normalized_lifecycle}.{run_suffix}",
+        )
+    if normalized_status == "DEGRADED":
+        return (
+            "warning",
+            "Prediction run completed in a degraded state. Lifecycle status: "
+            f"{normalized_lifecycle}.{run_suffix}",
+        )
+    return (
+        "warning",
+        f"Prediction run returned status {normalized_status} with lifecycle "
+        f"status {normalized_lifecycle}.{run_suffix}",
+    )
+
+
 APP_TITLE = "CourtVision"
 APP_SUBTITLE = "Player props, team totals, moneyline, history, calibration."
 DEMO_MODE = os.getenv("COURTVISION_DEMO") == "1"
@@ -3252,20 +3325,14 @@ def main() -> None:
                     "latest_prediction_application"
                 ] = application_payload
                 bump_history_refresh()
-                if (
-                    application_result.status == "SUCCESS"
-                    and application_result.lifecycle_status == "PASS"
-                ):
-                    st.success(
-                        "Prediction publication completed. "
-                        f"Run ID: {application_result.run_id}"
+                message_level, message = (
+                    classify_prediction_application_outcome(
+                        status=application_result.status,
+                        lifecycle_status=application_result.lifecycle_status,
+                        run_id=application_result.run_id,
                     )
-                else:
-                    st.warning(
-                        "Prediction artifacts were published, but lifecycle "
-                        f"status is {application_result.lifecycle_status}. "
-                        f"Run ID: {application_result.run_id}"
-                    )
+                )
+                getattr(st, message_level)(message)
                 st.json(application_payload)
             except PredictionRunConflictError as exc:
                 st.warning(

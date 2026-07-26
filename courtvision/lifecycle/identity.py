@@ -74,6 +74,7 @@ _MARKET_ALIASES = {
     "threes": "player_3pt_made",
     "three_pointers": "player_3pt_made",
     "batter_home_runs": "player_home_runs",
+    "batter_home_runs_alternate": "player_home_runs",
     "home_runs": "player_home_runs",
     "player_hr": "player_home_runs",
 }
@@ -347,21 +348,31 @@ def derive_publication_identity(
 
 def identity_inputs_from_board_row(row: Mapping[str, Any]) -> dict[str, Any]:
     return {
-        "event_id": row.get("canonical_event_id") or row.get("game_id"),
+        "event_id": (
+            row.get("canonical_event_id")
+            or row.get("game_id")
+            or row.get("event_id")
+        ),
         "participant_id": (
             row.get("canonical_player_id")
             or row.get("canonical_participant_id")
             or row.get("player_id")
             or row.get("entity_id")
+            or row.get("normalized_player_name")
         ),
         "market_id": (
             row.get("canonical_market_id")
             or row.get("market_type")
             or row.get("market")
             or row.get("prop_type")
+            or row.get("market_key")
         ),
         "selection": row.get("selection") or row.get("side"),
-        "line": row.get("sportsbook_line") or row.get("line"),
+        "line": (
+            row.get("sportsbook_line")
+            or row.get("line")
+            or row.get("point")
+        ),
         "bookmaker": (
             row.get("canonical_bookmaker_id")
             or row.get("bookmaker")
