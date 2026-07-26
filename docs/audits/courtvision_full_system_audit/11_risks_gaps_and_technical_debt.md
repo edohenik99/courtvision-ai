@@ -4,18 +4,19 @@
 
 | Finding | Status | Implemented here | Still open |
 | --- | --- | --- | --- |
-| F-001 | Foundation implemented | Canonical frozen `OfficialPick`, UUID-based immutable `pick_id`, separate deterministic idempotency key, explicit promotion, transactional append-only lifecycle publication, provenance, replay/conflict handling, and strict read validation. | Existing settlement/grading consumers still need migration to `pick_id`; no historical IDs were guessed or backfilled. |
-| F-002 | Partially implemented | Market observations and model candidates have explicit non-pick record kinds; official-pick report inputs exclude them; mixed official-pick ROI inputs fail; observation/candidate performance labels forbid betting-ROI claims; MLB/NBA runtimes do not auto-promote. | Existing MLB observation grader remains an observation-analysis workflow and has not been rewritten; official settlement and end-to-end official-pick performance reporting remain future work. |
+| F-001 | Foundation implemented | Canonical frozen `OfficialPick` plus append-only `OfficialPickSettlement` and settlement-correction v1 contracts; UUID identities; deterministic transition idempotency; explicit promotion/settlement; transactional lifecycle publication; provenance; replay/conflict handling; strict read validation. | Existing settlement/grading consumers still need migration to the new service; no historical IDs or settlements were guessed or backfilled. |
+| F-002 | Partially implemented | Market observations and model candidates have explicit non-pick record kinds; official-pick reports exclude them; settlement reporting reconstructs verified ledger state and joins only by `pick_id`; MLB/NBA runtimes do not auto-promote or auto-settle. | Existing MLB observation grader remains separately labeled observation analysis; no automated official-pick performance workflow or paper trial is active. |
+| F-005 | Foundation implemented | A strict unresolved MLB official-pick reconciliation queue model requires a committed MLB `pick_id`, rejects final/non-pick rows, and freezes the reason vocabulary. | Queue persistence, result-provider integration, automation, operator SLA, and legacy workbook migration remain open. |
 
 ## Findings Register
 
 | ID | Severity | Area | Finding | Impact | Recommendation |
 | --- | --- | --- | --- | --- | --- |
-| F-001 | Critical | Pick identity | A universal immutable official `pick_id` foundation now exists, but legacy settlement/grading consumers are not yet migrated. | Duplicate grading and ambiguous settlement remain possible outside the new boundary. | Migrate settlement and official reports to require committed `pick_id`. |
+| F-001 | Critical | Pick identity | Universal immutable official-pick identity and append-only settlement foundations now exist, but legacy settlement/grading consumers are not migrated. | Duplicate grading and ambiguous settlement remain possible outside the new boundary. | Migrate selected paper/research consumers to the explicit service without historical backfill. |
 | F-002 | Critical | MLB HR | MLB HR market observations are explicitly non-picks in the new boundary, but legacy observation grading/reporting still exists. | Legacy outputs can remain misleading if presented without the required observation-performance label. | Route MLB reports through the shared record-kind/report boundary; do not promote historical observations. |
 | F-003 | Critical | Evidence | Prospective evidence is incomplete for trustworthy live/bankroll claims. | Live-pick trust is not established. | Run controlled paper trials with frozen manifests and settlement. |
 | F-004 | High | Bankroll | Kelly staking exists before sufficient forward evidence is proven. | Real-money recommendations could outpace validation. | Keep Kelly gated/disabled for unproven sports and require evidence gates. |
-| F-005 | High | MLB results | HR settlement is hybrid and can leave blanks/void candidates/manual review. | Not every row is ready to grade; silent gaps can skew summaries. | Add explicit reconciliation queue and unresolved-row SLA. |
+| F-005 | High | MLB results | A strict official-pick reconciliation model now exists, but the legacy HR settlement workflow remains hybrid and can leave blanks/void candidates/manual review. | Not every legacy row is ready to grade; silent gaps can skew summaries. | Persist and operate the official-pick queue, then add an unresolved-row SLA without converting observations to picks. |
 | F-006 | High | Automation | Some wrappers pull mutable `main` before running. | A scheduled run can use unexpected code. | Pin commit/version per run and record manifest. |
 | F-007 | High | Automation | Hard-coded Windows paths and interpreter assumptions exist. | Portability and deployment reliability are limited. | Centralize runtime config and remove machine-specific paths. |
 | F-008 | High | API quota | MLB collector consumes paid API credits and lacks a process-level lock. | Duplicate scheduled runs or `--force` can waste credits. | Add lock file, dry-run defaults, and quota alerting. |
@@ -60,11 +61,12 @@
 ## Top Five Blockers To Trustworthy Live Picks
 
 1. Prospective evidence is incomplete.
-2. Official pick identity is first-class for new explicit promotions, but
-   settlement and legacy consumers are not migrated.
+2. Official pick identity and append-only settlement are first-class for new
+   explicit paper/research events, but legacy consumers are not migrated.
 3. MLB HR still grades market observations; those rows remain non-picks and must
    be labeled observation performance.
-4. Result settlement remains partially manual/hybrid.
+4. Existing result collection remains partially manual/hybrid; the new
+   reconciliation queue is not yet persisted or automated.
 5. Automation/config/deployment is too local and mutable for strong auditability.
 
 ## Top Five Blockers To Full Automation

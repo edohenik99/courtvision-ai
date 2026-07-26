@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "courtvision.lifecycle.official_pick_settled_payload.v1",
+  "title": "CourtVision official pick settled payload v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "payload_schema_version",
+    "settlement_policy_version",
+    "settlement_authority",
+    "settlement_content_sha256",
+    "official_pick_settlement"
+  ],
+  "properties": {
+    "payload_schema_version": {"const": 1},
+    "settlement_policy_version": {"const": "1.0"},
+    "settlement_authority": {"const": "PAPER_RESEARCH_ONLY"},
+    "settlement_content_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "official_pick_settlement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "settlement_id",
+        "pick_id",
+        "settlement_status",
+        "outcome",
+        "final_score",
+        "result_evidence",
+        "settled_at",
+        "result_source",
+        "source_record_id",
+        "settlement_run_id",
+        "idempotency_key",
+        "provenance",
+        "schema_version",
+        "record_kind"
+      ],
+      "properties": {
+        "settlement_id": {
+          "type": "string",
+          "pattern": "^settlement_[0-9a-f]{32}$"
+        },
+        "pick_id": {
+          "type": "string",
+          "pattern": "^pick_[0-9a-f]{32}$"
+        },
+        "settlement_status": {"enum": ["UNRESOLVED", "FINAL"]},
+        "outcome": {
+          "enum": ["WIN", "LOSS", "PUSH", "VOID", "CANCELLED", "UNRESOLVED"]
+        },
+        "final_score": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "string", "minLength": 1},
+            {"type": "object", "minProperties": 1}
+          ]
+        },
+        "result_evidence": {"type": "object", "minProperties": 1},
+        "settled_at": {"type": "string", "format": "date-time"},
+        "result_source": {"type": "string", "minLength": 1},
+        "source_record_id": {"type": "string", "minLength": 1},
+        "settlement_run_id": {"type": "string", "minLength": 1},
+        "idempotency_key": {
+          "type": "string",
+          "pattern": "^opsetidem_[0-9a-f]{64}$"
+        },
+        "provenance": {
+          "type": "object",
+          "required": [
+            "settlement_service",
+            "settlement_actor",
+            "settlement_policy_version"
+          ],
+          "properties": {
+            "settlement_service": {
+              "const": "courtvision.official_picks.settlement"
+            },
+            "settlement_actor": {"type": "string", "minLength": 1},
+            "settlement_policy_version": {"const": "1.0"}
+          }
+        },
+        "schema_version": {"const": 1},
+        "record_kind": {"const": "SETTLED_OFFICIAL_PICK"}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"settlement_status": {"const": "UNRESOLVED"}}
+          },
+          "then": {
+            "properties": {
+              "outcome": {"const": "UNRESOLVED"},
+              "final_score": {"type": "null"}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"settlement_status": {"const": "FINAL"}}
+          },
+          "then": {
+            "properties": {
+              "outcome": {
+                "enum": ["WIN", "LOSS", "PUSH", "VOID", "CANCELLED"]
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

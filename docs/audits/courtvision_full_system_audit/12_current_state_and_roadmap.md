@@ -6,11 +6,11 @@
 | --- | ---: | --- | --- | --- |
 | Repository organization | 3 | Structured package plus many scripts/docs/tests. | Overlapping active/legacy paths. | Entrypoint registry and deprecation cleanup. |
 | Data ingestion | 4 | BallDontLie and MLB HR collectors with recent logs. | Provider/quota monitoring not centralized. | Health checks and alerting. |
-| Data quality | 3 | Validators and coverage checkers exist. | Manual/unresolved states remain. | Reconciliation queue and strict schemas. |
+| Data quality | 3 | Validators, coverage checkers, and a strict unresolved MLB official-pick queue model exist. | Queue persistence/automation and legacy manual states remain. | Operated reconciliation queue with SLA. |
 | Prediction capability | 3 | NBA active scoring; MLB HR research scoring. | Prospective validity not proven. | Frozen forward trials. |
 | Pick generation | 3 | NBA elite board plus a universal explicit paper/research `OfficialPick` schema/service and immutable ledger now exist. | No runtime automatically promotes candidates; no controlled paper-pick workflow is active. | Add an audited paper-trial promotion call site. |
-| Result collection | 3 | MLB StatsAPI filler and NBA grading scripts. | Hybrid/manual gaps. | Fully auditable settlement. |
-| Grading | 3 | NBA and MLB graders. | Observation vs pick ambiguity. | Separate performance ledgers. |
+| Result collection | 3 | MLB StatsAPI filler, NBA grading scripts, and append-only official-pick settlement contracts/service. | Existing collectors/graders are not migrated; hybrid/manual gaps remain. | Audited paper/research integration through committed `pick_id`. |
+| Grading | 3 | NBA/MLB graders plus an official-pick-only settlement dataset. | Legacy observation grading remains separate and no automated official-pick workflow is active. | Migrate selected paper reports without mixing observations. |
 | Backtesting | 3 | MLB and NBA validation/backtest scripts. | Not all artifacts verified in this audit. | Reproducible backtest registry. |
 | Automation | 3 | PS wrappers and logs. | Local/mutable scheduler assumptions. | Pinned manifests, locks, alerts. |
 | Monitoring | 2 | Logs/operator cards. | No central run health view. | Run-status dashboard/notifications. |
@@ -33,6 +33,7 @@
 | Consolidated MLB nightly finalizer | commit `811a078`, nightly summary 2026-07-11 |
 | Evidence automation scripts | recent commits and `tools/run_courtvision_evidence_*.ps1` |
 | MLB HR historical research contracts | `docs/COURTVISION_MLB_HR_*` |
+| Official pick identity and settlement foundations | `courtvision/official_picks/`, `docs/architecture/official_pick_lifecycle.md`, `docs/architecture/official_pick_settlement_lifecycle.md` |
 
 ## Current Validation Phase
 
@@ -70,10 +71,10 @@ Exit criteria: immutable `pick_id`, official pick table, pick-vs-observation sep
 
 Foundation status (2026-07-26): the immutable contract, explicit promotion
 service, append-only lifecycle ledger, non-pick record kinds, report filtering,
-and settlement-reference boundary are implemented. The phase is not complete:
-no candidate pipeline auto-promotes (by design), no controlled paper trial is
-active, settlement is not migrated to `pick_id`, and no forward-validation claim
-is made.
+append-only settlement/correction service, official-pick-only settlement
+dataset, and strict MLB unresolved queue model are implemented. The phase is not
+complete: no candidate pipeline auto-promotes, no grading pipeline auto-settles,
+no controlled paper trial is active, and no forward-validation claim is made.
 
 ### Phase E: Automate Monitoring And Reporting
 
@@ -101,12 +102,14 @@ Exit criteria: read-only API/JSON surface for run status, official picks, settle
 
 ## What Should Be Built Next
 
-1. Wire an audited, operator-controlled paper-promotion call site to selected
+1. Review and approve the official-pick settlement contract and transition
+   policy before wiring any runtime consumer.
+2. Wire an audited, operator-controlled paper-promotion call site to selected
    candidates without changing model selection logic.
-2. Implement append-only settlement events that require a committed `pick_id`.
-3. Migrate official-pick reports to the strict official-only dataset boundary
-   while retaining separately labeled observation analysis.
-4. Add the MLB HR settlement reconciliation queue.
+3. Persist and operate the MLB official-pick reconciliation queue with an
+   unresolved-row SLA; do not migrate sportsbook observations.
+4. Migrate one paper/research settlement consumer and report to the strict
+   `pick_id` boundary while retaining separately labeled observation analysis.
 5. Execute a forward paper trial with frozen manifests.
 6. Add automation health/status monitoring.
 7. Keep live and bankroll promotion gated until evidence requirements are met.
