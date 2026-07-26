@@ -41,7 +41,11 @@ _REPO_ROOT = Path(__file__).resolve().parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from courtvision_ai import CourtVisionAI  # noqa: E402  (engine — untouched)
+from courtvision_ai import (  # noqa: E402
+    CourtVisionAI,
+    run_nba_prediction_application,
+)
+from courtvision.prediction import PredictionRunConflictError  # noqa: E402
 from courtvision.streamlit_review_artifacts import (  # noqa: E402
     PHASE15_READINESS_LABELS,
     extract_quality_review_statuses,
@@ -632,6 +636,8 @@ def init_state() -> None:
     st.session_state.setdefault("last_prediction_date", None)
     st.session_state.setdefault("active_view", "today")
     st.session_state.setdefault("missing_files", set())
+    st.session_state.setdefault("prediction_run_in_progress", False)
+    st.session_state.setdefault("latest_prediction_application", None)
 
 
 def bump_history_refresh() -> None:
@@ -3149,7 +3155,15 @@ def main() -> None:
         if mutation_actions_enabled(VIEW_ONLY_DEMO_MODE):
             fit_clicked = st.button("Fit / Refresh Model", width="stretch")
             predict_clicked = st.button(
-                "Run Predictions", type="primary", width="stretch"
+                "Run Predictions",
+                type="primary",
+                width="stretch",
+                disabled=bool(
+                    st.session_state.get(
+                        "prediction_run_in_progress",
+                        False,
+                    )
+                ),
             )
             reload_history_clicked = st.button("Reload History", width="stretch")
         else:
@@ -3207,13 +3221,65 @@ def main() -> None:
 
     if predict_clicked:
         with st.spinner("Scoring markets..."):
+            st.session_state["prediction_run_in_progress"] = True
             try:
-                outputs = ai.predict(prediction_date_text)
+                application_result = run_nba_prediction_application(
+                    ai,
+                    prediction_date=prediction_date_text,
+                    out_dir=resolved_out_dir_text,
+                    entrypoint="courtvision_streamlit_app.py",
+                    command=(
+                        "courtvision_streamlit_app.py prediction action "
+                        f"--prediction-date {prediction_date_text}"
+                    ),
+                )
+                outputs = dict(application_result.outputs)
                 st.session_state["latest_prediction"] = outputs
+                application_payload = {
+                    "run_id": application_result.run_id,
+                    "sport": application_result.sport,
+                    "prediction_date": application_result.prediction_date,
+                    "status": application_result.status,
+                    "lifecycle_status": application_result.lifecycle_status,
+                    "artifact_paths": dict(
+                        application_result.artifact_paths
+                    ),
+                    "failure_classification": (
+                        application_result.failure_classification
+                    ),
+                }
+                st.session_state[
+                    "latest_prediction_application"
+                ] = application_payload
                 bump_history_refresh()
+                if (
+                    application_result.status == "SUCCESS"
+                    and application_result.lifecycle_status == "PASS"
+                ):
+                    st.success(
+                        "Prediction publication completed. "
+                        f"Run ID: {application_result.run_id}"
+                    )
+                else:
+                    st.warning(
+                        "Prediction artifacts were published, but lifecycle "
+                        f"status is {application_result.lifecycle_status}. "
+                        f"Run ID: {application_result.run_id}"
+                    )
+                st.json(application_payload)
+            except PredictionRunConflictError as exc:
+                st.warning(
+                    "A prediction run is already active for this sport/date. "
+                    f"{exc}"
+                )
             except Exception as exc:
-                st.error(f"Prediction run failed: {exc}")
+                st.error(
+                    "Prediction run failed "
+                    f"({type(exc).__name__}): {exc}"
+                )
                 render_action_debug_details(traceback_text=traceback.format_exc())
+            finally:
+                st.session_state["prediction_run_in_progress"] = False
 
     runtime_payload = load_runtime_prediction_cached(
         resolved_out_dir_text,
