@@ -24,9 +24,11 @@ from courtvision.official_picks import (
     OfficialPickSettlementTransitionError,
     correct_official_pick_settlement,
     promote_candidate_to_official_pick,
+    read_official_picks,
     read_official_pick_settlement_corrections,
     read_official_pick_settlement_state,
     read_official_pick_settlements,
+    review_official_pick_candidate,
     settle_official_pick,
 )
 from courtvision.official_picks.mlb_reconciliation import (
@@ -76,6 +78,7 @@ class _SettlementOverrides(TypedDict, total=False):
 def _candidate(*, sport: str = "basketball", **updates: object) -> dict[str, object]:
     if sport == "baseball":
         value: dict[str, object] = {
+            "record_kind": "MODEL_CANDIDATE",
             "sport": "baseball",
             "league": "MLB",
             "event_id": "mlb-game-001",
@@ -92,10 +95,12 @@ def _candidate(*, sport: str = "basketball", **updates: object) -> dict[str, obj
             "model_name": "mlb-hr-research",
             "model_version": "baseline-v1",
             "run_id": "mlb-run-001",
+            "designation": "PAPER",
             "source_candidate_id": "mlb-candidate-001",
         }
     else:
         value = {
+            "record_kind": "MODEL_CANDIDATE",
             "sport": "basketball",
             "league": "NBA",
             "event_id": "nba-game-001",
@@ -112,6 +117,7 @@ def _candidate(*, sport: str = "basketball", **updates: object) -> dict[str, obj
             "model_name": "nba-props",
             "model_version": "2026.07",
             "run_id": "nba-run-001",
+            "designation": "PAPER",
             "source_candidate_id": "nba-candidate-001",
         }
     value.update(updates)
@@ -125,9 +131,20 @@ def _promote(
     sport: str = "basketball",
     transaction_id: str = "official-pick-promotion-test-001",
 ):
-    return promote_candidate_to_official_pick(
-        _candidate(sport=sport),
+    candidate = _candidate(sport=sport)
+    review = review_official_pick_candidate(
+        candidate,
+        operator_decision="APPROVED",
+        operator_id="operator.settlement-test",
+        decision_reason="settlement fixture approval",
+        review_run_id=f"settlement-review-{sport}",
         lifecycle_root=tmp_path / "data" / "lifecycle",
+        clock=FixedClock(PUBLISHED_AT),
+    )
+    return promote_candidate_to_official_pick(
+        candidate,
+        lifecycle_root=tmp_path / "data" / "lifecycle",
+        review_id=review.review.review_id,
         clock=FixedClock(PUBLISHED_AT),
         pick_id_factory=lambda: pick_id,
         transaction_id_factory=lambda: transaction_id,
@@ -334,7 +351,7 @@ def test_settlement_publication_rolls_back_completely_on_failure(
 
     root = tmp_path / "data" / "lifecycle"
     assert read_official_pick_settlements(root) == ()
-    assert len(list(root.rglob("COMPLETE"))) == 1
+    assert len(list(root.rglob("COMPLETE"))) == 2
     assert not (root / ".writer.lock").exists()
 
 
@@ -540,10 +557,10 @@ def test_official_settlement_report_joins_only_committed_pick_ids(
         source_rows=sources,
     )
 
-    assert [item.pick.pick_id for item in dataset.settled_rows] == [
+    assert [item.pick_id for item in dataset.settled_rows] == [
         NBA_PICK_ID
     ]
-    assert [item.pick.pick_id for item in dataset.unresolved_rows] == [
+    assert [item.pick_id for item in dataset.unresolved_rows] == [
         MLB_PICK_ID
     ]
     assert dataset.excluded_observation_count == 1
@@ -554,11 +571,28 @@ def test_official_settlement_report_joins_only_committed_pick_ids(
     dataset_dict = dataclasses.asdict(dataset)
     assert "bankroll_calculated" not in dataset_dict
     assert "kelly_calculated" not in dataset_dict
-    serialized = json.dumps(dataset.to_rows()).lower()
-    assert "bankroll_calculated" not in serialized
-    assert "kelly_calculated" not in serialized
-    assert "bankroll" not in serialized
-    assert "kelly" not in serialized
+    rows = dataset.to_rows()
+    prohibited_keys = {
+        "bankroll",
+        "kelly_fraction",
+        "stake",
+        "wager_amount",
+        "expected_profit",
+        "roi",
+        "live_bet",
+        "wagering_metadata",
+        "execution_instructions",
+    }
+    assert all(
+        not (set(row) & prohibited_keys)
+        and all(
+            value is None
+            or isinstance(value, (str, int, float, bool))
+            for value in row.values()
+        )
+        for row in rows
+    )
+    serialized = json.dumps(rows).lower()
     assert "pick_ffffffffffffffffffffffffffffffff" not in serialized
 
 

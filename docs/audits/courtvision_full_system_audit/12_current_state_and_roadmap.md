@@ -8,7 +8,7 @@
 | Data ingestion | 4 | BallDontLie and MLB HR collectors with recent logs. | Provider/quota monitoring not centralized. | Health checks and alerting. |
 | Data quality | 3 | Validators, coverage checkers, and a strict unresolved MLB official-pick queue model exist. | Queue persistence/automation and legacy manual states remain. | Operated reconciliation queue with SLA. |
 | Prediction capability | 3 | NBA active scoring; MLB HR research scoring. | Prospective validity not proven. | Frozen forward trials. |
-| Pick generation | 3 | NBA elite board plus a universal explicit paper/research `OfficialPick` schema/service and immutable ledger now exist. | No runtime automatically promotes candidates; no controlled paper-pick workflow is active. | Add an audited paper-trial promotion call site. |
+| Pick generation | 3 | NBA elite board plus immutable operator review, active v2-only `OfficialPick`, isolated legacy-v1 DTO, writer-locked batch authorization, one-review/one-pick enforcement, recomputed promotion identity, exact provenance, lexically writer-owned single-commit transactions, authorization mappings with no writable instance storage, and explicit paper/research publication now exist. | `operator_id` is asserted rather than authenticated; operational interfaces and automatic promotion remain disabled; no prospective paper trial is active. | Add authenticated operator identity before building an interface, then run a controlled prospective paper trial. |
 | Result collection | 3 | MLB StatsAPI filler, NBA grading scripts, and append-only official-pick settlement contracts/service. | Existing collectors/graders are not migrated; hybrid/manual gaps remain. | Audited paper/research integration through committed `pick_id`. |
 | Grading | 3 | NBA/MLB graders plus an official-pick-only settlement dataset. | Legacy observation grading remains separate and no automated official-pick workflow is active. | Migrate selected paper reports without mixing observations. |
 | Backtesting | 3 | MLB and NBA validation/backtest scripts. | Not all artifacts verified in this audit. | Reproducible backtest registry. |
@@ -16,7 +16,7 @@
 | Monitoring | 2 | Logs/operator cards. | No central run health view. | Run-status dashboard/notifications. |
 | Reproducibility | 2 | Manifests exist for some flows. | Local ignored data and mutable `main`. | Artifact storage and version pinning. |
 | Documentation | 3 | Extensive docs. | Current/planned/stale docs mixed. | Documentation status index. |
-| Testing | 3 | 293 tests, many targeted areas. | Current pass/fail not verified. | CI-gated canonical tests. |
+| Testing | 3 | Targeted lifecycle, identity, settlement, prediction, and architecture suites exist. | Local passes do not establish production or live readiness; CI remains the release gate. | CI-gated canonical, root-coverage, stable, type, compile, and schema checks. |
 | Security | 3 | `.env` pattern and no secret values exposed in audit. | `.env.example` confusion; local secrets. | Config hardening and secret scanning. |
 | Deployment readiness | 2 | Windows scripts work locally. | Path/interpreter/scheduler assumptions. | Deployment runbook and environment abstraction. |
 | Scalability | 2 | Multiple scripts can grow. | No service boundary or central store. | Orchestrator + normalized data model. |

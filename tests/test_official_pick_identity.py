@@ -1,28 +1,35 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Barrier
+from typing import Any
 from uuid import uuid4
 
 import pytest
 
+import courtvision.official_picks as official_picks_package
 import courtvision.official_picks.service as official_pick_service
+from courtvision.lifecycle.canonical import deterministic_id, format_utc_datetime
 from courtvision.lifecycle.clock import FixedClock
 from courtvision.lifecycle.models import EventType
 from courtvision.lifecycle.writer import read_segment_events
 from courtvision.official_picks import (
-    LiveOfficialPickBlockedError,
+    OfficialPick,
     OfficialPickConflictError,
     OfficialPickLedgerIntegrityError,
+    OfficialPickPromotionAuthorizationError,
     OfficialPickPromotionRequest,
+    OfficialPickReviewValidationError,
     OfficialPickValidationError,
     promote_candidate_to_official_pick,
     promote_observation_to_official_pick,
     read_official_pick,
+    read_official_pick_candidate_reviews,
     read_official_picks,
+    review_official_pick_candidate,
 )
 from courtvision.official_picks.reporting import (
     OfficialPickReportBoundaryError,
@@ -33,6 +40,10 @@ from courtvision.official_picks.reporting import (
     observation_performance_metadata,
     require_official_pick_roi_rows,
     validate_settlement_pick_reference,
+)
+from courtvision.official_picks.legacy_v1 import (
+    LegacyOfficialPickV1,
+    parse_legacy_official_pick_v1,
 )
 
 
@@ -45,6 +56,7 @@ TRANSACTION_ID = "official-pick-promotion-test-001"
 def _nba_candidate(**updates: object) -> dict[str, object]:
     value: dict[str, object] = {
         "sport": "basketball",
+        "record_kind": "MODEL_CANDIDATE",
         "league": "NBA",
         "event_id": "nba-game-001",
         "event_start_time": EVENT_START,
@@ -60,6 +72,7 @@ def _nba_candidate(**updates: object) -> dict[str, object]:
         "model_name": "nba-props",
         "model_version": "2026.07",
         "run_id": "nba-run-001",
+        "designation": "PAPER",
         "source_candidate_id": "nba-candidate-001",
         "provenance": {
             "git_commit_sha": "a" * 40,
@@ -97,17 +110,46 @@ def _mlb_observation(**updates: object) -> dict[str, object]:
 def _promote(
     tmp_path: Path,
     request: dict[str, object] | OfficialPickPromotionRequest | None = None,
-    **kwargs: object,
+    **kwargs: Any,
 ):
-    options: dict[str, object] = {
-        "lifecycle_root": tmp_path / "data" / "lifecycle",
+    candidate = request or _nba_candidate()
+    lifecycle_root = tmp_path / "data" / "lifecycle"
+    source_candidate_id = str(
+        getattr(candidate, "source_candidate_id", None)
+        if isinstance(candidate, OfficialPickPromotionRequest)
+        else candidate.get("source_candidate_id")
+    )
+    existing_review = next(
+        (
+            item
+            for item in read_official_pick_candidate_reviews(lifecycle_root)
+            if item.source_candidate_id == source_candidate_id
+        ),
+        None,
+    )
+    review_id = (
+        existing_review.review_id
+        if existing_review is not None
+        else review_official_pick_candidate(
+            candidate,
+            operator_decision="APPROVED",
+            operator_id="operator.identity-test",
+            decision_reason="identity fixture approval",
+            review_run_id="identity-review-run-001",
+            lifecycle_root=lifecycle_root,
+            clock=FixedClock(NOW),
+        ).review.review_id
+    )
+    options: dict[str, Any] = {
+        "lifecycle_root": lifecycle_root,
+        "review_id": review_id,
         "clock": FixedClock(NOW),
         "pick_id_factory": lambda: PICK_ID,
         "transaction_id_factory": lambda: TRANSACTION_ID,
     }
     options.update(kwargs)
     return promote_candidate_to_official_pick(
-        request or _nba_candidate(),
+        candidate,
         **options,
     )
 
@@ -151,11 +193,20 @@ def test_rereading_published_pick_preserves_pick_id(tmp_path: Path) -> None:
 def test_publication_rereads_and_verifies_committed_pick(
     tmp_path: Path, monkeypatch
 ) -> None:
-    original_commit = official_pick_service.LifecycleWriter.commit_segment
+    review_official_pick_candidate(
+        _nba_candidate(),
+        operator_decision="APPROVED",
+        operator_id="operator.identity-test",
+        decision_reason="identity fixture approval",
+        review_run_id="identity-review-run-001",
+        lifecycle_root=tmp_path / "data" / "lifecycle",
+        clock=FixedClock(NOW),
+    )
+    original_read = official_pick_service._official_pick_event_in_segment
 
-    def commit_then_tamper(self, *args, **kwargs):
-        commit = original_commit(self, *args, **kwargs)
-        events_path = commit.segment_directory / "events.jsonl"
+    def read_then_tamper(*args, **kwargs):
+        event = original_read(*args, **kwargs)
+        events_path = Path(args[0]) / "events.jsonl"
         events_path.write_text(
             events_path.read_text(encoding="utf-8").replace(
                 '"model_version":"2026.07"',
@@ -163,12 +214,12 @@ def test_publication_rereads_and_verifies_committed_pick(
             ),
             encoding="utf-8",
         )
-        return commit
+        return event
 
     monkeypatch.setattr(
-        official_pick_service.LifecycleWriter,
-        "commit_segment",
-        commit_then_tamper,
+        official_pick_service,
+        "_official_pick_event_in_segment",
+        read_then_tamper,
     )
 
     with pytest.raises(
@@ -193,6 +244,15 @@ def test_duplicate_promotion_is_protected_no_op(tmp_path: Path) -> None:
 
 
 def test_concurrent_duplicate_promotion_commits_one_pick(tmp_path: Path) -> None:
+    review = review_official_pick_candidate(
+        _nba_candidate(),
+        operator_decision="APPROVED",
+        operator_id="operator.identity-test",
+        decision_reason="identity fixture approval",
+        review_run_id="identity-review-run-001",
+        lifecycle_root=tmp_path / "data" / "lifecycle",
+        clock=FixedClock(NOW),
+    )
     barrier = Barrier(2)
 
     def racing_pick_id() -> str:
@@ -203,6 +263,7 @@ def test_concurrent_duplicate_promotion_commits_one_pick(tmp_path: Path) -> None
         return promote_candidate_to_official_pick(
             _nba_candidate(),
             lifecycle_root=tmp_path / "data" / "lifecycle",
+            review_id=review.review.review_id,
             clock=FixedClock(NOW),
             pick_id_factory=racing_pick_id,
         )
@@ -222,7 +283,10 @@ def test_conflicting_duplicate_promotion_fails(tmp_path: Path) -> None:
     first = _promote(tmp_path)
     before = _snapshot(first.ledger_segment_directory)
 
-    with pytest.raises(OfficialPickConflictError, match="IDEMPOTENCY_CONFLICT"):
+    with pytest.raises(
+        OfficialPickPromotionAuthorizationError,
+        match="frozen snapshot",
+    ):
         _promote(tmp_path, _nba_candidate(odds=-105))
 
     assert _snapshot(first.ledger_segment_directory) == before
@@ -305,18 +369,15 @@ def test_nba_candidate_requires_explicit_promotion(tmp_path: Path) -> None:
 def test_mlb_observation_can_only_become_pick_through_explicit_service(
     tmp_path: Path,
 ) -> None:
-    result = promote_observation_to_official_pick(
-        _mlb_observation(),
-        lifecycle_root=tmp_path / "data" / "lifecycle",
-        designation="RESEARCH",
-        clock=FixedClock(NOW),
-        pick_id_factory=lambda: PICK_ID,
-        transaction_id_factory=lambda: TRANSACTION_ID,
-    )
-
-    assert result.pick.source_observation_id == "sportsbook-quote-001"
-    assert result.pick.source_candidate_id is None
-    assert result.pick.designation == "RESEARCH"
+    with pytest.raises(
+        OfficialPickPromotionAuthorizationError,
+        match="MARKET_OBSERVATION",
+    ):
+        promote_observation_to_official_pick(
+            _mlb_observation(),
+            lifecycle_root=tmp_path / "data" / "lifecycle",
+            designation="RESEARCH",
+        )
 
 
 def test_publication_rolls_back_completely_on_failure(tmp_path: Path) -> None:
@@ -329,7 +390,7 @@ def test_publication_rolls_back_completely_on_failure(tmp_path: Path) -> None:
 
     lifecycle_root = tmp_path / "data" / "lifecycle"
     assert read_official_picks(lifecycle_root) == ()
-    assert list(lifecycle_root.rglob("COMPLETE")) == []
+    assert len(list(lifecycle_root.rglob("COMPLETE"))) == 1
     assert not (lifecycle_root / ".writer.lock").exists()
 
 
@@ -352,7 +413,9 @@ def test_official_pick_paths_never_change_process_working_directory(
         _promote(tmp_path / "rollback", failure_hook=fail_at)
     assert Path.cwd() == caller_directory
 
-    with pytest.raises(OfficialPickValidationError):
+    with pytest.raises(
+        (OfficialPickValidationError, OfficialPickReviewValidationError)
+    ):
         _promote(
             tmp_path / "validation",
             _nba_candidate(event_id=""),
@@ -380,7 +443,10 @@ def test_existing_official_pick_cannot_be_overwritten(tmp_path: Path) -> None:
     lifecycle_root = tmp_path / "data" / "lifecycle"
     before = _snapshot(lifecycle_root)
 
-    with pytest.raises(OfficialPickConflictError):
+    with pytest.raises(
+        OfficialPickPromotionAuthorizationError,
+        match="frozen snapshot",
+    ):
         _promote(tmp_path, _nba_candidate(line=25.5))
 
     assert _snapshot(lifecycle_root) == before
@@ -428,8 +494,11 @@ def test_settlement_reference_requires_valid_committed_pick_id(
 
 
 def test_live_and_bankroll_output_remain_blocked(tmp_path: Path) -> None:
-    with pytest.raises(LiveOfficialPickBlockedError, match="blocked"):
-        _promote(tmp_path, designation="LIVE")
+    with pytest.raises(
+        OfficialPickReviewValidationError,
+        match="PAPER or RESEARCH",
+    ):
+        _promote(tmp_path, _nba_candidate(designation="LIVE"))
 
     assert read_official_picks(tmp_path / "data" / "lifecycle") == ()
     assert not (tmp_path / "outputs").exists()
@@ -459,7 +528,9 @@ def test_schema_rejects_incomplete_identity_before_ledger(
     tmp_path: Path,
     updates: dict[str, object],
 ) -> None:
-    with pytest.raises(OfficialPickValidationError):
+    with pytest.raises(
+        (OfficialPickValidationError, OfficialPickReviewValidationError)
+    ):
         _promote(tmp_path, _nba_candidate(**updates))
 
     assert read_official_picks(tmp_path / "data" / "lifecycle") == ()
@@ -473,3 +544,122 @@ def test_legacy_adapter_labels_without_guessing_pick_id() -> None:
     assert adapted["record_kind"] == "LEGACY_UNIDENTIFIED"
     assert adapted["official_pick_identity_status"] == "legacy_unidentified"
     assert "pick_id" not in adapted
+
+
+def test_reporting_revalidates_already_constructed_active_pick(
+    tmp_path: Path,
+) -> None:
+    promoted = _promote(tmp_path)
+    forged = replace(promoted.pick)
+    object.__setattr__(forged, "schema_version", 1)
+
+    with pytest.raises(
+        OfficialPickReportBoundaryError,
+        match="active v2",
+    ):
+        build_official_pick_report_dataset((forged,))
+
+
+def test_schema_v1_parsing_is_isolated_from_active_runtime() -> None:
+    source_id = "synthetic-compat-candidate"
+    idempotency_key = deterministic_id(
+        "opidem",
+        "courtvision.official_pick_promotion.v1",
+        {
+            "promotion_policy_version": "1.0",
+            "sport": "basketball",
+            "league": "NBA",
+            "source_type": "CANDIDATE",
+            "source_id": source_id,
+            "designation": "PAPER",
+        },
+    )
+    compat_mapping = {
+        "pick_id": "pick_11111111111111111111111111111111",
+        "sport": "basketball",
+        "league": "NBA",
+        "event_id": "synthetic-compat-event",
+        "event_start_time": format_utc_datetime(EVENT_START),
+        "prediction_date": "2026-07-26",
+        "market_key": "basketball:nba:market:player_points",
+        "selection": "OVER",
+        "line": "24.5",
+        "odds": -110,
+        "sportsbook": "draftkings",
+        "player_id": "basketball:nba:participant:synthetic-player",
+        "player_name": "Synthetic Player",
+        "team_id": "basketball:nba:team:synthetic-team",
+        "model_name": "synthetic-compat-model",
+        "model_version": "v1",
+        "run_id": "synthetic-compat-run",
+        "published_at": format_utc_datetime(NOW),
+        "source_candidate_id": source_id,
+        "source_observation_id": None,
+        "status": "PUBLISHED",
+        "designation": "PAPER",
+        "idempotency_key": idempotency_key,
+        "provenance": {
+            "source_type": "CANDIDATE",
+            "source_id": source_id,
+            "promotion_service": "courtvision.official_picks",
+            "promotion_actor": "compatibility.test",
+            "promotion_policy_version": "1.0",
+        },
+        "schema_version": 1,
+        "record_kind": "OFFICIAL_PICK",
+    }
+
+    with pytest.raises(
+        OfficialPickValidationError,
+        match="active OfficialPick requires schema_version 2",
+    ):
+        OfficialPick(
+            pick_id="pick_11111111111111111111111111111111",
+            sport="basketball",
+            league="NBA",
+            event_id="synthetic-compat-event",
+            event_start_time=EVENT_START,
+            prediction_date="2026-07-26",
+            market_key="player_points",
+            selection="OVER",
+            line="24.5",
+            odds=-110,
+            sportsbook="DraftKings",
+            player_id="synthetic-player",
+            player_name="Synthetic Player",
+            team_id="synthetic-team",
+            model_name="synthetic-compat-model",
+            model_version="v1",
+            run_id="synthetic-compat-run",
+            published_at=NOW,
+            source_candidate_id=source_id,
+            status="PUBLISHED",
+            designation="PAPER",
+            idempotency_key=idempotency_key,
+            provenance=compat_mapping["provenance"],
+            schema_version=1,
+        )
+
+    parsed = parse_legacy_official_pick_v1(compat_mapping)
+    assert isinstance(parsed, LegacyOfficialPickV1)
+    assert parsed.to_dict() == compat_mapping
+    assert not isinstance(parsed, OfficialPick)
+    with pytest.raises(
+        OfficialPickValidationError,
+        match="active OfficialPick parsing requires schema_version 2",
+    ):
+        OfficialPick.from_dict(compat_mapping)
+    with pytest.raises(OfficialPickReportBoundaryError):
+        build_official_pick_report_dataset((compat_mapping,))
+    with pytest.raises(OfficialPickReportBoundaryError):
+        build_official_pick_report_dataset((parsed,))  # type: ignore[arg-type]
+    with pytest.raises(OfficialPickSettlementReferenceError):
+        validate_settlement_pick_reference(
+            parsed,  # type: ignore[arg-type]
+            lifecycle_root=Path("unused"),
+        )
+    assert not hasattr(official_picks_package, "LegacyOfficialPickV1")
+    assert not hasattr(
+        official_picks_package,
+        "parse_legacy_official_pick_v1",
+    )

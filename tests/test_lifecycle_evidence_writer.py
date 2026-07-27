@@ -159,6 +159,7 @@ def test_dead_stale_lock_can_be_recovered_after_owner_death_verification(
                 "lock_id": "dead",
                 "pid": 99999999,
                 "hostname": socket.gethostname(),
+                "root": str(tmp_path.resolve()),
                 "prediction_run_id": "old",
                 "command": "old",
                 "acquired_at_utc": "2026-07-25T15:00:00.000000Z",
