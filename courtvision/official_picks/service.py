@@ -7,10 +7,14 @@ from datetime import datetime
 import json
 from pathlib import Path
 import platform
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence, cast
 from uuid import uuid4
 
-from courtvision.lifecycle.canonical import deterministic_id, payload_sha256
+from courtvision.lifecycle.canonical import (
+    canonical_equal,
+    canonical_equality_sha256,
+    deterministic_id,
+)
 from courtvision.lifecycle.clock import Clock, SystemClock
 from courtvision.lifecycle.models import (
     EventEnvelope,
@@ -32,12 +36,25 @@ from courtvision.lifecycle.writer import (
 from courtvision.official_picks.contracts import (
     OFFICIAL_PICK_PAYLOAD_SCHEMA_VERSION,
     OFFICIAL_PICK_PROMOTION_POLICY_VERSION,
+    OFFICIAL_PICK_SCHEMA_VERSION,
     OfficialPick,
+    OfficialPickCandidateReview,
     OfficialPickDesignation,
+    OfficialPickOperatorDecision,
     OfficialPickPromotionRequest,
+    OfficialPickReviewStatus,
     OfficialPickSourceType,
     OfficialPickStatus,
     OfficialPickValidationError,
+)
+from courtvision.official_picks.authorization import (
+    OFFICIAL_PICK_PROCESS_TRANSACTION_LOCK,
+    OfficialPickAuthorizationValidationError,
+    validate_committed_schema_v2_review_authorization,
+    validate_schema_v2_review_authorization,
+)
+from courtvision.official_picks.review import (
+    read_official_pick_candidate_review,
 )
 
 
@@ -59,6 +76,10 @@ class OfficialPickLedgerIntegrityError(OfficialPickPromotionError):
 
 class LiveOfficialPickBlockedError(OfficialPickPromotionError):
     """Live official picks are not authorized in this foundation phase."""
+
+
+class OfficialPickPromotionAuthorizationError(OfficialPickPromotionError):
+    """Promotion lacks a matching committed approved operator review."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,21 +104,26 @@ def generate_promotion_transaction_id() -> str:
 def official_pick_idempotency_key(
     request: OfficialPickPromotionRequest | Mapping[str, Any],
     *,
-    designation: str | OfficialPickDesignation = OfficialPickDesignation.PAPER,
+    review_id: str,
 ) -> str:
     candidate = _request(request)
-    source_type, source_id = _source_reference(candidate)
-    designation_value = _designation(designation)
+    _, source_id = _source_reference(candidate)
+    review_reference = str(review_id).strip()
+    if not review_reference:
+        raise OfficialPickPromotionAuthorizationError(
+            "promotion requires a committed approved review_id"
+        )
     return deterministic_id(
         "opidem",
-        "courtvision.official_pick_promotion.v1",
+        "courtvision.official_pick_promotion.v2",
         {
             "promotion_policy_version": OFFICIAL_PICK_PROMOTION_POLICY_VERSION,
-            "sport": str(candidate.sport).strip().lower(),
-            "league": str(candidate.league).strip().upper(),
-            "source_type": source_type,
-            "source_id": source_id,
-            "designation": designation_value,
+            "review_id": review_reference,
+            "source_candidate_id": source_id,
+            "approved_designation": candidate.designation,
+            "candidate_snapshot_sha256": canonical_equality_sha256(
+                candidate.to_candidate_snapshot()
+            ),
         },
     )
 
@@ -106,33 +132,59 @@ def promote_candidate_to_official_pick(
     request: OfficialPickPromotionRequest | Mapping[str, Any],
     *,
     lifecycle_root: str | Path,
-    designation: str | OfficialPickDesignation = OfficialPickDesignation.PAPER,
-    promotion_actor: str = "courtvision.operator",
+    review_id: str | None = None,
+    promotion_actor: str | None = None,
     clock: Clock | None = None,
     pick_id_factory: PickIdFactory = generate_pick_id,
     transaction_id_factory: TransactionIdFactory = generate_promotion_transaction_id,
     failure_hook: FailureHook | None = None,
 ) -> OfficialPickPromotionResult:
-    """Explicitly promote one candidate or observation reference.
-
-    Nothing calls this service automatically. In particular, model boards and
-    sportsbook observations remain non-picks until an operator or audited
-    workflow invokes this function.
-    """
+    """Promote one candidate only through its committed approved review."""
 
     candidate = _request(request)
-    designation_value = _designation(designation)
+    designation_value = candidate.designation
     if designation_value == OfficialPickDesignation.LIVE.value:
         raise LiveOfficialPickBlockedError(
             "live official-pick designation is blocked; no live promotion gate is active"
         )
-    actor = str(promotion_actor).strip()
+    review_reference = str(review_id or "").strip()
+    if not review_reference:
+        raise OfficialPickPromotionAuthorizationError(
+            "promotion requires a committed approved review_id"
+        )
+    root = Path(lifecycle_root).resolve()
+    review = read_official_pick_candidate_review(root, review_reference)
+    if review is None:
+        raise OfficialPickPromotionAuthorizationError(
+            f"review_id is not committed: {review_reference}"
+        )
+    if review.review_status != OfficialPickReviewStatus.COMMITTED.value:
+        raise OfficialPickPromotionAuthorizationError(
+            "promotion review is not committed"
+        )
+    if review.operator_decision != OfficialPickOperatorDecision.APPROVED.value:
+        raise OfficialPickPromotionAuthorizationError(
+            "promotion requires an APPROVED operator review; committed "
+            f"decision is {review.operator_decision}"
+        )
+    if review.source_candidate_id != candidate.source_candidate_id:
+        raise OfficialPickPromotionAuthorizationError(
+            "review source_candidate_id does not match promotion candidate"
+        )
+    if not canonical_equal(
+        candidate.to_candidate_snapshot(),
+        review.candidate_snapshot,
+    ):
+        raise OfficialPickPromotionAuthorizationError(
+            "promotion candidate differs from the approved frozen snapshot"
+        )
+    actor = str(promotion_actor or review.operator_id).strip()
     if not actor:
         raise OfficialPickValidationError("promotion_actor is required")
     active_clock = clock or SystemClock()
-    root = Path(lifecycle_root)
     idempotency_key = official_pick_idempotency_key(
-        candidate, designation=designation_value
+        candidate,
+        review_id=review.review_id,
     )
 
     existing = _find_by_idempotency_key(root, idempotency_key)
@@ -140,8 +192,8 @@ def promote_candidate_to_official_pick(
         return _replay_result(
             existing,
             candidate=candidate,
-            designation=designation_value,
             promotion_actor=actor,
+            review=review,
         )
 
     published_at = active_clock.now()
@@ -149,10 +201,18 @@ def promote_candidate_to_official_pick(
         candidate,
         pick_id=pick_id_factory(),
         published_at=published_at,
-        designation=designation_value,
         idempotency_key=idempotency_key,
         promotion_actor=actor,
+        review=review,
     )
+    try:
+        validate_schema_v2_review_authorization(
+            pick,
+            review,
+            candidate=candidate,
+        )
+    except OfficialPickAuthorizationValidationError as exc:
+        raise OfficialPickPromotionAuthorizationError(str(exc)) from exc
     pick_id_owner = read_official_pick(root, pick.pick_id)
     if pick_id_owner is not None:
         raise OfficialPickConflictError(
@@ -174,13 +234,33 @@ def promote_candidate_to_official_pick(
         promotion_content_sha256=content_hash,
     )
     writer = LifecycleWriter(root, clock=active_clock)
+    replay_result: OfficialPickPromotionResult | None = None
+
+    def prepare_segment() -> tuple[
+        RunManifest,
+        tuple[EventEnvelope, ...],
+        tuple[Any, ...],
+    ] | None:
+        nonlocal replay_result
+        locked_existing = _find_by_idempotency_key(root, idempotency_key)
+        if locked_existing is not None:
+            replay_result = _replay_result(
+                locked_existing,
+                candidate=candidate,
+                promotion_actor=actor,
+                review=review,
+            )
+            return None
+        return manifest, (event,), ()
+
     try:
-        commit = writer.commit_segment(
-            manifest,
-            (event,),
-            failure_hook=failure_hook,
-            command="courtvision official-pick promote",
-        )
+        with OFFICIAL_PICK_PROCESS_TRANSACTION_LOCK:
+            commit = writer.run_locked_transaction(
+                prediction_run_id=transaction_id,
+                prepare=prepare_segment,
+                failure_hook=failure_hook,
+                command="courtvision official-pick promote",
+            )
     except IdempotencyConflictError as exc:
         raced = _find_by_idempotency_key(root, idempotency_key)
         if raced is None:
@@ -188,18 +268,27 @@ def promote_candidate_to_official_pick(
         return _replay_result(
             raced,
             candidate=candidate,
-            designation=designation_value,
             promotion_actor=actor,
+            review=review,
         )
     except LifecycleIntegrityError:
         raise
 
+    if commit is None:
+        if replay_result is None:
+            raise OfficialPickLedgerIntegrityError(
+                "locked promotion transaction completed without a result"
+            )
+        return replay_result
     persisted_event = _official_pick_event_in_segment(
         commit.segment_directory,
         idempotency_key,
         lifecycle_root=root,
     )
-    persisted = _event_pick(persisted_event)
+    persisted = _event_pick(
+        persisted_event,
+        lifecycle_root=root,
+    )
     event = persisted_event
     return OfficialPickPromotionResult(
         pick=persisted,
@@ -216,14 +305,12 @@ def promote_observation_to_official_pick(
     request: OfficialPickPromotionRequest | Mapping[str, Any],
     **kwargs: Any,
 ) -> OfficialPickPromotionResult:
-    """Named explicit call site for audited observation promotion."""
+    """Reject sportsbook observations at the operator-review boundary."""
 
-    candidate = _request(request)
-    if not candidate.source_observation_id or candidate.source_candidate_id:
-        raise OfficialPickValidationError(
-            "observation promotion requires only source_observation_id"
-        )
-    return promote_candidate_to_official_pick(candidate, **kwargs)
+    del request, kwargs
+    raise OfficialPickPromotionAuthorizationError(
+        "MARKET_OBSERVATION records cannot be promoted to OfficialPick"
+    )
 
 
 def read_official_picks(lifecycle_root: str | Path) -> tuple[OfficialPick, ...]:
@@ -231,11 +318,17 @@ def read_official_picks(lifecycle_root: str | Path) -> tuple[OfficialPick, ...]:
     records: list[OfficialPick] = []
     seen_ids: dict[str, OfficialPick] = {}
     seen_keys: dict[str, OfficialPick] = {}
+    seen_reviews: dict[str, OfficialPick] = {}
+    seen_candidates: dict[str, OfficialPick] = {}
     for segment in completed_segment_directories(root):
         for event in _verified_segment_events(segment, lifecycle_root=root):
             if event.event_type != EventType.OFFICIAL_PICK_PUBLISHED.value:
                 continue
-            pick = _event_pick(event)
+            pick = _event_pick(
+                event,
+                segment_directory=segment,
+                lifecycle_root=root,
+            )
             if pick.pick_id in seen_ids:
                 raise OfficialPickLedgerIntegrityError(
                     f"duplicate official pick_id in ledger: {pick.pick_id}"
@@ -245,12 +338,27 @@ def read_official_picks(lifecycle_root: str | Path) -> tuple[OfficialPick, ...]:
                     "duplicate official-pick idempotency key in ledger: "
                     f"{pick.idempotency_key}"
                 )
+            if pick.review_id is not None and pick.review_id in seen_reviews:
+                raise OfficialPickLedgerIntegrityError(
+                    "one approved review created multiple official picks: "
+                    f"{pick.review_id}"
+                )
+            if pick.source_candidate_id in seen_candidates:
+                raise OfficialPickLedgerIntegrityError(
+                    "one source candidate/review identity created multiple "
+                    f"official picks: {pick.source_candidate_id}"
+                )
             seen_ids[pick.pick_id] = pick
             seen_keys[pick.idempotency_key] = pick
+            if pick.review_id is not None:
+                seen_reviews[pick.review_id] = pick
+            if pick.source_candidate_id is not None:
+                seen_candidates[pick.source_candidate_id] = pick
             records.append(pick)
-    return tuple(
+    ordered = tuple(
         sorted(records, key=lambda item: (item.published_at, item.pick_id))
     )
+    return ordered
 
 
 def read_official_pick(
@@ -275,14 +383,6 @@ def _request(
     )
 
 
-def _designation(value: str | OfficialPickDesignation) -> str:
-    raw = value.value if isinstance(value, OfficialPickDesignation) else str(value)
-    normalized = raw.strip().upper()
-    if normalized not in {item.value for item in OfficialPickDesignation}:
-        raise OfficialPickValidationError("unsupported official-pick designation")
-    return normalized
-
-
 def _source_reference(
     request: OfficialPickPromotionRequest,
 ) -> tuple[str, str]:
@@ -291,22 +391,13 @@ def _source_reference(
         if request.source_candidate_id is not None
         else ""
     )
-    observation_id = (
-        str(request.source_observation_id).strip()
-        if request.source_observation_id is not None
-        else ""
-    )
-    if bool(candidate_id) == bool(observation_id):
+    if not candidate_id or request.source_observation_id is not None:
         raise OfficialPickValidationError(
-            "exactly one source_candidate_id or source_observation_id is required"
+            "promotion requires only source_candidate_id"
         )
-    if candidate_id:
-        if candidate_id.casefold() in {"unknown", "unresolved", "none", "null", "nan"}:
-            raise OfficialPickValidationError("source_candidate_id is unresolved")
-        return OfficialPickSourceType.CANDIDATE.value, candidate_id
-    if observation_id.casefold() in {"unknown", "unresolved", "none", "null", "nan"}:
-        raise OfficialPickValidationError("source_observation_id is unresolved")
-    return OfficialPickSourceType.OBSERVATION.value, observation_id
+    if candidate_id.casefold() in {"unknown", "unresolved", "none", "null", "nan"}:
+        raise OfficialPickValidationError("source_candidate_id is unresolved")
+    return OfficialPickSourceType.CANDIDATE.value, candidate_id
 
 
 def _build_pick(
@@ -314,9 +405,9 @@ def _build_pick(
     *,
     pick_id: str,
     published_at: datetime,
-    designation: str,
     idempotency_key: str,
     promotion_actor: str,
+    review: OfficialPickCandidateReview,
 ) -> OfficialPick:
     source_type, source_id = _source_reference(request)
     if not isinstance(request.provenance, Mapping):
@@ -328,13 +419,18 @@ def _build_pick(
         "promotion_service": "courtvision.official_picks",
         "promotion_actor": promotion_actor,
         "promotion_policy_version": OFFICIAL_PICK_PROMOTION_POLICY_VERSION,
+        "review_id": review.review_id,
+        "review_decision": review.operator_decision,
+        "review_operator_id": review.operator_id,
+        "review_run_id": review.review_run_id,
+        "candidate_snapshot_sha256": review.candidate_snapshot_sha256,
     }
     return OfficialPick(
         pick_id=pick_id,
         sport=request.sport,
         league=request.league,
         event_id=request.event_id,
-        event_start_time=request.event_start_time,
+        event_start_time=cast(datetime, request.event_start_time),
         prediction_date=request.prediction_date,
         market_key=request.market_key,
         selection=request.selection,
@@ -349,9 +445,11 @@ def _build_pick(
         run_id=request.run_id,
         published_at=published_at,
         source_candidate_id=request.source_candidate_id,
-        source_observation_id=request.source_observation_id,
+        source_observation_id=None,
+        review_id=review.review_id,
+        candidate_snapshot_sha256=review.candidate_snapshot_sha256,
         status=OfficialPickStatus.PUBLISHED.value,
-        designation=designation,
+        designation=request.designation,
         idempotency_key=idempotency_key,
         provenance=provenance,
     )
@@ -365,7 +463,7 @@ def _promotion_content(pick: OfficialPick) -> dict[str, Any]:
 
 
 def _promotion_content_sha256(pick: OfficialPick) -> str:
-    return payload_sha256(_promotion_content(pick))
+    return canonical_equality_sha256(_promotion_content(pick))
 
 
 def _promotion_manifest(
@@ -395,7 +493,7 @@ def _promotion_manifest(
         calibration_version=None,
         calibration_hash=None,
         strategy_version=None,
-        pipeline_version="official-pick-promotion-v1",
+        pipeline_version="official-pick-promotion-v2",
         python_version=platform.python_version(),
         dependency_fingerprint=None,
         input_manifest_hash=_nullable(provenance.get("input_manifest_hash")),
@@ -410,12 +508,6 @@ def _promotion_event(
     published_at: datetime,
     promotion_content_sha256: str,
 ) -> EventEnvelope:
-    source_key = (
-        "source_candidate_id"
-        if pick.source_candidate_id is not None
-        else "source_observation_id"
-    )
-    source_id = pick.source_candidate_id or pick.source_observation_id
     payload = {
         "payload_schema_version": OFFICIAL_PICK_PAYLOAD_SCHEMA_VERSION,
         "promotion_policy_version": OFFICIAL_PICK_PROMOTION_POLICY_VERSION,
@@ -437,8 +529,14 @@ def _promotion_event(
         actor_id=str(pick.provenance["promotion_actor"]),
         correlation_id=pick.run_id,
         idempotency_key=pick.idempotency_key,
-        source_refs={source_key: source_id},
-        source_hashes={"promotion_content_sha256": promotion_content_sha256},
+        source_refs={
+            "review_id": pick.review_id,
+            "source_candidate_id": pick.source_candidate_id,
+        },
+        source_hashes={
+            "promotion_content_sha256": promotion_content_sha256,
+            "candidate_snapshot_sha256": pick.candidate_snapshot_sha256,
+        },
         model_id=pick.model_name,
         model_version=pick.model_version,
     )
@@ -467,7 +565,11 @@ def _find_by_idempotency_key(
                 continue
             payload = _event_payload(event)
             current = _ExistingPromotion(
-                pick=_event_pick(event),
+                pick=_event_pick(
+                    event,
+                    segment_directory=segment,
+                    lifecycle_root=lifecycle_root,
+                ),
                 event=event,
                 segment_directory=segment,
                 promotion_content_sha256=str(
@@ -486,16 +588,16 @@ def _replay_result(
     existing: _ExistingPromotion,
     *,
     candidate: OfficialPickPromotionRequest,
-    designation: str,
     promotion_actor: str,
+    review: OfficialPickCandidateReview,
 ) -> OfficialPickPromotionResult:
     requested = _build_pick(
         candidate,
         pick_id=existing.pick.pick_id,
         published_at=existing.pick.published_at,
-        designation=designation,
         idempotency_key=existing.pick.idempotency_key,
         promotion_actor=promotion_actor,
+        review=review,
     )
     requested_hash = _promotion_content_sha256(requested)
     if (
@@ -559,24 +661,78 @@ def _event_payload(event: EventEnvelope) -> dict[str, Any]:
         raise OfficialPickLedgerIntegrityError(
             f"official-pick event payload is invalid: {event.event_id}"
         ) from exc
-    if (
-        payload.get("payload_schema_version")
-        != OFFICIAL_PICK_PAYLOAD_SCHEMA_VERSION
-    ):
+    if not isinstance(payload, dict):
+        raise OfficialPickLedgerIntegrityError(
+            f"official-pick event payload must be an object: {event.event_id}"
+        )
+    if "payload_schema_version" not in payload:
+        raise OfficialPickLedgerIntegrityError(
+            f"official-pick payload schema is missing: {event.event_id}"
+        )
+    payload_version = payload["payload_schema_version"]
+    if type(payload_version) is not int:
+        raise OfficialPickLedgerIntegrityError(
+            f"official-pick payload schema must be an integer: {event.event_id}"
+        )
+    expected_policy = {
+        1: "1.0",
+        OFFICIAL_PICK_PAYLOAD_SCHEMA_VERSION: (
+            OFFICIAL_PICK_PROMOTION_POLICY_VERSION
+        ),
+    }.get(payload_version)
+    if expected_policy is None or event.payload_schema_version != payload_version:
         raise OfficialPickLedgerIntegrityError(
             f"unsupported official-pick payload schema: {event.event_id}"
+        )
+    expected_fields = {
+        "payload_schema_version",
+        "promotion_policy_version",
+        "publication_authority",
+        "promotion_content_sha256",
+        "official_pick",
+    }
+    if set(payload) != expected_fields:
+        raise OfficialPickLedgerIntegrityError(
+            f"official-pick payload fields are not exact: {event.event_id}"
+        )
+    if payload["promotion_policy_version"] != expected_policy:
+        raise OfficialPickLedgerIntegrityError(
+            f"official-pick promotion policy mismatch: {event.event_id}"
+        )
+    if payload["publication_authority"] != "PAPER_RESEARCH_ONLY":
+        raise OfficialPickLedgerIntegrityError(
+            f"official-pick publication authority mismatch: {event.event_id}"
         )
     return payload
 
 
-def _event_pick(event: EventEnvelope) -> OfficialPick:
+def _event_pick(
+    event: EventEnvelope,
+    *,
+    segment_directory: Path | None = None,
+    lifecycle_root: Path | None = None,
+) -> OfficialPick:
     payload = _event_payload(event)
+    payload_version = payload["payload_schema_version"]
+    if payload_version == 1:
+        raise OfficialPickLedgerIntegrityError(
+            "schema-v1 OfficialPick is rejected at the active runtime boundary; "
+            "no production historical-v1 segments are registered"
+        )
     try:
         pick = OfficialPick.from_dict(payload["official_pick"])
     except (KeyError, OfficialPickValidationError) as exc:
         raise OfficialPickLedgerIntegrityError(
             f"malformed official-pick row in event {event.event_id}"
         ) from exc
+    if (
+        payload_version == OFFICIAL_PICK_PAYLOAD_SCHEMA_VERSION
+        and pick.schema_version != OFFICIAL_PICK_SCHEMA_VERSION
+    ):
+        raise OfficialPickLedgerIntegrityError(
+            f"official-pick payload/pick schema mismatch: {event.event_id}"
+        )
+    del segment_directory
     if pick.idempotency_key != event.idempotency_key:
         raise OfficialPickLedgerIntegrityError(
             f"official-pick/event idempotency mismatch: {event.event_id}"
@@ -586,7 +742,143 @@ def _event_pick(event: EventEnvelope) -> OfficialPick:
         raise OfficialPickLedgerIntegrityError(
             f"official-pick promotion content hash mismatch: {event.event_id}"
         )
+    if pick.schema_version == OFFICIAL_PICK_SCHEMA_VERSION:
+        expected_refs = {
+            "review_id": pick.review_id,
+            "source_candidate_id": pick.source_candidate_id,
+        }
+        expected_hashes = {
+            "promotion_content_sha256": expected_content_hash,
+            "candidate_snapshot_sha256": pick.candidate_snapshot_sha256,
+        }
+        if (
+            not canonical_equal(event.source_refs, expected_refs)
+            or not canonical_equal(event.source_hashes, expected_hashes)
+            or event.actor_type != "OPERATOR"
+            or event.actor_id != pick.provenance["promotion_actor"]
+            or event.correlation_id != pick.run_id
+            or event.occurred_at_utc != pick.published_at
+            or event.recorded_at_utc != pick.published_at
+            or event.operating_date != pick.prediction_date
+            or event.model_id != pick.model_name
+            or event.model_version != pick.model_version
+        ):
+            raise OfficialPickLedgerIntegrityError(
+                f"official-pick review evidence mismatch: {event.event_id}"
+            )
+        if lifecycle_root is not None:
+            try:
+                review = validate_committed_schema_v2_review_authorization(
+                    lifecycle_root,
+                    pick,
+                )
+                expected_key = official_pick_idempotency_key(
+                    review.candidate_snapshot,
+                    review_id=review.review_id,
+                )
+                if (
+                    pick.idempotency_key != expected_key
+                    or event.idempotency_key != expected_key
+                ):
+                    raise OfficialPickAuthorizationValidationError(
+                        "promotion idempotency key does not match frozen "
+                        "review policy inputs"
+                    )
+            except OfficialPickAuthorizationValidationError as exc:
+                raise OfficialPickLedgerIntegrityError(
+                    "official pick review authorization mismatch: "
+                    f"{pick.pick_id}: {exc}"
+                ) from exc
     return pick
+
+
+def validate_new_official_pick_publication_events(
+    lifecycle_root: str | Path,
+    events: Sequence[EventEnvelope],
+) -> None:
+    """Authorize a complete pending publication batch against committed state."""
+
+    try:
+        committed = read_official_picks(lifecycle_root)
+        by_pick_id = {item.pick_id: item for item in committed}
+        by_review_id = {str(item.review_id): item for item in committed}
+        by_candidate_id = {
+            str(item.source_candidate_id): item for item in committed
+        }
+        by_idempotency = {
+            item.idempotency_key: item for item in committed
+        }
+        for event in events:
+            if event.event_type != EventType.OFFICIAL_PICK_PUBLISHED.value:
+                raise OfficialPickLedgerIntegrityError(
+                    "publication authorization received a non-publication event"
+                )
+            payload = _event_payload(event)
+            if (
+                payload["payload_schema_version"]
+                != OFFICIAL_PICK_PAYLOAD_SCHEMA_VERSION
+            ):
+                raise OfficialPickLedgerIntegrityError(
+                    "new OfficialPick publications require payload schema v2"
+                )
+            pick = _event_pick(event)
+            review = validate_committed_schema_v2_review_authorization(
+                lifecycle_root,
+                pick,
+            )
+            expected_key = official_pick_idempotency_key(
+                review.candidate_snapshot,
+                review_id=review.review_id,
+            )
+            if (
+                pick.idempotency_key != expected_key
+                or event.idempotency_key != expected_key
+            ):
+                raise OfficialPickAuthorizationValidationError(
+                    "promotion idempotency key does not match frozen review "
+                    "policy inputs"
+                )
+
+            owners = tuple(
+                owner
+                for owner in (
+                    by_pick_id.get(pick.pick_id),
+                    by_review_id.get(str(pick.review_id)),
+                    by_candidate_id.get(str(pick.source_candidate_id)),
+                    by_idempotency.get(pick.idempotency_key),
+                )
+                if owner is not None
+            )
+            if owners:
+                if all(
+                    owner.pick_id == pick.pick_id
+                    and canonical_equal(owner.to_dict(), pick.to_dict())
+                    for owner in owners
+                ):
+                    continue
+                raise OfficialPickAuthorizationValidationError(
+                    "review, candidate, promotion identity, or pick_id is "
+                    "already bound to another OfficialPick"
+                )
+
+            by_pick_id[pick.pick_id] = pick
+            by_review_id[str(pick.review_id)] = pick
+            by_candidate_id[str(pick.source_candidate_id)] = pick
+            by_idempotency[pick.idempotency_key] = pick
+    except (
+        OfficialPickAuthorizationValidationError,
+        OfficialPickLedgerIntegrityError,
+    ) as exc:
+        raise OfficialPickValidationError(str(exc)) from exc
+
+
+def validate_new_official_pick_publication_event(
+    lifecycle_root: str | Path,
+    event: EventEnvelope,
+) -> None:
+    """Compatibility wrapper for one-event internal validation callers."""
+
+    validate_new_official_pick_publication_events(lifecycle_root, (event,))
 
 
 def _nullable(value: Any) -> str | None:
@@ -600,6 +892,7 @@ __all__ = [
     "LiveOfficialPickBlockedError",
     "OfficialPickConflictError",
     "OfficialPickLedgerIntegrityError",
+    "OfficialPickPromotionAuthorizationError",
     "OfficialPickPromotionError",
     "OfficialPickPromotionResult",
     "generate_pick_id",
@@ -608,4 +901,6 @@ __all__ = [
     "promote_observation_to_official_pick",
     "read_official_pick",
     "read_official_picks",
+    "validate_new_official_pick_publication_event",
+    "validate_new_official_pick_publication_events",
 ]

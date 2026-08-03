@@ -2,13 +2,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import Enum
 from pathlib import Path
 import subprocess
+from typing import Any
 
 import pytest
 
 from courtvision.lifecycle.canonical import (
     CanonicalizationError,
+    canonical_equal,
+    canonical_equality_sha256,
     canonical_json_v1,
     canonical_payload_bytes,
     payload_sha256,
@@ -27,7 +31,7 @@ NOW = datetime(2026, 7, 25, 15, 30, 45, 123456, tzinfo=UTC)
 
 
 def _identity(**overrides: object):
-    values: dict[str, object] = {
+    values: dict[str, Any] = {
         "sport": "basketball",
         "league": "NBA",
         "event_id": "100",
@@ -67,6 +71,42 @@ def test_canonical_json_datetime_is_utc_and_naive_is_rejected() -> None:
 def test_canonical_json_rejects_nondeterministic_types() -> None:
     with pytest.raises(CanonicalizationError, match="unsupported"):
         canonical_json_v1({"values": {1, 2}})
+
+
+class _CanonicalTestEnum(str, Enum):
+    PAPER = "PAPER"
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [
+        (1, 1.0),
+        (True, 1),
+        ("1", 1),
+        ({"provenance": {"nested": [1]}}, {"provenance": {"nested": [1.0]}}),
+        (_CanonicalTestEnum.PAPER, "PAPER"),
+        (NOW, "2026-07-25T15:30:45.123456Z"),
+        ({"value": None}, {}),
+    ],
+)
+def test_type_preserving_canonical_equality_rejects_cross_type_values(
+    left: object,
+    right: object,
+) -> None:
+    assert not canonical_equal(left, right)
+    assert canonical_equality_sha256(left) != canonical_equality_sha256(right)
+
+
+def test_type_preserving_canonical_equality_has_documented_container_policy() -> None:
+    assert canonical_equal(
+        {"values": [1, {"a": "x", "b": None}]},
+        {"values": (1, {"b": None, "a": "x"})},
+    )
+    assert canonical_equality_sha256(
+        {"z": 3, "a": {"right": 2, "left": 1}}
+    ) == canonical_equality_sha256(
+        {"a": {"left": 1, "right": 2}, "z": 3}
+    )
 
 
 def test_identity_v1_is_deterministic_and_field_order_independent() -> None:
