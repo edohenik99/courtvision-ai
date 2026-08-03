@@ -36,6 +36,7 @@ from courtvision.lifecycle.writer import (
     LifecycleIntegrityError,
     LifecycleWriter,
     LifecycleWriterBusyError,
+    LifecycleWriterError,
     LifecycleWriterLock,
     LifecycleWriterReentrancyError,
     completed_segment_directories,
@@ -510,6 +511,10 @@ def _multiprocess_race_worker(
             raise TypeError("injected race-harness TypeError")
         if spec.injected_behavior == "RUNTIME_ERROR":
             raise RuntimeError("injected race-harness RuntimeError")
+        if spec.injected_behavior == "LIFECYCLE_WRITER_ERROR":
+            raise LifecycleWriterError(
+                "injected race-harness LifecycleWriterError"
+            )
         if spec.operation_requested == "REVIEW":
             result = review_official_pick_candidate(
                 spec.candidate,
@@ -3280,7 +3285,10 @@ def _diagnostic_path_from_failure(message: str) -> Path:
     return Path(message.rsplit(marker, 1)[1].splitlines()[0])
 
 
-@pytest.mark.parametrize("exception_type", [TypeError, RuntimeError])
+@pytest.mark.parametrize(
+    "exception_type",
+    [TypeError, RuntimeError, LifecycleWriterError],
+)
 def test_race_harness_rejects_unexpected_worker_exceptions(
     tmp_path: Path,
     exception_type: type[Exception],
@@ -3302,7 +3310,11 @@ def test_race_harness_rejects_unexpected_worker_exceptions(
         injected_behavior=(
             "TYPE_ERROR"
             if exception_type is TypeError
-            else "RUNTIME_ERROR"
+            else (
+                "RUNTIME_ERROR"
+                if exception_type is RuntimeError
+                else "LIFECYCLE_WRITER_ERROR"
+            )
         ),
     )
     expectation = _RaceExpectation(
@@ -3407,6 +3419,11 @@ def test_race_harness_rejects_process_accounting_failures(
             OfficialPickReviewTransitionError,
             "REVIEW_FINAL",
         ),
+        (
+            EXPECTED_WRITER_BUSY,
+            LifecycleWriterBusyError,
+            "REVIEW_FINAL_VS_DEFERRED",
+        ),
     ],
 )
 def test_race_harness_accepts_exact_expected_review_loser(
@@ -3444,7 +3461,11 @@ def test_race_harness_accepts_exact_expected_review_loser(
         decision_attempted=(
             "APPROVED"
             if outcome_category == EXPECTED_CONFLICT
-            else "REJECTED"
+            else (
+                "DEFERRED"
+                if outcome_category == EXPECTED_WRITER_BUSY
+                else "REJECTED"
+            )
         ),
         review_run_id="harness-losing-review-run",
         transaction_id="harness-losing-transaction",
@@ -3526,16 +3547,33 @@ def test_multiprocess_final_vs_deferred_race_is_legal_and_deadlock_free(
     reviews = read_official_pick_candidate_reviews(
         tmp_path / "data" / "lifecycle"
     )
+    lifecycle_root = tmp_path / "data" / "lifecycle"
 
     assert any(
         result.outcome_category == SUCCESS for result in results
     ), results
+    assert {
+        result.outcome_category for result in results
+    }.issubset(
+        {
+            SUCCESS,
+            EXPECTED_TRANSITION_REJECTION,
+            EXPECTED_WRITER_BUSY,
+        }
+    )
     assert 1 <= len(reviews) <= 2
+    assert all(
+        item.review_status == "COMMITTED"
+        and item.operator_decision in {"APPROVED", "DEFERRED"}
+        for item in reviews
+    )
     if len(reviews) == 2:
         assert {item.operator_decision for item in reviews} == {
             "APPROVED",
             "DEFERRED",
         }
+    assert not (lifecycle_root / ".writer.lock").exists()
+    assert not tuple(lifecycle_root.rglob(".*.tmp-*"))
 
 
 @pytest.mark.parametrize("_repeat", range(2))

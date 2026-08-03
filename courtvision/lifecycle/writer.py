@@ -9,9 +9,10 @@ import os
 from pathlib import Path
 import shutil
 import socket
+import stat
 from threading import Lock
 import time
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Literal, Mapping, Sequence
 from uuid import uuid4
 
 from courtvision.lifecycle.canonical import (
@@ -145,6 +146,7 @@ class LifecycleWriterLock:
             )
         self.root.mkdir(parents=True, exist_ok=True)
         deadline = time.monotonic() + self.timeout_seconds
+        invisible_lock_permission_retries = 3
         while True:
             try:
                 self._fd = os.open(
@@ -152,20 +154,6 @@ class LifecycleWriterLock:
                     os.O_CREAT | os.O_EXCL | os.O_WRONLY,
                     0o600,
                 )
-                self.acquired_at_utc = format_utc_datetime(self.clock.now())
-                metadata = {
-                    "lock_id": self.lock_id,
-                    "pid": os.getpid(),
-                    "hostname": socket.gethostname(),
-                    "root": str(self.root),
-                    "prediction_run_id": self.prediction_run_id,
-                    "command": self.command,
-                    "acquired_at_utc": self.acquired_at_utc,
-                }
-                data = canonical_payload_bytes(metadata)
-                os.write(self._fd, data)
-                os.fsync(self._fd)
-                return self
             except FileExistsError as exc:
                 if self._recover_verified_dead_owner():
                     continue
@@ -174,10 +162,128 @@ class LifecycleWriterLock:
                         f"lifecycle writer lock is already held: {self.path}"
                     ) from exc
                 time.sleep(0.01)
+            except PermissionError as exc:
+                permission_state = self._classify_lock_permission_error()
+                if permission_state == "filesystem_error":
+                    raise LifecycleWriterError(
+                        f"unable to acquire lifecycle writer lock: {self.path}"
+                    ) from exc
+
+                if permission_state == "lock_not_visible":
+                    if invisible_lock_permission_retries <= 0:
+                        raise LifecycleWriterError(
+                            f"unable to acquire lifecycle writer lock: {self.path}"
+                        ) from exc
+                    invisible_lock_permission_retries -= 1
+                    time.sleep(0.001)
+                    continue
+
+                # Windows can report EACCES instead of FileExistsError while
+                # another process owns the exact create-exclusive lock path.
+                # Treat it like ordinary contention and retry until timeout.
+                if time.monotonic() >= deadline:
+                    raise LifecycleWriterBusyError(
+                        f"lifecycle writer lock is already held: {self.path}"
+                    ) from exc
+
+                time.sleep(0.01)
             except OSError as exc:
                 raise LifecycleWriterError(
                     f"unable to acquire lifecycle writer lock: {self.path}"
                 ) from exc
+            else:
+                break
+        try:
+            self.acquired_at_utc = format_utc_datetime(self.clock.now())
+            metadata = {
+                "lock_id": self.lock_id,
+                "pid": os.getpid(),
+                "hostname": socket.gethostname(),
+                "root": str(self.root),
+                "prediction_run_id": self.prediction_run_id,
+                "command": self.command,
+                "acquired_at_utc": self.acquired_at_utc,
+            }
+            data = canonical_payload_bytes(metadata)
+            os.write(self._fd, data)
+            os.fsync(self._fd)
+            return self
+        except OSError as exc:
+            raise LifecycleWriterError(
+                f"unable to acquire lifecycle writer lock: {self.path}"
+            ) from exc
+
+    def _classify_lock_permission_error(
+        self,
+    ) -> Literal["visible_lock", "lock_not_visible", "filesystem_error"]:
+        """Classify a Windows create-exclusive PermissionError.
+
+        Windows may return PermissionError/EACCES rather than
+        FileExistsError when another process owns the create-exclusive lock.
+
+        A uniquely named sibling probe confirms that the lifecycle directory
+        itself remains writable before the exact lock path is inspected.
+        """
+
+        if os.name != "nt":
+            return "filesystem_error"
+
+        try:
+            root_stat = self.root.stat()
+        except OSError:
+            return "filesystem_error"
+        if not stat.S_ISDIR(root_stat.st_mode):
+            return "filesystem_error"
+
+        probe_path = self.root / (
+            f".writer-lock-probe-{os.getpid()}-{uuid4().hex}"
+        )
+        probe_fd: int | None = None
+        probe_created = False
+        probe_succeeded = False
+        cleanup_failed = False
+
+        try:
+            probe_fd = os.open(
+                probe_path,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o600,
+            )
+            probe_created = True
+            os.close(probe_fd)
+            probe_fd = None
+            probe_path.unlink()
+            probe_created = False
+            probe_succeeded = True
+        except OSError:
+            pass
+        finally:
+            if probe_fd is not None:
+                try:
+                    os.close(probe_fd)
+                except OSError:
+                    cleanup_failed = True
+
+            if probe_created:
+                try:
+                    probe_path.unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    cleanup_failed = True
+
+        if not probe_succeeded or cleanup_failed:
+            return "filesystem_error"
+
+        try:
+            self.path.stat()
+        except FileNotFoundError:
+            return "lock_not_visible"
+        except PermissionError:
+            return "visible_lock"
+        except OSError:
+            return "filesystem_error"
+        return "visible_lock"
 
     def _recover_verified_dead_owner(self) -> bool:
         try:

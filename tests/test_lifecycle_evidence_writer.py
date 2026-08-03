@@ -7,6 +7,7 @@ import socket
 
 import pytest
 
+import courtvision.lifecycle.writer as writer_service
 from courtvision.lifecycle.canonical import canonical_payload_bytes
 from courtvision.lifecycle.clock import FixedClock
 from courtvision.lifecycle.evidence import (
@@ -26,6 +27,7 @@ from courtvision.lifecycle.writer import (
     IdempotencyConflictError,
     LifecycleWriter,
     LifecycleWriterBusyError,
+    LifecycleWriterError,
     LifecycleWriterLock,
     completed_segment_directories,
     verify_segment,
@@ -146,6 +148,217 @@ def test_writer_lock_prevents_competing_writer_and_live_owner_is_not_stale(
                 process_checker=lambda pid: True,
             ):
                 pass
+
+
+def test_atomic_lock_file_exists_error_is_writer_busy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock_path = tmp_path / ".writer.lock"
+    with LifecycleWriterLock(
+        tmp_path,
+        prediction_run_id="run-a",
+        command="owner",
+        clock=FixedClock(NOW),
+        timeout_seconds=0,
+    ):
+        original_open = writer_service.os.open
+
+        def report_existing_lock(
+            path: str | bytes | Path,
+            flags: int,
+            mode: int = 0o777,
+        ) -> int:
+            if Path(path) == lock_path:
+                raise FileExistsError(17, "File exists", str(path))
+            return original_open(path, flags, mode)
+
+        monkeypatch.setattr(writer_service.os, "open", report_existing_lock)
+        with pytest.raises(LifecycleWriterBusyError, match="already held") as error:
+            with LifecycleWriterLock(
+                tmp_path,
+                prediction_run_id="run-b",
+                command="contender",
+                clock=FixedClock(NOW),
+                timeout_seconds=0,
+                process_checker=lambda pid: True,
+            ):
+                pass
+
+        assert isinstance(error.value.__cause__, FileExistsError)
+        assert lock_path.is_file()
+    assert not lock_path.exists()
+
+
+@pytest.mark.skipif(
+    writer_service.os.name != "nt",
+    reason="PermissionError contention classification is Windows-only",
+)
+def test_atomic_lock_permission_error_with_competing_lock_is_writer_busy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock_path = tmp_path / ".writer.lock"
+    with LifecycleWriterLock(
+        tmp_path,
+        prediction_run_id="run-a",
+        command="owner",
+        clock=FixedClock(NOW),
+        timeout_seconds=0,
+    ):
+        original_open = writer_service.os.open
+
+        def deny_competing_create(
+            path: str | bytes | Path,
+            flags: int,
+            mode: int = 0o777,
+        ) -> int:
+            if Path(path) == lock_path:
+                raise PermissionError(13, "Permission denied", str(path))
+            return original_open(path, flags, mode)
+
+        monkeypatch.setattr(writer_service.os, "open", deny_competing_create)
+        with pytest.raises(LifecycleWriterBusyError, match="already held") as error:
+            with LifecycleWriterLock(
+                tmp_path,
+                prediction_run_id="run-b",
+                command="contender",
+                clock=FixedClock(NOW),
+                timeout_seconds=0,
+            ):
+                pass
+
+        assert isinstance(error.value.__cause__, PermissionError)
+        assert lock_path.is_file()
+    assert not lock_path.exists()
+
+
+def test_atomic_lock_permission_error_without_competing_lock_is_writer_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    lock_path = tmp_path / ".writer.lock"
+    original_open = writer_service.os.open
+
+    def deny_lock_create(
+        path: str | bytes | Path,
+        flags: int,
+        mode: int = 0o777,
+    ) -> int:
+        if Path(path) == lock_path:
+            raise PermissionError(13, "Permission denied", str(path))
+        return original_open(path, flags, mode)
+
+    monkeypatch.setattr(writer_service.os, "open", deny_lock_create)
+    with pytest.raises(LifecycleWriterError, match="unable to acquire") as error:
+        with LifecycleWriterLock(
+            tmp_path,
+            prediction_run_id="run-a",
+            command="denied",
+            clock=FixedClock(NOW),
+            timeout_seconds=0,
+        ):
+            pass
+
+    assert type(error.value) is LifecycleWriterError
+    assert isinstance(error.value.__cause__, PermissionError)
+    assert not lock_path.exists()
+    assert not tuple(tmp_path.glob(".writer-lock-probe-*"))
+    assert not tuple(tmp_path.rglob(".*.tmp-*"))
+
+
+@pytest.mark.skipif(
+    writer_service.os.name != "nt",
+    reason="PermissionError contention classification is Windows-only",
+)
+def test_transient_permission_error_with_disappeared_lock_retries_successfully(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    lock_path = tmp_path / ".writer.lock"
+    original_open = writer_service.os.open
+    lock_create_attempts = 0
+
+    def deny_first_lock_create(
+        path: str | bytes | Path,
+        flags: int,
+        mode: int = 0o777,
+    ) -> int:
+        nonlocal lock_create_attempts
+        if Path(path) == lock_path:
+            lock_create_attempts += 1
+            if lock_create_attempts == 1:
+                raise PermissionError(13, "Permission denied", str(path))
+        return original_open(path, flags, mode)
+
+    monkeypatch.setattr(writer_service.os, "open", deny_first_lock_create)
+    with LifecycleWriterLock(
+        tmp_path,
+        prediction_run_id="run-a",
+        command="transient-denial",
+        clock=FixedClock(NOW),
+        timeout_seconds=0,
+    ):
+        assert lock_create_attempts == 2
+        assert lock_path.is_file()
+
+    assert not lock_path.exists()
+    assert not tuple(tmp_path.glob(".writer-lock-probe-*"))
+    assert not tuple(tmp_path.rglob(".*.tmp-*"))
+
+
+@pytest.mark.skipif(
+    writer_service.os.name != "nt",
+    reason="PermissionError contention classification is Windows-only",
+)
+def test_inaccessible_parent_is_not_mislabeled_as_writer_busy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    lock_path = tmp_path / ".writer.lock"
+    original_open = writer_service.os.open
+    original_stat = writer_service.os.stat
+    create_denied = False
+
+    def deny_lock_create(
+        path: str | bytes | Path,
+        flags: int,
+        mode: int = 0o777,
+    ) -> int:
+        nonlocal create_denied
+        if Path(path) == lock_path:
+            create_denied = True
+            raise PermissionError(13, "Permission denied", str(path))
+        return original_open(path, flags, mode)
+
+    def deny_parent_metadata(
+        path: str | bytes | Path,
+        *args: object,
+        **kwargs: object,
+    ) -> writer_service.os.stat_result:
+        if create_denied and Path(path) == tmp_path:
+            raise PermissionError(13, "Permission denied", str(path))
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(writer_service.os, "open", deny_lock_create)
+    monkeypatch.setattr(writer_service.os, "stat", deny_parent_metadata)
+    with pytest.raises(LifecycleWriterError, match="unable to acquire") as error:
+        with LifecycleWriterLock(
+            tmp_path,
+            prediction_run_id="run-a",
+            command="inaccessible-parent",
+            clock=FixedClock(NOW),
+            timeout_seconds=0,
+        ):
+            pass
+
+    assert type(error.value) is LifecycleWriterError
+    assert isinstance(error.value.__cause__, PermissionError)
+    assert not lock_path.exists()
+    assert not tuple(tmp_path.rglob(".*.tmp-*"))
 
 
 def test_dead_stale_lock_can_be_recovered_after_owner_death_verification(
