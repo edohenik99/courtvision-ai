@@ -1,11 +1,11 @@
-"""Research-only Streamlit dashboard for legacy NBA elite-pick evaluation.
+"""Research-only Streamlit dashboard for legacy NBA model evaluation.
 
 Launch with::
 
     streamlit run model_evaluation_streamlit_app.py
 
-The UI reads one historical CSV through the strict Phase 1 adapter. It has no
-operational actions and delegates every metric to ``model_metrics.py``.
+The UI reads one explicitly selected historical CSV through a strict adapter.
+It has no operational actions and delegates every metric to ``model_metrics.py``.
 """
 
 from __future__ import annotations
@@ -25,18 +25,32 @@ from courtvision.evaluation.model_metrics import (
     select_recent_slates,
     source_is_stale,
 )
-from courtvision.evaluation.model_records import ModelEvaluationRecord, Outcome
+from courtvision.evaluation.model_records import (
+    ELITE_EVALUATION_POPULATION,
+    FEEDBACK_EVALUATION_POPULATION,
+    ModelEvaluationRecord,
+    Outcome,
+)
 from courtvision.evaluation.model_sources import (
+    FEEDBACK_SOURCE_PATH,
     ModelSourceError,
     PHASE1_SOURCE_PATH,
     SourceLoadResult,
     SourceState,
+    load_feedback_records,
     load_phase1_records,
 )
 
 
 RESEARCH_ONLY_BANNER = (
     "Research-only legacy observational evaluation — not betting guidance"
+)
+ELITE_POPULATION_LABEL = "Legacy elite picks"
+FEEDBACK_POPULATION_LABEL = "All graded feedback"
+POPULATION_OPTIONS = (ELITE_POPULATION_LABEL, FEEDBACK_POPULATION_LABEL)
+POPULATION_OVERLAP_WARNING = (
+    "These populations may overlap, but they are evaluated separately and are "
+    "never combined."
 )
 
 
@@ -50,12 +64,21 @@ class DashboardLoadState:
 
 
 def load_dashboard_data(
-    source_path: str | Path = PHASE1_SOURCE_PATH,
+    population_label: str,
+    source_path: str | Path | None = None,
 ) -> DashboardLoadState:
-    """Load the configured Phase 1 source and convert typed errors to UI state."""
+    """Load exactly one selected source and convert typed errors to UI state."""
 
     try:
-        return DashboardLoadState(source=load_phase1_records(source_path))
+        if population_label == ELITE_POPULATION_LABEL:
+            selected_path = source_path or PHASE1_SOURCE_PATH
+            result = load_phase1_records(selected_path)
+        elif population_label == FEEDBACK_POPULATION_LABEL:
+            selected_path = source_path or FEEDBACK_SOURCE_PATH
+            result = load_feedback_records(selected_path)
+        else:
+            raise ValueError(f"Unsupported evaluation population: {population_label!r}")
+        return DashboardLoadState(source=result)
     except ModelSourceError as exc:
         return DashboardLoadState(
             source=None,
@@ -74,6 +97,11 @@ def _format_percentage(value: float | None) -> str:
 
 def _format_units(value: float) -> str:
     return f"{value:+.2f}"
+
+
+def _format_coverage(count: int, total: int) -> str:
+    percentage = (count / total) if total else None
+    return f"{count}/{total} ({_format_percentage(percentage)})"
 
 
 def _metric_columns(items: Iterable[tuple[str, str]]) -> None:
@@ -100,10 +128,65 @@ def _render_source_and_coverage(
     )
     st.caption(
         f"Data as of {_format_date(coverage.latest_date)}. Dashboard as-of date: "
-        f"{as_of_date.isoformat()}. Identical duplicates excluded: "
-        f"{coverage.duplicate_identical_count}. Fully excluded records: "
+        f"{as_of_date.isoformat()}. Fully excluded records: "
         f"{coverage.fully_excluded_count}."
     )
+    feedback = source.feedback_coverage
+    if feedback is None:
+        st.caption(
+            "Identical duplicate rows excluded: "
+            f"{coverage.duplicate_identical_count}."
+        )
+    else:
+        total = coverage.unique_record_count
+        _metric_columns(
+            (
+                ("Unique grade keys", str(feedback.unique_grade_key_count)),
+                ("Duplicate groups", str(feedback.duplicate_grade_key_group_count)),
+                ("Duplicate source rows", str(feedback.duplicate_source_row_count)),
+                (
+                    "Duplicate rows excluded",
+                    str(feedback.duplicate_rows_excluded_count),
+                ),
+                ("Conflicting grade keys", str(feedback.conflicting_grade_key_count)),
+            )
+        )
+        _metric_columns(
+            (
+                ("Final graded", str(feedback.final_graded_count)),
+                ("Unresolved", str(feedback.unresolved_count)),
+                ("Unsupported", str(feedback.unsupported_count)),
+                (
+                    "Actual-value coverage",
+                    _format_coverage(feedback.actual_value_present_count, total),
+                ),
+                (
+                    "Valid-odds coverage",
+                    _format_coverage(feedback.valid_odds_count, total),
+                ),
+            )
+        )
+        _metric_columns(
+            (
+                (
+                    "Prediction-value coverage",
+                    _format_coverage(feedback.prediction_value_present_count, total),
+                ),
+                (
+                    "Confidence coverage",
+                    _format_coverage(feedback.confidence_present_count, total),
+                ),
+                ("Edge coverage", _format_coverage(feedback.edge_present_count, total)),
+                (
+                    "Participant-ID coverage",
+                    _format_coverage(feedback.participant_id_present_count, total),
+                ),
+                (
+                    "Event-ID coverage",
+                    _format_coverage(feedback.event_id_present_count, total),
+                ),
+            )
+        )
     if source_is_stale(coverage.latest_date, as_of_date=as_of_date):
         st.warning(
             "Stale source coverage: the latest prediction slate is materially "
@@ -260,6 +343,63 @@ def _render_data_quality(
     as_of_date: date,
 ) -> None:
     st.header("Data-quality warnings")
+    feedback = source.feedback_coverage
+    if feedback is not None:
+        total = source.coverage.unique_record_count
+        warnings = (
+            (
+                "Unresolved rows excluded from decision metrics",
+                feedback.unresolved_count,
+            ),
+            (
+                "Unsupported rows excluded from decision metrics",
+                feedback.unsupported_count,
+            ),
+            (
+                "Missing or invalid odds excluded without substitution",
+                total - feedback.valid_odds_count,
+            ),
+            (
+                "Missing confidence values appear in Unknown",
+                total - feedback.confidence_present_count,
+            ),
+            (
+                "Missing edge values appear in Unknown",
+                total - feedback.edge_present_count,
+            ),
+            (
+                "Missing participant IDs reduce coverage",
+                total - feedback.participant_id_present_count,
+            ),
+            (
+                "Missing event IDs reduce coverage",
+                total - feedback.event_id_present_count,
+            ),
+            (
+                "Missing prediction values reduce coverage",
+                total - feedback.prediction_value_present_count,
+            ),
+            (
+                "Compatible duplicate rows canonicalized",
+                feedback.duplicate_rows_excluded_count,
+            ),
+            (
+                "Conflicting final outcomes block loading",
+                feedback.conflicting_grade_key_count,
+            ),
+        )
+        for label, count in warnings:
+            message = f"{label}: {count}"
+            if count:
+                st.warning(message)
+            else:
+                st.success(message)
+        if source_is_stale(source.coverage.latest_date, as_of_date=as_of_date):
+            st.warning("Stale coverage warning: source freshness exceeds 30 days.")
+        else:
+            st.success("Stale coverage warning: none.")
+        return
+
     warnings = (
         ("Missing participant IDs", _reason_count(source, "missing_participant_id")),
         ("Missing event IDs", _reason_count(source, "missing_event_id")),
@@ -285,9 +425,15 @@ def render_dashboard(
     source: SourceLoadResult,
     *,
     as_of_date: date,
+    expected_population: str = ELITE_EVALUATION_POPULATION,
 ) -> None:
     """Render loaded observational records without operational dependencies."""
 
+    actual_populations = {record.evaluation_population for record in source.records}
+    if actual_populations != {expected_population}:
+        raise ValueError(
+            "Source records must contain exactly the selected evaluation population"
+        )
     _render_source_and_coverage(source, as_of_date=as_of_date)
     window_label = st.sidebar.selectbox(
         "Prediction-slate window",
@@ -318,17 +464,35 @@ def render_dashboard(
 def main(
     *,
     as_of_date: date | None = None,
-    source_path: str | Path = PHASE1_SOURCE_PATH,
+    elite_source_path: str | Path = PHASE1_SOURCE_PATH,
+    feedback_source_path: str | Path = FEEDBACK_SOURCE_PATH,
 ) -> None:
-    """Render the Phase 1 application, including all nonfatal source states."""
+    """Render one explicitly selected observational evaluation population."""
 
     effective_as_of_date = as_of_date or date.today()
     st.set_page_config(page_title="CourtVision Model Evaluation", layout="wide")
     st.warning(RESEARCH_ONLY_BANNER)
     st.title("CourtVision model evaluation")
-    st.caption("Phase 1 · NBA elite legacy population · observational evidence")
+    selected_label = st.sidebar.selectbox(
+        "Evaluation population",
+        POPULATION_OPTIONS,
+        index=None,
+        placeholder="Select an evaluation population",
+    )
+    if selected_label is None:
+        st.info("Select one evaluation population to load observational evidence.")
+        return
 
-    load_state = load_dashboard_data(source_path)
+    st.warning(POPULATION_OVERLAP_WARNING)
+    if selected_label == ELITE_POPULATION_LABEL:
+        selected_path = elite_source_path
+        expected_population = ELITE_EVALUATION_POPULATION
+    else:
+        selected_path = feedback_source_path
+        expected_population = FEEDBACK_EVALUATION_POPULATION
+    st.caption(f"Phase 2A · {selected_label} · observational evidence")
+
+    load_state = load_dashboard_data(selected_label, selected_path)
     if load_state.error_message is not None:
         st.error(
             f"Source validation failed ({load_state.error_kind}): "
@@ -346,7 +510,11 @@ def main(
         st.info(source.message)
         st.code(source.source_path, language=None)
         return
-    render_dashboard(source, as_of_date=effective_as_of_date)
+    render_dashboard(
+        source,
+        as_of_date=effective_as_of_date,
+        expected_population=expected_population,
+    )
 
 
 if __name__ == "__main__":

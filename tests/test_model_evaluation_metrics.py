@@ -15,7 +15,12 @@ from courtvision.evaluation.model_metrics import (
     select_recent_slates,
     source_is_stale,
 )
-from courtvision.evaluation.model_records import create_model_evaluation_record
+from courtvision.evaluation.model_records import (
+    EVALUATION_POPULATION,
+    FEEDBACK_EVALUATION_POPULATION,
+    Outcome,
+    create_model_evaluation_record,
+)
 
 
 _IDS = count()
@@ -28,11 +33,17 @@ def _record(
     confidence: float | None = 0.75,
     edge: float | None = 2.0,
     prediction_date: date = date(2026, 5, 1),
+    evaluation_population: str = EVALUATION_POPULATION,
 ):
     index = next(_IDS)
+    is_feedback = evaluation_population == FEEDBACK_EVALUATION_POPULATION
     return create_model_evaluation_record(
-        source_name="pick_history.csv",
-        source_path="C:/research/pick_history.csv",
+        source_name="result_feedback.csv" if is_feedback else "pick_history.csv",
+        source_path=(
+            "C:/research/result_feedback.csv"
+            if is_feedback
+            else "C:/research/pick_history.csv"
+        ),
         source_row_number=index + 2,
         prediction_date=prediction_date,
         participant_id=f"p-{index}",
@@ -49,6 +60,8 @@ def _record(
         edge_value=edge,
         raw_outcome=outcome,
         actual_value=24.0,
+        evaluation_population=evaluation_population,
+        source_identity=f"feedback-key-{index}" if is_feedback else None,
     )
 
 
@@ -175,3 +188,32 @@ def test_staleness_uses_injected_as_of_date_and_strict_30_day_threshold() -> Non
     latest = date(2026, 5, 13)
     assert source_is_stale(latest, as_of_date=date(2026, 6, 12)) is False
     assert source_is_stale(latest, as_of_date=date(2026, 6, 13)) is True
+
+
+def test_feedback_population_reuses_hit_rate_roi_and_outcome_semantics() -> None:
+    feedback = FEEDBACK_EVALUATION_POPULATION
+    records = (
+        _record(outcome="win", odds=+150, evaluation_population=feedback),
+        _record(outcome="loss", odds=-110, evaluation_population=feedback),
+        _record(outcome="push", odds=+120, evaluation_population=feedback),
+        _record(outcome="unresolved", odds=-110, evaluation_population=feedback),
+        _record(outcome="ungraded", odds=-110, evaluation_population=feedback),
+        _record(outcome="win", odds="", evaluation_population=feedback),
+    )
+
+    metrics = calculate_evaluation_metrics(records)
+    counts = dict(metrics.outcome_counts)
+
+    assert counts[Outcome.WIN] == 2
+    assert counts[Outcome.LOSS] == 1
+    assert counts[Outcome.PUSH] == 1
+    assert counts[Outcome.PENDING] == 1
+    assert counts[Outcome.UNSUPPORTED] == 1
+    assert metrics.hit_rate.wins == 2
+    assert metrics.hit_rate.losses == 1
+    assert metrics.hit_rate.hit_rate == pytest.approx(2 / 3)
+    assert metrics.flat_unit_roi.eligible_priced_decisions == 3
+    assert metrics.flat_unit_roi.net_flat_units == pytest.approx(0.5)
+    assert metrics.flat_unit_roi.roi == pytest.approx(1 / 6)
+    assert metrics.flat_unit_roi.odds_coverage_percentage == pytest.approx(0.75)
+    assert metrics.flat_unit_roi.excluded_count == 3
