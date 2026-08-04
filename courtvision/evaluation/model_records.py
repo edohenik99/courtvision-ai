@@ -16,7 +16,12 @@ from typing import Any
 
 
 SCHEMA_VERSION = "1.0"
-EVALUATION_POPULATION = "nba_elite_legacy"
+ELITE_EVALUATION_POPULATION = "nba_elite_legacy"
+FEEDBACK_EVALUATION_POPULATION = "nba_feedback_legacy"
+EVALUATION_POPULATION = ELITE_EVALUATION_POPULATION
+EVALUATION_POPULATIONS = frozenset(
+    {ELITE_EVALUATION_POPULATION, FEEDBACK_EVALUATION_POPULATION}
+)
 EVIDENCE_CLASS = "legacy_observational"
 SPORT = "NBA"
 LEAGUE = "NBA"
@@ -37,10 +42,16 @@ class Outcome(str, Enum):
 
 _OUTCOME_ALIASES = {
     "hit": Outcome.WIN,
+    "win": Outcome.WIN,
     "miss": Outcome.LOSS,
+    "loss": Outcome.LOSS,
     "push": Outcome.PUSH,
     "void": Outcome.VOID,
     "pending": Outcome.PENDING,
+    "unresolved": Outcome.PENDING,
+    "ungraded": Outcome.UNSUPPORTED,
+    "unsupported": Outcome.UNSUPPORTED,
+    "unknown": Outcome.UNSUPPORTED,
 }
 
 
@@ -96,20 +107,28 @@ def deterministic_record_id(
     market: str,
     selection: str,
     line: float | None,
+    source_identity: str | None = None,
 ) -> str:
     """Build a stable identifier from source identity fields, not row position."""
 
-    identity = {
-        "source_name": source_name.casefold(),
-        "prediction_date": prediction_date.isoformat(),
-        "participant": (participant_id or participant_name).strip().casefold(),
-        "team": (team or "").strip().casefold(),
-        "opponent": (opponent or "").strip().casefold(),
-        "event_id": (event_id or "").strip().casefold(),
-        "market": market.strip().casefold(),
-        "selection": selection.strip().casefold(),
-        "line": line,
-    }
+    normalized_source_identity = (source_identity or "").strip()
+    if normalized_source_identity:
+        identity = {
+            "source_name": source_name.casefold(),
+            "source_identity": normalized_source_identity,
+        }
+    else:
+        identity = {
+            "source_name": source_name.casefold(),
+            "prediction_date": prediction_date.isoformat(),
+            "participant": (participant_id or participant_name).strip().casefold(),
+            "team": (team or "").strip().casefold(),
+            "opponent": (opponent or "").strip().casefold(),
+            "event_id": (event_id or "").strip().casefold(),
+            "market": market.strip().casefold(),
+            "selection": selection.strip().casefold(),
+            "line": line,
+        }
     encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode(
         "utf-8"
     )
@@ -155,10 +174,6 @@ class ModelEvaluationRecord:
     def __post_init__(self) -> None:
         fixed_values = {
             "schema_version": (self.schema_version, SCHEMA_VERSION),
-            "evaluation_population": (
-                self.evaluation_population,
-                EVALUATION_POPULATION,
-            ),
             "evidence_class": (self.evidence_class, EVIDENCE_CLASS),
             "sport": (self.sport, SPORT),
             "league": (self.league, LEAGUE),
@@ -171,6 +186,11 @@ class ModelEvaluationRecord:
         for field_name, (actual, expected) in fixed_values.items():
             if actual != expected:
                 raise ValueError(f"{field_name} must be {expected!r}")
+        if self.evaluation_population not in EVALUATION_POPULATIONS:
+            raise ValueError(
+                "evaluation_population must be one of "
+                f"{sorted(EVALUATION_POPULATIONS)!r}"
+            )
 
         if self.source_row_number < 2:
             raise ValueError("source_row_number must identify a CSV data row")
@@ -223,6 +243,8 @@ def create_model_evaluation_record(
     edge_value: float | None,
     raw_outcome: Any,
     actual_value: float | None,
+    evaluation_population: str = EVALUATION_POPULATION,
+    source_identity: str | None = None,
 ) -> ModelEvaluationRecord:
     """Create a validated record while deriving odds and eligibility fields."""
 
@@ -264,6 +286,7 @@ def create_model_evaluation_record(
         market=market,
         selection=selection,
         line=line,
+        source_identity=source_identity,
     )
     return ModelEvaluationRecord(
         schema_version=SCHEMA_VERSION,
@@ -271,7 +294,7 @@ def create_model_evaluation_record(
         source_name=source_name,
         source_path=source_path,
         source_row_number=source_row_number,
-        evaluation_population=EVALUATION_POPULATION,
+        evaluation_population=evaluation_population,
         evidence_class=EVIDENCE_CLASS,
         sport=SPORT,
         league=LEAGUE,
@@ -303,8 +326,11 @@ def create_model_evaluation_record(
 __all__ = [
     "CONFIDENCE_SEMANTICS",
     "EDGE_TYPE",
+    "ELITE_EVALUATION_POPULATION",
     "EVALUATION_POPULATION",
+    "EVALUATION_POPULATIONS",
     "EVIDENCE_CLASS",
+    "FEEDBACK_EVALUATION_POPULATION",
     "LEAGUE",
     "ModelEvaluationRecord",
     "Outcome",
