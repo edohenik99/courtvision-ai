@@ -51,22 +51,53 @@ def _training(**overrides: object) -> TrainingProvenanceV1:
     return TrainingProvenanceV1(**values)  # type: ignore[arg-type]
 
 
+def _build_git(**overrides: object) -> GitProvenanceV1:
+    values: dict[str, object] = {
+        "commit_sha": "4" * 40,
+        "dirty": False,
+        "working_tree_fingerprint": "5" * 64,
+    }
+    values.update(overrides)
+    return GitProvenanceV1(**values)  # type: ignore[arg-type]
+
+
+def _build_configuration(
+    configuration: dict[str, object] | None = None,
+) -> ConfigurationProvenanceV1:
+    return ConfigurationProvenanceV1.from_configuration(
+        configuration
+        or {
+            "models": {"player": "baseline", "team": "baseline"},
+            "training": {"random_seed": 17},
+        }
+    )
+
+
 def _manifest(
     *,
     artifacts: tuple[ModelArtifactEntryV1, ...] | None = None,
     training: TrainingProvenanceV1 | None = None,
+    build_git_provenance: GitProvenanceV1 | None = None,
+    build_configuration_provenance: ConfigurationProvenanceV1 | None = None,
+    model_id: str = "courtvision-nba-props",
     model_version: str = "2026.08.05",
+    sport: str = "NBA",
+    league: str = "NBA",
     feature_schema_version: str = "nba-features-v3",
     feature_schema_digest: str = "c" * 64,
     created_at_utc: datetime = NOW,
 ) -> ModelBuildManifestV1:
     return ModelBuildManifestV1.create(
-        model_id="courtvision-nba-props",
+        model_id=model_id,
         model_version=model_version,
-        sport="NBA",
-        league="NBA",
+        sport=sport,
+        league=league,
         artifacts=artifacts or (_artifact(),),
         training=training or _training(),
+        build_git_provenance=build_git_provenance or _build_git(),
+        build_configuration_provenance=(
+            build_configuration_provenance or _build_configuration()
+        ),
         feature_schema_version=feature_schema_version,
         feature_schema_digest=feature_schema_digest,
         created_at_utc=created_at_utc,
@@ -151,6 +182,151 @@ def test_manifest_digest_is_recomputable_and_artifact_order_independent() -> Non
     second = _manifest(artifacts=(b, a))
     assert first.manifest_digest == second.manifest_digest
     assert first.manifest_digest == canonical_sha256(first.content_without_digest())
+
+
+def test_clean_build_git_and_configuration_produce_valid_manifest() -> None:
+    manifest = _manifest()
+
+    assert manifest.build_git_provenance == _build_git()
+    assert manifest.build_configuration_provenance == _build_configuration()
+    assert manifest.build_git_provenance.dirty is False
+
+
+def test_dirty_build_git_provenance_is_rejected() -> None:
+    with pytest.raises(ProspectiveDirtyTreeError, match="verified model build"):
+        _manifest(build_git_provenance=_build_git(dirty=True))
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["build_git_provenance", "build_configuration_provenance"],
+)
+def test_missing_build_provenance_is_rejected(field_name: str) -> None:
+    manifest = _manifest()
+    values = {
+        field.name: getattr(manifest, field.name)
+        for field in fields(ModelBuildManifestV1)
+    }
+    del values[field_name]
+
+    with pytest.raises(TypeError, match=field_name):
+        ModelBuildManifestV1(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["build_git_provenance", "build_configuration_provenance"],
+)
+def test_wrong_type_build_provenance_is_rejected(field_name: str) -> None:
+    manifest = _manifest()
+    values = {
+        field.name: getattr(manifest, field.name)
+        for field in fields(ModelBuildManifestV1)
+    }
+    values[field_name] = {"not": "a provenance contract"}
+
+    with pytest.raises(ProspectiveContractError, match=field_name):
+        ModelBuildManifestV1(**values)  # type: ignore[arg-type]
+
+
+def test_historical_build_provenance_is_serialized_and_round_trips() -> None:
+    manifest = _manifest(build_git_provenance=_build_git(commit_sha="6" * 40))
+    payload = json.loads(json.dumps(manifest.to_dict(), indent=4))
+
+    assert payload["build_git_provenance"] == _build_git(
+        commit_sha="6" * 40
+    ).to_dict()
+    assert (
+        payload["build_configuration_provenance"]
+        == _build_configuration().to_dict()
+    )
+
+    rebuilt = ModelBuildManifestV1(
+        schema_version=payload["schema_version"],  # type: ignore[arg-type]
+        model_id=payload["model_id"],  # type: ignore[arg-type]
+        model_version=payload["model_version"],  # type: ignore[arg-type]
+        sport=payload["sport"],  # type: ignore[arg-type]
+        league=payload["league"],  # type: ignore[arg-type]
+        artifacts=tuple(
+            ModelArtifactEntryV1(**artifact)  # type: ignore[arg-type]
+            for artifact in payload["artifacts"]  # type: ignore[union-attr]
+        ),
+        training=TrainingProvenanceV1(**payload["training"]),  # type: ignore[arg-type]
+        build_git_provenance=GitProvenanceV1(
+            **payload["build_git_provenance"]  # type: ignore[arg-type]
+        ),
+        build_configuration_provenance=ConfigurationProvenanceV1(
+            **payload["build_configuration_provenance"]  # type: ignore[arg-type]
+        ),
+        feature_schema_version=payload["feature_schema_version"],  # type: ignore[arg-type]
+        feature_schema_digest=payload["feature_schema_digest"],  # type: ignore[arg-type]
+        created_at_utc=payload["created_at_utc"],  # type: ignore[arg-type]
+        manifest_digest=payload["manifest_digest"],  # type: ignore[arg-type]
+    )
+
+    assert rebuilt == manifest
+    assert rebuilt.to_dict() == payload
+    assert rebuilt.build_git_provenance.commit_sha == "6" * 40
+
+
+def test_build_configuration_order_does_not_change_manifest_digest() -> None:
+    first = _manifest(
+        build_configuration_provenance=_build_configuration(
+            {"z": {"right": 2, "left": 1}, "a": True}
+        )
+    )
+    second = _manifest(
+        build_configuration_provenance=_build_configuration(
+            {"a": True, "z": {"left": 1, "right": 2}}
+        )
+    )
+
+    assert first.manifest_digest == second.manifest_digest
+
+
+def test_secret_build_configuration_is_rejected_recursively_without_value() -> None:
+    with pytest.raises(ProspectiveSecretConfigurationError) as caught:
+        _build_configuration(
+            {"provider": {"authentication": {"client_secret": "never-echo-me"}}}
+        )
+
+    assert "never-echo-me" not in str(caught.value)
+
+
+def test_every_material_model_build_input_changes_manifest_digest() -> None:
+    baseline = _manifest().manifest_digest
+    alternatives = (
+        _manifest(build_git_provenance=_build_git(commit_sha="6" * 40)),
+        _manifest(
+            build_git_provenance=_build_git(working_tree_fingerprint="6" * 64)
+        ),
+        _manifest(
+            build_configuration_provenance=_build_configuration(
+                {"models": {"player": "baseline"}, "material_option": "changed"}
+            )
+        ),
+        _manifest(artifacts=(_artifact(digest="d" * 64),)),
+        _manifest(training=_training(training_start_date=date(2024, 10, 2))),
+        _manifest(training=_training(training_end_date=date(2025, 6, 29))),
+        _manifest(
+            training=_training(
+                training_completed_at_utc=datetime(2026, 8, 5, 16, 29, tzinfo=UTC)
+            )
+        ),
+        _manifest(training=_training(training_run_id="training-run-002")),
+        _manifest(training=_training(training_data_digest="d" * 64)),
+        _manifest(training=_training(model_build_tool_version="trainer-1.0.1")),
+        _manifest(feature_schema_version="nba-features-v4"),
+        _manifest(feature_schema_digest="d" * 64),
+        _manifest(model_id="courtvision-nba-props-v2"),
+        _manifest(model_version="2026.08.06"),
+        _manifest(created_at_utc=datetime(2026, 8, 5, 16, 31, tzinfo=UTC)),
+    )
+
+    assert all(manifest.manifest_digest != baseline for manifest in alternatives)
+    assert len({manifest.manifest_digest for manifest in alternatives}) == len(
+        alternatives
+    )
 
 
 def test_configuration_key_order_is_canonicalized_and_values_are_immutable() -> None:
@@ -323,6 +499,8 @@ def test_incorrect_manifest_digest_is_rejected() -> None:
             league=manifest.league,
             artifacts=manifest.artifacts,
             training=manifest.training,
+            build_git_provenance=manifest.build_git_provenance,
+            build_configuration_provenance=manifest.build_configuration_provenance,
             feature_schema_version=manifest.feature_schema_version,
             feature_schema_digest=manifest.feature_schema_digest,
             created_at_utc=manifest.created_at_utc,

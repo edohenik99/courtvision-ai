@@ -8,6 +8,8 @@ import subprocess
 import pytest
 
 from courtvision.prospective.contracts import (
+    ConfigurationProvenanceV1,
+    GitProvenanceV1,
     ModelArtifactEntryV1,
     ModelBuildManifestV1,
     ProspectiveDigestMismatchError,
@@ -91,6 +93,15 @@ def _manifest(
         league="NBA",
         artifacts=artifacts,
         training=_training(),
+        build_git_provenance=GitProvenanceV1("1" * 40, False, "2" * 64),
+        build_configuration_provenance=(
+            ConfigurationProvenanceV1.from_configuration(
+                {
+                    "models": {"player": "baseline", "team": "baseline"},
+                    "training": {"random_seed": 17},
+                }
+            )
+        ),
         feature_schema_version="synthetic-features-v1",
         feature_schema_digest="b" * 64,
         created_at_utc=datetime(2026, 8, 5, 12, tzinfo=UTC),

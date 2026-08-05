@@ -1,12 +1,15 @@
 # Prospective Paper Trial v1
 
-## Phase 1A scope
+## Phase 1B-A scope
 
-Phase 1A defines immutable model-build, Git, configuration, cohort, and cohort
-identity contracts. It also provides read-only helpers that capture and verify
-those inputs. It does not generate predictions, run the NBA pipeline, publish
-records, create `OfficialPick` objects, write lifecycle events, settle picks,
-modify history, or add evaluation-dashboard behavior.
+Phase 1B-A extends the immutable Phase 1A model-build contract by binding the
+clean Git state and complete canonical build configuration that produced a
+verified build. Phase 1A also defines separate cohort-execution Git and
+configuration provenance, cohort, and cohort-identity contracts and provides
+read-only helpers that capture and verify those inputs. This phase does not
+train models, publish artifacts, generate predictions, run the NBA pipeline,
+publish records, create `OfficialPick` objects, write lifecycle events, settle
+picks, modify history, or add evaluation-dashboard behavior.
 
 The package is deliberately separate from prediction and lifecycle modules.
 Importing `courtvision.prospective` does not start a run, create a directory, or
@@ -49,12 +52,18 @@ not read or import any of them.
   path, lowercase SHA-256, and byte size;
 - explicit training start and end dates, UTC completion time, training run ID,
   training-data digest, and build-tool version;
+- the build Git commit and clean working-tree fingerprint;
+- the complete canonical build configuration and its digest;
 - feature-schema version and digest; and
 - the actual model-build manifest creation time in UTC.
 
 The manifest digest is SHA-256 over canonical manifest content excluding only
 the digest field itself. Artifact entries are sorted before hashing, so caller
-ordering does not change the digest. Artifact bytes and sizes are re-read during
+ordering does not change the digest. Configuration mapping order and JSON
+serialization whitespace likewise do not change it. Changes to the build commit,
+working-tree fingerprint, material build configuration, artifact evidence,
+training provenance, feature schema, model identity, build timestamp, or build
+tool version change the digest. Artifact bytes and sizes are re-read during
 validation, and the caller may provide the complete required logical-name set so
 an omitted required artifact fails closed.
 
@@ -63,6 +72,31 @@ precede the training end date, and manifest creation cannot precede training
 completion; equal completion and creation timestamps are valid. File creation
 or modification times are never treated as training completion evidence, and
 timestamps are not inferred or repaired.
+
+Build Git and configuration evidence describe the state that produced the
+model. They are distinct from the later cohort-execution Git and configuration
+evidence frozen in cohort identity. A verified build requires
+`build_git_provenance.dirty` to be false. Constructing or deserializing a
+historical manifest does not compare its build commit with the current checkout;
+such comparison belongs to an explicit repository-validation operation.
+
+Build configuration is supplied explicitly and is never read from `.env`,
+process credentials, or external configuration during contract construction.
+The canonical configuration and its digest are both part of manifest content.
+Credential-like keys remain rejected recursively, and secret values are not
+included in errors.
+
+## NBA v1 calibration policy
+
+Verified NBA baseline builds in v1 contain player and team baseline artifacts.
+Their calibration policy is explicitly identity/no-calibration. The shared
+`outputs/model/calibration.json` file is legacy and mutable: a verified v1 build
+must not copy it, inherit it, or represent it as verified build evidence.
+
+Provenance-tracked recalibration requires a later, separately authorized design.
+Future prediction loading must not silently fall back to legacy calibration when
+loading a verified v1 build. Phase 1B-A adds no calibration fields or calibration
+implementation code.
 
 ## Existing legacy baselines are unverified
 
@@ -74,7 +108,7 @@ artifact set. Consequently, the existing unmanifested baselines cannot activate
 a verified cohort automatically, and the API has no legacy auto-approval path.
 
 A later training phase must create a verified model-build manifest as part of
-the training/build event, when authoritative metadata is available. Phase 1A
+the training/build event, when authoritative metadata is available. Phase 1B-A
 does not invent that metadata or write a manifest for current files.
 
 ## Cohort identity contract
@@ -162,4 +196,4 @@ A later phase may add training-time creation of a verified model-build manifest
 and separately define prediction/publication behavior. Those changes must keep
 `MODEL_CANDIDATE` distinct from `OfficialPick` and preserve the cohort identity
 defined here. No such prediction, publication, settlement, lifecycle, or
-dashboard behavior is introduced in Phase 1A.
+dashboard behavior is introduced in Phase 1B-A.

@@ -504,6 +504,8 @@ def _manifest_content(
     league: str,
     artifacts: tuple[ModelArtifactEntryV1, ...],
     training: TrainingProvenanceV1,
+    build_git_provenance: GitProvenanceV1,
+    build_configuration_provenance: ConfigurationProvenanceV1,
     feature_schema_version: str,
     feature_schema_digest: str,
     created_at_utc: datetime,
@@ -516,6 +518,8 @@ def _manifest_content(
         "league": league,
         "artifacts": [artifact.to_dict() for artifact in artifacts],
         "training": training.to_dict(),
+        "build_git_provenance": build_git_provenance.to_dict(),
+        "build_configuration_provenance": build_configuration_provenance.to_dict(),
         "feature_schema_version": feature_schema_version,
         "feature_schema_digest": feature_schema_digest,
         "created_at_utc": _format_utc(created_at_utc),
@@ -531,6 +535,8 @@ class ModelBuildManifestV1:
     league: str
     artifacts: tuple[ModelArtifactEntryV1, ...]
     training: TrainingProvenanceV1
+    build_git_provenance: GitProvenanceV1
+    build_configuration_provenance: ConfigurationProvenanceV1
     feature_schema_version: str
     feature_schema_digest: str
     created_at_utc: datetime
@@ -544,6 +550,21 @@ class ModelBuildManifestV1:
         if not isinstance(self.training, TrainingProvenanceV1):
             raise ProspectiveUnverifiedModelError(
                 "training must be explicit verified TrainingProvenanceV1"
+            )
+        if not isinstance(self.build_git_provenance, GitProvenanceV1):
+            raise ProspectiveProvenanceError(
+                "build_git_provenance must be explicit GitProvenanceV1"
+            )
+        if self.build_git_provenance.dirty:
+            raise ProspectiveDirtyTreeError(
+                "dirty Git state blocks a verified model build"
+            )
+        if not isinstance(
+            self.build_configuration_provenance, ConfigurationProvenanceV1
+        ):
+            raise ProspectiveProvenanceError(
+                "build_configuration_provenance must be explicit "
+                "ConfigurationProvenanceV1"
             )
         model_id = _required_text(self.model_id, "model_id")
         model_version = _required_text(self.model_version, "model_version")
@@ -571,6 +592,8 @@ class ModelBuildManifestV1:
             league=league,
             artifacts=artifacts,
             training=self.training,
+            build_git_provenance=self.build_git_provenance,
+            build_configuration_provenance=self.build_configuration_provenance,
             feature_schema_version=feature_version,
             feature_schema_digest=feature_digest,
             created_at_utc=created_at,
@@ -601,6 +624,8 @@ class ModelBuildManifestV1:
         league: str,
         artifacts: tuple[ModelArtifactEntryV1, ...] | list[ModelArtifactEntryV1],
         training: TrainingProvenanceV1,
+        build_git_provenance: GitProvenanceV1,
+        build_configuration_provenance: ConfigurationProvenanceV1,
         feature_schema_version: str,
         feature_schema_digest: str,
         created_at_utc: datetime,
@@ -611,6 +636,21 @@ class ModelBuildManifestV1:
             raise ProspectiveUnverifiedModelError(
                 "training must be explicit verified TrainingProvenanceV1"
             )
+        if not isinstance(build_git_provenance, GitProvenanceV1):
+            raise ProspectiveProvenanceError(
+                "build_git_provenance must be explicit GitProvenanceV1"
+            )
+        if build_git_provenance.dirty:
+            raise ProspectiveDirtyTreeError(
+                "dirty Git state blocks a verified model build"
+            )
+        if not isinstance(
+            build_configuration_provenance, ConfigurationProvenanceV1
+        ):
+            raise ProspectiveProvenanceError(
+                "build_configuration_provenance must be explicit "
+                "ConfigurationProvenanceV1"
+            )
         normalized_created = _required_utc_datetime(created_at_utc, "created_at_utc")
         content = _manifest_content(
             schema_version=schema_version,
@@ -620,6 +660,8 @@ class ModelBuildManifestV1:
             league=_required_text(league, "league"),
             artifacts=normalized_artifacts,
             training=training,
+            build_git_provenance=build_git_provenance,
+            build_configuration_provenance=build_configuration_provenance,
             feature_schema_version=_required_text(
                 feature_schema_version, "feature_schema_version"
             ),
@@ -636,6 +678,8 @@ class ModelBuildManifestV1:
             league=league,
             artifacts=normalized_artifacts,
             training=training,
+            build_git_provenance=build_git_provenance,
+            build_configuration_provenance=build_configuration_provenance,
             feature_schema_version=feature_schema_version,
             feature_schema_digest=feature_schema_digest,
             created_at_utc=normalized_created,
@@ -651,6 +695,8 @@ class ModelBuildManifestV1:
             league=self.league,
             artifacts=self.artifacts,
             training=self.training,
+            build_git_provenance=self.build_git_provenance,
+            build_configuration_provenance=self.build_configuration_provenance,
             feature_schema_version=self.feature_schema_version,
             feature_schema_digest=self.feature_schema_digest,
             created_at_utc=self.created_at_utc,
