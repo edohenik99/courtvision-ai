@@ -305,11 +305,80 @@ hidden stage but cannot expose a partially published final directory. Legacy
 baseline/calibration paths and operational output/history remain outside this
 store and are never read as fallbacks.
 
+## Phase 1B-B2 verified NBA model-build CLI
+
+Phase 1B-B2 exposes the immutable Phase 1B-B1 builder through the supported
+application CLI. The canonical command is:
+
+```powershell
+py -3.13 courtvision_ai.py `
+  --sport nba `
+  --mode production `
+  --fit-only `
+  --verified-model-build `
+  --train-start YYYY-MM-DD `
+  --train-end YYYY-MM-DD `
+  --out-dir outputs
+```
+
+The flag is explicit and opt-in. It is valid only for NBA production fitting,
+requires both strict ISO training dates, and rejects prediction mode,
+`--prediction-date`, `--grade-date`, and `--force-output-overwrite`. The end
+date cannot precede the start date. These rules are checked before credential
+resolution or provider access. Commands without `--verified-model-build`
+continue through the existing legacy fit, prediction, and grading path.
+
+After argument validation, the adapter captures clean Git provenance and builds
+canonical credential-free configuration evidence before requesting data. The
+configuration binds the inclusive date interval, BallDontLie provider and stats
+endpoint identity, base URL, timeout, retry and backoff settings, normalization
+identity, player/team baseline policies, canonical serialization policy,
+immutable publication layout, and identity/no-calibration policy. Provider URLs
+containing user information, queries, or fragments fail closed. The separate
+deterministic tool-version string contains only the verified-builder schema,
+CourtVision version, Python version, and pandas version. Git identity remains in
+the manifest's dedicated `build_git_provenance` field.
+
+The training call chain is:
+
+1. capture clean Git provenance;
+2. load credentials through the existing application mechanism without
+   printing or persisting them;
+3. fetch every BallDontLie stats page for the inclusive interval;
+4. apply `courtvision.data.normalization.normalize_stats_frame` and convert the
+   result to the strict Phase 1B-B1 training-row schema;
+5. inject the existing `CourtVisionAI._build_player_baselines` and
+   `CourtVisionAI._build_team_baselines` methods through a constructor-free
+   runtime object; and
+6. delegate identity, canonical evidence, serialization, locking, replay, and
+   atomic publication to `create_verified_model_build()`.
+
+The constructor-free adapter does not create logs, runtime/history directories,
+or shared model paths, and it never calls `CourtVisionAI.fit()`. Consequently,
+the verified path does not invoke the legacy CSV publication or fit run-log
+append. It also has no prediction, grading, lifecycle, evaluation,
+`OfficialPick`, bankroll, Kelly, stake, or wager call. Empty, unusable, invalid,
+or failed provider data and builder failures occur before publication.
+
+Successful builds contain exactly the five Phase 1B-B1 files under
+`outputs/model/verified_builds/<model_version>/`. The legacy
+`player_baselines.csv`, `team_baselines.csv`, and `calibration.json` files are
+neither read nor written. Calibration remains explicitly
+`identity_no_calibration`. A valid identical destination is passed back through
+the existing strict core replay path using its original manifest event identity;
+the core must confirm identical manifest and artifact/evidence bytes before it
+reports a replay. Corrupt or conflicting destinations fail closed.
+
+Success writes one compact JSON object containing exactly `success`, `model_id`,
+`model_version`, `manifest_digest`, `verified_build_path`, and
+`replayed_existing_build`. Failures return a non-zero process status and a
+sanitized JSON error classification without credential, environment, or raw
+provider-response content.
+
 ## Later phases
 
-A later phase may adapt existing data normalization and baseline builders to
-this core and separately define prediction/publication behavior. Those changes
-must keep `MODEL_CANDIDATE` distinct from `OfficialPick`, preserve cohort
-identity, and never silently fall back from a verified build to legacy
-calibration. No prediction, activation, settlement, lifecycle, evaluation, or
-dashboard behavior is introduced in Phase 1B-B1.
+A later phase may define verified-build prediction loading and prospective
+candidate publication. Those changes must keep `MODEL_CANDIDATE` distinct from
+`OfficialPick`, preserve cohort identity, and never silently fall back from a
+verified build to legacy calibration. Phase 1B-B2 introduces no prediction,
+activation, settlement, lifecycle, evaluation, or dashboard behavior.

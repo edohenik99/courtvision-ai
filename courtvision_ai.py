@@ -19,9 +19,10 @@ import os
 import sys
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
+from urllib.parse import urlsplit
 
 import pandas as pd
 import requests
@@ -123,6 +124,12 @@ from courtvision.runtime_scoring import BoardScoringConfig, BoardScoringPolicy
 from courtvision.selection.operator_boards import (
     duplicate_betting_identity_drop_summary,
     unsupported_active_operator_market_drop_summary,
+)
+from courtvision.prospective import (
+    build_nba_verified_configuration,
+    build_nba_verified_tool_version,
+    capture_git_provenance,
+    create_nba_verified_model_build,
 )
 
 
@@ -354,7 +361,13 @@ class CalibrationRule:
 
 
 class BallDontLieClient:
-    def __init__(self, api_key: str, timeout: int = 30) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        timeout: int = 30,
+        *,
+        safe_errors: bool = False,
+    ) -> None:
         api_key, api_key_details = resolve_api_key(
             entrypoint="courtvision_ai.BallDontLieClient",
             env_var_name=BALLDONTLIE_API_KEY_ENV_VAR,
@@ -372,6 +385,7 @@ class BallDontLieClient:
         self.api_key_preview = mask_api_key(api_key)
         self.api_key_env_var = BALLDONTLIE_API_KEY_ENV_VAR
         self.api_key_details = dict(api_key_details)
+        self.safe_errors = safe_errors
         retry_total = int(os.getenv("COURTVISION_HTTP_RETRIES", "3") or "3")
         retry_backoff = float(os.getenv("COURTVISION_HTTP_BACKOFF", "1.5") or "1.5")
         retry = Retry(
@@ -403,11 +417,15 @@ class BallDontLieClient:
         response = self.session.get(url, params=params, timeout=self.timeout)
 
         if response.status_code == 401:
-            error_message = self._format_http_error(
-                response=response,
-                url=url,
-                params=params,
-                prepared_url=prepared_url,
+            error_message = (
+                "BallDontLie request failed with HTTP 401"
+                if self.safe_errors
+                else self._format_http_error(
+                    response=response,
+                    url=url,
+                    params=params,
+                    prepared_url=prepared_url,
+                )
             )
             self.last_http_error_message = error_message
             logging.getLogger("courtvision_ai").error(error_message)
@@ -9245,6 +9263,199 @@ def run_nba_prediction_application(
     )
 
 
+class VerifiedNBAProviderError(RuntimeError):
+    """Sanitized failure from the verified NBA training provider path."""
+
+
+def _verified_repository_root() -> Path:
+    return Path(__file__).resolve().parent
+
+
+def _verified_iso_date(
+    value: str | None,
+    *,
+    field_name: str,
+    parser: argparse.ArgumentParser,
+) -> date:
+    if not value:
+        parser.error(f"--{field_name} is required with --verified-model-build.")
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        parser.error(f"--{field_name} must be an ISO YYYY-MM-DD date.")
+    if value != parsed.isoformat():
+        parser.error(f"--{field_name} must be an ISO YYYY-MM-DD date.")
+    return parsed
+
+
+def _validate_verified_model_build_args(
+    args: argparse.Namespace,
+    parser: argparse.ArgumentParser,
+) -> tuple[date, date]:
+    if args.sport != "nba":
+        parser.error("--verified-model-build is valid only for NBA.")
+    if not args.fit_only:
+        parser.error("--verified-model-build requires --fit-only.")
+    if (
+        args.predict_only
+        or args.command == "predict"
+        or args.prediction_date
+        or args.send_telegram
+    ):
+        parser.error("--verified-model-build cannot be combined with prediction mode.")
+    if args.grade_date:
+        parser.error("--verified-model-build cannot be combined with --grade-date.")
+    if args.force_output_overwrite:
+        parser.error(
+            "--verified-model-build cannot be combined with --force-output-overwrite."
+        )
+    if (args.mode or "production") != "production":
+        parser.error("NBA verified model builds require --mode production.")
+
+    start = _verified_iso_date(
+        args.train_start,
+        field_name="train-start",
+        parser=parser,
+    )
+    end = _verified_iso_date(
+        args.train_end,
+        field_name="train-end",
+        parser=parser,
+    )
+    if end < start:
+        parser.error("--train-end may not precede --train-start.")
+    return start, end
+
+
+def _verified_provider_settings() -> dict[str, object]:
+    try:
+        request_timeout = int(
+            os.getenv("BALLDONTLIE_REQUEST_TIMEOUT", "30") or "30"
+        )
+        retry_total = int(os.getenv("COURTVISION_HTTP_RETRIES", "3") or "3")
+        retry_backoff = float(
+            os.getenv("COURTVISION_HTTP_BACKOFF", "1.5") or "1.5"
+        )
+    except ValueError:
+        raise VerifiedNBAProviderError(
+            "verified NBA provider settings are invalid"
+        ) from None
+    if (
+        request_timeout <= 0
+        or retry_total < 0
+        or retry_backoff < 0
+        or not math.isfinite(retry_backoff)
+    ):
+        raise VerifiedNBAProviderError(
+            "verified NBA provider settings are invalid"
+        )
+
+    parsed_url = urlsplit(NBA_V1)
+    if (
+        parsed_url.scheme not in {"http", "https"}
+        or not parsed_url.netloc
+        or parsed_url.username is not None
+        or parsed_url.password is not None
+        or parsed_url.query
+        or parsed_url.fragment
+    ):
+        raise VerifiedNBAProviderError(
+            "verified NBA provider endpoint configuration is invalid"
+        )
+    return {
+        "base_url": NBA_V1,
+        "request_timeout_seconds": request_timeout,
+        "retry_total": retry_total,
+        "retry_backoff_seconds": retry_backoff,
+    }
+
+
+def _fetch_verified_nba_training_stats(
+    *,
+    train_start: date,
+    train_end: date,
+    request_timeout_seconds: int,
+) -> pd.DataFrame:
+    try:
+        api_key, _details = resolve_api_key(
+            entrypoint="courtvision_ai.py --verified-model-build",
+            env_var_name=BALLDONTLIE_API_KEY_ENV_VAR,
+        )
+        client = BallDontLieClient(
+            api_key=api_key,
+            timeout=request_timeout_seconds,
+            safe_errors=True,
+        )
+        return client.get_stats(train_start.isoformat(), train_end.isoformat())
+    except Exception:
+        raise VerifiedNBAProviderError(
+            "BallDontLie NBA training stats request failed"
+        ) from None
+
+
+def _run_verified_model_build_cli(
+    args: argparse.Namespace,
+    *,
+    train_start: date,
+    train_end: date,
+) -> int:
+    repository_root = _verified_repository_root()
+    build_git_provenance = capture_git_provenance(
+        repository_root,
+        require_clean=True,
+    )
+    _load_env_file()
+    provider_settings = _verified_provider_settings()
+    build_configuration = build_nba_verified_configuration(
+        requested_start_date=train_start,
+        requested_end_date=train_end,
+        provider_base_url=str(provider_settings["base_url"]),
+        request_timeout_seconds=int(
+            provider_settings["request_timeout_seconds"]
+        ),
+        retry_total=int(provider_settings["retry_total"]),
+        retry_backoff_seconds=float(
+            provider_settings["retry_backoff_seconds"]
+        ),
+    )
+    raw_stats = _fetch_verified_nba_training_stats(
+        train_start=train_start,
+        train_end=train_end,
+        request_timeout_seconds=int(
+            provider_settings["request_timeout_seconds"]
+        ),
+    )
+
+    baseline_runtime = object.__new__(CourtVisionAI)
+    result = create_nba_verified_model_build(
+        raw_stats=raw_stats,
+        requested_start_date=train_start,
+        requested_end_date=train_end,
+        build_configuration=build_configuration,
+        build_git_provenance=build_git_provenance,
+        model_build_tool_version=build_nba_verified_tool_version(),
+        player_baseline_builder=baseline_runtime._build_player_baselines,
+        team_baseline_builder=baseline_runtime._build_team_baselines,
+        repository_root=repository_root,
+        output_root=args.out_dir,
+    )
+    print(
+        json.dumps(
+            {
+                "success": True,
+                "model_id": result.manifest.model_id,
+                "model_version": result.manifest.model_version,
+                "manifest_digest": result.manifest.manifest_digest,
+                "verified_build_path": str(result.path),
+                "replayed_existing_build": result.replayed,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+    return 0
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run CourtVision AI model fitting and/or prediction from the command line.",
@@ -9271,6 +9482,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--train-end", help="Training end date in YYYY-MM-DD format.")
     parser.add_argument("--out-dir", default="outputs", help="Output directory. Defaults to ./outputs")
     parser.add_argument("--fit-only", action="store_true", help="Only fit the model baselines.")
+    parser.add_argument(
+        "--verified-model-build",
+        action="store_true",
+        help="Publish an immutable verified NBA baseline build.",
+    )
     parser.add_argument("--predict-only", action="store_true", help="Only run predictions using existing baselines.")
     parser.add_argument("--grade-date", help="Auto-grade predictions for a completed date in YYYY-MM-DD format.")
     parser.add_argument("--send-telegram", action="store_true", help="Send Telegram alert for top qualified plays after prediction.")
@@ -9390,9 +9606,35 @@ def _run_mlb_prediction_cli(args: argparse.Namespace, parser: argparse.ArgumentP
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    print("[STAGE] main_start")
+    supplied_arguments = list(sys.argv[1:] if argv is None else argv)
+    verified_requested = "--verified-model-build" in supplied_arguments
+    if not verified_requested:
+        print("[STAGE] main_start")
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
+
+    if args.verified_model_build:
+        train_start, train_end = _validate_verified_model_build_args(args, parser)
+        try:
+            return _run_verified_model_build_cli(
+                args,
+                train_start=train_start,
+                train_end=train_end,
+            )
+        except Exception as exc:
+            print(
+                json.dumps(
+                    {
+                        "success": False,
+                        "failure_classification": type(exc).__name__,
+                        "error": "verified NBA model build failed",
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                file=sys.stderr,
+            )
+            return 1
 
     if args.sport == "mlb":
         if args.command != "predict" and not args.predict_only:
