@@ -190,10 +190,126 @@ Keys representing API keys, tokens, passwords, credentials, private keys, or
 secrets are rejected at any nesting depth. Secret values are not stored and are
 not included in exception text.
 
+## Phase 1B-B1 immutable verified model builds
+
+Phase 1B-B1 adds a reusable, caller-driven build core in
+`courtvision.prospective.model_build` and a strict immutable publication store
+in `courtvision.prospective.model_manifest_io`. The public boundary accepts
+already-normalized rows, complete build configuration and Git provenance,
+explicit or factory-generated training-run identity, an injected UTC clock,
+injected player/team baseline builders, and explicit repository/output roots.
+It does not fetch data, instantiate or fit `CourtVisionAI`, generate
+predictions, activate a cohort, publish lifecycle records, create
+`OfficialPick` objects, grade outcomes, or update history.
+
+### Training-input evidence
+
+`training_inputs_v1.json` contains NBA/NBA provider and endpoint identity, the
+inclusive requested date interval, the exact typed normalized-row schema, the
+canonical sorted rows with duplicates preserved, row count, separate player
+and team input digests, the overall training-data digest, and explicit
+selection/manual-context/exclusion policies. IDs become non-empty canonical
+strings, dates are ISO `YYYY-MM-DD`, team abbreviations are uppercase, numeric
+values are finite float64 values or JSON null, and unexpected row fields fail
+closed. Rows are sorted by all typed fields, so input order is immaterial while
+adding or removing a duplicate remains material.
+
+The player digest binds complete normalized player rows. The team digest binds
+the game/date/team/minutes/stat projection used to aggregate team totals. The
+overall digest binds both, the canonical rows and schema, requested dates,
+provider identity and endpoint version, row count, and all row-selection
+policies. Manual context never participates. An exclusion policy participates
+only when explicitly supplied, in which case the complete caller-supplied
+policy is canonicalized and bound. Credential-like keys are rejected by the
+existing configuration contract.
+
+### Feature-schema and serialization evidence
+
+`feature_schema_v1.json` binds one combined schema with version
+`courtvision-nba-baselines-v1`. It records the normalized input schema, exact
+player and team output columns, identity/uniqueness rules, production material
+transformations, identity/no-calibration policy, and serialization policy. The
+team column order is the current 26-column schema from `team_abbr` and `games`
+through `opp_fg3m_allowed_recent`.
+
+Player evidence binds the eight-minute inclusion floor, player grouping and
+observation order, 18-day recency half-life with the current weight clipping,
+five-observation recent window, minute multiplier, weighted means, weighted
+population standard deviation, missing-result behavior, and canonical
+`player_key`. Team evidence binds game/team aggregation, the `game_id`
+self-join with self-pairs removed, team grouping/order, 20-day half-life,
+five-game recent window, and offense/opponent-allowance output mapping.
+
+CSV serialization is UTF-8 without a BOM, LF-terminated, exact-column-order,
+index-free, and minimally quoted. Rows are sorted by canonical serialized
+identity. Null is an empty CSV field; finite floats use `.17g` and normalize
+negative zero to zero. JSON is canonical sorted-key UTF-8 with no insignificant
+whitespace and with non-finite values forbidden. Missing/extra/reordered
+columns, duplicate identities, invalid `player_key`, unsupported values, and
+non-finite values fail before publication.
+
+### Build identity and layout
+
+The fixed model ID is `courtvision-nba-baselines`. A canonical build key binds
+that ID, training dates and training-data digest, feature-schema version and
+digest, build-tool version, clean build Git provenance, and complete canonical
+build configuration provenance. The resulting version is:
+
+`nba-baselines-v1-<start YYYYMMDD>-<end YYYYMMDD>-<first 20 build-key hex>`
+
+Attempt timestamps, training-run IDs, checkout paths, and file mtimes do not
+enter the version. A successful build contains exactly these files under
+`outputs/model/verified_builds/<model_version>/`:
+
+- `player_baselines.csv`
+- `team_baselines.csv`
+- `training_inputs_v1.json`
+- `feature_schema_v1.json`
+- `model_build_manifest_v1.json`
+
+Only the player and team CSVs are `ModelArtifactEntryV1` model artifacts. The
+two evidence JSON files are mandatory immutable supporting evidence and are
+verified separately. Manifest artifact paths always claim the final
+repository-relative location even during staging.
+
+### Publication, replay, conflict, and locking
+
+The core builds frames and canonical bytes before creating a unique hidden
+`.temporary-<training_run_id>` sibling. It writes and closes both artifacts and
+both evidence files, captures completion time, re-hashes staged artifacts using
+their final claimed paths, constructs the Phase 1A manifest, captures a creation
+time no earlier than completion, writes canonical manifest JSON, and strictly
+re-reads the complete staged candidate. It then acquires a create-exclusive
+`.verified-build-store.lock`, resolves replay/conflict, atomically renames the
+complete directory, and strictly re-reads the final build before returning.
+
+The lock contains schema, random owner token, process ID, host, creation time,
+and training-run ID. Locks are never aged out or deleted automatically. A valid
+visible lock reports busy; malformed or inaccessible state fails closed. The
+owner re-reads and verifies exact metadata plus file identity before removal,
+and refuses to remove a replaced or changed lock. Windows permission failures
+are classified without deleting another process's lock.
+
+An identical replay requires a valid existing build, identical complete
+manifest content, and identical bytes for all five files. The caller's staging
+directory is removed, existing bytes and mtimes remain untouched, and the
+existing verified build is returned. Any difference, incomplete or corrupt
+destination, unexpected file, symlink, or non-directory destination is a
+conflict. Existing destinations are never repaired, merged, replaced, or
+overwritten, and the public core rejects force overwrite.
+
+Pre-publication failure removes only the current attempt's owned staging
+directory when safe. Cleanup failure leaves the hidden non-authoritative stage
+and raises an actionable error. An interrupted attempt can therefore leave a
+hidden stage but cannot expose a partially published final directory. Legacy
+baseline/calibration paths and operational output/history remain outside this
+store and are never read as fallbacks.
+
 ## Later phases
 
-A later phase may add training-time creation of a verified model-build manifest
-and separately define prediction/publication behavior. Those changes must keep
-`MODEL_CANDIDATE` distinct from `OfficialPick` and preserve the cohort identity
-defined here. No such prediction, publication, settlement, lifecycle, or
-dashboard behavior is introduced in Phase 1B-A.
+A later phase may adapt existing data normalization and baseline builders to
+this core and separately define prediction/publication behavior. Those changes
+must keep `MODEL_CANDIDATE` distinct from `OfficialPick`, preserve cohort
+identity, and never silently fall back from a verified build to legacy
+calibration. No prediction, activation, settlement, lifecycle, evaluation, or
+dashboard behavior is introduced in Phase 1B-B1.
