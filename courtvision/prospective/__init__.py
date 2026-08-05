@@ -1,0 +1,58 @@
+"""Read-only prospective paper-trial identity and provenance contracts."""
+
+from courtvision.prospective.contracts import (
+    ConfigurationProvenanceV1,
+    FrozenJSONMapping,
+    GitProvenanceV1,
+    ModelArtifactEntryV1,
+    ModelBuildManifestV1,
+    ProspectiveCohortIdentityV1,
+    ProspectiveCohortSpecV1,
+    ProspectiveContractError,
+    ProspectiveDigestMismatchError,
+    ProspectiveDirtyTreeError,
+    ProspectiveMissingArtifactError,
+    ProspectiveProvenanceError,
+    ProspectiveSecretConfigurationError,
+    ProspectiveUnverifiedModelError,
+    TrainingProvenanceV1,
+    derive_prospective_cohort_identity,
+)
+from courtvision.prospective.provenance import (
+    capture_configuration_provenance,
+    capture_git_provenance,
+    capture_model_artifacts,
+    hash_model_artifacts,
+    resolve_repository_root,
+    validate_and_derive_cohort_identity,
+    validate_git_provenance,
+    validate_model_build_manifest,
+)
+
+
+__all__ = [
+    "ConfigurationProvenanceV1",
+    "FrozenJSONMapping",
+    "GitProvenanceV1",
+    "ModelArtifactEntryV1",
+    "ModelBuildManifestV1",
+    "ProspectiveCohortIdentityV1",
+    "ProspectiveCohortSpecV1",
+    "ProspectiveContractError",
+    "ProspectiveDigestMismatchError",
+    "ProspectiveDirtyTreeError",
+    "ProspectiveMissingArtifactError",
+    "ProspectiveProvenanceError",
+    "ProspectiveSecretConfigurationError",
+    "ProspectiveUnverifiedModelError",
+    "TrainingProvenanceV1",
+    "capture_configuration_provenance",
+    "capture_git_provenance",
+    "capture_model_artifacts",
+    "derive_prospective_cohort_identity",
+    "hash_model_artifacts",
+    "resolve_repository_root",
+    "validate_and_derive_cohort_identity",
+    "validate_git_provenance",
+    "validate_model_build_manifest",
+]
