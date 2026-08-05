@@ -5203,6 +5203,8 @@ def _print_json(payload: Mapping[str, object]) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    from courtvision.sports.mlb.training import hr_prospective_trial
+
     parser = argparse.ArgumentParser(
         description="CourtVision MLB HR research-only baseline commands."
     )
@@ -5284,10 +5286,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     trial.add_argument("--generated-at")
 
     sub.add_parser("feature-readiness")
+    hr_prospective_trial.configure_prospective_cli(sub)
 
     args = parser.parse_args(argv)
     try:
-        if args.command == "audit-data":
+        if args.command in hr_prospective_trial.PROSPECTIVE_COMMANDS:
+            print(
+                json.dumps(
+                    hr_prospective_trial.execute_prospective_cli(args),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+            )
+        elif args.command == "audit-data":
             result = build_live_hr_research_features(
                 odds_path=args.odds_csv,
                 results_path=args.results_csv,

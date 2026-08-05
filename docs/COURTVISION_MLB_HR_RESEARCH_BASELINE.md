@@ -293,6 +293,125 @@ python -m courtvision.sports.mlb.training.hr_research_baseline feature-readiness
 
 ## Artifact Locations
 
+### Prospective paper trial v1
+
+The prospective paper trial is a separate, opt-in research lifecycle. It never
+creates official picks, wagers, stakes, bankroll decisions, Kelly values, or
+automatic promotion. Every control, prediction, ledger, closing, settlement,
+status artifact, and compact CLI result is constrained to:
+
+- `sport: MLB`
+- `market: batter_home_runs`
+- `research_only: true`
+- `approval_status: not_approved`
+- `eligible_for_betting: false`
+- `eligible_for_official_pick: false`
+
+Activate a control from one explicit, complete model bundle. There is no
+default model, mutable `current` pointer, legacy fallback, rehearsal fallback,
+or in-place repair:
+
+```powershell
+python -m courtvision.sports.mlb.training.hr_research_baseline `
+  activate-prospective-control `
+  --model-dir <EXPLICIT_MODEL_BUNDLE> `
+  --trial-root <EXPLICIT_TRIAL_ROOT> `
+  --repository-root <REPOSITORY_ROOT>
+```
+
+The bundle must contain `model.json`, `metadata.json`, `metrics.json`,
+`model_card.md`, and `bundle_manifest.json`. Activation validates their
+recorded hashes, training interval, feature schema, model version, and clean Git
+provenance, then publishes an immutable control directory named from a
+deterministic control digest. Creation time, absolute paths, and filesystem
+metadata are not control-identity inputs. An identical replay is a byte- and
+mtime-preserving no-op; a conflict fails closed.
+
+Run one prospective Toronto operating date from the frozen control and an
+explicit odds snapshot:
+
+```powershell
+python -m courtvision.sports.mlb.training.hr_research_baseline `
+  run-prospective-paper-day `
+  --date YYYY-MM-DD `
+  --control-dir <EXPLICIT_CONTROL_DIR> `
+  --odds-csv <EXPLICIT_ODDS_CSV> `
+  --trial-root <EXPLICIT_TRIAL_ROOT> `
+  --repository-root <REPOSITORY_ROOT> `
+  [--identity-cache-csv <EXPLICIT_IDENTITY_CACHE>] `
+  [--dry-run]
+```
+
+The run revalidates the control, model bundle, repository state, source-file
+stability, strict pregame timestamps, identity policy, and the complete
+eligible source population. It stages and validates `predictions.csv`,
+`excluded_rows.csv`, `prediction_manifest_v1.json`, and `run_summary_v1.json`, then
+publishes atomically and appends the canonical ledger. A run is admissible only
+after its ledger linkage re-reads successfully. Zero-prediction runs remain
+auditable, and a later changed source snapshot may create a new run.
+
+Capture closing evidence only for an already committed v1 prediction artifact:
+
+```powershell
+python -m courtvision.sports.mlb.training.hr_research_baseline `
+  capture-prospective-closing `
+  --control-dir <EXPLICIT_CONTROL_DIR> `
+  --predictions-csv <EXPLICIT_PREDICTIONS_CSV> `
+  --odds-csv <EXPLICIT_ODDS_CSV> `
+  --trial-root <EXPLICIT_TRIAL_ROOT>
+```
+
+Closing capture accepts observations strictly before game start, prefers the
+same sportsbook, otherwise applies the existing consensus fallback, and marks
+missing evidence explicitly. It cannot import legacy, rehearsal, historical,
+post-hoc lifecycle, or grade-derived rows.
+
+Settle from an explicit strict-results file:
+
+```powershell
+python -m courtvision.sports.mlb.training.hr_research_baseline `
+  settle-prospective-paper-day `
+  --control-dir <EXPLICIT_CONTROL_DIR> `
+  --results-csv <EXPLICIT_RESULTS_CSV> `
+  --trial-root <EXPLICIT_TRIAL_ROOT>
+```
+
+Settlement joins by event ID plus normalized player identity. Only strict final
+results create a final append-only settlement. Pending, unresolved,
+manual-review, or void-candidate states cannot become wins or losses. Unit
+return uses the original captured price only when that price is complete and
+valid; settlement never sizes a wager.
+
+Build the read-only prospective report:
+
+```powershell
+python -m courtvision.sports.mlb.training.hr_research_baseline `
+  report-prospective-status `
+  --control-dir <EXPLICIT_CONTROL_DIR> `
+  --trial-root <EXPLICIT_TRIAL_ROOT>
+```
+
+The report verifies immutable evidence without creating or repairing files. It
+separates controls and model versions and reports operating dates, games,
+predictions, players, positive outcomes, identity coverage, closing coverage,
+calibration and performance only when measurable, gate progress, and artifact
+integrity findings. Passing gates is evidence for human review only and never
+promotes a model or creates an official pick.
+
+Prospective v1 uses explicit schemas rather than silently extending older
+records: `mlb-hr-prospective-control-v1`,
+`mlb-hr-prospective-prediction-v1`,
+`mlb-hr-prospective-prediction-manifest-v1`,
+`mlb-hr-prospective-run-summary-v1`, `mlb-hr-prospective-ledger-v2`,
+`mlb-hr-prospective-closing-v2`, `mlb-hr-prospective-status-v1`, and
+`mlb-hr-prospective-trial-lock-v1`. Older schemas remain readable by their
+existing tooling but are never upgraded in place or treated as prospective v1.
+
+All mutating prospective commands use one exclusive owner-verified trial-store
+lock. Visible, malformed, inaccessible, or ownership-conflicting lock states
+fail closed; operators must investigate them rather than delete or repair them
+automatically.
+
 Recommended generated artifact root:
 
 ```text
