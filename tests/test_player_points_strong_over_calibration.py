@@ -33,10 +33,12 @@ from courtvision.runtime_scoring import BoardScoringConfig, BoardScoringPolicy
 from courtvision.scoring.candidate_scoring import CandidateScoringPolicy
 
 
-# Future datetime to pass the game-status gate so tests target the guard under test.
-_FUTURE_DATE = (datetime.now() + timedelta(hours=2)).isoformat()
-#: Recent timestamp for fresh odds in tests
-_FRESH_ODDS_TIME = (datetime.now() - timedelta(minutes=5)).isoformat()
+def _fresh_time() -> str:
+    return (datetime.now() - timedelta(minutes=5)).isoformat()
+
+
+def _future_game_time() -> str:
+    return (datetime.now() + timedelta(hours=2)).isoformat()
 
 
 def _candidate(
@@ -50,6 +52,7 @@ def _candidate(
     minutes_avg: float = 34.0,
     qualification_gate_mode: str = "core_pass",
 ) -> dict[str, object]:
+    future_game_time = _future_game_time()
     return {
         "market_type": market_type,
         "entity_name": "Test Player",
@@ -77,11 +80,11 @@ def _candidate(
         # Include valid future game status so the game-status gate does not block
         # before the strong-over calibration guard can be tested.
         "game_status": "scheduled",
-        "game_date": _FUTURE_DATE,
-        "game_datetime": _FUTURE_DATE,
+        "game_date": future_game_time,
+        "game_datetime": future_game_time,
         "postseason": "false",
         # Include fresh odds timestamp so odds-stale gate doesn't block
-        "odds_updated_at": _FRESH_ODDS_TIME,
+        "odds_updated_at": _fresh_time(),
     }
 
 

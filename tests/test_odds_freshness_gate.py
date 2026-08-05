@@ -28,9 +28,19 @@ from courtvision.runtime_audit import (
 # Helpers
 # ---------------------------------------------------------------------------
 
-_FRESH_TIME = (datetime.now() - timedelta(minutes=5)).isoformat()
-_STALE_TIME = (datetime.now() - timedelta(minutes=45)).isoformat()
 _SENTINEL = object()
+
+
+def _fresh_time() -> str:
+    return (datetime.now() - timedelta(minutes=5)).isoformat()
+
+
+def _stale_time() -> str:
+    return (datetime.now() - timedelta(minutes=45)).isoformat()
+
+
+def _future_game_time() -> str:
+    return (datetime.now() + timedelta(hours=2)).isoformat()
 
 
 def _candidate(
@@ -40,8 +50,8 @@ def _candidate(
     game_status: str = "scheduled",
     game_datetime: str | None = None,
 ) -> dict[str, object]:
-    future = (datetime.now() + timedelta(hours=2)).isoformat()
-    _oa = _FRESH_TIME if odds_updated_at is _SENTINEL else odds_updated_at  # type: ignore[assignment]
+    future = _future_game_time()
+    _oa = _fresh_time() if odds_updated_at is _SENTINEL else odds_updated_at  # type: ignore[assignment]
     return {
         "player_name": player_name,
         "market_type": "player_points",
@@ -67,13 +77,13 @@ def _candidate(
 
 
 def test_fresh_odds_pass() -> None:
-    row = _candidate(odds_updated_at=_FRESH_TIME)
+    row = _candidate(odds_updated_at=_fresh_time())
     assert odds_stale_ineligibility_reason(row) == ""
     assert is_odds_fresh(row) is True
 
 
 def test_stale_odds_blocked() -> None:
-    row = _candidate(odds_updated_at=_STALE_TIME)
+    row = _candidate(odds_updated_at=_stale_time())
     assert odds_stale_ineligibility_reason(row) == "odds_stale"
     assert is_odds_fresh(row) is False
 
@@ -132,7 +142,7 @@ def test_now_parameter_prevents_stale() -> None:
 
 def test_research_mode_bypasses_odds_stale() -> None:
     with mock.patch.dict("os.environ", {"COURTVISION_MODE": "research"}):
-        for updated_at in (_STALE_TIME, "", "not-a-date", None):
+        for updated_at in (_stale_time(), "", "not-a-date", None):
             row = _candidate(odds_updated_at=updated_at)
             assert odds_stale_ineligibility_reason(row) == ""
             assert is_odds_fresh(row) is True
@@ -140,7 +150,7 @@ def test_research_mode_bypasses_odds_stale() -> None:
 
 def test_betting_mode_enforces_odds_stale() -> None:
     with mock.patch.dict("os.environ", {"COURTVISION_MODE": "betting"}):
-        row = _candidate(odds_updated_at=_STALE_TIME)
+        row = _candidate(odds_updated_at=_stale_time())
         assert odds_stale_ineligibility_reason(row) == "odds_stale"
         assert is_odds_fresh(row) is False
 
@@ -148,7 +158,7 @@ def test_betting_mode_enforces_odds_stale() -> None:
 def test_default_mode_is_betting() -> None:
     # Ensure default (no env var) is betting mode
     with mock.patch.dict("os.environ", {}, clear=True):
-        row = _candidate(odds_updated_at=_STALE_TIME)
+        row = _candidate(odds_updated_at=_stale_time())
         assert odds_stale_ineligibility_reason(row) == "odds_stale"
 
 
@@ -158,7 +168,7 @@ def test_default_mode_is_betting() -> None:
 
 
 def test_stale_odds_elite_rejection_reason() -> None:
-    row = _candidate(odds_updated_at=_STALE_TIME)
+    row = _candidate(odds_updated_at=_stale_time())
     assert get_elite_rejection_reason(row) == ELITE_REJECT_ODDS_STALE
 
 
@@ -173,7 +183,7 @@ def test_unparseable_updated_at_elite_rejection_reason() -> None:
 
 
 def test_fresh_odds_no_elite_rejection() -> None:
-    row = _candidate(odds_updated_at=_FRESH_TIME)
+    row = _candidate(odds_updated_at=_fresh_time())
     # Fresh odds should not trigger the stale gate; game status is scheduled
     # so the only remaining gate that might block is the directional edge
     # check which requires specific edge/selection values.
@@ -187,7 +197,7 @@ def test_fresh_odds_no_elite_rejection() -> None:
 
 
 def test_stale_odds_kelly_skip_reason() -> None:
-    row = _candidate(odds_updated_at=_STALE_TIME)
+    row = _candidate(odds_updated_at=_stale_time())
     assert projected_kelly_skip_reason(row) == KELLY_SKIP_ODDS_STALE
 
 
@@ -197,7 +207,7 @@ def test_missing_updated_at_kelly_skip_reason() -> None:
 
 
 def test_fresh_odds_no_kelly_skip() -> None:
-    row = _candidate(odds_updated_at=_FRESH_TIME)
+    row = _candidate(odds_updated_at=_fresh_time())
     skip = projected_kelly_skip_reason(row)
     assert skip != KELLY_SKIP_ODDS_STALE
 
@@ -209,8 +219,8 @@ def test_fresh_odds_no_kelly_skip() -> None:
 
 def test_dataframe_filters_stale_odds() -> None:
     rows = [
-        _candidate(odds_updated_at=_FRESH_TIME, player_name="Fresh"),
-        _candidate(odds_updated_at=_STALE_TIME, player_name="Stale"),
+        _candidate(odds_updated_at=_fresh_time(), player_name="Fresh"),
+        _candidate(odds_updated_at=_stale_time(), player_name="Stale"),
         _candidate(odds_updated_at="", player_name="Missing"),
     ]
     df = pd.DataFrame(rows)
@@ -225,8 +235,8 @@ def test_dataframe_filters_stale_odds() -> None:
 
 def test_dataframe_elite_rejection_reasons() -> None:
     rows = [
-        _candidate(odds_updated_at=_FRESH_TIME, player_name="Fresh"),
-        _candidate(odds_updated_at=_STALE_TIME, player_name="Stale"),
+        _candidate(odds_updated_at=_fresh_time(), player_name="Fresh"),
+        _candidate(odds_updated_at=_stale_time(), player_name="Stale"),
     ]
     df = pd.DataFrame(rows)
     df["elite_rejection_reason"] = df.apply(
@@ -252,7 +262,7 @@ def test_default_stale_minutes_is_reasonable() -> None:
 
 def test_game_status_gate_takes_precedence() -> None:
     # Even with fresh odds, a final game should be blocked by game_status first
-    row = _candidate(odds_updated_at=_FRESH_TIME, game_status="final")
+    row = _candidate(odds_updated_at=_fresh_time(), game_status="final")
     elite_reason = get_elite_rejection_reason(row)
     assert "game_final" in elite_reason
     kelly_skip = projected_kelly_skip_reason(row)
