@@ -44,6 +44,7 @@ RUN_SUMMARY_SCHEMA_VERSION: Final = "mlb-hr-prospective-run-summary-v1"
 LEDGER_SCHEMA_VERSION: Final = "mlb-hr-prospective-ledger-v2"
 CLOSING_SCHEMA_VERSION: Final = "mlb-hr-prospective-closing-v2"
 STATUS_SCHEMA_VERSION: Final = "mlb-hr-prospective-status-v1"
+HEALTH_SCHEMA_VERSION: Final = "mlb-hr-prospective-health-v1"
 TRIAL_LOCK_SCHEMA_VERSION: Final = "mlb-hr-prospective-trial-lock-v1"
 
 SPORT: Final = "MLB"
@@ -2873,6 +2874,7 @@ def _strict_committed_prediction_rows(
     control_manifest_digest: str,
     control_dir: Path,
     ledger_path: Path,
+    operating_dates: set[str] | None = None,
 ) -> tuple[dict[str, str], ...]:
     ledger_rows = _read_ledger(ledger_path)
     ledger_predictions = tuple(
@@ -2905,6 +2907,7 @@ def _strict_committed_prediction_rows(
                 raise MLBHRProspectiveTrialError(
                     "prospective operating-date store is inaccessible"
                 ) from exc
+            validated_run = False
             for run_dir in run_entries:
                 if run_dir.name.startswith("."):
                     continue
@@ -2920,6 +2923,7 @@ def _strict_committed_prediction_rows(
                         control_dir=control_dir,
                     )
                 )
+                validated_run = True
                 _verify_ledger_linkage(
                     ledger_path=ledger_path,
                     predictions=predictions,
@@ -2935,6 +2939,8 @@ def _strict_committed_prediction_rows(
                             "prediction_id appears in multiple immutable runs"
                         )
                     artifact_ids.add(prediction_id)
+            if validated_run and operating_dates is not None:
+                operating_dates.add(date_dir.name)
     if artifact_ids != ledger_ids:
         raise MLBHRProspectiveTrialError(
             "canonical ledger and immutable prediction artifacts are not exact"
@@ -3425,6 +3431,697 @@ def report_prospective_status(
     }
 
 
+def _health_directory_members(path: Path, description: str) -> tuple[str, ...]:
+    if path.is_symlink() or not path.is_dir():
+        raise MLBHRProspectiveTrialError(
+            f"{description} is not a real directory"
+        )
+    try:
+        return tuple(sorted(entry.name for entry in path.iterdir()))
+    except OSError as exc:
+        raise MLBHRProspectiveTrialError(
+            f"{description} is inaccessible"
+        ) from exc
+
+
+def _health_file_digest(path: Path, description: str) -> str:
+    if path.is_symlink() or not path.is_file():
+        raise MLBHRProspectiveTrialError(
+            f"{description} is not a regular file"
+        )
+    return _file_sha256(path, description)
+
+
+def _health_optional_file_digest(path: Path, description: str) -> str | None:
+    if not path.exists():
+        if path.is_symlink():
+            raise MLBHRProspectiveTrialError(
+                f"{description} may not be a symlink"
+            )
+        return None
+    return _health_file_digest(path, description)
+
+
+def _health_evidence_snapshot(control_dir: Path) -> dict[str, object]:
+    """Fingerprint every file and directory membership used by health reporting."""
+
+    required_run_files = (
+        "excluded_rows.csv",
+        "predictions.csv",
+        PREDICTION_MANIFEST_FILENAME,
+        RUN_SUMMARY_FILENAME,
+    )
+    control_members = _health_directory_members(
+        control_dir, "prospective health control directory"
+    )
+    snapshot: dict[str, object] = {
+        "control_membership": control_members,
+        "control_manifest": _health_file_digest(
+            control_dir / CONTROL_MANIFEST_FILENAME,
+            "prospective health control manifest",
+        ),
+        "ledger": _health_optional_file_digest(
+            control_dir / "prospective_ledger.csv",
+            "prospective health ledger",
+        ),
+        "closing": _health_optional_file_digest(
+            control_dir / "closing_lines.csv",
+            "prospective health closing evidence",
+        ),
+        "date_membership": None,
+        "runs": (),
+    }
+    dates_root = control_dir / "dates"
+    if dates_root.exists() or dates_root.is_symlink():
+        date_members = _health_directory_members(
+            dates_root, "prospective health dates store"
+        )
+        run_snapshots: list[tuple[object, ...]] = []
+        for date_name in date_members:
+            if date_name.startswith("."):
+                continue
+            date_dir = dates_root / date_name
+            run_members = _health_directory_members(
+                date_dir,
+                "prospective health operating-date store",
+            )
+            for run_name in run_members:
+                if run_name.startswith("."):
+                    continue
+                run_dir = date_dir / run_name
+                artifact_members = _health_directory_members(
+                    run_dir,
+                    "prospective health prediction run",
+                )
+                if artifact_members != tuple(sorted(required_run_files)):
+                    raise MLBHRProspectiveTrialError(
+                        "prospective health prediction run artifact membership "
+                        "is incomplete or unexpected"
+                    )
+                artifact_digests = tuple(
+                    (
+                        filename,
+                        _health_file_digest(
+                            run_dir / filename,
+                            "prospective health prediction artifact",
+                        ),
+                    )
+                    for filename in required_run_files
+                )
+                if _health_directory_members(
+                    run_dir, "prospective health prediction run"
+                ) != artifact_members:
+                    raise MLBHRProspectiveTrialError(
+                        "prospective health prediction run membership changed "
+                        "while it was being read"
+                    )
+                run_snapshots.append(
+                    (date_name, run_name, artifact_members, artifact_digests)
+                )
+            if _health_directory_members(
+                date_dir, "prospective health operating-date store"
+            ) != run_members:
+                raise MLBHRProspectiveTrialError(
+                    "prospective health run membership changed while it was being read"
+                )
+        if _health_directory_members(
+            dates_root, "prospective health dates store"
+        ) != date_members:
+            raise MLBHRProspectiveTrialError(
+                "prospective health date membership changed while it was being read"
+            )
+        snapshot["date_membership"] = date_members
+        snapshot["runs"] = tuple(run_snapshots)
+    if _health_directory_members(
+        control_dir, "prospective health control directory"
+    ) != control_members:
+        raise MLBHRProspectiveTrialError(
+            "prospective health control membership changed while it was being read"
+        )
+    return snapshot
+
+
+def _validated_health_settlements(
+    *,
+    predictions: Sequence[Mapping[str, str]],
+    settlements: Sequence[Mapping[str, str]],
+) -> dict[str, Mapping[str, str]]:
+    """Validate settlement semantics before they enter a trusted health report."""
+
+    predictions_by_id = {row["prediction_id"]: row for row in predictions}
+    validated: dict[str, Mapping[str, str]] = {}
+    for row in settlements:
+        prediction_id = row["prediction_id"]
+        prediction = predictions_by_id.get(prediction_id)
+        if prediction is None:
+            raise MLBHRProspectiveTrialError(
+                "prospective health settlement lacks a committed prediction"
+            )
+        expected_record_id = (
+            "mlb-hr-ledger-v2-"
+            + _canonical_sha256(
+                {"record_type": "settlement", "prediction_id": prediction_id}
+            )[:24]
+        )
+        if row["ledger_record_id"] != expected_record_id:
+            raise MLBHRProspectiveTrialError(
+                "prospective health settlement identity is inconsistent"
+            )
+        if not _is_sha256(row["results_sha256"]):
+            raise MLBHRProspectiveTrialError(
+                "prospective health settlement result digest is invalid"
+            )
+        _parse_utc(
+            row["settlement_timestamp_utc"], "settlement timestamp"
+        )
+        if row["integrity_status"] != "strict_result_join_verified":
+            raise MLBHRProspectiveTrialError(
+                "prospective health settlement integrity is not verified"
+            )
+        if row["settlement_status"] == "settled":
+            outcome = row["final_hr_outcome"]
+            if (
+                row["strict_result_status"] != "final"
+                or outcome not in {"0", "1"}
+                or row["grade"] != ("win" if outcome == "1" else "loss")
+            ):
+                raise MLBHRProspectiveTrialError(
+                    "prospective health settlement outcome is inconsistent"
+                )
+            try:
+                original_odds = int(prediction["original_american_odds"])
+            except ValueError as exc:
+                raise MLBHRProspectiveTrialError(
+                    "prospective health settlement price is invalid"
+                ) from exc
+            expected_profit = (
+                _format_float(baseline.win_profit_1u(original_odds))
+                if outcome == "1"
+                else "-1"
+            )
+            if row["unit_profit_loss"] != expected_profit:
+                raise MLBHRProspectiveTrialError(
+                    "prospective health settlement return is inconsistent"
+                )
+        elif row["settlement_status"] == "void":
+            if (
+                row["strict_result_status"] != "void"
+                or row["final_hr_outcome"]
+                or row["grade"] != "void"
+                or row["unit_profit_loss"]
+            ):
+                raise MLBHRProspectiveTrialError(
+                    "prospective health void settlement is inconsistent"
+                )
+        else:
+            raise MLBHRProspectiveTrialError(
+                "prospective health settlement status is invalid"
+            )
+        validated[prediction_id] = row
+    return validated
+
+
+def _validated_health_closing_rows(
+    *,
+    control: Mapping[str, object],
+    control_digest: str,
+    predictions: Sequence[Mapping[str, str]],
+    closing_rows: Sequence[Mapping[str, str]],
+) -> dict[str, Mapping[str, str]]:
+    """Validate closing-row linkage and captured/missing evidence semantics."""
+
+    predictions_by_id = {row["prediction_id"]: row for row in predictions}
+    validated: dict[str, Mapping[str, str]] = {}
+    allowed = {
+        "captured_same_book": (
+            "same_book_latest_prestart",
+            "no_post_start_evidence_used",
+        ),
+        "captured_consensus": (
+            "consensus_latest_prestart",
+            "no_post_start_evidence_used",
+        ),
+        "missing": ("missing", "no_valid_prestart_snapshot"),
+        "missing_prestart": (
+            "missing_prestart_snapshot",
+            "no_valid_prestart_snapshot",
+        ),
+    }
+    for row in closing_rows:
+        prediction_id = row["prediction_id"]
+        prediction = predictions_by_id.get(prediction_id)
+        if prediction is None:
+            raise MLBHRProspectiveTrialError(
+                "prospective health closing row lacks a committed prediction"
+            )
+        if (
+            row["prediction_run_id"] != prediction["prediction_run_id"]
+            or row["control_id"] != control["control_id"]
+            or row["control_manifest_digest"] != control_digest
+            or row["original_american_odds"]
+            != prediction["original_american_odds"]
+            or row["original_implied_probability"]
+            != prediction["original_implied_probability"]
+        ):
+            raise MLBHRProspectiveTrialError(
+                "prospective health closing linkage is inconsistent"
+            )
+        status = row["closing_status"]
+        expected_policy = allowed.get(status)
+        if expected_policy is None or (
+            row["closing_method"], row["integrity_status"]
+        ) != expected_policy:
+            raise MLBHRProspectiveTrialError(
+                "prospective health closing status is invalid"
+            )
+        expected_record_id = (
+            "mlb-hr-closing-v2-"
+            + _canonical_sha256(
+                {
+                    "prediction_id": prediction_id,
+                    "closing_status": status,
+                    "closing_method": row["closing_method"],
+                    "closing_snapshot_time": row[
+                        "closing_snapshot_time_utc"
+                    ],
+                    "closing_sportsbook": row["closing_sportsbook"],
+                    "closing_american_odds": row["closing_american_odds"],
+                }
+            )[:24]
+        )
+        if row["closing_record_id"] != expected_record_id:
+            raise MLBHRProspectiveTrialError(
+                "prospective health closing identity is inconsistent"
+            )
+        if not _is_sha256(row["source_odds_sha256"]):
+            raise MLBHRProspectiveTrialError(
+                "prospective health closing source digest is invalid"
+            )
+        _parse_utc(row["captured_at_utc"], "closing capture timestamp")
+        evidence_fields = (
+            "closing_snapshot_time_utc",
+            "closing_sportsbook",
+            "closing_sportsbook_name",
+            "closing_american_odds",
+            "closing_decimal_odds",
+            "closing_implied_probability",
+            "consensus_implied_probability",
+            "closing_line_movement",
+            "closing_probability_movement",
+        )
+        if status in {"missing", "missing_prestart"}:
+            if any(row[field_name] for field_name in evidence_fields) or row[
+                "consensus_bookmaker_count"
+            ] != "0":
+                raise MLBHRProspectiveTrialError(
+                    "prospective health explicit-missing closing row is inconsistent"
+                )
+        else:
+            captured_required_fields = (
+                "closing_snapshot_time_utc",
+                "closing_american_odds",
+                "closing_decimal_odds",
+                "closing_implied_probability",
+                "consensus_implied_probability",
+                "closing_line_movement",
+                "closing_probability_movement",
+            )
+            if any(
+                not row[field_name]
+                for field_name in captured_required_fields
+            ):
+                raise MLBHRProspectiveTrialError(
+                    "prospective health captured closing row is incomplete"
+                )
+            try:
+                closing_american = int(row["closing_american_odds"])
+                closing_decimal = float(row["closing_decimal_odds"])
+                closing_implied = float(row["closing_implied_probability"])
+                consensus_count = int(row["consensus_bookmaker_count"])
+                consensus_implied = float(
+                    row["consensus_implied_probability"]
+                )
+                line_movement = float(row["closing_line_movement"])
+                probability_movement = float(
+                    row["closing_probability_movement"]
+                )
+                original_american = int(row["original_american_odds"])
+                original_implied = float(row["original_implied_probability"])
+            except ValueError as exc:
+                raise MLBHRProspectiveTrialError(
+                    "prospective health captured closing values are invalid"
+                ) from exc
+            values = (
+                closing_decimal,
+                closing_implied,
+                consensus_implied,
+                line_movement,
+                probability_movement,
+                original_implied,
+            )
+            if (
+                closing_american == 0
+                or consensus_count <= 0
+                or not all(math.isfinite(value) for value in values)
+                or closing_decimal <= 1
+                or not 0 < closing_implied < 1
+                or not 0 < consensus_implied < 1
+                or not math.isclose(
+                    closing_decimal,
+                    baseline.american_to_decimal(closing_american),
+                    rel_tol=1e-9,
+                    abs_tol=1e-9,
+                )
+                or not math.isclose(
+                    closing_implied,
+                    baseline.american_to_implied_probability(closing_american),
+                    rel_tol=1e-9,
+                    abs_tol=1e-9,
+                )
+                or not math.isclose(
+                    line_movement,
+                    float(closing_american - original_american),
+                    rel_tol=1e-9,
+                    abs_tol=1e-9,
+                )
+                or not math.isclose(
+                    probability_movement,
+                    closing_implied - original_implied,
+                    rel_tol=1e-9,
+                    abs_tol=1e-9,
+                )
+            ):
+                raise MLBHRProspectiveTrialError(
+                    "prospective health captured closing values are inconsistent"
+                )
+            snapshot_time = _parse_utc(
+                row["closing_snapshot_time_utc"], "closing snapshot timestamp"
+            )
+            commence_time = _parse_utc(
+                prediction["commence_time_utc"], "commence timestamp"
+            )
+            if snapshot_time >= commence_time:
+                raise MLBHRProspectiveTrialError(
+                    "prospective health closing evidence is not pregame"
+                )
+            same_book = row["closing_sportsbook"] == prediction["sportsbook"]
+            if same_book != (status == "captured_same_book"):
+                raise MLBHRProspectiveTrialError(
+                    "prospective health closing method is inconsistent"
+                )
+        validated[prediction_id] = row
+    return validated
+
+
+def _daily_health_evidence(
+    *,
+    operating_dates: Sequence[str],
+    predictions: Sequence[Mapping[str, str]],
+    settlements_by_id: Mapping[str, Mapping[str, str]],
+    closing_by_id: Mapping[str, Mapping[str, str]],
+) -> list[dict[str, object]]:
+    by_date: dict[str, dict[str, object]] = {}
+    for operating_date in operating_dates:
+        try:
+            canonical_date = date.fromisoformat(operating_date).isoformat()
+        except ValueError as exc:
+            raise MLBHRProspectiveTrialError(
+                "prospective health operating date is invalid"
+            ) from exc
+        if operating_date != canonical_date:
+            raise MLBHRProspectiveTrialError(
+                "prospective health operating date is not canonical"
+            )
+        by_date.setdefault(
+            operating_date,
+            {
+                "operating_date": operating_date,
+                "predictions": 0,
+                "settled": 0,
+                "pending": 0,
+                "void": 0,
+                "positive_hr_outcomes": 0,
+                "closing_same_book": 0,
+                "closing_consensus": 0,
+                "closing_explicit_missing": 0,
+                "predictions_without_closing_record": 0,
+                "usable_closing": 0,
+                "closing_coverage_rate": None,
+            },
+        )
+    for prediction in predictions:
+        operating_date = prediction["operating_date"]
+        row = by_date.get(operating_date)
+        if row is None:
+            raise MLBHRProspectiveTrialError(
+                "prospective health prediction date lacks immutable run evidence"
+            )
+        row["predictions"] = int(row["predictions"]) + 1
+        settlement = settlements_by_id.get(prediction["prediction_id"])
+        if settlement is None:
+            row["pending"] = int(row["pending"]) + 1
+        elif settlement["settlement_status"] == "settled":
+            row["settled"] = int(row["settled"]) + 1
+            if settlement["final_hr_outcome"] == "1":
+                row["positive_hr_outcomes"] = (
+                    int(row["positive_hr_outcomes"]) + 1
+                )
+        else:
+            row["void"] = int(row["void"]) + 1
+        closing = closing_by_id.get(prediction["prediction_id"])
+        if closing is None:
+            row["predictions_without_closing_record"] = (
+                int(row["predictions_without_closing_record"]) + 1
+            )
+        elif closing["closing_status"] == "captured_same_book":
+            row["closing_same_book"] = int(row["closing_same_book"]) + 1
+            row["usable_closing"] = int(row["usable_closing"]) + 1
+        elif closing["closing_status"] == "captured_consensus":
+            row["closing_consensus"] = int(row["closing_consensus"]) + 1
+            row["usable_closing"] = int(row["usable_closing"]) + 1
+        else:
+            row["closing_explicit_missing"] = (
+                int(row["closing_explicit_missing"]) + 1
+            )
+    result: list[dict[str, object]] = []
+    for operating_date in sorted(by_date):
+        row = by_date[operating_date]
+        predictions_for_date = int(row["predictions"])
+        row["closing_coverage_rate"] = (
+            int(row["usable_closing"]) / predictions_for_date
+            if predictions_for_date
+            else None
+        )
+        result.append(row)
+    return result
+
+
+def report_prospective_health(
+    *,
+    control_dir: str | Path,
+    trial_root: str | Path,
+) -> dict[str, object]:
+    """Return a deterministic, fail-closed view of immutable trial health."""
+
+    trial = Path(trial_root).expanduser().resolve(strict=False)
+    control, control_digest, frozen_control_dir = _read_control(
+        control_dir,
+        trial_root=trial,
+    )
+    ledger_path = frozen_control_dir / "prospective_ledger.csv"
+    closing_path = frozen_control_dir / "closing_lines.csv"
+    evidence_before = _health_evidence_snapshot(frozen_control_dir)
+    status_report = report_prospective_status(
+        control_dir=frozen_control_dir,
+        trial_root=trial,
+    )
+    artifact_integrity = status_report.get("artifact_integrity")
+    if not isinstance(artifact_integrity, Mapping):
+        raise MLBHRProspectiveTrialError(
+            "prospective health artifact integrity is unavailable"
+        )
+    if artifact_integrity.get("status") != "valid" or artifact_integrity.get(
+        "finding_count"
+    ) != 0:
+        raise MLBHRProspectiveTrialError(
+            "prospective health report blocked by artifact integrity findings"
+        )
+    status_control = status_report.get("control")
+    if not isinstance(status_control, Mapping) or (
+        status_control.get("control_id") != control["control_id"]
+        or status_control.get("control_manifest_digest") != control_digest
+    ):
+        raise MLBHRProspectiveTrialError(
+            "prospective health control evidence changed during reporting"
+        )
+    operating_dates: set[str] = set()
+    ledger_rows = _strict_committed_prediction_rows(
+        control_manifest=control,
+        control_manifest_digest=control_digest,
+        control_dir=frozen_control_dir,
+        ledger_path=ledger_path,
+        operating_dates=operating_dates,
+    )
+    predictions = tuple(
+        row for row in ledger_rows if row["record_type"] == "prediction"
+    )
+    settlements = tuple(
+        row for row in ledger_rows if row["record_type"] == "settlement"
+    )
+    settlements_by_id = _validated_health_settlements(
+        predictions=predictions,
+        settlements=settlements,
+    )
+    closing_by_id = _validated_health_closing_rows(
+        control=control,
+        control_digest=control_digest,
+        predictions=predictions,
+        closing_rows=_read_closing_rows(closing_path),
+    )
+    daily_evidence = _daily_health_evidence(
+        operating_dates=tuple(sorted(operating_dates)),
+        predictions=predictions,
+        settlements_by_id=settlements_by_id,
+        closing_by_id=closing_by_id,
+    )
+    counts = status_report.get("counts")
+    identity_coverage = status_report.get("identity_status_coverage")
+    closing_coverage = status_report.get("closing_line_coverage")
+    metrics = status_report.get("metrics")
+    gate_progress = status_report.get("gate_progress")
+    if not all(
+        isinstance(section, Mapping)
+        for section in (
+            counts,
+            identity_coverage,
+            closing_coverage,
+            metrics,
+            gate_progress,
+        )
+    ):
+        raise MLBHRProspectiveTrialError(
+            "prospective health source report is incomplete"
+        )
+    settled_rows = tuple(
+        row
+        for row in settlements
+        if row["settlement_status"] == "settled"
+    )
+    explicit_missing = sum(
+        row["closing_status"] in {"missing", "missing_prestart"}
+        for row in closing_by_id.values()
+    )
+    captured_closing = sum(
+        row["closing_status"]
+        in {"captured_same_book", "captured_consensus"}
+        for row in closing_by_id.values()
+    )
+    without_closing = len(predictions) - len(closing_by_id)
+    status_expected_counts = {
+        "prospective_operating_dates": len(
+            {row["operating_date"] for row in predictions}
+        ),
+        "committed_predictions": len(predictions),
+        "settled_predictions": len(settled_rows),
+        "pending_predictions": len(predictions) - len(settlements_by_id),
+        "void_predictions": len(settlements) - len(settled_rows),
+        "unique_games": len({row["event_id"] for row in predictions}),
+        "unique_players": len(
+            {row["normalized_player_name"] for row in predictions}
+        ),
+        "positive_hr_outcomes": sum(
+            row["final_hr_outcome"] == "1" for row in settled_rows
+        ),
+    }
+    if any(
+        counts.get(name) != value
+        for name, value in status_expected_counts.items()
+    ):
+        raise MLBHRProspectiveTrialError(
+            "prospective health cumulative evidence is inconsistent"
+        )
+    if (
+        closing_coverage.get("captured") != captured_closing
+        or closing_coverage.get("prediction_count") != len(predictions)
+        or closing_coverage.get("missing") != without_closing
+    ):
+        raise MLBHRProspectiveTrialError(
+            "prospective health closing evidence is inconsistent"
+        )
+    measured = metrics.get("status") == "measured"
+    performance = {
+        "brier_score": metrics.get("brier_score") if measured else None,
+        "calibration_error": (
+            metrics.get("calibration_error") if measured else None
+        ),
+        "log_loss": metrics.get("log_loss") if measured else None,
+        "hit_rate": metrics.get("hit_rate") if measured else None,
+        "flat_one_unit_profit_loss": (
+            metrics.get("flat_one_unit_profit_loss") if measured else None
+        ),
+        "settled_count": len(settled_rows),
+    }
+    gates: dict[str, dict[str, object]] = {}
+    for name in sorted(gate_progress):
+        gate = gate_progress[name]
+        if not isinstance(gate, Mapping) or any(
+            field_name not in gate
+            for field_name in (
+                "current_value",
+                "required_value",
+                "remaining_gap",
+                "status",
+            )
+        ):
+            raise MLBHRProspectiveTrialError(
+                "prospective health gate evidence is incomplete"
+            )
+        gates[name] = {
+            "current_value": gate["current_value"],
+            "required_value": gate["required_value"],
+            "remaining_gap": gate["remaining_gap"],
+            "status": gate["status"],
+        }
+    health_report = {
+        "schema_version": HEALTH_SCHEMA_VERSION,
+        "control": {
+            "control_id": control["control_id"],
+            "model_id": status_control["model_id"],
+            "model_version": status_control["model_version"],
+            "research_only": status_report["research_only"],
+            "approval_status": status_report["approval_status"],
+            "eligible_for_betting": status_report["eligible_for_betting"],
+            "eligible_for_official_pick": status_report[
+                "eligible_for_official_pick"
+            ],
+            "artifact_integrity_status": artifact_integrity["status"],
+            "artifact_integrity_finding_count": artifact_integrity[
+                "finding_count"
+            ],
+        },
+        "evidence": {
+            **status_expected_counts,
+            "prospective_operating_dates": len(operating_dates),
+            "identity_status_coverage": {
+                name: identity_coverage[name] for name in sorted(identity_coverage)
+            },
+            "closing_prediction_count": len(predictions),
+            "closing_captured": captured_closing,
+            "closing_explicit_missing": explicit_missing,
+            "predictions_without_closing_record": without_closing,
+            "closing_coverage_rate": closing_coverage["coverage_rate"],
+        },
+        "performance": performance,
+        "gates": gates,
+        "daily_evidence": daily_evidence,
+    }
+    if _health_evidence_snapshot(frozen_control_dir) != evidence_before:
+        raise MLBHRProspectiveTrialError(
+            "prospective evidence changed during read-only health reporting"
+        )
+    return health_report
+
+
 PROSPECTIVE_COMMANDS: Final = frozenset(
     {
         "activate-prospective-control",
@@ -3432,6 +4129,7 @@ PROSPECTIVE_COMMANDS: Final = frozenset(
         "capture-prospective-closing",
         "settle-prospective-paper-day",
         "report-prospective-status",
+        "report-prospective-health",
     }
 )
 
@@ -3467,6 +4165,10 @@ def configure_prospective_cli(
     report = subparsers.add_parser("report-prospective-status")
     report.add_argument("--control-dir", type=Path, required=True)
     report.add_argument("--trial-root", type=Path, required=True)
+
+    health = subparsers.add_parser("report-prospective-health")
+    health.add_argument("--control-dir", type=Path, required=True)
+    health.add_argument("--trial-root", type=Path, required=True)
 
 
 def _relative_control_path(control_id: str) -> str:
@@ -3541,6 +4243,11 @@ def execute_prospective_cli(args: argparse.Namespace) -> dict[str, object]:
             control_dir=args.control_dir,
             trial_root=args.trial_root,
         )
+    if args.command == "report-prospective-health":
+        return report_prospective_health(
+            control_dir=args.control_dir,
+            trial_root=args.trial_root,
+        )
     raise MLBHRProspectiveTrialError("unsupported prospective command")
 
 
@@ -3551,6 +4258,7 @@ __all__ = [
     "ControlActivationResult",
     "EXCLUDED_COLUMNS",
     "FROZEN_POLICIES",
+    "HEALTH_SCHEMA_VERSION",
     "LEDGER_COLUMNS",
     "LEDGER_SCHEMA_VERSION",
     "MLBHRProspectiveTrialBusyError",
@@ -3567,6 +4275,7 @@ __all__ = [
     "configure_prospective_cli",
     "execute_prospective_cli",
     "report_prospective_status",
+    "report_prospective_health",
     "run_prospective_paper_day",
     "settle_prospective_paper_day",
     "validate_complete_model_bundle",

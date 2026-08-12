@@ -398,14 +398,37 @@ calibration and performance only when measurable, gate progress, and artifact
 integrity findings. Passing gates is evidence for human review only and never
 promotes a model or creates an official pick.
 
+Build the stricter cumulative and daily trial-health report:
+
+```powershell
+py -3.13 -m courtvision.sports.mlb.training.hr_research_baseline `
+  report-prospective-health `
+  --control-dir <EXPLICIT_CONTROL_DIR> `
+  --trial-root <EXPLICIT_TRIAL_ROOT>
+```
+
+This command is also strictly read-only. It reuses the prospective control,
+immutable prediction/ledger linkage, closing-evidence readers, cumulative
+metrics, and gate calculations. It emits deterministic JSON with the frozen
+control identity and research boundaries; cumulative prediction, settlement,
+identity, and closing evidence; measurable performance; every existing
+prospective gate; and one sorted evidence record per supported operating date.
+Explicit missing closing rows remain distinct from predictions that have no
+closing record, and usable closing coverage includes only verified same-book
+or consensus rows. Malformed, conflicting, inconsistent, or integrity-invalid
+evidence blocks the report instead of being presented as trusted health data.
+The command does not create or repair trial artifacts and does not access a
+provider or the network.
+
 Prospective v1 uses explicit schemas rather than silently extending older
 records: `mlb-hr-prospective-control-v1`,
 `mlb-hr-prospective-prediction-v1`,
 `mlb-hr-prospective-prediction-manifest-v1`,
 `mlb-hr-prospective-run-summary-v1`, `mlb-hr-prospective-ledger-v2`,
-`mlb-hr-prospective-closing-v2`, `mlb-hr-prospective-status-v1`, and
-`mlb-hr-prospective-trial-lock-v1`. Older schemas remain readable by their
-existing tooling but are never upgraded in place or treated as prospective v1.
+`mlb-hr-prospective-closing-v2`, `mlb-hr-prospective-status-v1`,
+`mlb-hr-prospective-health-v1`, and `mlb-hr-prospective-trial-lock-v1`. Older
+schemas remain readable by their existing tooling but are never upgraded in
+place or treated as prospective v1.
 
 All mutating prospective commands use one exclusive owner-verified trial-store
 lock. Visible, malformed, inaccessible, or ownership-conflicting lock states

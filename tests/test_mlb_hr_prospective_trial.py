@@ -7,8 +7,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import socket
 import subprocess
 import threading
+import urllib.request
 
 import pytest
 
@@ -53,6 +55,17 @@ def _read_csv(path: Path) -> list[dict[str, str]]:
 
 def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _snapshot_tree(root: Path) -> dict[str, tuple[bytes, int]]:
+    return {
+        path.relative_to(root).as_posix(): (
+            path.read_bytes(),
+            path.stat().st_mtime_ns,
+        )
+        for path in root.rglob("*")
+        if path.is_file()
+    }
 
 
 def _git(repository: Path, *args: str) -> str:
@@ -1097,6 +1110,473 @@ def test_settled_status_report_has_deterministic_counts_and_gates(
     assert report["gate_progress"]["eligible_predictions"]["current_value"] == 1  # type: ignore[index]
 
 
+def test_prospective_health_cli_is_registered_read_only_and_deterministic(
+    workspace: dict[str, Path],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control = _activate(workspace)
+    before = _snapshot_tree(workspace["trial"])
+
+    def forbidden_boundary(*args: object, **kwargs: object) -> object:
+        raise AssertionError("health report reached a prohibited boundary")
+
+    for name in (
+        "_TrialStoreLock",
+        "_transactional_append_csv",
+        "_write_exclusive",
+        "_safe_remove_owned_stage",
+        "_append_prediction_ledger_rows",
+        "activate_prospective_control",
+        "run_prospective_paper_day",
+        "capture_prospective_closing",
+        "settle_prospective_paper_day",
+    ):
+        monkeypatch.setattr(trial, name, forbidden_boundary)
+    for name in (
+        "_write_csv_create_once",
+        "_write_json_create_once",
+        "_write_text_create_once",
+        "write_feature_artifacts",
+        "train_research_logistic_baseline",
+        "generate_daily_research_predictions",
+        "append_predictions_to_ledger",
+        "settle_prediction_ledger",
+        "capture_closing_line_snapshots",
+        "run_daily_research",
+        "build_live_hr_research_features",
+        "load_model_bundle",
+    ):
+        monkeypatch.setattr(baseline, name, forbidden_boundary)
+    monkeypatch.setattr(socket, "create_connection", forbidden_boundary)
+    monkeypatch.setattr(urllib.request, "urlopen", forbidden_boundary)
+    argv = [
+        "report-prospective-health",
+        "--control-dir",
+        str(control.control_dir),
+        "--trial-root",
+        str(workspace["trial"]),
+    ]
+
+    assert baseline.main(argv) == 0
+    first = capsys.readouterr().out
+    assert baseline.main(argv) == 0
+    second = capsys.readouterr().out
+    payload = json.loads(first)
+
+    assert first == second
+    assert payload["schema_version"] == trial.HEALTH_SCHEMA_VERSION
+    assert payload["daily_evidence"] == []
+    assert payload["performance"] == {
+        "brier_score": None,
+        "calibration_error": None,
+        "flat_one_unit_profit_loss": None,
+        "hit_rate": None,
+        "log_loss": None,
+        "settled_count": 0,
+    }
+    assert payload["control"]["research_only"] is True
+    assert payload["control"]["approval_status"] == "not_approved"
+    assert payload["control"]["eligible_for_betting"] is False
+    assert payload["control"]["eligible_for_official_pick"] is False
+    assert _snapshot_tree(workspace["trial"]) == before
+
+
+def test_prospective_health_cumulative_counts_performance_and_gate_passthrough(
+    workspace: dict[str, Path],
+) -> None:
+    control, run = _published_run(workspace)
+    _capture_closing(workspace, control, run)
+    _settle(workspace, control)
+
+    health = trial.report_prospective_health(
+        control_dir=control.control_dir,
+        trial_root=workspace["trial"],
+    )
+    status = trial.report_prospective_status(
+        control_dir=control.control_dir,
+        trial_root=workspace["trial"],
+    )
+
+    assert health["evidence"] == {
+        "prospective_operating_dates": 1,
+        "committed_predictions": 1,
+        "settled_predictions": 1,
+        "pending_predictions": 0,
+        "void_predictions": 0,
+        "unique_games": 1,
+        "unique_players": 1,
+        "positive_hr_outcomes": 1,
+        "identity_status_coverage": {"name_only_research": 1},
+        "closing_prediction_count": 1,
+        "closing_captured": 1,
+        "closing_explicit_missing": 0,
+        "predictions_without_closing_record": 0,
+        "closing_coverage_rate": 1.0,
+    }
+    performance = health["performance"]
+    assert performance["settled_count"] == 1  # type: ignore[index]
+    assert performance["hit_rate"] == 1.0  # type: ignore[index]
+    assert performance["flat_one_unit_profit_loss"] == 4.0  # type: ignore[index]
+    assert performance["brier_score"] is not None  # type: ignore[index]
+    assert performance["calibration_error"] is not None  # type: ignore[index]
+    assert performance["log_loss"] is not None  # type: ignore[index]
+    assert health["gates"] == status["gate_progress"]
+
+
+@pytest.mark.parametrize(
+    ("bookmaker_key", "expected_status"),
+    [
+        ("draftkings", "captured_same_book"),
+        ("", "captured_consensus"),
+    ],
+)
+def test_prospective_health_accepts_writer_optional_bookmaker_metadata(
+    workspace: dict[str, Path],
+    bookmaker_key: str,
+    expected_status: str,
+) -> None:
+    control, run = _published_run(workspace)
+    _write_csv(
+        workspace["odds"],
+        baseline.ODDS_REQUIRED_COLUMNS,
+        [
+            _odds_row(
+                snapshot_time="2026-08-06T22:00:00Z",
+                bookmaker_key=bookmaker_key,
+                bookmaker="",
+                price=350,
+            )
+        ],
+    )
+
+    _capture_closing(workspace, control, run)
+    closing = _read_csv(control.control_dir / "closing_lines.csv")[0]
+    health = trial.report_prospective_health(
+        control_dir=control.control_dir,
+        trial_root=workspace["trial"],
+    )
+    daily = health["daily_evidence"][0]  # type: ignore[index]
+
+    assert closing["closing_status"] == expected_status
+    assert closing["closing_sportsbook_name"] == ""
+    assert daily["closing_same_book"] == (  # type: ignore[index]
+        1 if expected_status == "captured_same_book" else 0
+    )
+    assert daily["closing_consensus"] == (  # type: ignore[index]
+        1 if expected_status == "captured_consensus" else 0
+    )
+    assert daily["usable_closing"] == 1  # type: ignore[index]
+
+
+def test_prospective_health_daily_closing_and_settlement_accounting(
+    workspace: dict[str, Path],
+) -> None:
+    _write_csv(
+        workspace["odds"],
+        baseline.ODDS_REQUIRED_COLUMNS,
+        [
+            _odds_row(event_id="event-same", player="Same Batter"),
+            _odds_row(event_id="event-consensus", player="Consensus Batter"),
+            _odds_row(event_id="event-missing-1", player="Missing Batter One"),
+            _odds_row(event_id="event-missing-2", player="Missing Batter Two"),
+        ],
+    )
+    control = _activate(workspace)
+    first_run = _run(workspace, control)
+    _write_csv(
+        workspace["odds"],
+        baseline.ODDS_REQUIRED_COLUMNS,
+        [
+            _odds_row(
+                snapshot_time="2026-08-06T22:00:00Z",
+                event_id="event-same",
+                player="Same Batter",
+                price=350,
+            ),
+            _odds_row(
+                snapshot_time="2026-08-06T22:00:00Z",
+                event_id="event-consensus",
+                player="Consensus Batter",
+                bookmaker_key="fanduel",
+                bookmaker="FanDuel",
+                price=325,
+            ),
+        ],
+    )
+    _capture_closing(workspace, control, first_run)
+    _write_csv(
+        workspace["odds"],
+        baseline.ODDS_REQUIRED_COLUMNS,
+        [_odds_row(event_id="event-no-closing", player="No Closing Batter")],
+    )
+    _run(workspace, control)
+    _write_csv(
+        workspace["results"],
+        (*baseline.RESULTS_REQUIRED_COLUMNS, "result_reason"),
+        [
+            _result_row(event_id="event-same", player="Same Batter"),
+            _result_row(
+                event_id="event-consensus",
+                player="Consensus Batter",
+                actual_home_runs=0,
+            ),
+            _result_row(
+                event_id="event-missing-1",
+                player="Missing Batter One",
+                actual_home_runs="",
+                game_status="void",
+            ),
+            _result_row(
+                event_id="event-missing-2",
+                player="Missing Batter Two",
+                actual_home_runs="",
+                game_status="void",
+            ),
+        ],
+    )
+    _settle(workspace, control)
+
+    health = trial.report_prospective_health(
+        control_dir=control.control_dir,
+        trial_root=workspace["trial"],
+    )
+
+    assert health["evidence"]["committed_predictions"] == 5  # type: ignore[index]
+    assert health["evidence"]["settled_predictions"] == 2  # type: ignore[index]
+    assert health["evidence"]["pending_predictions"] == 1  # type: ignore[index]
+    assert health["evidence"]["void_predictions"] == 2  # type: ignore[index]
+    assert health["evidence"]["closing_captured"] == 2  # type: ignore[index]
+    assert health["evidence"]["closing_explicit_missing"] == 2  # type: ignore[index]
+    assert health["evidence"]["predictions_without_closing_record"] == 1  # type: ignore[index]
+    evidence = health["evidence"]
+    assert evidence["committed_predictions"] == (  # type: ignore[index]
+        evidence["settled_predictions"]  # type: ignore[index]
+        + evidence["void_predictions"]  # type: ignore[index]
+        + evidence["pending_predictions"]  # type: ignore[index]
+    )
+    assert health["daily_evidence"] == [
+        {
+            "operating_date": "2026-08-06",
+            "predictions": 5,
+            "settled": 2,
+            "pending": 1,
+            "void": 2,
+            "positive_hr_outcomes": 1,
+            "closing_same_book": 1,
+            "closing_consensus": 1,
+            "closing_explicit_missing": 2,
+            "predictions_without_closing_record": 1,
+            "usable_closing": 2,
+            "closing_coverage_rate": 0.4,
+        }
+    ]
+    daily = health["daily_evidence"][0]  # type: ignore[index]
+    assert daily["usable_closing"] == (  # type: ignore[index]
+        daily["closing_same_book"] + daily["closing_consensus"]  # type: ignore[index]
+    )
+    assert daily["predictions"] == (  # type: ignore[index]
+        daily["usable_closing"]  # type: ignore[index]
+        + daily["closing_explicit_missing"]  # type: ignore[index]
+        + daily["predictions_without_closing_record"]  # type: ignore[index]
+    )
+
+
+def test_prospective_health_groups_daily_evidence_in_date_order(
+    workspace: dict[str, Path],
+) -> None:
+    control = _activate(workspace)
+    _run(workspace, control)
+    _write_csv(
+        workspace["odds"],
+        baseline.ODDS_REQUIRED_COLUMNS,
+        [
+            _odds_row(
+                snapshot_time="2026-08-07T15:00:00Z",
+                event_id="event-2",
+                commence_time="2026-08-07T23:00:00Z",
+                player="Second Batter",
+            )
+        ],
+    )
+    trial.run_prospective_paper_day(
+        target_date="2026-08-07",
+        control_dir=control.control_dir,
+        odds_csv=workspace["odds"],
+        trial_root=workspace["trial"],
+        repository_root=workspace["repository"],
+        clock=_clock(datetime(2026, 8, 7, 17, 0, tzinfo=timezone.utc)),
+    )
+
+    health = trial.report_prospective_health(
+        control_dir=control.control_dir,
+        trial_root=workspace["trial"],
+    )
+
+    assert health["evidence"]["prospective_operating_dates"] == 2  # type: ignore[index]
+    assert [
+        row["operating_date"] for row in health["daily_evidence"]  # type: ignore[union-attr]
+    ] == ["2026-08-06", "2026-08-07"]
+    assert [
+        row["predictions_without_closing_record"]
+        for row in health["daily_evidence"]  # type: ignore[union-attr]
+    ] == [1, 1]
+
+
+def test_prospective_health_includes_validated_zero_prediction_date(
+    workspace: dict[str, Path],
+) -> None:
+    _write_csv(
+        workspace["odds"],
+        baseline.ODDS_REQUIRED_COLUMNS,
+        [_odds_row(commence_time="2026-08-07T23:00:00Z")],
+    )
+    control = _activate(workspace)
+    run = _run(workspace, control)
+
+    health = trial.report_prospective_health(
+        control_dir=control.control_dir,
+        trial_root=workspace["trial"],
+    )
+
+    assert run.status == "completed_no_predictions"
+    assert health["evidence"]["prospective_operating_dates"] == 1  # type: ignore[index]
+    assert health["evidence"]["committed_predictions"] == 0  # type: ignore[index]
+    assert health["gates"]["prospective_prediction_dates"]["current_value"] == 0  # type: ignore[index]
+    assert health["daily_evidence"] == [
+        {
+            "operating_date": "2026-08-06",
+            "predictions": 0,
+            "settled": 0,
+            "pending": 0,
+            "void": 0,
+            "positive_hr_outcomes": 0,
+            "closing_same_book": 0,
+            "closing_consensus": 0,
+            "closing_explicit_missing": 0,
+            "predictions_without_closing_record": 0,
+            "usable_closing": 0,
+            "closing_coverage_rate": None,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "artifact_name",
+    ["predictions.csv", trial.PREDICTION_MANIFEST_FILENAME],
+)
+def test_prospective_health_fails_if_run_artifact_changes_after_validation(
+    workspace: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    artifact_name: str,
+) -> None:
+    control, run = _published_run(workspace)
+    artifact_path = run.run_dir / artifact_name  # type: ignore[operator]
+    original_daily = trial._daily_health_evidence  # type: ignore[attr-defined]
+
+    def mutate_after_validation(**kwargs: object) -> list[dict[str, object]]:
+        result = original_daily(**kwargs)  # type: ignore[arg-type]
+        artifact_path.write_bytes(artifact_path.read_bytes() + b"\n")
+        return result
+
+    monkeypatch.setattr(trial, "_daily_health_evidence", mutate_after_validation)
+    with pytest.raises(trial.MLBHRProspectiveTrialError, match="changed"):
+        trial.report_prospective_health(
+            control_dir=control.control_dir,
+            trial_root=workspace["trial"],
+        )
+
+
+def test_prospective_health_fails_if_control_changes_after_validation(
+    workspace: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control = _activate(workspace)
+    manifest_path = control.control_dir / trial.CONTROL_MANIFEST_FILENAME
+    original_daily = trial._daily_health_evidence  # type: ignore[attr-defined]
+
+    def mutate_after_validation(**kwargs: object) -> list[dict[str, object]]:
+        result = original_daily(**kwargs)  # type: ignore[arg-type]
+        manifest_path.write_bytes(manifest_path.read_bytes() + b"\n")
+        return result
+
+    monkeypatch.setattr(trial, "_daily_health_evidence", mutate_after_validation)
+    with pytest.raises(trial.MLBHRProspectiveTrialError, match="changed"):
+        trial.report_prospective_health(
+            control_dir=control.control_dir,
+            trial_root=workspace["trial"],
+        )
+
+
+@pytest.mark.parametrize("operation", ["add_run", "remove_run", "rename_date"])
+def test_prospective_health_fails_if_membership_changes_after_validation(
+    workspace: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    control, run = _published_run(workspace)
+    run_dir = run.run_dir
+    assert run_dir is not None
+    date_dir = run_dir.parent
+    original_daily = trial._daily_health_evidence  # type: ignore[attr-defined]
+
+    def mutate_after_validation(**kwargs: object) -> list[dict[str, object]]:
+        result = original_daily(**kwargs)  # type: ignore[arg-type]
+        if operation == "add_run":
+            (date_dir / "added-run").mkdir()
+        elif operation == "remove_run":
+            run_dir.rename(workspace["repository"] / "removed-run")
+        else:
+            date_dir.rename(date_dir.with_name("2026-08-07"))
+        return result
+
+    monkeypatch.setattr(trial, "_daily_health_evidence", mutate_after_validation)
+    with pytest.raises(trial.MLBHRProspectiveTrialError):
+        trial.report_prospective_health(
+            control_dir=control.control_dir,
+            trial_root=workspace["trial"],
+        )
+
+
+@pytest.mark.parametrize("mutation", ["malformed", "conflicting"])
+def test_prospective_health_fails_closed_on_invalid_closing_evidence(
+    workspace: dict[str, Path], mutation: str
+) -> None:
+    control, run = _published_run(workspace)
+    _capture_closing(workspace, control, run)
+    closing_path = control.control_dir / "closing_lines.csv"
+    rows = _read_csv(closing_path)
+    if mutation == "malformed":
+        rows[0]["integrity_status"] = "unverified"
+    else:
+        conflicting = dict(rows[0])
+        conflicting["closing_record_id"] = "conflicting-record"
+        rows.append(conflicting)
+    _write_csv(closing_path, trial.CLOSING_COLUMNS, rows)
+
+    with pytest.raises(trial.MLBHRProspectiveTrialError):
+        trial.report_prospective_health(
+            control_dir=control.control_dir,
+            trial_root=workspace["trial"],
+        )
+
+
+def test_prospective_health_fails_closed_on_artifact_integrity_finding(
+    workspace: dict[str, Path],
+) -> None:
+    control, run = _published_run(workspace)
+    with (run.run_dir / "predictions.csv").open(  # type: ignore[operator]
+        "a", encoding="utf-8"
+    ) as handle:
+        handle.write("\n")
+
+    with pytest.raises(trial.MLBHRProspectiveTrialError, match="integrity"):
+        trial.report_prospective_health(
+            control_dir=control.control_dir,
+            trial_root=workspace["trial"],
+        )
+
+
 def test_report_never_counts_historical_rehearsal_lifecycle_or_grade_rows(
     workspace: dict[str, Path],
 ) -> None:
@@ -1244,5 +1724,6 @@ def test_cli_help_preserves_legacy_commands_and_adds_explicit_opt_in(
         "capture-prospective-closing",
         "settle-prospective-paper-day",
         "report-prospective-status",
+        "report-prospective-health",
     ):
         assert command in output
