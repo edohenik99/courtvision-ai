@@ -60,8 +60,11 @@ STATCAST_COLUMNS = (
     "game_id",
     "game_date",
     "game_completed_at_utc",
-    "source_published_or_available_at_utc",
-    "collected_at_utc",
+    "completion_evidence_type",
+    "completion_witnessed_at_utc",
+    "provider_published_at_utc",
+    "first_observed_at_utc",
+    "captured_at_utc",
     "plate_appearance_id",
     "pitch_number",
     "batter_id",
@@ -120,6 +123,8 @@ def _stat_row(
     completed: str,
     observed: str,
     pa_id: str,
+    completion_evidence_type: str = "",
+    completion_witnessed_at: str = "",
     batter_id: str,
     pitcher_id: str,
     event_type: str,
@@ -145,8 +150,11 @@ def _stat_row(
         "game_id": game_id,
         "game_date": game_date,
         "game_completed_at_utc": completed,
-        "source_published_or_available_at_utc": observed,
-        "collected_at_utc": observed,
+        "completion_evidence_type": completion_evidence_type,
+        "completion_witnessed_at_utc": completion_witnessed_at,
+        "provider_published_at_utc": observed,
+        "first_observed_at_utc": observed,
+        "captured_at_utc": observed,
         "plate_appearance_id": pa_id,
         "pitch_number": pitch_number,
         "batter_id": batter_id,
@@ -410,8 +418,12 @@ def _make_source_pack(root: Path) -> Path:
             "probable_pitcher_status",
             "identity_status",
             "identity_mapping_version",
-            "announced_or_published_at_utc",
+            "provider_published_at_utc",
+            "first_observed_at_utc",
             "captured_at_utc",
+            "source",
+            "source_record_id",
+            "source_version",
         ),
         [
             {
@@ -424,8 +436,12 @@ def _make_source_pack(root: Path) -> Path:
                 "probable_pitcher_status": "confirmed",
                 "identity_status": "verified_mlbam",
                 "identity_mapping_version": "mlb-id-map-v2",
-                "announced_or_published_at_utc": "2026-06-05T17:20:00Z",
+                "provider_published_at_utc": "2026-06-05T17:20:00Z",
+                "first_observed_at_utc": "2026-06-05T17:25:00Z",
                 "captured_at_utc": "2026-06-05T17:30:00Z",
+                "source": "MLB StatsAPI",
+                "source_record_id": "game-765432-bos-probable",
+                "source_version": "statsapi-v1",
             }
         ],
     )
@@ -437,8 +453,14 @@ def _make_source_pack(root: Path) -> Path:
             "player_id",
             "lineup_status",
             "batting_order_position",
-            "announced_or_published_at_utc",
+            "provider_published_at_utc",
+            "first_observed_at_utc",
             "captured_at_utc",
+            "source",
+            "source_record_id",
+            "expected_pa",
+            "expected_pa_source",
+            "expected_pa_version",
         ),
         [
             {
@@ -447,8 +469,14 @@ def _make_source_pack(root: Path) -> Path:
                 "player_id": BATTER_ID,
                 "lineup_status": "confirmed",
                 "batting_order_position": 2,
-                "announced_or_published_at_utc": "2026-06-05T17:30:00Z",
+                "provider_published_at_utc": "2026-06-05T17:30:00Z",
+                "first_observed_at_utc": "2026-06-05T17:35:00Z",
                 "captured_at_utc": "2026-06-05T17:40:00Z",
+                "source": "MLB StatsAPI",
+                "source_record_id": "game-765432-tor-lineup-600001",
+                "expected_pa": "",
+                "expected_pa_source": "",
+                "expected_pa_version": "",
             }
         ],
     )
@@ -465,9 +493,15 @@ def _make_source_pack(root: Path) -> Path:
             "measured_at_utc",
             "captured_at_utc",
             "temperature",
+            "temperature_unit",
             "wind_speed",
+            "wind_speed_unit",
             "wind_direction",
+            "humidity",
             "roof_status",
+            "source",
+            "source_record_id",
+            "source_version",
         ),
         [
             {
@@ -481,9 +515,15 @@ def _make_source_pack(root: Path) -> Path:
                 "measured_at_utc": "",
                 "captured_at_utc": "2026-06-05T17:45:00Z",
                 "temperature": 79,
+                "temperature_unit": "fahrenheit",
                 "wind_speed": 8,
+                "wind_speed_unit": "mph",
                 "wind_direction": "out_to_left",
+                "humidity": 61,
                 "roof_status": "open",
+                "source": "pregame forecast provider",
+                "source_record_id": "forecast-765432-1730z",
+                "source_version": "forecast-v1",
             }
         ],
     )
@@ -499,6 +539,7 @@ def _make_source_pack(root: Path) -> Path:
             "effective_to_date",
             "published_or_available_at_utc",
             "captured_at_utc",
+            "source_record_id",
         ),
         [
             {
@@ -511,6 +552,7 @@ def _make_source_pack(root: Path) -> Path:
                 "effective_to_date": "2026-12-31",
                 "published_or_available_at_utc": "2026-03-01T12:00:00Z",
                 "captured_at_utc": "2026-03-01T12:05:00Z",
+                "source_record_id": "venue-1-2026-v1-home-run",
             }
         ],
     )
@@ -633,7 +675,8 @@ def test_source_before_and_exactly_at_as_of_are_accepted(source_root: Path) -> N
         probable,
         lambda row: {
             **row,
-            "announced_or_published_at_utc": AS_OF,
+            "provider_published_at_utc": AS_OF,
+            "first_observed_at_utc": AS_OF,
             "captured_at_utc": AS_OF,
         },
     )
@@ -641,14 +684,38 @@ def test_source_before_and_exactly_at_as_of_are_accepted(source_root: Path) -> N
 
     def exact_doubleheader(row: dict[str, str]) -> dict[str, str]:
         if row["game_id"] == EARLY_DH_GAME:
-            row["source_published_or_available_at_utc"] = AS_OF
-            row["collected_at_utc"] = AS_OF
+            row["provider_published_at_utc"] = AS_OF
+            row["first_observed_at_utc"] = AS_OF
+            row["captured_at_utc"] = AS_OF
         return row
 
     _rewrite(statcast, exact_doubleheader)
     row = _build(source_root).rows[0]
     assert row["probable_pitcher_available"] is True
     assert row["probable_pitcher_captured_at_utc"] == AS_OF
+    assert row["hitter_season_pa"] == 5
+
+
+def test_forward_observation_clocks_do_not_invent_provider_publication(
+    source_root: Path,
+) -> None:
+    for source_name in ("probable_pitchers", "lineups"):
+        path = source_root / context.SOURCE_FILES[source_name]
+        _rewrite(path, lambda row: {**row, "provider_published_at_utc": ""})
+    statcast = source_root / context.SOURCE_FILES["statcast"]
+    _rewrite(statcast, lambda row: {**row, "provider_published_at_utc": ""})
+
+    result = _build(source_root)
+    row = result.rows[0]
+
+    assert row["probable_pitcher_available"] is True
+    assert row["probable_pitcher_announced_or_published_at_utc"] is None
+    assert row["probable_pitcher_provider_published_at_utc"] is None
+    assert row["probable_pitcher_first_observed_at_utc"] == "2026-06-05T17:25:00Z"
+    assert row["lineup_available"] is True
+    assert row["lineup_announced_or_published_at_utc"] is None
+    assert row["lineup_provider_published_at_utc"] is None
+    assert row["lineup_first_observed_at_utc"] == "2026-06-05T17:35:00Z"
     assert row["hitter_season_pa"] == 5
 
 
@@ -701,6 +768,7 @@ def test_hitter_season_and_rolling_arithmetic(source_root: Path) -> None:
     assert row["hitter_season_barrel_rate"] == pytest.approx(2 / 3)
     assert row["hitter_season_hard_hit_rate"] == pytest.approx(2 / 3)
     assert row["hitter_season_average_exit_velocity"] == 92.0
+    assert row["hitter_season_average_launch_angle"] == pytest.approx(58 / 3)
     assert row["hitter_season_max_exit_velocity"] == 100.0
     assert row["hitter_season_sweet_spot_rate"] == pytest.approx(2 / 3)
     assert row["hitter_season_strikeout_rate"] == 0.2
@@ -731,16 +799,86 @@ def test_pitcher_matchup_lineup_park_weather_and_market_context(source_root: Pat
     assert row["pitcher_season_barrel_rate_allowed"] == 0.5
     assert row["pitcher_season_hard_hit_rate_allowed"] == 0.5
     assert row["pitcher_season_average_exit_velocity_allowed"] == 95.5
+    assert row["pitcher_season_average_launch_angle_allowed"] == 13.5
+    assert row["pitcher_history_game_count"] == 3
+    assert row["pitcher_history_first_game_completed_at_utc"] == "2026-05-20T22:00:00Z"
+    assert row["pitcher_history_last_game_completed_at_utc"] == "2026-06-02T22:00:00Z"
+    assert row["pitcher_history_max_available_at_utc"] == "2026-06-02T22:05:00Z"
+    assert row["pitcher_history_max_first_observed_at_utc"] == "2026-06-02T22:05:00Z"
+    assert row["pitcher_history_max_captured_at_utc"] == "2026-06-02T22:05:00Z"
+    assert row["pitcher_history_source_digest"] == hashlib.sha256(
+        (source_root / context.SOURCE_FILES["statcast"]).read_bytes()
+    ).hexdigest()
     assert row["platoon_matchup_category"] == "same_side"
     assert row["bvp_pa_descriptive"] == 1
     assert json.loads(row["pitcher_pitch_mix_json"]) == {"FF": 1.0}
+    assert json.loads(row["pitcher_pitch_type_context_json"]) == {
+        "FF": {
+            "average_exit_velocity_allowed": 95.5,
+            "average_launch_angle_allowed": 13.5,
+            "average_velocity": 95.0,
+            "barrel_rate_allowed": 0.5,
+            "contact_count": 2,
+            "fly_ball_rate": 0.5,
+            "hard_hit_rate_allowed": 0.5,
+            "hr_allowed": 1,
+            "hr_per_terminal_batter_faced": pytest.approx(1 / 3),
+            "pitch_count": 3,
+            "terminal_batters_faced": 3,
+            "usage_rate": 1.0,
+        }
+    }
     assert row["lineup_status"] == "confirmed"
     assert row["batting_order_position"] == 2
     assert row["park_hr_factor"] == 1.08
+    assert row["park_factor_effective_from_date"] == "2026-01-01"
+    assert row["park_factor_effective_to_date"] == "2026-12-31"
+    assert row["park_factor_source_digest"] == hashlib.sha256(
+        (source_root / context.SOURCE_FILES["park_factors"]).read_bytes()
+    ).hexdigest()
     assert row["temperature"] == 79.0
+    assert row["temperature_unit"] == "fahrenheit"
+    assert row["wind_speed_unit"] == "mph"
+    assert row["humidity"] == 61.0
+    assert row["weather_issued_at_utc"] == "2026-06-05T17:30:00Z"
+    assert row["weather_measured_at_utc"] is None
+    assert row["weather_source"] == "pregame forecast provider"
     assert row["market_best_sportsbook"] == "Book B"
     assert row["market_best_american_odds"] == 160
     assert row["market_bookmaker_count"] == 2
+
+
+def test_expected_pa_requires_source_supplied_admissible_lineup(source_root: Path) -> None:
+    lineup = source_root / context.SOURCE_FILES["lineups"]
+    columns, rows = _read_csv(lineup)
+    rows[0].update(
+        {
+            "lineup_status": "projected",
+            "expected_pa": "4.6",
+            "expected_pa_source": "pregame projection provider",
+            "expected_pa_version": "expected-pa-v1",
+        }
+    )
+    _write_csv(lineup, columns, rows)
+
+    result = _build(source_root)
+    row = result.rows[0]
+
+    assert row["lineup_status"] == "projected"
+    assert row["batting_order_position"] == 2
+    assert row["expected_pa"] == 4.6
+    assert row["expected_pa_available"] is True
+    assert row["expected_pa_source"] == "pregame projection provider"
+    assert row["expected_pa_version"] == "expected-pa-v1"
+    assert result.summary["availability_counts"]["expected_pa_available"] == 1
+
+
+def test_expected_pa_without_lineup_source_lineage_fails_closed(source_root: Path) -> None:
+    lineup = source_root / context.SOURCE_FILES["lineups"]
+    _rewrite(lineup, lambda row: {**row, "expected_pa": "4.6"})
+
+    with pytest.raises(context.ContextFeatureError, match="expected_pa_source"):
+        _build(source_root)
 
 
 def test_missing_or_late_probable_pitcher_stays_unavailable(source_root: Path) -> None:
@@ -784,6 +922,31 @@ def test_weather_and_park_cutoffs_and_missingness(source_root: Path) -> None:
     assert row["weather_available"] is False
     assert row["park_factor_available"] is False
     assert row["park_hr_factor"] is None
+
+
+def test_future_park_version_cannot_leak_into_earlier_cutoff(source_root: Path) -> None:
+    park = source_root / context.SOURCE_FILES["park_factors"]
+    columns, rows = _read_csv(park)
+    _write_csv(
+        park,
+        columns,
+        [
+            *rows,
+            {
+                **rows[0],
+                "park_hr_factor": "1.50",
+                "park_factor_version": "2026-v2",
+                "published_or_available_at_utc": "2026-06-05T18:00:01Z",
+                "captured_at_utc": "2026-06-05T18:00:02Z",
+                "source_record_id": "venue-1-2026-v2-home-run",
+            },
+        ],
+    )
+
+    row = _build(source_root).rows[0]
+
+    assert row["park_hr_factor"] == 1.08
+    assert row["park_factor_version"] == "2026-v1"
 
 
 def test_identity_and_event_team_mismatches_fail_closed(source_root: Path) -> None:
@@ -1180,7 +1343,7 @@ def test_multiple_or_nonfinal_terminal_rows_fail_closed(source_root: Path) -> No
     _, rows = _read_csv(statcast)
     extra = {**rows[0], "pitch_number": "2", "event_type": "field_out", "is_home_run": "false"}
     _append_rows(statcast, [extra])
-    with pytest.raises(context.ContextFeatureError, match="exactly one terminal row"):
+    with pytest.raises(context.ContextFeatureError, match="at most one terminal event"):
         _build(source_root)
 
     source_root = _make_source_pack(source_root.parent / "nonfinal-terminal")
@@ -1215,9 +1378,9 @@ def test_expected_stats_are_explicitly_unavailable_for_contact_k_and_bb_rows(
 @pytest.mark.parametrize(
     ("source_name", "available_field", "capture_field", "message"),
     [
-        ("statcast", "source_published_or_available_at_utc", "collected_at_utc", "Statcast clocks"),
-        ("probable_pitchers", "announced_or_published_at_utc", "captured_at_utc", "after capture"),
-        ("lineups", "announced_or_published_at_utc", "captured_at_utc", "after capture"),
+        ("statcast", "first_observed_at_utc", "captured_at_utc", "Statcast clocks"),
+        ("probable_pitchers", "first_observed_at_utc", "captured_at_utc", "first_observed"),
+        ("lineups", "first_observed_at_utc", "captured_at_utc", "first_observed"),
         ("weather", "issued_at_utc", "captured_at_utc", "after capture"),
         ("park_factors", "published_or_available_at_utc", "captured_at_utc", "after capture"),
         ("market", "quote_at_utc", "captured_at_utc", "after capture"),
@@ -1258,7 +1421,7 @@ def test_announcement_after_cutoff_is_unavailable(
         path,
         lambda row: {
             **row,
-            "announced_or_published_at_utc": "2026-06-05T18:01:00Z",
+            "first_observed_at_utc": "2026-06-05T18:01:00Z",
             "captured_at_utc": "2026-06-05T18:02:00Z",
         },
     )
@@ -1334,10 +1497,13 @@ def test_usable_evidence_controls_weather_park_and_statcast_availability(
         weather,
         lambda row: {
             **row,
-            "temperature": "",
-            "wind_speed": "",
-            "wind_direction": "",
-            "roof_status": "",
+                "temperature": "",
+                "temperature_unit": "",
+                "wind_speed": "",
+                "wind_speed_unit": "",
+                "wind_direction": "",
+                "humidity": "",
+                "roof_status": "",
         },
     )
     park = source_root / context.SOURCE_FILES["park_factors"]
@@ -1494,8 +1660,9 @@ def test_boundary_matrix_same_game_midnight_season_opening_and_sparse_samples(
     def make_target_visible(row: dict[str, str]) -> dict[str, str]:
         if row["game_id"] == TARGET_GAME:
             row["game_completed_at_utc"] = "2026-06-05T17:00:00Z"
-            row["source_published_or_available_at_utc"] = "2026-06-05T17:05:00Z"
-            row["collected_at_utc"] = "2026-06-05T17:10:00Z"
+            row["provider_published_at_utc"] = "2026-06-05T17:05:00Z"
+            row["first_observed_at_utc"] = "2026-06-05T17:07:00Z"
+            row["captured_at_utc"] = "2026-06-05T17:10:00Z"
         return row
 
     _rewrite(statcast, make_target_visible)
@@ -1709,3 +1876,189 @@ def test_publication_preserves_frozen_sources_and_verifies_all_three_artifacts(
         result.summary_path: result.summary_path.read_bytes(),
     }
     context._verify_persisted_artifacts(expected)  # type: ignore[arg-type]
+
+
+def test_schedule_final_completion_witness_is_point_in_time_safe(
+    source_root: Path,
+) -> None:
+    statcast = source_root / context.SOURCE_FILES["statcast"]
+
+    def use_schedule_witness(
+        row: dict[str, str],
+    ) -> dict[str, str]:
+        row["game_completed_at_utc"] = ""
+        row["completion_evidence_type"] = (
+            "schedule_final_observation"
+        )
+        row["completion_witnessed_at_utc"] = (
+            row["first_observed_at_utc"]
+        )
+        return row
+
+    _rewrite(statcast, use_schedule_witness)
+
+    result = _build(source_root)
+    row = result.rows[0]
+
+    assert row["hitter_stats_available"] is True
+    assert row["pitcher_stats_available"] is True
+    assert row["pitcher_history_game_count"] == 3
+
+    # Schedule Final is completion evidence, but not an exact
+    # final-pitch timestamp.
+    assert (
+        row["pitcher_history_first_game_completed_at_utc"]
+        is None
+    )
+    assert (
+        row["pitcher_history_last_game_completed_at_utc"]
+        is None
+    )
+
+    assert (
+        row["pitcher_history_max_available_at_utc"]
+        is not None
+    )
+    assert (
+        row["pitcher_history_max_first_observed_at_utc"]
+        is not None
+    )
+    assert (
+        row["pitcher_history_max_captured_at_utc"]
+        is not None
+    )
+
+    coverage = result.manifest["source_coverage"]["statcast"]
+
+    assert coverage["available"] is True
+    assert coverage["completed_at_start_utc"] is None
+    assert coverage["completed_at_end_utc"] is None
+
+
+
+def test_schedule_final_evidence_requires_witness(
+    source_root: Path,
+) -> None:
+    from courtvision.sports.mlb.training.hr_context_features import (
+        ContextFeatureError,
+    )
+
+    statcast = source_root / context.SOURCE_FILES["statcast"]
+
+    def remove_required_witness(
+        row: dict[str, str],
+    ) -> dict[str, str]:
+        row["game_completed_at_utc"] = ""
+        row["completion_evidence_type"] = (
+            "schedule_final_observation"
+        )
+        row["completion_witnessed_at_utc"] = ""
+        return row
+
+    _rewrite(statcast, remove_required_witness)
+
+    with pytest.raises(
+        ContextFeatureError,
+        match="requires completion_witnessed_at_utc",
+    ):
+        _build(source_root)
+
+
+def test_schedule_final_evidence_cannot_claim_exact_completion(
+    source_root: Path,
+) -> None:
+    from courtvision.sports.mlb.training.hr_context_features import (
+        ContextFeatureError,
+    )
+
+    statcast = source_root / context.SOURCE_FILES["statcast"]
+
+    def create_conflict(
+        row: dict[str, str],
+    ) -> dict[str, str]:
+        row["completion_evidence_type"] = (
+            "schedule_final_observation"
+        )
+        row["completion_witnessed_at_utc"] = (
+            row["first_observed_at_utc"]
+        )
+        return row
+
+    _rewrite(statcast, create_conflict)
+
+    with pytest.raises(
+        ContextFeatureError,
+        match="must not claim an exact completion time",
+    ):
+        _build(source_root)
+
+
+def test_explicit_pbp_completion_preserves_exact_provenance(
+    source_root: Path,
+) -> None:
+    statcast = source_root / context.SOURCE_FILES["statcast"]
+
+    def mark_explicit_pbp(
+        row: dict[str, str],
+    ) -> dict[str, str]:
+        row["completion_evidence_type"] = (
+            "play_by_play_last_play_end"
+        )
+        row["completion_witnessed_at_utc"] = (
+            row["captured_at_utc"]
+        )
+        return row
+
+    _rewrite(statcast, mark_explicit_pbp)
+
+    row = _build(source_root).rows[0]
+
+    assert (
+        row["pitcher_history_first_game_completed_at_utc"]
+        == "2026-05-20T22:00:00Z"
+    )
+    assert (
+        row["pitcher_history_last_game_completed_at_utc"]
+        == "2026-06-02T22:00:00Z"
+    )
+
+
+def test_legacy_statcast_without_new_completion_columns_still_loads(
+    source_root: Path,
+) -> None:
+    statcast = source_root / context.SOURCE_FILES["statcast"]
+
+    columns, rows = _read_csv(statcast)
+
+    legacy_columns = tuple(
+        name
+        for name in columns
+        if name
+        not in {
+            "completion_evidence_type",
+            "completion_witnessed_at_utc",
+        }
+    )
+
+    legacy_rows = [
+        {
+            name: row.get(name, "")
+            for name in legacy_columns
+        }
+        for row in rows
+    ]
+
+    _write_csv(
+        statcast,
+        legacy_columns,
+        legacy_rows,
+    )
+
+    row = _build(source_root).rows[0]
+
+    assert row["hitter_stats_available"] is True
+    assert row["pitcher_stats_available"] is True
+    assert (
+        row["pitcher_history_first_game_completed_at_utc"]
+        == "2026-05-20T22:00:00Z"
+    )

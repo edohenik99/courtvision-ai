@@ -23,6 +23,8 @@ from courtvision.sports.mlb.data.context_source_pack import (  # noqa: E402
     collect_candidate_snapshot,
     collect_identity_snapshot,
     collect_normalized_source_snapshot,
+    collect_statsapi_lineup_snapshot,
+    collect_statsapi_probable_pitcher_snapshot,
     collect_statcast_snapshot,
     validate_context_source_pack,
 )
@@ -42,9 +44,25 @@ def _git_commit() -> str:
 def _common_collection_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--operating-date", required=True)
     parser.add_argument("--cutoff-utc", required=True)
-    parser.add_argument("--collected-at-utc", required=True)
+    parser.add_argument(
+        "--captured-at-utc",
+        "--collected-at-utc",
+        dest="captured_at_utc",
+        required=True,
+        help=(
+            "Immutable source capture timestamp. --collected-at-utc remains an "
+            "accepted compatibility alias."
+        ),
+    )
     parser.add_argument("--git-commit", default=None)
     parser.add_argument("--research-root", type=Path, default=DEFAULT_SOURCE_RESEARCH_ROOT)
+    parser.add_argument(
+        "--raw-input",
+        action="append",
+        default=[],
+        metavar="NAME=PATH",
+        help="Additional immutable raw evidence to bind into the snapshot.",
+    )
 
 
 def _normalized_parser(
@@ -57,6 +75,12 @@ def _normalized_parser(
     parser.add_argument("--input-csv", type=Path, required=True)
     parser.add_argument("--provider", required=True)
     parser.add_argument("--provider-version", required=True)
+    parser.add_argument(
+        "--availability-status",
+        choices=("available", "partial"),
+        default="available",
+    )
+    parser.add_argument("--availability-note")
     parser.set_defaults(action="normalized", source_name=source_name)
 
 
@@ -96,6 +120,23 @@ def _parser() -> argparse.ArgumentParser:
     _normalized_parser(subparsers, "collect-context-weather", "weather")
     _normalized_parser(subparsers, "collect-context-park-factors", "park_factors")
     _normalized_parser(subparsers, "collect-context-market", "market")
+
+    probable_observation = subparsers.add_parser(
+        "collect-statsapi-probable-pitchers"
+    )
+    _common_collection_arguments(probable_observation)
+    probable_observation.add_argument("--observation-csv", type=Path, required=True)
+    probable_observation.add_argument("--game-feed-json", type=Path, required=True)
+    probable_observation.add_argument(
+        "--identity-crosswalk-csv", type=Path, required=True
+    )
+    probable_observation.set_defaults(action="statsapi_probable")
+
+    lineup_observation = subparsers.add_parser("collect-statsapi-lineups")
+    _common_collection_arguments(lineup_observation)
+    lineup_observation.add_argument("--observation-csv", type=Path, required=True)
+    lineup_observation.add_argument("--game-feed-json", type=Path, required=True)
+    lineup_observation.set_defaults(action="statsapi_lineup")
 
     assemble = subparsers.add_parser("assemble-context-source-pack")
     assemble.add_argument("--operating-date", required=True)
@@ -144,6 +185,19 @@ def _unavailable(values: Sequence[str]) -> dict[str, str]:
     return parsed
 
 
+def _raw_inputs(values: Sequence[str]) -> dict[str, Path]:
+    parsed: dict[str, Path] = {}
+    for value in values:
+        name, separator, path_text = value.partition("=")
+        if not separator or not name.strip() or not path_text.strip():
+            raise ContextSourceError("--raw-input must be NAME=PATH")
+        name = name.strip()
+        if name in parsed:
+            raise ContextSourceError(f"duplicate --raw-input name: {name}")
+        parsed[name] = Path(path_text.strip())
+    return parsed
+
+
 def _snapshot_payload(result: object) -> dict[str, object]:
     return {
         "source_name": getattr(result, "source_name"),
@@ -183,6 +237,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0 if validation.is_valid else 2
 
         commit = args.git_commit or _git_commit()
+        additional_raw_inputs = _raw_inputs(getattr(args, "raw_input", ()))
         if args.action == "candidates":
             result = collect_candidate_snapshot(
                 args.schedule_csv,
@@ -190,20 +245,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.identity_crosswalk_csv,
                 operating_date=args.operating_date,
                 cutoff_utc=args.cutoff_utc,
-                collected_at_utc=args.collected_at_utc,
+                collected_at_utc=args.captured_at_utc,
                 git_commit=commit,
                 research_root=args.research_root,
+                additional_raw_inputs=additional_raw_inputs,
             )
         elif args.action == "identity":
             result = collect_identity_snapshot(
                 args.identity_crosswalk_csv,
                 operating_date=args.operating_date,
                 cutoff_utc=args.cutoff_utc,
-                collected_at_utc=args.collected_at_utc,
+                collected_at_utc=args.captured_at_utc,
                 mapping_source=args.mapping_source,
                 mapping_version=args.mapping_version,
                 git_commit=commit,
                 research_root=args.research_root,
+                additional_raw_inputs=additional_raw_inputs,
             )
         elif args.action == "statcast":
             result = collect_statcast_snapshot(
@@ -211,9 +268,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.game_clock_csv,
                 operating_date=args.operating_date,
                 cutoff_utc=args.cutoff_utc,
-                collected_at_utc=args.collected_at_utc,
+                captured_at_utc=args.captured_at_utc,
                 git_commit=commit,
                 research_root=args.research_root,
+                additional_raw_inputs=additional_raw_inputs,
             )
         elif args.action == "normalized":
             result = collect_normalized_source_snapshot(
@@ -221,11 +279,37 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.input_csv,
                 operating_date=args.operating_date,
                 cutoff_utc=args.cutoff_utc,
-                collected_at_utc=args.collected_at_utc,
+                collected_at_utc=args.captured_at_utc,
                 provider=args.provider,
                 collector_configuration={"provider_version": args.provider_version},
                 git_commit=commit,
                 research_root=args.research_root,
+                availability_status=args.availability_status,
+                availability_note=args.availability_note,
+                additional_raw_inputs=additional_raw_inputs,
+            )
+        elif args.action == "statsapi_probable":
+            result = collect_statsapi_probable_pitcher_snapshot(
+                args.observation_csv,
+                args.game_feed_json,
+                args.identity_crosswalk_csv,
+                operating_date=args.operating_date,
+                cutoff_utc=args.cutoff_utc,
+                captured_at_utc=args.captured_at_utc,
+                git_commit=commit,
+                research_root=args.research_root,
+                additional_raw_inputs=additional_raw_inputs,
+            )
+        elif args.action == "statsapi_lineup":
+            result = collect_statsapi_lineup_snapshot(
+                args.observation_csv,
+                args.game_feed_json,
+                operating_date=args.operating_date,
+                cutoff_utc=args.cutoff_utc,
+                captured_at_utc=args.captured_at_utc,
+                git_commit=commit,
+                research_root=args.research_root,
+                additional_raw_inputs=additional_raw_inputs,
             )
         elif args.action == "assemble":
             snapshots = {

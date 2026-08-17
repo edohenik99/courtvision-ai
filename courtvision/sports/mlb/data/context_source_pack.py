@@ -36,7 +36,7 @@ SOURCE_PACK_SCHEMA_VERSION: Final = "mlb-hr-context-source-pack-v1"
 SOURCE_SNAPSHOT_SCHEMA_VERSION: Final = "mlb-hr-context-source-snapshot-v1"
 SOURCE_SNAPSHOT_MANIFEST_FILENAME: Final = "source_snapshot_manifest_v1.json"
 SOURCE_PACK_MANIFEST_FILENAME: Final = "source_manifest_v1.json"
-SOURCE_COLLECTOR_VERSION: Final = "1.0.0"
+SOURCE_COLLECTOR_VERSION: Final = "1.1.0"
 CANDIDATE_UNIVERSE_VERSION: Final = "mlb-hr-neutral-candidate-universe-v1"
 CANDIDATE_UNIVERSE_GENERATOR: Final = "schedule-roster-enumerator-v1"
 CANDIDATE_UNIVERSE_POLICY: Final = (
@@ -56,10 +56,10 @@ OPTIONAL_SOURCES: Final = frozenset(set(SOURCE_NAMES) - REQUIRED_SOURCES)
 SOURCE_SCHEMA_VERSIONS: Final[Mapping[str, str]] = MappingProxyType(
     {
         "candidates": CANDIDATE_UNIVERSE_VERSION,
-        "identity_crosswalk": "mlb-hr-context-identity-v1",
-        "statcast": "mlb-hr-context-statcast-pitch-v1",
-        "probable_pitchers": "mlb-hr-context-probable-pitchers-v1",
-        "lineups": "mlb-hr-context-lineups-v1",
+        "identity_crosswalk": "mlb-hr-context-identity-v2",
+        "statcast": "mlb-hr-context-statcast-pitch-v2",
+        "probable_pitchers": "mlb-hr-context-probable-pitchers-v2",
+        "lineups": "mlb-hr-context-lineups-v2",
         "weather": "mlb-hr-context-weather-v1",
         "park_factors": "mlb-hr-context-park-factors-v1",
         "market": "mlb-hr-context-market-v1",
@@ -147,8 +147,11 @@ STATCAST_OUTPUT_COLUMNS: Final = (
     "game_id",
     "game_date",
     "game_completed_at_utc",
-    "source_published_or_available_at_utc",
-    "collected_at_utc",
+    "completion_evidence_type",
+    "completion_witnessed_at_utc",
+    "provider_published_at_utc",
+    "first_observed_at_utc",
+    "captured_at_utc",
     "plate_appearance_id",
     "pitch_number",
     "pitch_id",
@@ -177,13 +180,56 @@ STATCAST_OUTPUT_COLUMNS: Final = (
     "is_pull",
 )
 
+PROBABLE_PITCHER_OUTPUT_COLUMNS: Final = (
+    "event_id",
+    "team",
+    "pitcher_id",
+    "pitcher_name",
+    "normalized_pitcher_name",
+    "pitcher_hand",
+    "probable_pitcher_status",
+    "identity_status",
+    "identity_mapping_version",
+    "provider_published_at_utc",
+    "first_observed_at_utc",
+    "captured_at_utc",
+    "source",
+    "source_record_id",
+    "source_version",
+)
+
+LINEUP_OUTPUT_COLUMNS: Final = (
+    "event_id",
+    "team",
+    "player_id",
+    "lineup_status",
+    "batting_order_position",
+    "provider_published_at_utc",
+    "first_observed_at_utc",
+    "captured_at_utc",
+    "source",
+    "source_record_id",
+    "expected_pa",
+    "expected_pa_source",
+    "expected_pa_version",
+)
+
 SOURCE_LAYER_REQUIRED_COLUMNS: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
     {
         "probable_pitchers": frozenset(
             {"source", "source_record_id", "source_version"}
         ),
         "lineups": frozenset({"source", "source_record_id"}),
-        "weather": frozenset({"source", "source_record_id", "source_version"}),
+        "weather": frozenset(
+            {
+                "humidity",
+                "temperature_unit",
+                "wind_speed_unit",
+                "source",
+                "source_record_id",
+                "source_version",
+            }
+        ),
         "park_factors": frozenset(
             {"factor_type", "factor_value", "source_record_id"}
         ),
@@ -197,7 +243,7 @@ _MLBAM_ID: Final = re.compile(r"^[1-9]\d{5,9}$")
 _SHA256: Final = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_TOKEN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _TEAM_ALIASES: Final[Mapping[str, str]] = MappingProxyType(
-    {"CHW": "CWS", "KCR": "KC", "SDP": "SD", "SFG": "SF", "TBR": "TB", "WSN": "WSH"}
+    {"CHW": "CWS", "KCR": "KC", "SDP": "SD", "SFG": "SF", "TBR": "TB", "WSN": "WSH", "AZ": "ARI"}
 )
 
 
@@ -283,6 +329,32 @@ def _utc(value: datetime | str, field_name: str) -> datetime:
 
 def _utc_text(value: datetime | str, field_name: str) -> str:
     return _utc(value, field_name).isoformat().replace("+00:00", "Z")
+
+
+def _optional_utc(value: object, field_name: str) -> datetime | None:
+    text = "" if value is None else str(value).strip()
+    return _utc(text, field_name) if text else None
+
+
+def _forward_observation_clocks(
+    row: Mapping[str, object], label: str
+) -> tuple[datetime | None, datetime, datetime, datetime]:
+    provider_published = _optional_utc(
+        row.get("provider_published_at_utc"),
+        f"{label}.provider_published_at_utc",
+    )
+    first_observed = _utc(
+        row.get("first_observed_at_utc", ""),
+        f"{label}.first_observed_at_utc",
+    )
+    captured = _utc(row.get("captured_at_utc", ""), f"{label}.captured_at_utc")
+    availability = provider_published or first_observed
+    if not (availability <= first_observed <= captured):
+        raise ContextSourceError(
+            f"{label} clocks must satisfy trustworthy availability <= "
+            "first_observed <= captured"
+        )
+    return provider_published, first_observed, captured, availability
 
 
 def _date(value: date | str, field_name: str) -> date:
@@ -484,6 +556,8 @@ def persist_source_snapshot(
     source_schema_version: str | None = None,
     source_clock_fields: Sequence[str] = (),
     raw_inputs: Mapping[str, str | Path] | None = None,
+    availability_status: str = "available",
+    availability_note: str | None = None,
 ) -> SourceSnapshotResult:
     """Persist one immutable, content-addressed source snapshot.
 
@@ -518,8 +592,21 @@ def persist_source_snapshot(
         scope_cutoff, "request_scope.cutoff_utc"
     ):
         raise ContextSourceError("snapshot collected_at_utc cannot be after request cutoff")
+    status = str(availability_status).strip().casefold()
+    if status not in {"available", "partial"}:
+        raise ContextSourceError(
+            "source snapshot availability_status must be available or partial"
+        )
+    note = str(availability_note or "").strip() or None
+    if status == "partial" and note is None:
+        raise ContextSourceError("partial source snapshot requires availability_note")
     commit = _validate_git_commit(git_commit)
     schema_version = source_schema_version or SOURCE_SCHEMA_VERSIONS[source_name]
+    bound_configuration = {
+        **dict(collector_configuration),
+        "availability_status": status,
+        "availability_note": note,
+    }
     root = _research_root(research_root)
     raw_input_paths: dict[str, Path] = {}
     raw_input_digests: dict[str, str] = {}
@@ -538,7 +625,7 @@ def persist_source_snapshot(
         csv_sha256=data_sha256,
         collected_at_utc=collected,
         request_scope=request_scope,
-        collector_configuration=collector_configuration,
+        collector_configuration=bound_configuration,
         git_commit=commit,
         raw_input_digests=raw_input_digests,
     )
@@ -575,12 +662,14 @@ def persist_source_snapshot(
             "request_scope": dict(request_scope),
             "collected_at_utc": collected,
             "source_clock_fields": list(source_clock_fields),
+            "availability_status": status,
+            "availability_note": note,
             "row_count": row_count,
             "sha256": data_sha256,
             "byte_size": len(csv_payload),
             "filename": SOURCE_FILES[source_name],
             "collector_version": SOURCE_COLLECTOR_VERSION,
-            "collector_configuration": dict(collector_configuration),
+            "collector_configuration": bound_configuration,
             "git_commit": commit,
             "raw_inputs": raw_records,
             "research_only": True,
@@ -635,6 +724,13 @@ def _load_snapshot(snapshot_dir: str | Path) -> tuple[dict[str, object], Path]:
         raise ContextSourceError("source snapshot has unsupported source_name")
     if payload.get("source_schema_version") != SOURCE_SCHEMA_VERSIONS[source_name]:
         raise ContextSourceError("source snapshot has unsupported source schema version")
+    availability_status = str(payload.get("availability_status") or "").casefold()
+    if availability_status not in {"available", "partial"}:
+        raise ContextSourceError("source snapshot has invalid availability_status")
+    if availability_status == "partial" and not str(
+        payload.get("availability_note") or ""
+    ).strip():
+        raise ContextSourceError("partial source snapshot lacks availability_note")
     snapshot_id = str(payload.get("snapshot_id") or "")
     if root.name != snapshot_id:
         raise ContextSourceError("source snapshot directory does not match snapshot_id")
@@ -996,6 +1092,7 @@ def collect_candidate_snapshot(
     collected_at_utc: datetime | str,
     git_commit: str,
     research_root: str | Path = DEFAULT_SOURCE_RESEARCH_ROOT,
+    additional_raw_inputs: Mapping[str, str | Path] | None = None,
 ) -> SourceSnapshotResult:
     universe = build_neutral_candidate_universe(
         schedule_csv,
@@ -1024,6 +1121,20 @@ def collect_candidate_snapshot(
         raise ContextSourceError(
             "candidate snapshot collected_at_utc cannot precede candidate capture"
         )
+    event_identities = sorted(
+        {
+            (
+                str(row["event_id"]),
+                str(row["operating_date"]),
+                str(row["commence_time_utc"]),
+                str(row["home_team"]),
+                str(row["away_team"]),
+                str(row["venue_id"]),
+                str(row["venue_name"]),
+            )
+            for row in universe.rows
+        }
+    )
     return persist_source_snapshot(
         source_name="candidates",
         csv_payload=_csv_bytes(CANDIDATE_COLUMNS, universe.rows),
@@ -1034,6 +1145,27 @@ def collect_candidate_snapshot(
             "operating_date": parsed_operating_date.isoformat(),
             "cutoff_utc": _utc_text(cutoff, "cutoff_utc"),
             "candidate_universe_id": universe.candidate_universe_id,
+            "canonical_event_id_type": "mlb_statsapi_game_pk",
+            "event_identities": [
+                {
+                    "event_id": event_id,
+                    "operating_date": event_date,
+                    "commence_time_utc": commence,
+                    "home_team": home,
+                    "away_team": away,
+                    "venue_id": venue_id,
+                    "venue_name": venue_name,
+                }
+                for (
+                    event_id,
+                    event_date,
+                    commence,
+                    home,
+                    away,
+                    venue_id,
+                    venue_name,
+                ) in event_identities
+            ],
         },
         provider="MLB schedule and roster evidence supplied to CourtVision adapter",
         collector_configuration={
@@ -1049,6 +1181,7 @@ def collect_candidate_snapshot(
             "candidate_universe_cutoff_utc",
         ),
         raw_inputs={
+            **dict(additional_raw_inputs or {}),
             "schedule": schedule_csv,
             "roster": roster_csv,
             "identity_crosswalk": identity_crosswalk_csv,
@@ -1066,6 +1199,7 @@ def collect_identity_snapshot(
     mapping_version: str,
     git_commit: str,
     research_root: str | Path = DEFAULT_SOURCE_RESEARCH_ROOT,
+    additional_raw_inputs: Mapping[str, str | Path] | None = None,
 ) -> SourceSnapshotResult:
     source = Path(identity_crosswalk_csv).expanduser().resolve()
     validation = validate_mlb_hr_crosswalk_csv(source)
@@ -1112,7 +1246,363 @@ def collect_identity_snapshot(
         git_commit=git_commit,
         research_root=research_root,
         source_clock_fields=("verified_at",),
-        raw_inputs={"identity_crosswalk": source},
+        raw_inputs={
+            **dict(additional_raw_inputs or {}),
+            "identity_crosswalk": source,
+        },
+    )
+
+
+def _read_json_object(path: str | Path, label: str) -> tuple[Mapping[str, object], bytes]:
+    source = Path(path).expanduser().resolve()
+    if not source.is_file():
+        raise ContextSourceError(f"{label} does not exist: {source}")
+    raw = source.read_bytes()
+    try:
+        payload = json.loads(raw.decode("utf-8-sig"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ContextSourceError(f"{label} is not valid JSON: {exc}") from exc
+    if not isinstance(payload, Mapping):
+        raise ContextSourceError(f"{label} must be a JSON object")
+    return payload, raw
+
+
+def _statsapi_game_feed_context(
+    game_feed_json: str | Path,
+) -> tuple[
+    str,
+    Mapping[str, str],
+    Mapping[str, Mapping[str, object]],
+    Mapping[str, tuple[str, ...]],
+]:
+    payload, _ = _read_json_object(game_feed_json, "MLB StatsAPI game feed")
+    event_id = _mlbam_id(payload.get("gamePk"), "StatsAPI game feed.gamePk")
+    game_data = payload.get("gameData")
+    live_data = payload.get("liveData")
+    if not isinstance(game_data, Mapping) or not isinstance(live_data, Mapping):
+        raise ContextSourceError("StatsAPI game feed lacks gameData/liveData objects")
+    teams_payload = game_data.get("teams")
+    players_payload = game_data.get("players")
+    boxscore = live_data.get("boxscore")
+    if not isinstance(teams_payload, Mapping) or not isinstance(players_payload, Mapping):
+        raise ContextSourceError("StatsAPI game feed lacks team/player identity objects")
+    if not isinstance(boxscore, Mapping) or not isinstance(boxscore.get("teams"), Mapping):
+        raise ContextSourceError("StatsAPI game feed lacks boxscore team objects")
+
+    teams: dict[str, str] = {}
+    batting_orders: dict[str, tuple[str, ...]] = {}
+    boxscore_teams = boxscore["teams"]
+    assert isinstance(boxscore_teams, Mapping)
+    for side in ("away", "home"):
+        team = teams_payload.get(side)
+        boxscore_team = boxscore_teams.get(side)
+        if not isinstance(team, Mapping) or not isinstance(boxscore_team, Mapping):
+            raise ContextSourceError(f"StatsAPI game feed lacks {side} team evidence")
+        abbreviation = _team(team.get("abbreviation"), f"StatsAPI {side}.abbreviation")
+        teams[side] = abbreviation
+        order = boxscore_team.get("battingOrder") or []
+        if not isinstance(order, list):
+            raise ContextSourceError(f"StatsAPI {side}.battingOrder must be an array")
+        batting_orders[abbreviation] = tuple(
+            _mlbam_id(value, f"StatsAPI {side}.battingOrder") for value in order
+        )
+
+    players: dict[str, Mapping[str, object]] = {}
+    for key, value in players_payload.items():
+        if not isinstance(value, Mapping):
+            continue
+        player_id = _mlbam_id(value.get("id"), f"StatsAPI player {key}.id")
+        players[player_id] = value
+    return (
+        event_id,
+        MappingProxyType(teams),
+        MappingProxyType(players),
+        MappingProxyType(batting_orders),
+    )
+
+
+def collect_statsapi_probable_pitcher_snapshot(
+    observation_csv: str | Path,
+    game_feed_json: str | Path,
+    identity_crosswalk_csv: str | Path,
+    *,
+    operating_date: date | str,
+    cutoff_utc: datetime | str,
+    captured_at_utc: datetime | str,
+    git_commit: str,
+    research_root: str | Path = DEFAULT_SOURCE_RESEARCH_ROOT,
+    additional_raw_inputs: Mapping[str, str | Path] | None = None,
+) -> SourceSnapshotResult:
+    """Normalize persisted StatsAPI probable-pitcher observations without fetching."""
+
+    _, observed_rows, _ = _read_csv(observation_csv, "probable pitcher observation")
+    if not observed_rows:
+        raise ContextSourceError("probable pitcher observation contains no rows")
+    event_id, teams_by_side, players, _ = _statsapi_game_feed_context(game_feed_json)
+    crosswalk_path = Path(identity_crosswalk_csv).expanduser().resolve()
+    validation = validate_mlb_hr_crosswalk_csv(crosswalk_path)
+    if not validation.is_valid:
+        raise ContextSourceError(
+            "identity crosswalk validation failed: " + "; ".join(validation.errors)
+        )
+    _, crosswalk_rows, _ = _read_csv(crosswalk_path, "identity crosswalk")
+    pitcher_roles: dict[str, tuple[str, str, str]] = {}
+    for index, row in enumerate(crosswalk_rows, start=2):
+        row_event = _mlbam_id(
+            row.get("mlbam_game_id"), f"identity row {index}.mlbam_game_id"
+        )
+        if row_event != event_id:
+            continue
+        team = _team(row.get("pitcher_team"), f"identity row {index}.pitcher_team")
+        role = (
+            _mlbam_id(row.get("mlbam_pitcher_id"), f"identity row {index}.mlbam_pitcher_id"),
+            normalize_mlb_player_name(
+                _required_text(row, "pitcher_name", f"identity row {index}")
+            ),
+            _required_text(row, "identity_mapping_version", f"identity row {index}"),
+        )
+        previous = pitcher_roles.setdefault(team, role)
+        if previous != role:
+            raise ContextSourceError(
+                f"conflicting probable-pitcher identity aliases for {event_id}/{team}"
+            )
+
+    prepared: list[dict[str, object]] = []
+    seen_teams: set[str] = set()
+    for index, row in enumerate(observed_rows, start=2):
+        label = f"probable pitcher observation row {index}"
+        row_event = _mlbam_id(row.get("event_id"), f"{label}.event_id")
+        if row_event != event_id:
+            raise ContextSourceError(f"{label} event_id conflicts with StatsAPI gamePk")
+        team = _team(row.get("team"), f"{label}.team")
+        if team not in set(teams_by_side.values()):
+            raise ContextSourceError(f"{label} team conflicts with StatsAPI game identity")
+        if team in seen_teams:
+            raise ContextSourceError(f"duplicate probable pitcher observation for {team}")
+        seen_teams.add(team)
+        pitcher_id = _mlbam_id(row.get("pitcher_id"), f"{label}.pitcher_id")
+        pitcher_name = _required_text(row, "pitcher_name", label)
+        feed_player = players.get(pitcher_id)
+        if feed_player is None:
+            raise ContextSourceError(f"{label} pitcher is absent from persisted StatsAPI feed")
+        feed_name = _required_text(feed_player, "fullName", "StatsAPI pitcher")
+        if normalize_mlb_player_name(feed_name) != normalize_mlb_player_name(pitcher_name):
+            raise ContextSourceError(f"{label} pitcher name conflicts with StatsAPI feed")
+        pitch_hand = feed_player.get("pitchHand")
+        if not isinstance(pitch_hand, Mapping):
+            raise ContextSourceError(f"{label} StatsAPI pitcher hand is unavailable")
+        hand = _required_text(pitch_hand, "code", "StatsAPI pitcher hand").upper()
+        if hand not in {"L", "R"}:
+            raise ContextSourceError(f"{label} StatsAPI pitcher hand must be L or R")
+        crosswalk_role = pitcher_roles.get(team)
+        if crosswalk_role is None:
+            raise ContextSourceError(f"{label} has no verified pitcher identity role")
+        if crosswalk_role[:2] != (pitcher_id, normalize_mlb_player_name(pitcher_name)):
+            raise ContextSourceError(f"{label} conflicts with verified pitcher identity role")
+        captured_text = _required_text(row, "captured_at_utc", label)
+        provider_published = (
+            _optional_text(row, "provider_published_at_utc")
+            or _optional_text(row, "announced_or_published_at_utc")
+            or ""
+        )
+        first_observed = (
+            _optional_text(row, "first_observed_at_utc") or captured_text
+        )
+        status = (
+            _optional_text(row, "probable_pitcher_status")
+            or _required_text(row, "status", label)
+        ).casefold()
+        prepared.append(
+            {
+                "event_id": event_id,
+                "team": team,
+                "pitcher_id": pitcher_id,
+                "pitcher_name": pitcher_name,
+                "normalized_pitcher_name": normalize_mlb_player_name(pitcher_name),
+                "pitcher_hand": hand,
+                "probable_pitcher_status": status,
+                "identity_status": "verified_mlbam",
+                "identity_mapping_version": crosswalk_role[2],
+                "provider_published_at_utc": provider_published,
+                "first_observed_at_utc": first_observed,
+                "captured_at_utc": captured_text,
+                "source": _required_text(row, "source", label),
+                "source_record_id": _required_text(row, "source_record_id", label),
+                "source_version": _required_text(row, "source_version", label),
+            }
+        )
+    if seen_teams != set(teams_by_side.values()):
+        raise ContextSourceError("probable pitcher observations lack both-team coverage")
+
+    cutoff = _utc(cutoff_utc, "cutoff_utc")
+    _validate_point_in_time_rows(
+        "probable_pitchers", PROBABLE_PITCHER_OUTPUT_COLUMNS, prepared, cutoff
+    )
+    snapshot_capture = _utc(captured_at_utc, "captured_at_utc")
+    if any(
+        snapshot_capture < _utc(row["captured_at_utc"], "probable.captured_at_utc")
+        for row in prepared
+    ):
+        raise ContextSourceError("probable pitcher snapshot precedes row capture")
+    return persist_source_snapshot(
+        source_name="probable_pitchers",
+        csv_payload=_csv_bytes(
+            PROBABLE_PITCHER_OUTPUT_COLUMNS,
+            sorted(prepared, key=lambda row: (row["event_id"], row["team"])),
+        ),
+        row_count=len(prepared),
+        operating_date=operating_date,
+        collected_at_utc=snapshot_capture,
+        request_scope={
+            "operating_date": _date(operating_date, "operating_date").isoformat(),
+            "cutoff_utc": _utc_text(cutoff, "cutoff_utc"),
+            "event_id": event_id,
+        },
+        provider="MLB StatsAPI persisted game feed",
+        collector_configuration={"provider_adapter": "statsapi-probable-observation-v1"},
+        git_commit=git_commit,
+        research_root=research_root,
+        source_clock_fields=(
+            "provider_published_at_utc",
+            "first_observed_at_utc",
+            "captured_at_utc",
+        ),
+        raw_inputs={
+            **dict(additional_raw_inputs or {}),
+            "probable_observation": observation_csv,
+            "statsapi_game_feed": game_feed_json,
+            "identity_crosswalk": identity_crosswalk_csv,
+        },
+    )
+
+
+def collect_statsapi_lineup_snapshot(
+    observation_csv: str | Path,
+    game_feed_json: str | Path,
+    *,
+    operating_date: date | str,
+    cutoff_utc: datetime | str,
+    captured_at_utc: datetime | str,
+    git_commit: str,
+    research_root: str | Path = DEFAULT_SOURCE_RESEARCH_ROOT,
+    additional_raw_inputs: Mapping[str, str | Path] | None = None,
+) -> SourceSnapshotResult:
+    """Normalize persisted StatsAPI lineup observations and retain partial coverage."""
+
+    _, observed_rows, _ = _read_csv(observation_csv, "lineup observation")
+    if not observed_rows:
+        raise ContextSourceError("lineup observation contains no rows")
+    event_id, teams_by_side, _, batting_orders = _statsapi_game_feed_context(
+        game_feed_json
+    )
+    prepared: list[dict[str, object]] = []
+    seen_slots: set[tuple[str, int]] = set()
+    seen_players: set[tuple[str, str]] = set()
+    observed_teams: set[str] = set()
+    for index, row in enumerate(observed_rows, start=2):
+        label = f"lineup observation row {index}"
+        row_event = _mlbam_id(row.get("event_id"), f"{label}.event_id")
+        if row_event != event_id:
+            raise ContextSourceError(f"{label} event_id conflicts with StatsAPI gamePk")
+        team = _team(row.get("team"), f"{label}.team")
+        if team not in set(teams_by_side.values()):
+            raise ContextSourceError(f"{label} team conflicts with StatsAPI game identity")
+        player_id = _mlbam_id(row.get("player_id"), f"{label}.player_id")
+        order = _int_text(
+            row.get("batting_order_position"),
+            f"{label}.batting_order_position",
+            minimum=1,
+        )
+        if order > 9:
+            raise ContextSourceError(f"{label}.batting_order_position must be 1 through 9")
+        if (team, order) in seen_slots or (team, player_id) in seen_players:
+            raise ContextSourceError(f"duplicate lineup identity for {team}/{player_id}")
+        seen_slots.add((team, order))
+        seen_players.add((team, player_id))
+        observed_teams.add(team)
+        feed_order = batting_orders.get(team, ())
+        if len(feed_order) < order or feed_order[order - 1] != player_id:
+            raise ContextSourceError(f"{label} conflicts with persisted StatsAPI batting order")
+        status = _required_text(row, "lineup_status", label).casefold()
+        if status == "confirmed_current_observation":
+            status = "confirmed"
+        captured_text = _required_text(row, "captured_at_utc", label)
+        provider_published = (
+            _optional_text(row, "provider_published_at_utc")
+            or _optional_text(row, "announced_or_published_at_utc")
+            or ""
+        )
+        prepared.append(
+            {
+                "event_id": event_id,
+                "team": team,
+                "player_id": player_id,
+                "lineup_status": status,
+                "batting_order_position": order,
+                "provider_published_at_utc": provider_published,
+                "first_observed_at_utc": (
+                    _optional_text(row, "first_observed_at_utc") or captured_text
+                ),
+                "captured_at_utc": captured_text,
+                "source": _required_text(row, "source", label),
+                "source_record_id": _required_text(row, "source_record_id", label),
+                # MLB StatsAPI batting order evidence does not publish an
+                # expected-PA estimate. Keep that optional contract explicit.
+                "expected_pa": "",
+                "expected_pa_source": "",
+                "expected_pa_version": "",
+            }
+        )
+
+    cutoff = _utc(cutoff_utc, "cutoff_utc")
+    _validate_point_in_time_rows("lineups", LINEUP_OUTPUT_COLUMNS, prepared, cutoff)
+    snapshot_capture = _utc(captured_at_utc, "captured_at_utc")
+    if any(
+        snapshot_capture < _utc(row["captured_at_utc"], "lineup.captured_at_utc")
+        for row in prepared
+    ):
+        raise ContextSourceError("lineup snapshot precedes row capture")
+    missing_teams = sorted(set(teams_by_side.values()) - observed_teams)
+    coverage_note = None
+    availability_status = "available"
+    if len(seen_slots) < 18:
+        availability_status = "partial"
+        coverage_note = (
+            f"{len(seen_slots)} of 18 starting lineup slots observed; missing teams: "
+            + (", ".join(missing_teams) if missing_teams else "partial slots")
+        )
+    return persist_source_snapshot(
+        source_name="lineups",
+        csv_payload=_csv_bytes(
+            LINEUP_OUTPUT_COLUMNS,
+            sorted(prepared, key=lambda row: (row["event_id"], row["team"], row["batting_order_position"])),
+        ),
+        row_count=len(prepared),
+        operating_date=operating_date,
+        collected_at_utc=snapshot_capture,
+        request_scope={
+            "operating_date": _date(operating_date, "operating_date").isoformat(),
+            "cutoff_utc": _utc_text(cutoff, "cutoff_utc"),
+            "event_id": event_id,
+            "observed_starting_slots": len(seen_slots),
+            "expected_starting_slots": 18,
+        },
+        provider="MLB StatsAPI persisted game feed",
+        collector_configuration={"provider_adapter": "statsapi-lineup-observation-v1"},
+        git_commit=git_commit,
+        research_root=research_root,
+        source_clock_fields=(
+            "provider_published_at_utc",
+            "first_observed_at_utc",
+            "captured_at_utc",
+        ),
+        raw_inputs={
+            **dict(additional_raw_inputs or {}),
+            "lineup_observation": observation_csv,
+            "statsapi_game_feed": game_feed_json,
+        },
+        availability_status=availability_status,
+        availability_note=coverage_note,
     )
 
 
@@ -1120,7 +1610,8 @@ def normalize_statcast_pitch_csv(
     statcast_csv: str | Path,
     game_clock_csv: str | Path,
     *,
-    collected_at_utc: datetime | str,
+    captured_at_utc: datetime | str | None = None,
+    collected_at_utc: datetime | str | None = None,
 ) -> tuple[Mapping[str, object], ...]:
     """Normalize an unaggregated Savant export to the v2 pitch-grain contract.
 
@@ -1153,34 +1644,180 @@ def normalize_statcast_pitch_csv(
     }
     _require_columns(headers, required, "Statcast CSV")
     clock_headers, clock_rows, _ = _read_csv(game_clock_csv, "Statcast game clock")
-    _require_columns(
-        clock_headers,
-        {
-            "game_id",
-            "game_completed_at_utc",
-            "source_published_or_available_at_utc",
-        },
-        "Statcast game-clock CSV",
-    )
-    collected = _utc(collected_at_utc, "collected_at_utc")
-    clocks: dict[str, tuple[datetime, datetime]] = {}
+    _require_columns(clock_headers, {"game_id"}, "Statcast game-clock CSV")
+    capture_value = captured_at_utc if captured_at_utc is not None else collected_at_utc
+    if capture_value is None:
+        raise ContextSourceError("captured_at_utc is required")
+    snapshot_capture = _utc(capture_value, "captured_at_utc")
+    if captured_at_utc is not None and collected_at_utc is not None:
+        legacy_capture = _utc(collected_at_utc, "collected_at_utc")
+        if legacy_capture != snapshot_capture:
+            raise ContextSourceError(
+                "captured_at_utc conflicts with deprecated collected_at_utc"
+            )
+    clocks: dict[
+        str,
+        tuple[
+            datetime | None,
+            str,
+            datetime | None,
+            datetime | None,
+            datetime,
+            datetime,
+        ],
+    ] = {}
+
     for index, row in enumerate(clock_rows, start=2):
-        game_id = _mlbam_id(row.get("game_id"), f"game clock row {index}.game_id")
-        completed = _utc(
-            row.get("game_completed_at_utc", ""),
+        game_id = _mlbam_id(
+            row.get("game_id"),
+            f"game clock row {index}.game_id",
+        )
+
+        completed_value = (
+            row.get("game_completed_at_utc")
+            or row.get("game_completed_derived_from_last_play_end_utc")
+        )
+
+        completed = _optional_utc(
+            completed_value,
             f"game clock row {index}.game_completed_at_utc",
         )
-        published = _utc(
-            row.get("source_published_or_available_at_utc", ""),
-            f"game clock row {index}.source_published_or_available_at_utc",
+
+        evidence_type = _optional_text(
+            row,
+            "completion_evidence_type",
         )
-        if not (completed <= published <= collected):
+
+        # Backward compatibility for immutable source packs produced
+        # before completion-evidence type was made explicit.
+        if evidence_type is None:
+            if completed is None:
+                raise ContextSourceError(
+                    f"game clock row {index} lacks completion evidence"
+                )
+            evidence_type = "legacy_exact_completion_clock"
+
+        allowed_evidence_types = {
+            "legacy_exact_completion_clock",
+            "play_by_play_last_play_end",
+            "schedule_final_observation",
+        }
+
+        if evidence_type not in allowed_evidence_types:
             raise ContextSourceError(
-                f"game clock row {index} must satisfy completed <= available <= collected"
+                f"game clock row {index}.completion_evidence_type is invalid"
             )
-        previous = clocks.setdefault(game_id, (completed, published))
-        if previous != (completed, published):
-            raise ContextSourceError(f"conflicting game-clock evidence for {game_id}")
+
+        witnessed = _optional_utc(
+            row.get("completion_witnessed_at_utc"),
+            f"game clock row {index}.completion_witnessed_at_utc",
+        )
+
+        provider_published = _optional_utc(
+            row.get("provider_published_at_utc")
+            or row.get("savant_publication_or_available_at_utc"),
+            f"game clock row {index}.provider_published_at_utc",
+        )
+
+        first_observed = _utc(
+            row.get("first_observed_at_utc")
+            or row.get("savant_collected_at_utc")
+            or "",
+            f"game clock row {index}.first_observed_at_utc",
+        )
+
+        captured = _utc(
+            row.get("captured_at_utc")
+            or row.get("savant_collected_at_utc")
+            or "",
+            f"game clock row {index}.captured_at_utc",
+        )
+
+        availability = provider_published or first_observed
+
+        if not (
+            availability
+            <= first_observed
+            <= captured
+            <= snapshot_capture
+        ):
+            raise ContextSourceError(
+                f"game clock row {index} must satisfy trustworthy "
+                "availability <= first_observed <= captured <= snapshot capture"
+            )
+
+        if evidence_type == "schedule_final_observation":
+            if completed is not None:
+                raise ContextSourceError(
+                    f"game clock row {index} schedule-final evidence "
+                    "must not claim an exact completion time"
+                )
+            if witnessed is None:
+                raise ContextSourceError(
+                    f"game clock row {index} schedule-final evidence "
+                    "requires completion_witnessed_at_utc"
+                )
+            if witnessed > snapshot_capture:
+                raise ContextSourceError(
+                    f"game clock row {index} completion witness is after snapshot capture"
+                )
+        else:
+            if completed is None:
+                raise ContextSourceError(
+                    f"game clock row {index} exact-completion evidence "
+                    "requires game_completed_at_utc"
+                )
+            if completed > availability:
+                raise ContextSourceError(
+                    f"game clock row {index} exact completion occurs after "
+                    "trustworthy Statcast availability"
+                )
+            if witnessed is not None:
+                if witnessed < completed:
+                    raise ContextSourceError(
+                        f"game clock row {index} completion witness precedes "
+                        "the exact completion time"
+                    )
+                if witnessed > snapshot_capture:
+                    raise ContextSourceError(
+                        f"game clock row {index} completion witness is after "
+                        "snapshot capture"
+                    )
+
+        provider_final_status = _optional_text(
+            row,
+            "provider_final_status",
+        )
+
+        if (
+            provider_final_status is not None
+            and provider_final_status.casefold()
+            not in {
+                "final",
+                "game over",
+                "completed early",
+            }
+        ):
+            raise ContextSourceError(
+                f"game clock row {index} does not contain final-game "
+                "completion evidence"
+            )
+
+        clock = (
+            completed,
+            evidence_type,
+            witnessed,
+            provider_published,
+            first_observed,
+            captured,
+        )
+
+        previous = clocks.setdefault(game_id, clock)
+
+        if previous != clock:
+            raise ContextSourceError(
+                f"conflicting game-clock evidence for {game_id}"
+            )
 
     normalized: list[dict[str, object]] = []
     pitch_keys: set[tuple[str, str, int]] = set()
@@ -1215,22 +1852,36 @@ def normalize_statcast_pitch_csv(
             batter_team, pitcher_team, normalized_half = home, away, "bottom"
         else:
             raise ContextSourceError(f"{label}.inning_topbot must be Top or Bot")
-        completed, published = clocks[game_id]
-        if completed.date() < game_date:
+        (
+            completed,
+            completion_evidence_type,
+            completion_witnessed_at,
+            provider_published,
+            first_observed,
+            captured,
+        ) = clocks[game_id]
+        completion_date_reference = (
+            completed
+            if completed is not None
+            else completion_witnessed_at
+        )
+        if completion_date_reference is None:
+            raise ContextSourceError(
+                f"{label} has no usable game-completion evidence timestamp"
+            )
+        if completion_date_reference.date() < game_date:
             raise ContextSourceError(
                 f"{label} completion clock cannot precede game_date"
             )
         event = (_optional_text(row, "events") or "").strip().casefold()
         terminal = bool(event)
         signature = (
-            game_date,
-            batter_id,
-            pitcher_id,
-            batter_hand,
-            pitcher_hand,
-            home,
-            away,
-        )
+                        game_date,
+                        home,
+                        away,
+                        batter_team,
+                        pitcher_team,
+                    )
         previous = pa_identity.setdefault((game_id, pa_id), signature)
         if previous != signature:
             raise ContextSourceError(f"inconsistent Statcast PA identity: {(game_id, pa_id)}")
@@ -1240,9 +1891,27 @@ def normalize_statcast_pitch_csv(
             {
                 "game_id": game_id,
                 "game_date": game_date.isoformat(),
-                "game_completed_at_utc": _utc_text(completed, "completed"),
-                "source_published_or_available_at_utc": _utc_text(published, "published"),
-                "collected_at_utc": _utc_text(collected, "collected"),
+                "game_completed_at_utc": (
+                    _utc_text(completed, "completed") if completed else ""
+                ),
+                "completion_evidence_type": completion_evidence_type,
+                "completion_witnessed_at_utc": (
+                    _utc_text(
+                        completion_witnessed_at,
+                        "completion_witnessed_at",
+                    )
+                    if completion_witnessed_at
+                    else ""
+                ),
+                "provider_published_at_utc": (
+                    _utc_text(provider_published, "provider_published")
+                    if provider_published
+                    else ""
+                ),
+                "first_observed_at_utc": _utc_text(
+                    first_observed, "first_observed"
+                ),
+                "captured_at_utc": _utc_text(captured, "captured"),
                 "plate_appearance_id": pa_id,
                 "pitch_number": pitch_number,
                 "pitch_id": pitch_id,
@@ -1290,11 +1959,12 @@ def normalize_statcast_pitch_csv(
         by_pa.setdefault((str(row["game_id"]), str(row["plate_appearance_id"])), []).append(row)
     for key, pitches in by_pa.items():
         terminal_rows = [row for row in pitches if row["is_terminal_pa"] == "true"]
-        if len(terminal_rows) != 1:
-            raise ContextSourceError(f"Statcast PA must have exactly one terminal row: {key}")
-        final_pitch = max(int(row["pitch_number"]) for row in pitches)
-        if int(terminal_rows[0]["pitch_number"]) != final_pitch:
-            raise ContextSourceError(f"terminal Statcast row is not the final pitch: {key}")
+        if len(terminal_rows) > 1:
+            raise ContextSourceError(f"Statcast PA must have at most one terminal row: {key}")
+        if terminal_rows:
+            final_pitch = max(int(row["pitch_number"]) for row in pitches)
+            if int(terminal_rows[0]["pitch_number"]) != final_pitch:
+                raise ContextSourceError(f"terminal Statcast row is not the final pitch: {key}")
     return tuple(
         sorted(
             normalized,
@@ -1311,22 +1981,33 @@ def collect_statcast_snapshot(
     *,
     operating_date: date | str,
     cutoff_utc: datetime | str,
-    collected_at_utc: datetime | str,
+    captured_at_utc: datetime | str | None = None,
+    collected_at_utc: datetime | str | None = None,
     git_commit: str,
     research_root: str | Path = DEFAULT_SOURCE_RESEARCH_ROOT,
+    additional_raw_inputs: Mapping[str, str | Path] | None = None,
 ) -> SourceSnapshotResult:
+    capture_value = captured_at_utc if captured_at_utc is not None else collected_at_utc
+    if capture_value is None:
+        raise ContextSourceError("captured_at_utc is required")
     rows = normalize_statcast_pitch_csv(
-        statcast_csv, game_clock_csv, collected_at_utc=collected_at_utc
+        statcast_csv,
+        game_clock_csv,
+        captured_at_utc=capture_value,
+        collected_at_utc=collected_at_utc if captured_at_utc is not None else None,
     )
     cutoff = _utc(cutoff_utc, "cutoff_utc")
-    if any(_utc(row["collected_at_utc"], "statcast.collected_at_utc") > cutoff for row in rows):
+    if any(
+        _utc(row["captured_at_utc"], "statcast.captured_at_utc") > cutoff
+        for row in rows
+    ):
         raise ContextSourceError("Statcast snapshot contains evidence collected after cutoff")
     return persist_source_snapshot(
         source_name="statcast",
         csv_payload=_csv_bytes(STATCAST_OUTPUT_COLUMNS, rows),
         row_count=len(rows),
         operating_date=operating_date,
-        collected_at_utc=collected_at_utc,
+        collected_at_utc=capture_value,
         request_scope={
             "operating_date": _date(operating_date, "operating_date").isoformat(),
             "cutoff_utc": _utc_text(cutoff, "cutoff_utc"),
@@ -1342,10 +2023,15 @@ def collect_statcast_snapshot(
         research_root=research_root,
         source_clock_fields=(
             "game_completed_at_utc",
-            "source_published_or_available_at_utc",
-            "collected_at_utc",
+            "provider_published_at_utc",
+            "first_observed_at_utc",
+            "captured_at_utc",
         ),
-        raw_inputs={"statcast": statcast_csv, "game_clocks": game_clock_csv},
+        raw_inputs={
+            **dict(additional_raw_inputs or {}),
+            "statcast": statcast_csv,
+            "game_clocks": game_clock_csv,
+        },
     )
 
 
@@ -1373,29 +2059,59 @@ def _validate_point_in_time_rows(
         if source_name == "probable_pitchers":
             _required_text(row, "source", label)
             _required_text(row, "source_version", label)
-            available = _utc(
-                row.get("announced_or_published_at_utc", ""),
-                f"{label}.announced_or_published_at_utc",
-            )
-            captured = _utc(row.get("captured_at_utc", ""), f"{label}.captured_at_utc")
+            _, _, captured, available = _forward_observation_clocks(row, label)
             _mlbam_id(row.get("event_id"), f"{label}.event_id")
             status = _required_text(row, "probable_pitcher_status", label).casefold()
+            if status not in context_features.PROBABLE_PITCHER_STATUSES:
+                raise ContextSourceError(
+                    f"{label}.probable_pitcher_status is unsupported"
+                )
             if status != "unknown":
                 _mlbam_id(row.get("pitcher_id"), f"{label}.pitcher_id")
         elif source_name == "lineups":
             _required_text(row, "source", label)
-            available = _utc(
-                row.get("announced_or_published_at_utc", ""),
-                f"{label}.announced_or_published_at_utc",
-            )
-            captured = _utc(row.get("captured_at_utc", ""), f"{label}.captured_at_utc")
+            _, _, captured, available = _forward_observation_clocks(row, label)
             _mlbam_id(row.get("event_id"), f"{label}.event_id")
             _mlbam_id(row.get("player_id"), f"{label}.player_id")
+            status = _required_text(row, "lineup_status", label).casefold()
+            if status not in context_features.LINEUP_STATUSES:
+                raise ContextSourceError(f"{label}.lineup_status is unsupported")
             order = _optional_text(row, "batting_order_position")
             if order is not None and not 1 <= _int_text(
                 order, f"{label}.batting_order_position"
             ) <= 9:
                 raise ContextSourceError(f"{label}.batting_order_position must be 1 through 9")
+            if status in {"confirmed", "projected"} and order is None:
+                raise ContextSourceError(
+                    f"{label} confirmed/projected lineup requires batting_order_position"
+                )
+            if status in {"unknown", "not_starting"} and order is not None:
+                raise ContextSourceError(
+                    f"{label} unknown/not-starting lineup cannot carry batting_order_position"
+                )
+            expected_pa_text = _float_or_blank(
+                row.get("expected_pa"), f"{label}.expected_pa"
+            )
+            expected_pa_source = _optional_text(row, "expected_pa_source")
+            expected_pa_version = _optional_text(row, "expected_pa_version")
+            if expected_pa_text:
+                expected_pa = float(expected_pa_text)
+                if not 0.0 < expected_pa <= 10.0:
+                    raise ContextSourceError(
+                        f"{label}.expected_pa must be greater than 0 and at most 10"
+                    )
+                if status not in {"confirmed", "projected"} or order is None:
+                    raise ContextSourceError(
+                        f"{label}.expected_pa requires an admissible batting-order row"
+                    )
+                if expected_pa_source is None or expected_pa_version is None:
+                    raise ContextSourceError(
+                        f"{label}.expected_pa requires source and version"
+                    )
+            elif expected_pa_source is not None or expected_pa_version is not None:
+                raise ContextSourceError(
+                    f"{label}.expected_pa source/version requires a value"
+                )
         elif source_name == "weather":
             _required_text(row, "source", label)
             _required_text(row, "source_version", label)
@@ -1408,15 +2124,48 @@ def _validate_point_in_time_rows(
                 if evidence_class != "provider_pregame_forecast":
                     raise ContextSourceError(f"{label} is not genuine pregame forecast evidence")
                 available = _utc(row.get("issued_at_utc", ""), f"{label}.issued_at_utc")
-                _utc(row.get("valid_for_utc", ""), f"{label}.valid_for_utc")
+                valid_for = _utc(
+                    row.get("valid_for_utc", ""), f"{label}.valid_for_utc"
+                )
+                if available > valid_for:
+                    raise ContextSourceError(
+                        f"{label} forecast issuance is after valid_for_utc"
+                    )
                 if _optional_text(row, "measured_at_utc") is not None:
                     raise ContextSourceError(f"{label} forecast cannot include measured_at_utc")
             elif weather_type == "pregame_observation":
                 if evidence_class != "provider_pregame_observation":
-                    raise ContextSourceError(f"{label} is not genuine pregame observation evidence")
-                available = _utc(row.get("measured_at_utc", ""), f"{label}.measured_at_utc")
+                    raise ContextSourceError(
+                        f"{label} is not genuine pregame observation evidence"
+                    )
+                available = _utc(
+                    row.get("measured_at_utc", ""), f"{label}.measured_at_utc"
+                )
             else:
                 raise ContextSourceError(f"{label}.weather_type is unsupported")
+            temperature_text = _float_or_blank(
+                row.get("temperature"), f"{label}.temperature"
+            )
+            temperature_unit = _optional_text(row, "temperature_unit")
+            wind_speed_text = _float_or_blank(
+                row.get("wind_speed"), f"{label}.wind_speed"
+            )
+            if wind_speed_text and float(wind_speed_text) < 0:
+                raise ContextSourceError(f"{label}.wind_speed cannot be negative")
+            wind_speed_unit = _optional_text(row, "wind_speed_unit")
+            if bool(temperature_text) != (temperature_unit is not None):
+                raise ContextSourceError(
+                    f"{label}.temperature and temperature_unit must be supplied together"
+                )
+            if bool(wind_speed_text) != (wind_speed_unit is not None):
+                raise ContextSourceError(
+                    f"{label}.wind_speed and wind_speed_unit must be supplied together"
+                )
+            humidity_text = _float_or_blank(row.get("humidity"), f"{label}.humidity")
+            if humidity_text and not 0.0 <= float(humidity_text) <= 100.0:
+                raise ContextSourceError(
+                    f"{label}.humidity must be between 0 and 100"
+                )
         elif source_name == "park_factors":
             available = _utc(
                 row.get("published_or_available_at_utc", ""),
@@ -1480,6 +2229,9 @@ def collect_normalized_source_snapshot(
     collector_configuration: Mapping[str, object],
     git_commit: str,
     research_root: str | Path = DEFAULT_SOURCE_RESEARCH_ROOT,
+    availability_status: str = "available",
+    availability_note: str | None = None,
+    additional_raw_inputs: Mapping[str, str | Path] | None = None,
 ) -> SourceSnapshotResult:
     """Persist one supplied point-in-time provider adapter output.
 
@@ -1512,8 +2264,16 @@ def collect_normalized_source_snapshot(
     sorted_rows = sorted(rows, key=lambda row: _canonical_json_bytes(dict(row)))
     canonical = _csv_bytes(headers, sorted_rows)
     clock_fields = {
-        "probable_pitchers": ("announced_or_published_at_utc", "captured_at_utc"),
-        "lineups": ("announced_or_published_at_utc", "captured_at_utc"),
+        "probable_pitchers": (
+            "provider_published_at_utc",
+            "first_observed_at_utc",
+            "captured_at_utc",
+        ),
+        "lineups": (
+            "provider_published_at_utc",
+            "first_observed_at_utc",
+            "captured_at_utc",
+        ),
         "weather": ("issued_at_utc", "measured_at_utc", "valid_for_utc", "captured_at_utc"),
         "park_factors": ("published_or_available_at_utc", "captured_at_utc"),
         "market": ("quote_at_utc", "captured_at_utc"),
@@ -1533,7 +2293,9 @@ def collect_normalized_source_snapshot(
         git_commit=git_commit,
         research_root=research_root,
         source_clock_fields=clock_fields,
-        raw_inputs={source_name: input_csv},
+        raw_inputs={**dict(additional_raw_inputs or {}), source_name: input_csv},
+        availability_status=availability_status,
+        availability_note=availability_note,
     )
 
 
@@ -1541,9 +2303,9 @@ def _source_capture_fields(source_name: str) -> tuple[tuple[str, str], ...]:
     if source_name == "candidates":
         return (("candidate_published_or_available_at_utc", "candidate_captured_at_utc"),)
     if source_name in {"probable_pitchers", "lineups"}:
-        return (("announced_or_published_at_utc", "captured_at_utc"),)
+        return ()
     if source_name == "statcast":
-        return (("source_published_or_available_at_utc", "collected_at_utc"),)
+        return ()
     if source_name == "weather":
         return ()
     if source_name == "park_factors":
@@ -1587,6 +2349,98 @@ def _validate_pack_source_clocks(
             _validate_point_in_time_rows(source_name, headers, rows, cutoff)
         except ContextSourceError as exc:
             errors.append(str(exc))
+        return
+    if source_name == "statcast":
+        for index, row in enumerate(rows, start=2):
+            label = f"statcast row {index}"
+
+            try:
+                completed = _optional_utc(
+                    row.get("game_completed_at_utc"),
+                    f"{label}.game_completed_at_utc",
+                )
+
+                evidence_type = _optional_text(
+                    row,
+                    "completion_evidence_type",
+                )
+
+                if evidence_type is None:
+                    if completed is None:
+                        raise ContextSourceError(
+                            f"{label} lacks completion evidence"
+                        )
+                    evidence_type = "legacy_exact_completion_clock"
+
+                witnessed = _optional_utc(
+                    row.get("completion_witnessed_at_utc"),
+                    f"{label}.completion_witnessed_at_utc",
+                )
+
+                _, first_observed, captured, availability = (
+                    _forward_observation_clocks(row, label)
+                )
+
+                if not (
+                    availability
+                    <= first_observed
+                    <= captured
+                    <= cutoff
+                ):
+                    raise ContextSourceError(
+                        f"{label} clocks must satisfy trustworthy "
+                        "availability <= first_observed <= captured <= pack cutoff"
+                    )
+
+                if evidence_type == "schedule_final_observation":
+                    if completed is not None:
+                        raise ContextSourceError(
+                            f"{label} schedule-final evidence must not claim "
+                            "an exact completion time"
+                        )
+                    if witnessed is None:
+                        raise ContextSourceError(
+                            f"{label} schedule-final evidence requires "
+                            "completion_witnessed_at_utc"
+                        )
+                    if witnessed > cutoff:
+                        raise ContextSourceError(
+                            f"{label} completion witness is after pack cutoff"
+                        )
+
+                elif evidence_type in {
+                    "legacy_exact_completion_clock",
+                    "play_by_play_last_play_end",
+                }:
+                    if completed is None:
+                        raise ContextSourceError(
+                            f"{label} exact-completion evidence requires "
+                            "game_completed_at_utc"
+                        )
+                    if completed > availability:
+                        raise ContextSourceError(
+                            f"{label} exact completion occurs after trustworthy "
+                            "Statcast availability"
+                        )
+                    if witnessed is not None:
+                        if witnessed < completed:
+                            raise ContextSourceError(
+                                f"{label} completion witness precedes exact completion"
+                            )
+                        if witnessed > cutoff:
+                            raise ContextSourceError(
+                                f"{label} completion witness is after pack cutoff"
+                            )
+
+                else:
+                    raise ContextSourceError(
+                        f"{label}.completion_evidence_type is invalid"
+                    )
+
+            except ContextSourceError as exc:
+                errors.append(str(exc))
+                continue
+
         return
     for index, row in enumerate(rows, start=2):
         for available_field, captured_field in _source_capture_fields(source_name):
@@ -1651,7 +2505,7 @@ def _validate_candidate_manifest_binding(
         else:
             digests[name] = digest
     required_inputs = {"schedule", "roster", "identity_crosswalk"}
-    if set(digests) != required_inputs:
+    if not required_inputs.issubset(digests):
         errors.append(
             "candidate raw input digests must bind schedule, roster, and identity_crosswalk"
         )
@@ -1691,6 +2545,48 @@ def _validate_candidate_manifest_binding(
             "candidate_identities": identities,
         }
     )
+    event_identities = sorted(
+        {
+            (
+                str(row.get("event_id") or ""),
+                str(row.get("operating_date") or ""),
+                str(row.get("commence_time_utc") or ""),
+                str(row.get("home_team") or ""),
+                str(row.get("away_team") or ""),
+                str(row.get("venue_id") or ""),
+                str(row.get("venue_name") or ""),
+            )
+            for row in rows
+        }
+    )
+    expected_event_identities = [
+        {
+            "event_id": event_id,
+            "operating_date": event_date,
+            "commence_time_utc": commence,
+            "home_team": home,
+            "away_team": away,
+            "venue_id": venue_id,
+            "venue_name": venue_name,
+        }
+        for (
+            event_id,
+            event_date,
+            commence,
+            home,
+            away,
+            venue_id,
+            venue_name,
+        ) in event_identities
+    ]
+    request_scope = entry.get("request_scope")
+    if not isinstance(request_scope, Mapping):
+        errors.append("candidate request_scope must be an object")
+    else:
+        if request_scope.get("canonical_event_id_type") != "mlb_statsapi_game_pk":
+            errors.append("candidate canonical event identity type mismatch")
+        if request_scope.get("event_identities") != expected_event_identities:
+            errors.append("candidate event identity binding mismatch")
     for index, row in enumerate(rows, start=2):
         if row.get("candidate_universe_source_digest") != expected_source_digest:
             errors.append(f"candidates row {index} source digest is not bound to raw inputs")
@@ -1760,6 +2656,8 @@ def assemble_context_source_pack(
                     "filename": SOURCE_FILES[source_name],
                     "available": False,
                     "unavailable_reason": unavailable[source_name].strip(),
+                    "availability_status": "unavailable",
+                    "availability_note": unavailable[source_name].strip(),
                     "snapshot_id": None,
                     "sha256": None,
                     "row_count": 0,
@@ -1792,6 +2690,8 @@ def assemble_context_source_pack(
                 "filename": SOURCE_FILES[source_name],
                 "available": True,
                 "unavailable_reason": None,
+                "availability_status": snapshot_manifest["availability_status"],
+                "availability_note": snapshot_manifest["availability_note"],
                 "snapshot_id": snapshot_manifest["snapshot_id"],
                 "snapshot_manifest_digest": snapshot_manifest["manifest_digest"],
                 "sha256": snapshot_manifest["sha256"],
@@ -1999,8 +2899,19 @@ def validate_context_source_pack(
                 errors.append(f"missing optional source lacks reason: {source_name}")
             if source_path.exists():
                 errors.append(f"unavailable source unexpectedly exists: {source_name}")
+            if entry.get("availability_status") != "unavailable":
+                errors.append(f"unavailable source has invalid status: {source_name}")
+            if entry.get("availability_note") != reason:
+                errors.append(f"unavailable source note/reason mismatch: {source_name}")
             continue
         available_names.add(source_name)
+        availability_status = str(entry.get("availability_status") or "").casefold()
+        if availability_status not in {"available", "partial"}:
+            errors.append(f"available source has invalid status: {source_name}")
+        if availability_status == "partial" and not str(
+            entry.get("availability_note") or ""
+        ).strip():
+            errors.append(f"partial source lacks availability note: {source_name}")
         if not source_path.is_file():
             errors.append(f"available source file is missing: {source_path}")
             continue
@@ -2096,6 +3007,8 @@ __all__ = [
     "ContextSourceError",
     "DEFAULT_SOURCE_RESEARCH_ROOT",
     "OPTIONAL_SOURCES",
+    "LINEUP_OUTPUT_COLUMNS",
+    "PROBABLE_PITCHER_OUTPUT_COLUMNS",
     "REQUIRED_SOURCES",
     "SOURCE_COLLECTOR_VERSION",
     "SOURCE_FILES",
@@ -2114,6 +3027,8 @@ __all__ = [
     "collect_candidate_snapshot",
     "collect_identity_snapshot",
     "collect_normalized_source_snapshot",
+    "collect_statsapi_lineup_snapshot",
+    "collect_statsapi_probable_pitcher_snapshot",
     "collect_statcast_snapshot",
     "normalize_statcast_pitch_csv",
     "persist_source_snapshot",

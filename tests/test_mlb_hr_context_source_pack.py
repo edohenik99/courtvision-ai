@@ -306,6 +306,45 @@ def test_missing_crosswalk_mapping_fails_closed(
         sources.build_neutral_candidate_universe(schedule, roster, crosswalk, cutoff_utc=CUTOFF)
 
 
+def test_retrosheet_game_alias_is_optional_for_prospective_gamepk(
+    inputs: tuple[Path, Path, Path], tmp_path: Path
+) -> None:
+    schedule, roster, _ = inputs
+    crosswalk = _crosswalk(
+        tmp_path / "prospective-crosswalk.csv",
+        retrosheet_game_id="",
+        retrosheet_batter_id="",
+    )
+
+    universe = sources.build_neutral_candidate_universe(
+        schedule, roster, crosswalk, cutoff_utc=CUTOFF
+    )
+
+    assert len(universe.rows) == 1
+    assert universe.rows[0]["event_id"] == GAME_ID
+
+
+def test_conflicting_retrosheet_game_aliases_still_fail_closed(tmp_path: Path) -> None:
+    crosswalk = _crosswalk(tmp_path / "conflicting-alias.csv")
+    columns, rows = _read_csv(crosswalk)
+    second = {
+        **rows[0],
+        "mlbam_batter_id": "600002",
+        "batter_name": "Another Batter",
+        "retrosheet_batter_id": "batta002",
+        "retrosheet_game_id": "TOR202606051",
+    }
+    _write_csv(crosswalk, columns, [rows[0], second])
+
+    with pytest.raises(sources.ContextSourceError, match="conflicting MLBAM-to-Retrosheet"):
+        sources.build_neutral_candidate_universe(
+            _schedule(tmp_path / "schedule.csv"),
+            _roster(tmp_path / "roster.csv"),
+            crosswalk,
+            cutoff_utc=CUTOFF,
+        )
+
+
 def test_roster_crosswalk_name_mismatch_fails_closed(
     inputs: tuple[Path, Path, Path], tmp_path: Path
 ) -> None:
@@ -489,7 +528,9 @@ def _game_clocks(path: Path, **updates: object) -> Path:
     row: dict[str, object] = {
         "game_id": "765400",
         "game_completed_at_utc": "2026-06-01T22:00:00Z",
-        "source_published_or_available_at_utc": "2026-06-01T22:05:00Z",
+        "provider_published_at_utc": "2026-06-01T22:05:00Z",
+        "first_observed_at_utc": "2026-06-01T22:06:00Z",
+        "captured_at_utc": "2026-06-01T22:07:00Z",
     }
     row.update(updates)
     return _write_csv(path, tuple(row), [row])
@@ -499,7 +540,7 @@ def test_statcast_adapter_preserves_pitch_grain_and_raw_metrics(tmp_path: Path) 
     rows = sources.normalize_statcast_pitch_csv(
         _statcast(tmp_path / "statcast.csv"),
         _game_clocks(tmp_path / "clocks.csv"),
-        collected_at_utc="2026-06-01T22:10:00Z",
+        captured_at_utc="2026-06-01T22:10:00Z",
     )
     assert len(rows) == 1
     row = rows[0]
@@ -513,6 +554,43 @@ def test_statcast_adapter_preserves_pitch_grain_and_raw_metrics(tmp_path: Path) 
     assert row["is_pull"] == ""
 
 
+def test_statcast_uses_first_observed_when_provider_publication_is_absent(
+    tmp_path: Path,
+) -> None:
+    rows = sources.normalize_statcast_pitch_csv(
+        _statcast(tmp_path / "statcast.csv"),
+        _game_clocks(
+            tmp_path / "clocks.csv",
+            provider_published_at_utc="",
+        ),
+        captured_at_utc="2026-06-01T22:10:00Z",
+    )
+
+    assert rows[0]["provider_published_at_utc"] == ""
+    assert rows[0]["first_observed_at_utc"] == "2026-06-01T22:06:00Z"
+    assert rows[0]["captured_at_utc"] == "2026-06-01T22:07:00Z"
+
+
+def test_statcast_capture_after_requested_cutoff_cannot_reconstruct_history(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(sources.ContextSourceError, match="after cutoff"):
+        sources.collect_statcast_snapshot(
+            _statcast(tmp_path / "statcast.csv"),
+            _game_clocks(
+                tmp_path / "clocks.csv",
+                provider_published_at_utc="",
+                first_observed_at_utc="2026-06-01T22:09:00Z",
+                captured_at_utc="2026-06-01T22:11:00Z",
+            ),
+            operating_date=OPERATING_DATE,
+            cutoff_utc="2026-06-01T22:10:00Z",
+            captured_at_utc="2026-06-01T22:11:00Z",
+            git_commit=COMMIT,
+            research_root=tmp_path / "research",
+        )
+
+
 def test_statcast_adapter_accepts_multi_pitch_pa_with_one_terminal(tmp_path: Path) -> None:
     path = _statcast(tmp_path / "statcast.csv")
     columns, rows = _read_csv(path)
@@ -522,7 +600,7 @@ def test_statcast_adapter_accepts_multi_pitch_pa_with_one_terminal(tmp_path: Pat
     normalized = sources.normalize_statcast_pitch_csv(
         path,
         _game_clocks(tmp_path / "clocks.csv"),
-        collected_at_utc="2026-06-01T22:10:00Z",
+        captured_at_utc="2026-06-01T22:10:00Z",
     )
     assert [row["pitch_number"] for row in normalized] == [1, 2]
     assert [row["is_terminal_pa"] for row in normalized] == ["false", "true"]
@@ -532,7 +610,6 @@ def test_statcast_adapter_accepts_multi_pitch_pa_with_one_terminal(tmp_path: Pat
     ("mutation", "message"),
     [
         ("duplicate", "duplicate Statcast pitch identity"),
-        ("no_terminal", "exactly one terminal"),
         ("terminal_first", "not the final pitch"),
     ],
 )
@@ -552,7 +629,7 @@ def test_statcast_pitch_identity_and_terminal_rules(
         sources.normalize_statcast_pitch_csv(
             path,
             _game_clocks(tmp_path / "clocks.csv"),
-            collected_at_utc="2026-06-01T22:10:00Z",
+            captured_at_utc="2026-06-01T22:10:00Z",
         )
 
 
@@ -562,17 +639,24 @@ def test_statcast_requires_separate_game_completion_evidence(tmp_path: Path) -> 
         sources.normalize_statcast_pitch_csv(
             _statcast(tmp_path / "statcast.csv"),
             clocks,
-            collected_at_utc="2026-06-01T22:10:00Z",
+            captured_at_utc="2026-06-01T22:10:00Z",
         )
 
 
 @pytest.mark.parametrize(
     ("updates", "message"),
     [
-        ({"game_completed_at_utc": "2026-06-01T22:06:00Z"}, "completed <= available"),
         (
-            {"source_published_or_available_at_utc": "2026-06-01T22:11:00Z"},
-            "available <= collected",
+            {"game_completed_at_utc": "2026-06-01T22:06:00Z"},
+            "exact completion occurs after trustworthy Statcast availability",
+        ),
+        (
+            {"provider_published_at_utc": "2026-06-01T22:07:00Z"},
+            "availability <= first_observed",
+        ),
+        (
+            {"first_observed_at_utc": "2026-06-01T22:08:00Z"},
+            "first_observed <= captured",
         ),
     ],
 )
@@ -581,7 +665,7 @@ def test_statcast_clock_ordering(updates: dict[str, object], message: str, tmp_p
         sources.normalize_statcast_pitch_csv(
             _statcast(tmp_path / "statcast.csv"),
             _game_clocks(tmp_path / "clocks.csv", **updates),
-            collected_at_utc="2026-06-01T22:10:00Z",
+            captured_at_utc="2026-06-01T22:10:00Z",
         )
 
 
@@ -597,7 +681,8 @@ def _normalized_csv(source_name: str, path: Path, **updates: object) -> Path:
             "probable_pitcher_status": "confirmed",
             "identity_status": "verified_mlbam",
             "identity_mapping_version": "mlb-id-map-v2",
-            "announced_or_published_at_utc": "2026-06-05T17:00:00Z",
+            "provider_published_at_utc": "2026-06-05T17:00:00Z",
+            "first_observed_at_utc": "2026-06-05T17:02:00Z",
             "captured_at_utc": "2026-06-05T17:05:00Z",
             "source": "MLB StatsAPI",
             "source_record_id": "game-765432-away-probable",
@@ -609,7 +694,8 @@ def _normalized_csv(source_name: str, path: Path, **updates: object) -> Path:
             "player_id": BATTER_ID,
             "lineup_status": "confirmed",
             "batting_order_position": "2",
-            "announced_or_published_at_utc": "2026-06-05T17:00:00Z",
+            "provider_published_at_utc": "2026-06-05T17:00:00Z",
+            "first_observed_at_utc": "2026-06-05T17:02:00Z",
             "captured_at_utc": "2026-06-05T17:05:00Z",
             "source": "MLB StatsAPI",
             "source_record_id": "game-765432-tor-lineup-600001",
@@ -625,8 +711,11 @@ def _normalized_csv(source_name: str, path: Path, **updates: object) -> Path:
             "measured_at_utc": "",
             "captured_at_utc": "2026-06-05T17:05:00Z",
             "temperature": "22",
+            "temperature_unit": "celsius",
             "wind_speed": "10",
+            "wind_speed_unit": "kmh",
             "wind_direction": "out_to_left",
+            "humidity": "58",
             "roof_status": "open",
             "precipitation": "0",
             "source": "pregame forecast provider",
@@ -671,13 +760,21 @@ def _normalized_csv(source_name: str, path: Path, **updates: object) -> Path:
     [
         (
             "probable_pitchers",
-            {"announced_or_published_at_utc": "2026-06-05T17:06:00Z"},
-            "source time",
+            {"provider_published_at_utc": "2026-06-05T17:03:00Z"},
+            "trustworthy availability",
         ),
         ("probable_pitchers", {"source_version": ""}, "source_version"),
         ("lineups", {"batting_order_position": "10"}, "1 through 9"),
+        ("lineups", {"lineup_status": "roster_only"}, "lineup_status is unsupported"),
+        ("lineups", {"expected_pa": "4.5"}, "expected_pa requires source and version"),
         ("weather", {"weather_evidence_class": "final_game_weather"}, "final observed"),
         ("weather", {"issued_at_utc": "2026-06-05T17:06:00Z"}, "source time"),
+        ("weather", {"humidity": "101"}, "humidity must be between 0 and 100"),
+        (
+            "weather",
+            {"temperature_unit": ""},
+            "temperature and temperature_unit must be supplied together",
+        ),
         ("park_factors", {"effective_to_date": "2025-12-31"}, "effective interval"),
         ("park_factors", {"factor_value": "1.09"}, "must equal park_hr_factor"),
         ("market", {"evidence_class": "closing_snapshot"}, "closing/non-pregame"),
@@ -725,6 +822,76 @@ def test_market_snapshot_keeps_exact_id_and_book_lineage(tmp_path: Path) -> None
     assert rows[0]["player_id"] == BATTER_ID
     assert rows[0]["sportsbook"] == "Book A"
     assert rows[0]["source_snapshot_id"] == "odds-api-run-1"
+
+
+def test_lineup_snapshot_preserves_source_supplied_expected_pa(tmp_path: Path) -> None:
+    input_csv = _normalized_csv(
+        "lineups",
+        tmp_path / "lineups.csv",
+        expected_pa="4.5",
+        expected_pa_source="pregame projection provider",
+        expected_pa_version="expected-pa-v1",
+    )
+    snapshot = sources.collect_normalized_source_snapshot(
+        "lineups",
+        input_csv,
+        operating_date=OPERATING_DATE,
+        cutoff_utc=CUTOFF,
+        collected_at_utc="2026-06-05T17:10:00Z",
+        provider="pregame lineup provider",
+        collector_configuration={"version": "v1"},
+        git_commit=COMMIT,
+        research_root=tmp_path / "research",
+    )
+
+    _, rows = _read_csv(snapshot.data_path)
+
+    assert rows[0]["expected_pa"] == "4.5"
+    assert rows[0]["expected_pa_source"] == "pregame projection provider"
+    assert rows[0]["expected_pa_version"] == "expected-pa-v1"
+
+
+def test_partial_source_status_is_bound_into_pack_manifest(
+    inputs: tuple[Path, Path, Path], tmp_path: Path
+) -> None:
+    lineup = sources.collect_normalized_source_snapshot(
+        "lineups",
+        _normalized_csv(
+            "lineups",
+            tmp_path / "lineups.csv",
+            provider_published_at_utc="",
+        ),
+        operating_date=OPERATING_DATE,
+        cutoff_utc=CUTOFF,
+        collected_at_utc="2026-06-05T17:10:00Z",
+        provider="persisted test observation",
+        collector_configuration={"version": "v1"},
+        git_commit=COMMIT,
+        research_root=tmp_path / "research",
+        availability_status="partial",
+        availability_note="one of two team lineups observed",
+    )
+    snapshots = _minimal_snapshots(tmp_path, inputs)
+    snapshots["lineups"] = lineup.snapshot_dir
+    unavailable = _unavailable()
+    unavailable.pop("lineups")
+    pack = sources.assemble_context_source_pack(
+        operating_date=OPERATING_DATE,
+        cutoff_utc=CUTOFF,
+        assembled_at_utc=ASSEMBLED,
+        snapshot_dirs=snapshots,
+        unavailable_sources=unavailable,
+        git_commit=COMMIT,
+        research_root=tmp_path / "research",
+    )
+    manifest = json.loads(pack.manifest_path.read_text(encoding="utf-8"))
+    entry = next(
+        item for item in manifest["source_files"] if item["source_name"] == "lineups"
+    )
+
+    assert entry["available"] is True
+    assert entry["availability_status"] == "partial"
+    assert entry["availability_note"] == "one of two team lineups observed"
 
 
 def test_assemble_requires_explicit_optional_source_reasons(
@@ -866,3 +1033,13 @@ def test_source_module_has_no_training_or_operational_imports() -> None:
     assert "train_model" not in text
     assert "urllib.request" not in text
     assert "requests.get" not in text
+def test_statcast_provider_az_team_alias_normalizes_to_ari_and_unknown_still_fails() -> None:
+    assert sources._team("AZ", "team") == "ARI"
+    assert sources._team("az", "team") == "ARI"
+    assert sources._team(" ARI ", "team") == "ARI"
+
+    with pytest.raises(
+        sources.ContextSourceError,
+        match="canonical MLB team",
+    ):
+        sources._team("ZZZ", "team")

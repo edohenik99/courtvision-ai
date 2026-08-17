@@ -20,7 +20,7 @@ from courtvision.sports.mlb.data.odds_snapshot_ingestion import (
 )
 
 
-MLB_HR_CROSSWALK_VERSION: Final = "mlb-hr-batter-game-crosswalk-v1"
+MLB_HR_CROSSWALK_VERSION: Final = "mlb-hr-batter-game-crosswalk-v2"
 
 REQUIRED_CROSSWALK_COLUMNS: Final = frozenset(
     {
@@ -392,7 +392,6 @@ def validate_mlb_hr_crosswalk_csv(
         required_ids = (
             (mlbam_game_id, "mlbam_game_id"),
             (mlbam_batter_id, "mlbam_batter_id"),
-            (retrosheet_game_id, "retrosheet_game_id"),
             (_text(row, "retrosheet_home_team_id"), "retrosheet_home_team_id"),
             (_text(row, "retrosheet_away_team_id"), "retrosheet_away_team_id"),
             (_text(row, "retrosheet_batting_team_id"), "retrosheet_batting_team_id"),
@@ -423,6 +422,11 @@ def validate_mlb_hr_crosswalk_csv(
             warnings.append(
                 f"row {row_number}: retrosheet_batter_id is absent; only the "
                 "MLBAM side of the player identity can be validated"
+            )
+        if not retrosheet_game_id:
+            warnings.append(
+                f"row {row_number}: retrosheet_game_id is absent; MLB StatsAPI "
+                "gamePk remains the canonical prospective event identity"
             )
 
         batter_name = _text(row, "batter_name")
@@ -510,15 +514,13 @@ def validate_mlb_hr_crosswalk_csv(
 
         game_match = _RETROSHEET_GAME_ID.fullmatch(retrosheet_game_id)
         retrosheet_game_valid = game_match is not None
-        if not retrosheet_game_id:
-            errors.append(f"row {row_number}: retrosheet_game_id is required")
-        elif game_match is None:
+        if retrosheet_game_id and game_match is None:
             errors.append(
                 f"row {row_number}: retrosheet_game_id must use "
                 "TTTYYYYMMDDN form: "
                 f"{retrosheet_game_id!r}"
             )
-        else:
+        elif game_match is not None:
             encoded_home = game_match.group("home_team")
             encoded_date_text = game_match.group("date")
             encoded_game_number = int(game_match.group("game_number"))

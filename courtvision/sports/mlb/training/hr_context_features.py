@@ -133,8 +133,9 @@ REQUIRED_SOURCE_COLUMNS: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
                 "game_id",
                 "game_date",
                 "game_completed_at_utc",
-                "source_published_or_available_at_utc",
-                "collected_at_utc",
+                "provider_published_at_utc",
+                "first_observed_at_utc",
+                "captured_at_utc",
                 "plate_appearance_id",
                 "pitch_number",
                 "batter_id",
@@ -160,7 +161,8 @@ REQUIRED_SOURCE_COLUMNS: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
                 "probable_pitcher_status",
                 "identity_status",
                 "identity_mapping_version",
-                "announced_or_published_at_utc",
+                "provider_published_at_utc",
+                "first_observed_at_utc",
                 "captured_at_utc",
             }
         ),
@@ -171,7 +173,8 @@ REQUIRED_SOURCE_COLUMNS: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
                 "player_id",
                 "lineup_status",
                 "batting_order_position",
-                "announced_or_published_at_utc",
+                "provider_published_at_utc",
+                "first_observed_at_utc",
                 "captured_at_utc",
             }
         ),
@@ -187,7 +190,9 @@ REQUIRED_SOURCE_COLUMNS: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
                 "measured_at_utc",
                 "captured_at_utc",
                 "temperature",
+                "temperature_unit",
                 "wind_speed",
+                "wind_speed_unit",
                 "wind_direction",
                 "roof_status",
             }
@@ -227,6 +232,7 @@ HITTER_METRICS: Final = (
     "barrel_rate",
     "hard_hit_rate",
     "average_exit_velocity",
+    "average_launch_angle",
     "max_exit_velocity",
     "sweet_spot_rate",
     "xwoba",
@@ -243,6 +249,7 @@ PITCHER_METRICS: Final = (
     "barrel_rate_allowed",
     "hard_hit_rate_allowed",
     "average_exit_velocity_allowed",
+    "average_launch_angle_allowed",
     "xwoba_allowed",
     "xslg_allowed",
     "strikeout_rate",
@@ -300,12 +307,25 @@ IDENTITY_AND_PROVENANCE_COLUMNS: Final = (
     "probable_pitcher_identity_status",
     "probable_pitcher_identity_mapping_version",
     "probable_pitcher_announced_or_published_at_utc",
+    "probable_pitcher_provider_published_at_utc",
+    "probable_pitcher_first_observed_at_utc",
     "probable_pitcher_captured_at_utc",
+    "probable_pitcher_source",
+    "probable_pitcher_source_record_id",
+    "probable_pitcher_source_version",
+    "probable_pitcher_source_digest",
     "lineup_status",
     "lineup_announced_or_published_at_utc",
+    "lineup_provider_published_at_utc",
+    "lineup_first_observed_at_utc",
     "lineup_captured_at_utc",
+    "lineup_source",
+    "lineup_source_record_id",
+    "lineup_source_digest",
     "batting_order_position",
     "expected_pa",
+    "expected_pa_source",
+    "expected_pa_version",
     "hitter_stats_available",
     "pitcher_stats_available",
     "probable_pitcher_available",
@@ -314,6 +334,13 @@ IDENTITY_AND_PROVENANCE_COLUMNS: Final = (
     "park_factor_available",
     "weather_available",
     "market_available",
+    "pitcher_history_game_count",
+    "pitcher_history_first_game_completed_at_utc",
+    "pitcher_history_last_game_completed_at_utc",
+    "pitcher_history_max_available_at_utc",
+    "pitcher_history_max_first_observed_at_utc",
+    "pitcher_history_max_captured_at_utc",
+    "pitcher_history_source_digest",
 )
 
 MATCHUP_COLUMNS: Final = (
@@ -325,6 +352,7 @@ MATCHUP_COLUMNS: Final = (
     "hitter_pitch_type_xwoba_json",
     "pitcher_pitch_mix_json",
     "pitcher_average_velocity_json",
+    "pitcher_pitch_type_context_json",
     "bvp_pa_descriptive",
     "bvp_hr_descriptive",
 )
@@ -333,17 +361,30 @@ CONTEXT_AND_MARKET_COLUMNS: Final = (
     "park_hr_factor",
     "park_factor_source",
     "park_factor_version",
+    "park_factor_effective_from_date",
+    "park_factor_effective_to_date",
+    "park_factor_source_record_id",
+    "park_factor_source_digest",
     "park_factor_published_or_available_at_utc",
     "park_factor_captured_at_utc",
     "temperature",
+    "temperature_unit",
     "wind_speed",
+    "wind_speed_unit",
     "wind_direction",
+    "humidity",
     "roof_status",
     "weather_type",
     "weather_evidence_class",
     "weather_evidence_at_utc",
+    "weather_issued_at_utc",
+    "weather_measured_at_utc",
     "weather_valid_for_utc",
     "weather_captured_at_utc",
+    "weather_source",
+    "weather_source_record_id",
+    "weather_source_version",
+    "weather_source_digest",
     "market_best_sportsbook",
     "market_best_american_odds",
     "market_best_decimal_odds",
@@ -435,9 +476,12 @@ class _Candidate:
 class _StatcastRow:
     game_id: str
     game_date: date
-    completed_at: datetime
-    published_or_available_at: datetime
-    collected_at: datetime
+    completed_at: datetime | None
+    completion_evidence_type: str
+    completion_witnessed_at: datetime | None
+    provider_published_at: datetime | None
+    first_observed_at: datetime
+    captured_at: datetime
     plate_appearance_id: str
     pitch_number: int
     batter_id: str
@@ -459,6 +503,15 @@ class _StatcastRow:
     away_team: str
     batter_team: str
     pitcher_team: str
+
+    @property
+    def completion_evidence_at(self) -> datetime:
+        value = self.completed_at or self.completion_witnessed_at
+        if value is None:
+            raise ContextFeatureError(
+                "Statcast row lacks usable completion evidence"
+            )
+        return value
 
     @property
     def is_terminal(self) -> bool:
@@ -506,6 +559,11 @@ def _parse_aware_datetime(value: object, field_name: str) -> datetime:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ContextFeatureError(f"{field_name} must be timezone-aware")
     return parsed.astimezone(timezone.utc)
+
+
+def _optional_aware_datetime(value: object, field_name: str) -> datetime | None:
+    text = "" if value is None else str(value).strip()
+    return _parse_aware_datetime(text, field_name) if text else None
 
 
 def _parse_date(value: object, field_name: str) -> date:
@@ -879,19 +937,99 @@ def _parse_statcast(snapshot: SourceSnapshot | None) -> tuple[_StatcastRow, ...]
     pa_signatures: dict[tuple[str, str], tuple[object, ...]] = {}
     for index, row in enumerate(snapshot.rows, start=2):
         label = f"statcast row {index}"
-        completed_at = _parse_aware_datetime(
-            row.get("game_completed_at_utc"), f"{label}.game_completed_at_utc"
+        completed_at = _optional_aware_datetime(
+            row.get("game_completed_at_utc"),
+            f"{label}.game_completed_at_utc",
         )
-        published_at = _parse_aware_datetime(
-            row.get("source_published_or_available_at_utc"),
-            f"{label}.source_published_or_available_at_utc",
+
+        completion_evidence_type = _optional_text(
+            row,
+            "completion_evidence_type",
         )
-        collected_at = _parse_aware_datetime(
-            row.get("collected_at_utc"), f"{label}.collected_at_utc"
+
+        completion_witnessed_at = _optional_aware_datetime(
+            row.get("completion_witnessed_at_utc"),
+            f"{label}.completion_witnessed_at_utc",
         )
-        if not (completed_at <= published_at <= collected_at):
+
+        if completion_evidence_type is None:
+            if completed_at is None:
+                raise ContextFeatureError(
+                    f"{label} lacks completion evidence"
+                )
+            completion_evidence_type = "legacy_exact_completion_clock"
+
+        allowed_completion_evidence_types = {
+            "legacy_exact_completion_clock",
+            "play_by_play_last_play_end",
+            "schedule_final_observation",
+        }
+
+        if completion_evidence_type not in allowed_completion_evidence_types:
             raise ContextFeatureError(
-                f"{label} Statcast clocks must satisfy completed <= available <= collected"
+                f"{label}.completion_evidence_type is invalid"
+            )
+
+        if completion_evidence_type == "schedule_final_observation":
+            if completed_at is not None:
+                raise ContextFeatureError(
+                    f"{label} schedule-final evidence must not claim "
+                    "an exact completion time"
+                )
+            if completion_witnessed_at is None:
+                raise ContextFeatureError(
+                    f"{label} schedule-final evidence requires "
+                    "completion_witnessed_at_utc"
+                )
+        else:
+            if completed_at is None:
+                raise ContextFeatureError(
+                    f"{label} exact-completion evidence requires "
+                    "game_completed_at_utc"
+                )
+            if (
+                completion_witnessed_at is not None
+                and completion_witnessed_at < completed_at
+            ):
+                raise ContextFeatureError(
+                    f"{label} completion witness precedes "
+                    "the exact completion time"
+                )
+
+        provider_published_at = _optional_aware_datetime(
+            row.get("provider_published_at_utc"),
+            f"{label}.provider_published_at_utc",
+        )
+
+        first_observed_at = _parse_aware_datetime(
+            row.get("first_observed_at_utc"),
+            f"{label}.first_observed_at_utc",
+        )
+
+        captured_at = _parse_aware_datetime(
+            row.get("captured_at_utc"),
+            f"{label}.captured_at_utc",
+        )
+
+        availability_at = provider_published_at or first_observed_at
+
+        if not (
+            availability_at
+            <= first_observed_at
+            <= captured_at
+        ):
+            raise ContextFeatureError(
+                f"{label} Statcast clocks must satisfy trustworthy "
+                "availability <= first_observed <= captured"
+            )
+
+        if (
+            completed_at is not None
+            and completed_at > availability_at
+        ):
+            raise ContextFeatureError(
+                f"{label} exact completion occurs after trustworthy "
+                "Statcast availability"
             )
         event_type_text = _optional_text(row, "event_type")
         event_type = _normalized_token(event_type_text) or None
@@ -926,19 +1064,18 @@ def _parse_statcast(snapshot: SourceSnapshot | None) -> tuple[_StatcastRow, ...]
             raise ContextFeatureError(f"{label} batter/pitcher teams do not match game")
         game_date = _parse_date(row.get("game_date"), f"{label}.game_date")
         signature = (
-            game_date,
-            completed_at,
-            published_at,
-            collected_at,
-            batter_id,
-            pitcher_id,
-            batter_hand,
-            pitcher_hand,
-            home_team,
-            away_team,
-            batter_team,
-            pitcher_team,
-        )
+                        game_date,
+                        completed_at,
+                        completion_evidence_type,
+                        completion_witnessed_at,
+                        provider_published_at,
+                        first_observed_at,
+                        captured_at,
+                        home_team,
+                        away_team,
+                        batter_team,
+                        pitcher_team,
+                    )
         pa_key = (game_id, pa_id)
         previous = pa_signatures.setdefault(pa_key, signature)
         if previous != signature:
@@ -948,8 +1085,11 @@ def _parse_statcast(snapshot: SourceSnapshot | None) -> tuple[_StatcastRow, ...]
                 game_id=game_id,
                 game_date=game_date,
                 completed_at=completed_at,
-                published_or_available_at=published_at,
-                collected_at=collected_at,
+                completion_evidence_type=completion_evidence_type,
+                completion_witnessed_at=completion_witnessed_at,
+                provider_published_at=provider_published_at,
+                first_observed_at=first_observed_at,
+                captured_at=captured_at,
                 plate_appearance_id=pa_id,
                 pitch_number=pitch_number,
                 batter_id=batter_id,
@@ -975,22 +1115,48 @@ def _parse_statcast(snapshot: SourceSnapshot | None) -> tuple[_StatcastRow, ...]
                 pitcher_team=pitcher_team,
             )
         )
-    by_pa: dict[tuple[str, str], list[_StatcastRow]] = {}
+    terminal_contract_by_pa: dict[tuple[str, str], list[_StatcastRow]] = {}
+
     for event in events:
-        by_pa.setdefault((event.game_id, event.plate_appearance_id), []).append(event)
-    for pa_key, pitches in by_pa.items():
-        terminal = [pitch for pitch in pitches if pitch.is_terminal]
-        if len(terminal) != 1:
+        terminal_contract_by_pa.setdefault(
+            (
+                event.game_id,
+                event.plate_appearance_id,
+            ),
+            [],
+        ).append(event)
+
+    for key, pitches in terminal_contract_by_pa.items():
+        terminal_rows = [
+            event
+            for event in pitches
+            if event.is_terminal
+        ]
+
+        if len(terminal_rows) > 1:
             raise ContextFeatureError(
-                f"Statcast PA must have exactly one terminal row: {pa_key}"
+                f"Statcast PA must have at most one terminal event: {key}"
             )
-        if terminal[0].pitch_number != max(pitch.pitch_number for pitch in pitches):
-            raise ContextFeatureError(f"terminal Statcast row is not the final pitch: {pa_key}")
+
+        if terminal_rows:
+            final_pitch = max(
+                event.pitch_number
+                for event in pitches
+            )
+
+            if (
+                terminal_rows[0].pitch_number
+                != final_pitch
+            ):
+                raise ContextFeatureError(
+                    f"terminal Statcast event is not the final pitch: {key}"
+                )
+
     return tuple(
         sorted(
             events,
             key=lambda item: (
-                item.completed_at,
+                item.completion_evidence_at,
                 item.game_id,
                 item.plate_appearance_id,
                 item.pitch_number,
@@ -1006,10 +1172,11 @@ def _eligible_history(
         event
         for event in events
         if event.game_id != candidate.event_id
-        and event.completed_at <= as_of
-        and event.published_or_available_at <= as_of
-        and event.collected_at <= as_of
-        and event.completed_at < candidate.commence_time
+        and event.completion_evidence_at <= as_of
+        and (event.provider_published_at or event.first_observed_at) <= as_of
+        and event.first_observed_at <= as_of
+        and event.captured_at <= as_of
+        and event.completion_evidence_at < candidate.commence_time
     )
 
 
@@ -1047,6 +1214,7 @@ def _hitter_metrics(rows: Sequence[_StatcastRow]) -> dict[str, object]:
             sum(value >= 95.0 for value in exit_speeds), len(exit_speeds)
         ),
         "average_exit_velocity": _mean(exit_speeds),
+        "average_launch_angle": _mean(launch_angles),
         "max_exit_velocity": max(exit_speeds, default=None),
         "sweet_spot_rate": _rate(
             sum(8.0 <= value <= 32.0 for value in launch_angles), len(launch_angles)
@@ -1075,6 +1243,9 @@ def _pitcher_metrics(rows: Sequence[_StatcastRow]) -> dict[str, object]:
     ground_types = tuple(
         row.batted_ball_type for row in batted if row.batted_ball_type is not None
     )
+    launch_angles = tuple(
+        row.launch_angle for row in batted if row.launch_angle is not None
+    )
     return {
         "batters_faced": hitter["pa"],
         "hr_allowed": hitter["hr"],
@@ -1082,6 +1253,7 @@ def _pitcher_metrics(rows: Sequence[_StatcastRow]) -> dict[str, object]:
         "barrel_rate_allowed": hitter["barrel_rate"],
         "hard_hit_rate_allowed": hitter["hard_hit_rate"],
         "average_exit_velocity_allowed": hitter["average_exit_velocity"],
+        "average_launch_angle_allowed": _mean(launch_angles),
         "xwoba_allowed": hitter["xwoba"],
         "xslg_allowed": hitter["xslg"],
         "strikeout_rate": hitter["strikeout_rate"],
@@ -1114,7 +1286,11 @@ def _windowed_features(
         values[f"{prefix}_season_{metric}"] = season_metrics[metric]
     for days in ROLLING_WINDOWS_DAYS:
         cutoff = as_of - timedelta(days=days)
-        window_rows = tuple(row for row in history if cutoff <= row.completed_at <= as_of)
+        window_rows = tuple(
+            row
+            for row in history
+            if cutoff <= row.completion_evidence_at <= as_of
+        )
         metrics = build(window_rows)
         for metric in metric_names:
             values[f"{prefix}_{days}d_{metric}"] = metrics[metric]
@@ -1153,6 +1329,60 @@ def _pitch_velocity_json(rows: Sequence[_StatcastRow]) -> str | None:
     )
 
 
+def _pitch_type_context_json(rows: Sequence[_StatcastRow]) -> str | None:
+    grouped: dict[str, list[_StatcastRow]] = {}
+    for row in rows:
+        if row.pitch_type:
+            grouped.setdefault(row.pitch_type, []).append(row)
+    total_pitches = sum(len(group) for group in grouped.values())
+    if not total_pitches:
+        return None
+
+    payload: dict[str, dict[str, object]] = {}
+    for pitch_type, group in sorted(grouped.items()):
+        terminal = tuple(row for row in group if row.is_terminal)
+        batted = _batted_rows(terminal)
+        barrels = tuple(row.is_barrel for row in batted if row.is_barrel is not None)
+        exit_speeds = tuple(
+            row.launch_speed for row in batted if row.launch_speed is not None
+        )
+        launch_angles = tuple(
+            row.launch_angle for row in batted if row.launch_angle is not None
+        )
+        batted_ball_types = tuple(
+            row.batted_ball_type
+            for row in batted
+            if row.batted_ball_type is not None
+        )
+        velocities = tuple(
+            row.release_speed for row in group if row.release_speed is not None
+        )
+        terminal_batters_faced = len(terminal)
+        hr_allowed = sum(row.is_home_run is True for row in terminal)
+        payload[pitch_type] = {
+            "pitch_count": len(group),
+            "usage_rate": round(len(group) / total_pitches, 10),
+            "average_velocity": _mean(velocities),
+            "terminal_batters_faced": terminal_batters_faced,
+            "hr_allowed": hr_allowed,
+            "hr_per_terminal_batter_faced": _rate(
+                hr_allowed, terminal_batters_faced
+            ),
+            "contact_count": len(batted),
+            "barrel_rate_allowed": _rate(sum(barrels), len(barrels)),
+            "hard_hit_rate_allowed": _rate(
+                sum(value >= 95.0 for value in exit_speeds), len(exit_speeds)
+            ),
+            "average_exit_velocity_allowed": _mean(exit_speeds),
+            "average_launch_angle_allowed": _mean(launch_angles),
+            "fly_ball_rate": _rate(
+                sum(value == "fly_ball" for value in batted_ball_types),
+                len(batted_ball_types),
+            ),
+        }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
 def _hitter_pitch_type_xwoba_json(rows: Sequence[_StatcastRow]) -> str | None:
     del rows
     return None
@@ -1164,35 +1394,53 @@ def _latest_snapshot_row(
     predicate: object,
     as_of: datetime,
     label: str,
-    available_field: str,
-    captured_field: str,
-) -> tuple[Mapping[str, str] | None, datetime | None, datetime | None]:
+    provider_published_field: str = "provider_published_at_utc",
+    first_observed_field: str = "first_observed_at_utc",
+    captured_field: str = "captured_at_utc",
+) -> tuple[
+    Mapping[str, str] | None,
+    datetime | None,
+    datetime | None,
+    datetime | None,
+]:
     if snapshot is None:
-        return None, None, None
-    matches: list[tuple[datetime, datetime, Mapping[str, str]]] = []
+        return None, None, None, None
+    matches: list[
+        tuple[datetime, datetime, datetime, datetime | None, Mapping[str, str]]
+    ] = []
     for index, row in enumerate(snapshot.rows, start=2):
         if not callable(predicate) or not predicate(row):
             continue
-        available = _parse_aware_datetime(
-            row.get(available_field), f"{snapshot.name} row {index}.{available_field}"
+        provider_published = _optional_aware_datetime(
+            row.get(provider_published_field),
+            f"{snapshot.name} row {index}.{provider_published_field}",
+        )
+        first_observed = _parse_aware_datetime(
+            row.get(first_observed_field),
+            f"{snapshot.name} row {index}.{first_observed_field}",
         )
         captured = _parse_aware_datetime(
             row.get(captured_field), f"{snapshot.name} row {index}.{captured_field}"
         )
-        if available > captured:
+        availability = provider_published or first_observed
+        if not (availability <= first_observed <= captured):
             raise ContextFeatureError(
-                f"{snapshot.name} row {index} publication/announcement is after capture"
+                f"{snapshot.name} row {index} clocks must satisfy trustworthy "
+                "availability <= first_observed <= captured"
             )
         if captured <= as_of:
-            matches.append((available, captured, row))
+            matches.append(
+                (availability, first_observed, captured, provider_published, row)
+            )
     if not matches:
-        return None, None, None
-    latest_key = max((item[0], item[1]) for item in matches)
-    latest = [row for available, captured, row in matches if (available, captured) == latest_key]
-    distinct = {_sha256_value(dict(sorted(row.items()))) for row in latest}
+        return None, None, None, None
+    latest_key = max((item[0], item[1], item[2]) for item in matches)
+    latest = [item for item in matches if item[:3] == latest_key]
+    distinct = {_sha256_value(dict(sorted(item[4].items()))) for item in latest}
     if len(distinct) != 1:
-        raise ContextFeatureError(f"ambiguous {label} at {latest_key[1].isoformat()}")
-    return latest[0], latest_key[0], latest_key[1]
+        raise ContextFeatureError(f"ambiguous {label} at {latest_key[2].isoformat()}")
+    _, first_observed, captured, provider_published, row = latest[0]
+    return row, provider_published, first_observed, captured
 
 
 def _probable_pitcher_context(
@@ -1207,16 +1455,14 @@ def _probable_pitcher_context(
                 raise ContextFeatureError(
                     f"probable_pitchers row {index} team does not match event identity"
                 )
-    row, announced, captured = _latest_snapshot_row(
+    row, provider_published, first_observed, captured = _latest_snapshot_row(
         snapshot,
         predicate=lambda item: _optional_text(item, "event_id") == candidate.event_id
         and _optional_text(item, "team") == candidate.opponent,
         as_of=as_of,
         label=f"probable pitcher for {candidate.event_id}/{candidate.opponent}",
-        available_field="announced_or_published_at_utc",
-        captured_field="captured_at_utc",
     )
-    if row is None or announced is None or captured is None:
+    if row is None or first_observed is None or captured is None:
         return {
             "probable_pitcher_id": None,
             "probable_pitcher_name": None,
@@ -1226,7 +1472,13 @@ def _probable_pitcher_context(
             "probable_pitcher_identity_status": "unavailable",
             "probable_pitcher_identity_mapping_version": None,
             "probable_pitcher_announced_or_published_at_utc": None,
+            "probable_pitcher_provider_published_at_utc": None,
+            "probable_pitcher_first_observed_at_utc": None,
             "probable_pitcher_captured_at_utc": None,
+            "probable_pitcher_source": None,
+            "probable_pitcher_source_record_id": None,
+            "probable_pitcher_source_version": None,
+            "probable_pitcher_source_digest": None,
             "probable_pitcher_available": False,
         }, None
     status = _required_text(row, "probable_pitcher_status", "probable pitcher").casefold()
@@ -1242,7 +1494,13 @@ def _probable_pitcher_context(
             "probable_pitcher_identity_status": "unavailable",
             "probable_pitcher_identity_mapping_version": None,
             "probable_pitcher_announced_or_published_at_utc": None,
+            "probable_pitcher_provider_published_at_utc": None,
+            "probable_pitcher_first_observed_at_utc": None,
             "probable_pitcher_captured_at_utc": None,
+            "probable_pitcher_source": None,
+            "probable_pitcher_source_record_id": None,
+            "probable_pitcher_source_version": None,
+            "probable_pitcher_source_digest": None,
             "probable_pitcher_available": False,
         }, None
     hand = _required_text(row, "pitcher_hand", "probable pitcher").upper()
@@ -1277,8 +1535,18 @@ def _probable_pitcher_context(
         "probable_pitcher_status": status,
         "probable_pitcher_identity_status": identity_status,
         "probable_pitcher_identity_mapping_version": mapping_version,
-        "probable_pitcher_announced_or_published_at_utc": _utc_text(announced),
+        "probable_pitcher_announced_or_published_at_utc": (
+            _utc_text(provider_published) if provider_published else None
+        ),
+        "probable_pitcher_provider_published_at_utc": (
+            _utc_text(provider_published) if provider_published else None
+        ),
+        "probable_pitcher_first_observed_at_utc": _utc_text(first_observed),
         "probable_pitcher_captured_at_utc": _utc_text(captured),
+        "probable_pitcher_source": _optional_text(row, "source"),
+        "probable_pitcher_source_record_id": _optional_text(row, "source_record_id"),
+        "probable_pitcher_source_version": _optional_text(row, "source_version"),
+        "probable_pitcher_source_digest": snapshot.sha256 if snapshot else None,
         "probable_pitcher_available": True,
     }, captured
 
@@ -1296,22 +1564,29 @@ def _lineup_context(
                 raise ContextFeatureError(
                     f"lineups row {index} player/event team linkage mismatch"
                 )
-    row, announced, captured = _latest_snapshot_row(
+    row, provider_published, first_observed, captured = _latest_snapshot_row(
         snapshot,
         predicate=lambda item: _optional_text(item, "event_id") == candidate.event_id
         and _optional_text(item, "player_id") == candidate.player_id
         and _optional_text(item, "team") == candidate.team,
         as_of=as_of,
         label=f"lineup for {candidate.event_id}/{candidate.player_id}",
-        available_field="announced_or_published_at_utc",
-        captured_field="captured_at_utc",
     )
-    if row is None or announced is None or captured is None:
+    if row is None or first_observed is None or captured is None:
         return {
             "lineup_status": "unknown",
             "lineup_announced_or_published_at_utc": None,
+            "lineup_provider_published_at_utc": None,
+            "lineup_first_observed_at_utc": None,
             "lineup_captured_at_utc": None,
+            "lineup_source": None,
+            "lineup_source_record_id": None,
+            "lineup_source_digest": None,
             "batting_order_position": None,
+            "expected_pa": None,
+            "expected_pa_source": None,
+            "expected_pa_version": None,
+            "expected_pa_available": False,
             "lineup_available": False,
         }, None
     status = _required_text(row, "lineup_status", "lineup").casefold()
@@ -1322,19 +1597,59 @@ def _lineup_context(
         raise ContextFeatureError("lineup.batting_order_position must be 1 through 9")
     if status == "confirmed" and batting_order is None:
         raise ContextFeatureError("confirmed lineup requires batting_order_position")
+    expected_pa = _optional_float(row, "expected_pa", "lineup")
+    expected_pa_source = _optional_text(row, "expected_pa_source")
+    expected_pa_version = _optional_text(row, "expected_pa_version")
+    if expected_pa is not None:
+        if status not in {"confirmed", "projected"} or batting_order is None:
+            raise ContextFeatureError(
+                "expected_pa requires an admissible confirmed/projected batting-order row"
+            )
+        if not 0.0 < expected_pa <= 10.0:
+            raise ContextFeatureError("lineup.expected_pa must be greater than 0 and at most 10")
+        if expected_pa_source is None or expected_pa_version is None:
+            raise ContextFeatureError(
+                "lineup.expected_pa requires expected_pa_source and expected_pa_version"
+            )
+    elif expected_pa_source is not None or expected_pa_version is not None:
+        raise ContextFeatureError(
+            "expected_pa source/version cannot be supplied without expected_pa"
+        )
     if status == "unknown":
         return {
             "lineup_status": "unknown",
             "lineup_announced_or_published_at_utc": None,
+            "lineup_provider_published_at_utc": None,
+            "lineup_first_observed_at_utc": None,
             "lineup_captured_at_utc": None,
+            "lineup_source": None,
+            "lineup_source_record_id": None,
+            "lineup_source_digest": None,
             "batting_order_position": None,
+            "expected_pa": None,
+            "expected_pa_source": None,
+            "expected_pa_version": None,
+            "expected_pa_available": False,
             "lineup_available": False,
         }, None
     return {
         "lineup_status": status,
-        "lineup_announced_or_published_at_utc": _utc_text(announced),
+        "lineup_announced_or_published_at_utc": (
+            _utc_text(provider_published) if provider_published else None
+        ),
+        "lineup_provider_published_at_utc": (
+            _utc_text(provider_published) if provider_published else None
+        ),
+        "lineup_first_observed_at_utc": _utc_text(first_observed),
         "lineup_captured_at_utc": _utc_text(captured),
+        "lineup_source": _optional_text(row, "source"),
+        "lineup_source_record_id": _optional_text(row, "source_record_id"),
+        "lineup_source_digest": snapshot.sha256 if snapshot else None,
         "batting_order_position": batting_order,
+        "expected_pa": expected_pa,
+        "expected_pa_source": expected_pa_source,
+        "expected_pa_version": expected_pa_version,
+        "expected_pa_available": expected_pa is not None,
         "lineup_available": status != "unknown",
     }, captured
 
@@ -1344,14 +1659,23 @@ def _weather_context(
 ) -> tuple[dict[str, object], datetime | None]:
     missing = {
         "temperature": None,
+        "temperature_unit": None,
         "wind_speed": None,
+        "wind_speed_unit": None,
         "wind_direction": None,
+        "humidity": None,
         "roof_status": None,
         "weather_type": None,
         "weather_evidence_class": None,
         "weather_evidence_at_utc": None,
+        "weather_issued_at_utc": None,
+        "weather_measured_at_utc": None,
         "weather_valid_for_utc": None,
         "weather_captured_at_utc": None,
+        "weather_source": None,
+        "weather_source_record_id": None,
+        "weather_source_version": None,
+        "weather_source_digest": None,
         "weather_available": False,
     }
     if snapshot is None:
@@ -1378,17 +1702,23 @@ def _weather_context(
             if evidence_class != "provider_pregame_forecast":
                 raise ContextFeatureError(f"{label} forecast lacks pregame source provenance")
             evidence_at = _parse_aware_datetime(row.get("issued_at_utc"), f"{label}.issued_at_utc")
+            issued_at = evidence_at
+            measured_at = None
             valid_for = _parse_aware_datetime(row.get("valid_for_utc"), f"{label}.valid_for_utc")
             if _optional_text(row, "measured_at_utc") is not None:
                 raise ContextFeatureError(f"{label} forecast cannot carry measured_at_utc")
             if abs(valid_for - candidate.commence_time) > WEATHER_VALID_FOR_TOLERANCE:
                 raise ContextFeatureError(f"{label} valid_for_utc does not cover game start")
+            if issued_at > valid_for:
+                raise ContextFeatureError(f"{label} forecast issuance is after valid_for_utc")
         elif weather_type == "pregame_observation":
             if evidence_class != "provider_pregame_observation":
                 raise ContextFeatureError(f"{label} observation lacks pregame source provenance")
             evidence_at = _parse_aware_datetime(
                 row.get("measured_at_utc"), f"{label}.measured_at_utc"
             )
+            issued_at = None
+            measured_at = evidence_at
             valid_for = None
             if _optional_text(row, "issued_at_utc") is not None or _optional_text(
                 row, "valid_for_utc"
@@ -1410,23 +1740,50 @@ def _weather_context(
         raise ContextFeatureError(f"ambiguous weather at {latest_key[1].isoformat()}")
     evidence_at, captured, row, valid_for = latest[0]
     temperature = _optional_float(row, "temperature", "weather")
+    temperature_unit = _optional_text(row, "temperature_unit")
     wind_speed = _optional_float(row, "wind_speed", "weather")
+    wind_speed_unit = _optional_text(row, "wind_speed_unit")
     wind_direction = _optional_text(row, "wind_direction")
+    humidity = _optional_float(row, "humidity", "weather")
+    if wind_speed is not None and wind_speed < 0:
+        raise ContextFeatureError("weather.wind_speed cannot be negative")
+    if humidity is not None and not 0.0 <= humidity <= 100.0:
+        raise ContextFeatureError("weather.humidity must be between 0 and 100")
+    if (temperature is None) != (temperature_unit is None):
+        raise ContextFeatureError(
+            "weather.temperature and temperature_unit must be supplied together"
+        )
+    if (wind_speed is None) != (wind_speed_unit is None):
+        raise ContextFeatureError(
+            "weather.wind_speed and wind_speed_unit must be supplied together"
+        )
     roof_status = _optional_text(row, "roof_status")
-    if all(value is None for value in (temperature, wind_speed, wind_direction, roof_status)):
+    if all(
+        value is None
+        for value in (temperature, wind_speed, wind_direction, humidity, roof_status)
+    ):
         return missing, None
     return {
         "temperature": temperature,
+        "temperature_unit": temperature_unit,
         "wind_speed": wind_speed,
+        "wind_speed_unit": wind_speed_unit,
         "wind_direction": wind_direction,
+        "humidity": humidity,
         "roof_status": roof_status,
         "weather_type": _required_text(row, "weather_type", "weather").casefold(),
         "weather_evidence_class": _required_text(
             row, "weather_evidence_class", "weather"
         ).casefold(),
         "weather_evidence_at_utc": _utc_text(evidence_at),
+        "weather_issued_at_utc": _utc_text(issued_at) if issued_at else None,
+        "weather_measured_at_utc": _utc_text(measured_at) if measured_at else None,
         "weather_valid_for_utc": _utc_text(valid_for) if valid_for else None,
         "weather_captured_at_utc": _utc_text(captured),
+        "weather_source": _optional_text(row, "source"),
+        "weather_source_record_id": _optional_text(row, "source_record_id"),
+        "weather_source_version": _optional_text(row, "source_version"),
+        "weather_source_digest": snapshot.sha256,
         "weather_available": True,
     }, captured
 
@@ -1441,7 +1798,7 @@ def _park_context(
         row = None
         observed = None
     else:
-        eligible: list[tuple[datetime, Mapping[str, str]]] = []
+        eligible: list[tuple[datetime, datetime, Mapping[str, str]]] = []
         venue_key = normalize_venue_name(candidate.venue_name)
         for index, item in enumerate(snapshot.rows, start=2):
             item_name = _required_text(item, "venue_name", f"park_factors row {index}")
@@ -1481,13 +1838,18 @@ def _park_context(
                 and valid_from <= operating_date
                 and (valid_to is None or operating_date <= valid_to)
             ):
-                eligible.append((captured_at, item))
+                eligible.append((published_at, captured_at, item))
         if eligible:
-            observed = max(item[0] for item in eligible)
-            latest = [item for item_at, item in eligible if item_at == observed]
+            latest_key = max((item[0], item[1]) for item in eligible)
+            latest = [
+                item
+                for published, captured, item in eligible
+                if (published, captured) == latest_key
+            ]
             if len({_sha256_value(dict(sorted(item.items()))) for item in latest}) != 1:
-                raise ContextFeatureError(f"ambiguous park factor at {observed.isoformat()}")
+                raise ContextFeatureError(f"ambiguous park factor at {latest_key[1].isoformat()}")
             row = latest[0]
+            observed = latest_key[1]
         else:
             row = None
             observed = None
@@ -1496,6 +1858,10 @@ def _park_context(
             "park_hr_factor": None,
             "park_factor_source": None,
             "park_factor_version": None,
+            "park_factor_effective_from_date": None,
+            "park_factor_effective_to_date": None,
+            "park_factor_source_record_id": None,
+            "park_factor_source_digest": None,
             "park_factor_published_or_available_at_utc": None,
             "park_factor_captured_at_utc": None,
             "park_factor_available": False,
@@ -1506,6 +1872,10 @@ def _park_context(
             "park_hr_factor": None,
             "park_factor_source": None,
             "park_factor_version": None,
+            "park_factor_effective_from_date": None,
+            "park_factor_effective_to_date": None,
+            "park_factor_source_record_id": None,
+            "park_factor_source_digest": None,
             "park_factor_published_or_available_at_utc": None,
             "park_factor_captured_at_utc": None,
             "park_factor_available": False,
@@ -1518,6 +1888,12 @@ def _park_context(
         "park_hr_factor": factor,
         "park_factor_source": _required_text(row, "park_factor_source", "park factor"),
         "park_factor_version": _required_text(row, "park_factor_version", "park factor"),
+        "park_factor_effective_from_date": _parse_date(
+            row.get("effective_from_date"), "park factor.effective_from_date"
+        ).isoformat(),
+        "park_factor_effective_to_date": _optional_text(row, "effective_to_date"),
+        "park_factor_source_record_id": _optional_text(row, "source_record_id"),
+        "park_factor_source_digest": snapshot.sha256 if snapshot else None,
         "park_factor_published_or_available_at_utc": _utc_text(published),
         "park_factor_captured_at_utc": _utc_text(observed),
         "park_factor_available": True,
@@ -1640,7 +2016,10 @@ def _configuration_payload() -> dict[str, object]:
         "feature_columns": list(FEATURE_COLUMNS),
         "rolling_windows_days": list(ROLLING_WINDOWS_DAYS),
         "season_policy": "calendar_year_of_operating_date",
-        "rolling_policy": "game_completed_at_utc in [as_of_utc-Nd, as_of_utc]",
+        "rolling_policy": (
+            "completion_evidence_at_utc in [as_of_utc-Nd, as_of_utc]; "
+            "exact completion when known, otherwise schedule-final witness"
+        ),
         "matchup_horizon_policy": MATCHUP_HORIZON_POLICY,
         "market_staleness_policy": MARKET_STALENESS_POLICY,
         "weather_forecast_valid_for_tolerance_seconds": int(
@@ -1661,7 +2040,9 @@ def _configuration_payload() -> dict[str, object]:
         ),
         "hard_hit_threshold_mph": 95.0,
         "sweet_spot_launch_angle_degrees": [8.0, 32.0],
-        "expected_pa_policy": "unavailable_no_imputation",
+        "expected_pa_policy": (
+            "source_supplied_with_admissible_lineup_only; no batting-order imputation"
+        ),
         "expected_stat_policy": "pa_level_xwoba_and_xslg_unavailable_in_v2",
         "missingness_policy": "null_or_empty_with_explicit_family_flags",
         "source_files": dict(SOURCE_FILES),
@@ -1712,7 +2093,12 @@ def _feature_row_id(
 def _source_capability_gaps(
     snapshots: Mapping[str, SourceSnapshot | None]
 ) -> tuple[str, ...]:
-    gaps: list[str] = ["expected_pa_model", "pa_level_xwoba", "pa_level_xslg"]
+    gaps: list[str] = ["pa_level_xwoba", "pa_level_xslg"]
+    lineup_snapshot = snapshots["lineups"]
+    if lineup_snapshot is None or not any(
+        str(row.get("expected_pa") or "").strip() for row in lineup_snapshot.rows
+    ):
+        gaps.append("expected_pa_source")
     if snapshots["statcast"] is None:
         gaps.extend(("hitter_statcast", "pitcher_statcast", "matchup_statcast"))
     else:
@@ -1760,6 +2146,75 @@ def _statcast_metric_availability(rows: Sequence[_StatcastRow]) -> str:
     availability["pa_level_xwoba"] = False
     availability["pa_level_xslg"] = False
     return json.dumps(availability, sort_keys=True, separators=(",", ":"))
+
+
+def _pitcher_history_provenance(
+    rows: Sequence[_StatcastRow], snapshot: SourceSnapshot | None
+) -> dict[str, object]:
+    terminal = tuple(row for row in rows if row.is_terminal)
+    if not terminal:
+        return {
+            "pitcher_history_game_count": 0,
+            "pitcher_history_first_game_completed_at_utc": None,
+            "pitcher_history_last_game_completed_at_utc": None,
+            "pitcher_history_max_available_at_utc": None,
+            "pitcher_history_max_first_observed_at_utc": None,
+            "pitcher_history_max_captured_at_utc": None,
+            "pitcher_history_source_digest": None,
+        }
+    game_ids = {row.game_id for row in terminal}
+
+    exact_completion_by_game: dict[str, datetime] = {}
+
+    for row in terminal:
+        if row.completed_at is None:
+            continue
+
+        previous = exact_completion_by_game.setdefault(
+            row.game_id,
+            row.completed_at,
+        )
+
+        if previous != row.completed_at:
+            raise ContextFeatureError(
+                f"conflicting exact completion clocks for Statcast game "
+                f"{row.game_id}"
+            )
+
+    all_games_have_exact_completion = (
+        len(exact_completion_by_game) == len(game_ids)
+    )
+
+    exact_completion_values = tuple(
+        exact_completion_by_game.values()
+    )
+
+    return {
+        "pitcher_history_game_count": len(game_ids),
+        "pitcher_history_first_game_completed_at_utc": (
+            _utc_text(min(exact_completion_values))
+            if all_games_have_exact_completion
+            else None
+        ),
+        "pitcher_history_last_game_completed_at_utc": (
+            _utc_text(max(exact_completion_values))
+            if all_games_have_exact_completion
+            else None
+        ),
+        "pitcher_history_max_available_at_utc": _utc_text(
+            max(
+                row.provider_published_at or row.first_observed_at
+                for row in terminal
+            )
+        ),
+        "pitcher_history_max_first_observed_at_utc": _utc_text(
+            max(row.first_observed_at for row in terminal)
+        ),
+        "pitcher_history_max_captured_at_utc": _utc_text(
+            max(row.captured_at for row in terminal)
+        ),
+        "pitcher_history_source_digest": snapshot.sha256 if snapshot else None,
+    }
 
 
 def _build_feature_row(
@@ -1817,12 +2272,18 @@ def _build_feature_row(
     hitter_feature_terminals = tuple(
         row
         for row in hitter_terminals
-        if row.game_date.year == operating_date.year or row.completed_at >= rolling_floor
+        if (
+            row.game_date.year == operating_date.year
+            or row.completion_evidence_at >= rolling_floor
+        )
     )
     pitcher_feature_terminals = tuple(
         row
         for row in pitcher_terminals
-        if row.game_date.year == operating_date.year or row.completed_at >= rolling_floor
+        if (
+            row.game_date.year == operating_date.year
+            or row.completion_evidence_at >= rolling_floor
+        )
     )
     hitter_matchup_history = tuple(
         row for row in hitter_history if row.game_date.year == operating_date.year
@@ -1847,6 +2308,9 @@ def _build_feature_row(
         operating_date=operating_date,
         as_of=as_of,
         metric_builder=_pitcher_metrics,
+    )
+    pitcher_history_provenance = _pitcher_history_provenance(
+        pitcher_history, snapshots["statcast"]
     )
     pitcher_hand = probable["pitcher_hand"]
     hitter_split = tuple(
@@ -1889,6 +2353,9 @@ def _build_feature_row(
         ),
         "pitcher_pitch_mix_json": _pitch_type_rate_json(pitcher_matchup_history),
         "pitcher_average_velocity_json": _pitch_velocity_json(pitcher_matchup_history),
+        "pitcher_pitch_type_context_json": _pitch_type_context_json(
+            pitcher_matchup_history
+        ),
         "bvp_pa_descriptive": (
             len(bvp) if isinstance(pitcher_id, str) and hitter_matchup_terminals else None
         ),
@@ -1903,7 +2370,7 @@ def _build_feature_row(
     source_observed["candidates"] = _utc_text(candidate.captured_at)
     if hitter_history or pitcher_history:
         source_observed["statcast"] = _utc_text(
-            max(row.collected_at for row in (*hitter_history, *pitcher_history))
+            max(row.captured_at for row in (*hitter_history, *pitcher_history))
         )
     for name, observed in (
         ("probable_pitchers", probable_observed),
@@ -1972,43 +2439,86 @@ def _build_feature_row(
         "probable_pitcher_announced_or_published_at_utc": probable[
             "probable_pitcher_announced_or_published_at_utc"
         ],
+        "probable_pitcher_provider_published_at_utc": probable[
+            "probable_pitcher_provider_published_at_utc"
+        ],
+        "probable_pitcher_first_observed_at_utc": probable[
+            "probable_pitcher_first_observed_at_utc"
+        ],
         "probable_pitcher_captured_at_utc": probable[
             "probable_pitcher_captured_at_utc"
+        ],
+        "probable_pitcher_source": probable["probable_pitcher_source"],
+        "probable_pitcher_source_record_id": probable[
+            "probable_pitcher_source_record_id"
+        ],
+        "probable_pitcher_source_version": probable[
+            "probable_pitcher_source_version"
+        ],
+        "probable_pitcher_source_digest": probable[
+            "probable_pitcher_source_digest"
         ],
         "lineup_status": lineup["lineup_status"],
         "lineup_announced_or_published_at_utc": lineup[
             "lineup_announced_or_published_at_utc"
         ],
+        "lineup_provider_published_at_utc": lineup[
+            "lineup_provider_published_at_utc"
+        ],
+        "lineup_first_observed_at_utc": lineup[
+            "lineup_first_observed_at_utc"
+        ],
         "lineup_captured_at_utc": lineup["lineup_captured_at_utc"],
+        "lineup_source": lineup["lineup_source"],
+        "lineup_source_record_id": lineup["lineup_source_record_id"],
+        "lineup_source_digest": lineup["lineup_source_digest"],
         "batting_order_position": lineup["batting_order_position"],
-        "expected_pa": None,
+        "expected_pa": lineup["expected_pa"],
+        "expected_pa_source": lineup["expected_pa_source"],
+        "expected_pa_version": lineup["expected_pa_version"],
         "hitter_stats_available": bool(hitter_feature_terminals),
         "pitcher_stats_available": bool(pitcher_feature_terminals),
         "probable_pitcher_available": probable["probable_pitcher_available"],
         "lineup_available": lineup["lineup_available"],
-        "expected_pa_available": False,
+        "expected_pa_available": lineup["expected_pa_available"],
         "park_factor_available": park["park_factor_available"],
         "weather_available": weather["weather_available"],
         "market_available": market["market_available"],
+        **pitcher_history_provenance,
         **hitter_features,
         **pitcher_features,
         **matchup,
         "park_hr_factor": park["park_hr_factor"],
         "park_factor_source": park["park_factor_source"],
         "park_factor_version": park["park_factor_version"],
+        "park_factor_effective_from_date": park[
+            "park_factor_effective_from_date"
+        ],
+        "park_factor_effective_to_date": park["park_factor_effective_to_date"],
+        "park_factor_source_record_id": park["park_factor_source_record_id"],
+        "park_factor_source_digest": park["park_factor_source_digest"],
         "park_factor_published_or_available_at_utc": park[
             "park_factor_published_or_available_at_utc"
         ],
         "park_factor_captured_at_utc": park["park_factor_captured_at_utc"],
         "temperature": weather["temperature"],
+        "temperature_unit": weather["temperature_unit"],
         "wind_speed": weather["wind_speed"],
+        "wind_speed_unit": weather["wind_speed_unit"],
         "wind_direction": weather["wind_direction"],
+        "humidity": weather["humidity"],
         "roof_status": weather["roof_status"],
         "weather_type": weather["weather_type"],
         "weather_evidence_class": weather["weather_evidence_class"],
         "weather_evidence_at_utc": weather["weather_evidence_at_utc"],
+        "weather_issued_at_utc": weather["weather_issued_at_utc"],
+        "weather_measured_at_utc": weather["weather_measured_at_utc"],
         "weather_valid_for_utc": weather["weather_valid_for_utc"],
         "weather_captured_at_utc": weather["weather_captured_at_utc"],
+        "weather_source": weather["weather_source"],
+        "weather_source_record_id": weather["weather_source_record_id"],
+        "weather_source_version": weather["weather_source_version"],
+        "weather_source_digest": weather["weather_source_digest"],
         "market_best_sportsbook": market["market_best_sportsbook"],
         "market_best_american_odds": market["market_best_american_odds"],
         "market_best_decimal_odds": market["market_best_decimal_odds"],
@@ -2092,7 +2602,13 @@ def _validate_feature_values(row: Mapping[str, object]) -> None:
     availability_contracts = (
         (
             "park_factor_available",
-            ("park_hr_factor", "park_factor_source", "park_factor_version"),
+            (
+                "park_hr_factor",
+                "park_factor_source",
+                "park_factor_version",
+                "park_factor_effective_from_date",
+                "park_factor_source_digest",
+            ),
         ),
         (
             "weather_available",
@@ -2100,7 +2616,11 @@ def _validate_feature_values(row: Mapping[str, object]) -> None:
         ),
         (
             "probable_pitcher_available",
-            ("probable_pitcher_id", "pitcher_hand"),
+            (
+                "probable_pitcher_id",
+                "pitcher_hand",
+                "probable_pitcher_source_digest",
+            ),
         ),
     )
     for flag, required_values in availability_contracts:
@@ -2111,11 +2631,105 @@ def _validate_feature_values(row: Mapping[str, object]) -> None:
     if row.get("lineup_available") is False and (
         row.get("batting_order_position") is not None
         or row.get("lineup_announced_or_published_at_utc") is not None
+        or row.get("lineup_provider_published_at_utc") is not None
+        or row.get("lineup_first_observed_at_utc") is not None
         or row.get("lineup_captured_at_utc") is not None
+        or row.get("lineup_source") is not None
+        or row.get("lineup_source_record_id") is not None
+        or row.get("lineup_source_digest") is not None
     ):
         raise ContextFeatureError("unavailable lineup must remain null")
-    if row.get("expected_pa_available") is not False or row.get("expected_pa") is not None:
-        raise ContextFeatureError("expected_pa must remain explicitly unavailable")
+    pitcher_history_fields = (
+        "pitcher_history_first_game_completed_at_utc",
+        "pitcher_history_last_game_completed_at_utc",
+        "pitcher_history_max_available_at_utc",
+        "pitcher_history_max_first_observed_at_utc",
+        "pitcher_history_max_captured_at_utc",
+        "pitcher_history_source_digest",
+    )
+    if row.get("pitcher_stats_available") is False:
+        if row.get("pitcher_history_game_count") != 0 or any(
+            row.get(name) is not None for name in pitcher_history_fields
+        ):
+            raise ContextFeatureError(
+                "unavailable pitcher history must have zero games and null provenance"
+            )
+    else:
+        if not isinstance(row.get("pitcher_history_game_count"), int) or row.get(
+            "pitcher_history_game_count"
+        ) < 1:
+            raise ContextFeatureError("available pitcher history requires completed games")
+        exact_first_name = (
+            "pitcher_history_first_game_completed_at_utc"
+        )
+        exact_last_name = (
+            "pitcher_history_last_game_completed_at_utc"
+        )
+
+        exact_first_value = row.get(exact_first_name)
+        exact_last_value = row.get(exact_last_name)
+
+        if (
+            (exact_first_value is None)
+            != (exact_last_value is None)
+        ):
+            raise ContextFeatureError(
+                "pitcher exact-completion provenance must be "
+                "both present or both null"
+            )
+
+        if exact_first_value is not None:
+            exact_first = _parse_aware_datetime(
+                exact_first_value,
+                exact_first_name,
+            )
+            exact_last = _parse_aware_datetime(
+                exact_last_value,
+                exact_last_name,
+            )
+
+            if exact_first > exact_last:
+                raise ContextFeatureError(
+                    "pitcher exact-completion provenance is reversed"
+                )
+
+            if exact_last > as_of:
+                raise ContextFeatureError(
+                    f"{exact_last_name} cannot be after as_of_utc"
+                )
+
+        for name in (
+            "pitcher_history_max_available_at_utc",
+            "pitcher_history_max_first_observed_at_utc",
+            "pitcher_history_max_captured_at_utc",
+        ):
+            observed = _parse_aware_datetime(
+                row.get(name),
+                name,
+            )
+
+            if observed > as_of:
+                raise ContextFeatureError(
+                    f"{name} cannot be after as_of_utc"
+                )
+    expected_pa_fields = (
+        "expected_pa",
+        "expected_pa_source",
+        "expected_pa_version",
+    )
+    if row.get("expected_pa_available") is True:
+        if (
+            row.get("lineup_available") is not True
+            or row.get("batting_order_position") is None
+            or not all(row.get(name) is not None for name in expected_pa_fields)
+        ):
+            raise ContextFeatureError(
+                "expected_pa requires an admissible batting-order row and source lineage"
+            )
+    elif any(row.get(name) is not None for name in expected_pa_fields):
+        raise ContextFeatureError(
+            "expected_pa_available=false requires null expected-PA fields"
+        )
     market_fields = (
         "market_best_sportsbook",
         "market_best_american_odds",
@@ -2248,19 +2862,33 @@ def _statcast_source_coverage(snapshot: SourceSnapshot | None) -> Mapping[str, o
     game_dates = tuple(
         _parse_date(row.get("game_date"), "statcast.game_date") for row in snapshot.rows
     )
-    completed = tuple(
-        _parse_aware_datetime(
-            row.get("game_completed_at_utc"), "statcast.game_completed_at_utc"
-        )
+    completed_values = tuple(
+        value
         for row in snapshot.rows
+        if (
+            value := _optional_aware_datetime(
+                row.get("game_completed_at_utc"),
+                "statcast.game_completed_at_utc",
+            )
+        )
+        is not None
     )
+
     return MappingProxyType(
         {
             "available": True,
             "game_date_start": min(game_dates).isoformat(),
             "game_date_end": max(game_dates).isoformat(),
-            "completed_at_start_utc": _utc_text(min(completed)),
-            "completed_at_end_utc": _utc_text(max(completed)),
+            "completed_at_start_utc": (
+                _utc_text(min(completed_values))
+                if completed_values
+                else None
+            ),
+            "completed_at_end_utc": (
+                _utc_text(max(completed_values))
+                if completed_values
+                else None
+            ),
         }
     )
 
@@ -2356,6 +2984,7 @@ def _build_manifest_and_summary(
         "pitcher_stats_available",
         "probable_pitcher_available",
         "lineup_available",
+        "expected_pa_available",
         "park_factor_available",
         "weather_available",
         "market_available",
