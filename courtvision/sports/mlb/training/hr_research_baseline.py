@@ -5203,6 +5203,7 @@ def _print_json(payload: Mapping[str, object]) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    from courtvision.sports.mlb.training import hr_prospective_market_movement
     from courtvision.sports.mlb.training import hr_prospective_trial
 
     parser = argparse.ArgumentParser(
@@ -5287,10 +5288,23 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     sub.add_parser("feature-readiness")
     hr_prospective_trial.configure_prospective_cli(sub)
+    hr_prospective_market_movement.configure_market_movement_cli(sub)
 
     args = parser.parse_args(argv)
     try:
-        if args.command in hr_prospective_trial.PROSPECTIVE_COMMANDS:
+        if args.command in hr_prospective_market_movement.REPORT_COMMANDS:
+            print(
+                json.dumps(
+                    hr_prospective_market_movement.execute_market_movement_cli(
+                        args
+                    ),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+            )
+        elif args.command in hr_prospective_trial.PROSPECTIVE_COMMANDS:
             print(
                 json.dumps(
                     hr_prospective_trial.execute_prospective_cli(args),
