@@ -4,7 +4,8 @@ import time
 import argparse
 import requests
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 
@@ -37,8 +38,13 @@ MARKETS = "batter_home_runs_alternate"
 
 ODDS_FORMAT = "american"
 
-# Free-plan protection.
-MAX_EVENTS_PER_RUN = 12
+# Safety ceiling applied AFTER operating-date filtering.
+# A slate larger than this fails closed; it is never truncated.
+MAX_EVENTS_PER_RUN = 20
+
+# CourtVision MLB operating date is the Toronto-local calendar date.
+OPERATING_TIMEZONE_NAME = "America/Toronto"
+OPERATING_TIMEZONE = ZoneInfo(OPERATING_TIMEZONE_NAME)
 
 # Skip games too close to start/live.
 MIN_MINUTES_BEFORE_GAME = 30
@@ -85,6 +91,84 @@ def parse_iso_z(value):
 
 def iso_z(dt):
     return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def parse_operating_date(value):
+    text = str(value).strip()
+    try:
+        parsed = date.fromisoformat(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "operating date must use YYYY-MM-DD"
+        ) from exc
+    if text != parsed.isoformat():
+        raise argparse.ArgumentTypeError(
+            "operating date must use YYYY-MM-DD"
+        )
+    return parsed
+
+
+def select_operating_date_events(
+    events,
+    *,
+    operating_date,
+    snapshot_dt,
+    max_events,
+):
+    """Return the complete eligible Toronto-local slate or fail closed."""
+    if max_events <= 0:
+        raise ValueError("--max-events must be greater than zero")
+
+    if isinstance(operating_date, date):
+        target_date = operating_date
+    else:
+        target_date = parse_operating_date(operating_date)
+
+    if snapshot_dt.tzinfo is None or snapshot_dt.utcoffset() is None:
+        raise ValueError("snapshot_dt must be timezone-aware")
+
+    eligible = []
+
+    for event in events:
+        event_id = event.get("id")
+        commence_raw = event.get("commence_time")
+
+        if not event_id or not commence_raw:
+            continue
+
+        commence_time = parse_iso_z(commence_raw)
+
+        if commence_time.tzinfo is None or commence_time.utcoffset() is None:
+            raise ValueError(
+                f"provider event {event_id} has a naive commence_time"
+            )
+
+        local_date = commence_time.astimezone(OPERATING_TIMEZONE).date()
+
+        if local_date != target_date:
+            continue
+
+        minutes_until_game = (
+            commence_time - snapshot_dt
+        ).total_seconds() / 60
+
+        if minutes_until_game >= MIN_MINUTES_BEFORE_GAME:
+            eligible.append(event)
+
+    eligible.sort(
+        key=lambda event: (
+            parse_iso_z(event["commence_time"]),
+            str(event["id"]),
+        )
+    )
+
+    if len(eligible) > max_events:
+        raise RuntimeError(
+            f"Operating-date slate contains {len(eligible)} eligible events "
+            f"but --max-events={max_events}. Refusing partial-slate collection."
+        )
+
+    return eligible
 
 
 def header_int(headers, key, default=0):
@@ -349,10 +433,24 @@ def main():
     )
 
     parser.add_argument(
+        "--operating-date",
+        type=parse_operating_date,
+        default=None,
+        help=(
+            "Toronto-local MLB operating date in YYYY-MM-DD. "
+            "Defaults to the current Toronto-local date."
+        ),
+    )
+
+    parser.add_argument(
         "--max-events",
         type=int,
         default=MAX_EVENTS_PER_RUN,
-        help=f"Maximum events to scan. Default: {MAX_EVENTS_PER_RUN}",
+        help=(
+            "Safety ceiling for eligible operating-date events. "
+            f"Default: {MAX_EVENTS_PER_RUN}. The collector fails closed "
+            "instead of truncating the slate."
+        ),
     )
 
     parser.add_argument(
@@ -375,7 +473,12 @@ def main():
 
     snapshot_dt = now_utc()
     snapshot_time = iso_z(snapshot_dt)
-    today_key = snapshot_dt.strftime("%Y-%m-%d")
+    operating_date = (
+        args.operating_date
+        if args.operating_date is not None
+        else snapshot_dt.astimezone(OPERATING_TIMEZONE).date()
+    )
+    today_key = operating_date.isoformat()
 
     timestamp_for_file = snapshot_dt.strftime("%Y%m%d_%H%M%SZ")
     snapshot_csv = DATA_DIR / f"live_hr_props_{timestamp_for_file}.csv"
@@ -403,24 +506,17 @@ def main():
 
         print(f"\nEvents found: {events_found}")
 
-        usable_events = []
+        usable_events = select_operating_date_events(
+            events,
+            operating_date=operating_date,
+            snapshot_dt=snapshot_dt,
+            max_events=args.max_events,
+        )
 
-        for event in events:
-            commence_raw = event.get("commence_time")
-
-            if not commence_raw:
-                continue
-
-            commence_time = parse_iso_z(commence_raw)
-            minutes_until_game = (commence_time - snapshot_dt).total_seconds() / 60
-
-            if minutes_until_game >= MIN_MINUTES_BEFORE_GAME:
-                usable_events.append(event)
-
-        usable_events = usable_events[:args.max_events]
-
-        print(f"Usable future events: {len(usable_events)}")
-        print(f"Max events this run: {args.max_events}")
+        print(f"Operating date: {operating_date.isoformat()}")
+        print(f"Operating timezone: {OPERATING_TIMEZONE_NAME}")
+        print(f"Eligible operating-date events: {len(usable_events)}")
+        print(f"Safety ceiling: {args.max_events}")
 
         for event in usable_events:
             print("\n==================================================")
