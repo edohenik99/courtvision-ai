@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import csv
 import importlib.util
 from pathlib import Path
@@ -288,3 +289,309 @@ def test_csv_writes_remain_inside_temporary_directory(
     assert _read_rows(snapshot)[0]["player"] == "Example Batter"
     assert _read_rows(collector.MASTER_CSV)[0]["player"] == "Example Batter"
     assert {path.parent for path in tmp_path.iterdir()} == {tmp_path}
+
+
+
+def _event(
+    event_id: str,
+    commence_time: str,
+) -> dict[str, str]:
+    return {
+        "id": event_id,
+        "commence_time": commence_time,
+        "home_team": f"{event_id} Home",
+        "away_team": f"{event_id} Away",
+    }
+
+
+def test_operating_date_parser_is_strict(
+    collector: ModuleType,
+) -> None:
+    assert collector.parse_operating_date("2026-08-20").isoformat() == "2026-08-20"
+
+    with pytest.raises(
+        argparse.ArgumentTypeError,
+        match="YYYY-MM-DD",
+    ):
+        collector.parse_operating_date("20260820")
+
+
+def test_operating_date_filter_uses_toronto_local_calendar_date(
+    collector: ModuleType,
+) -> None:
+    snapshot = collector.parse_iso_z("2026-08-18T12:00:00Z")
+
+    events = [
+        _event("late-aug19", "2026-08-20T03:30:00Z"),
+        _event("early-aug20", "2026-08-20T04:40:00Z"),
+    ]
+
+    selected = collector.select_operating_date_events(
+        events,
+        operating_date="2026-08-19",
+        snapshot_dt=snapshot,
+        max_events=20,
+    )
+
+    assert [event["id"] for event in selected] == ["late-aug19"]
+
+
+def test_full_15_game_operating_date_slate_is_not_truncated(
+    collector: ModuleType,
+) -> None:
+    snapshot = collector.parse_iso_z("2026-08-20T12:00:00Z")
+
+    events = [
+        _event(
+            f"event-{index:02d}",
+            f"2026-08-20T{14 + (index // 2):02d}:{(index % 2) * 30:02d}:00Z",
+        )
+        for index in range(15)
+    ]
+
+    selected = collector.select_operating_date_events(
+        list(reversed(events)),
+        operating_date="2026-08-20",
+        snapshot_dt=snapshot,
+        max_events=20,
+    )
+
+    assert len(selected) == 15
+    assert [event["id"] for event in selected] == [
+        event["id"] for event in events
+    ]
+
+
+def test_slate_over_safety_ceiling_fails_closed(
+    collector: ModuleType,
+) -> None:
+    snapshot = collector.parse_iso_z("2026-08-20T12:00:00Z")
+
+    events = [
+        _event(
+            f"event-{index:02d}",
+            f"2026-08-20T{14 + (index // 2):02d}:{(index % 2) * 30:02d}:00Z",
+        )
+        for index in range(15)
+    ]
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"15 eligible events.*--max-events=12.*Refusing partial-slate",
+    ):
+        collector.select_operating_date_events(
+            events,
+            operating_date="2026-08-20",
+            snapshot_dt=snapshot,
+            max_events=12,
+        )
+
+
+def test_games_inside_30_minute_safety_zone_are_excluded(
+    collector: ModuleType,
+) -> None:
+    snapshot = collector.parse_iso_z("2026-08-20T17:00:00Z")
+
+    events = [
+        _event("too-close", "2026-08-20T17:29:59Z"),
+        _event("boundary", "2026-08-20T17:30:00Z"),
+        _event("later", "2026-08-20T18:00:00Z"),
+    ]
+
+    selected = collector.select_operating_date_events(
+        events,
+        operating_date="2026-08-20",
+        snapshot_dt=snapshot,
+        max_events=20,
+    )
+
+    assert [event["id"] for event in selected] == [
+        "boundary",
+        "later",
+    ]
+
+
+def test_operating_date_selection_is_deterministic(
+    collector: ModuleType,
+) -> None:
+    snapshot = collector.parse_iso_z("2026-08-20T12:00:00Z")
+
+    events = [
+        _event("event-c", "2026-08-20T20:00:00Z"),
+        _event("event-b", "2026-08-20T18:00:00Z"),
+        _event("event-a", "2026-08-20T18:00:00Z"),
+    ]
+
+    selected = collector.select_operating_date_events(
+        events,
+        operating_date="2026-08-20",
+        snapshot_dt=snapshot,
+        max_events=20,
+    )
+
+    assert [event["id"] for event in selected] == [
+        "event-a",
+        "event-b",
+        "event-c",
+    ]
+
+
+def test_main_refuses_oversized_slate_before_event_odds_requests(
+    collector: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixed_now = collector.parse_iso_z("2026-08-20T12:00:00Z")
+
+    events = [
+        _event(
+            f"event-{index:02d}",
+            f"2026-08-20T{14 + (index // 2):02d}:{(index % 2) * 30:02d}:00Z",
+        )
+        for index in range(15)
+    ]
+
+    get_events = Mock(
+        return_value=(
+            events,
+            {
+                "x-requests-last": "0",
+                "x-requests-remaining": "100",
+            },
+        )
+    )
+
+    event_odds = Mock(
+        side_effect=AssertionError(
+            "event-level provider request must not occur"
+        )
+    )
+
+    monkeypatch.setattr(collector, "now_utc", lambda: fixed_now)
+    monkeypatch.setattr(collector, "get_events", get_events)
+    monkeypatch.setattr(collector, "get_event_hr_odds", event_odds)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(COLLECTOR_PATH),
+            "--force",
+            "--quiet",
+            "--operating-date",
+            "2026-08-20",
+            "--max-events",
+            "12",
+        ],
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"15 eligible events.*Refusing partial-slate",
+    ):
+        collector.main()
+
+    get_events.assert_called_once()
+    event_odds.assert_not_called()
+
+    assert not list(
+        collector.DATA_DIR.glob("live_hr_props_20260820_*.csv")
+    )
+
+
+
+def test_default_operating_date_drives_daily_guard_across_utc_midnight(
+    collector: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # 03:30 UTC on Aug20 is still 23:30 on Aug19 in Toronto.
+    fixed_now = collector.parse_iso_z("2026-08-20T03:30:00Z")
+
+    collector.RUN_LOG.write_text(
+        "run_date,status\n"
+        "2026-08-19,success\n",
+        encoding="utf-8",
+    )
+
+    get_events = Mock(
+        side_effect=AssertionError(
+            "daily guard should stop before provider event discovery"
+        )
+    )
+
+    monkeypatch.setattr(
+        collector,
+        "now_utc",
+        lambda: fixed_now,
+    )
+
+    monkeypatch.setattr(
+        collector,
+        "get_events",
+        get_events,
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [str(COLLECTOR_PATH)],
+    )
+
+    collector.main()
+
+    get_events.assert_not_called()
+
+    output = capsys.readouterr().out
+
+    assert "Collector already ran today: 2026-08-19" in output
+    assert "Stopping to protect credits" in output
+
+
+def test_explicit_operating_date_drives_daily_guard(
+    collector: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fixed_now = collector.parse_iso_z("2026-08-20T16:00:00Z")
+
+    collector.RUN_LOG.write_text(
+        "run_date,status\n"
+        "2026-08-19,success\n",
+        encoding="utf-8",
+    )
+
+    get_events = Mock(
+        side_effect=AssertionError(
+            "explicit-date daily guard should stop before provider access"
+        )
+    )
+
+    monkeypatch.setattr(
+        collector,
+        "now_utc",
+        lambda: fixed_now,
+    )
+
+    monkeypatch.setattr(
+        collector,
+        "get_events",
+        get_events,
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(COLLECTOR_PATH),
+            "--operating-date",
+            "2026-08-19",
+        ],
+    )
+
+    collector.main()
+
+    get_events.assert_not_called()
+
+    output = capsys.readouterr().out
+
+    assert "Collector already ran today: 2026-08-19" in output
