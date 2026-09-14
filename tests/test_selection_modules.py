@@ -729,7 +729,7 @@ def test_kelly_quarantined_row_gets_no_stake_and_data_invalid_action():
 
     assert stake.eligible is False
     assert stake.stake_amount == 0.0
-    assert stake.expected_value == 0.0
+    assert stake.expected_value is None
     assert stake.skip_reason == IDENTITY_QUARANTINE_REJECTION_REASON
     assert stake.recommended_action == IDENTITY_QUARANTINE_ACTION
     assert stake.identity_quarantine_reason == "stale_team_identity"

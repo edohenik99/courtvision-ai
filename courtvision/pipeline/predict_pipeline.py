@@ -61,7 +61,6 @@ from courtvision.selection.pipeline_selectors import (
     select_top_per_market as select_top_per_market_helper,
 )
 from courtvision.reason_codes import REJECT_NEGATIVE_EDGE_DIRECTION
-from courtvision.betting.kelly import compute_kelly_fraction
 from courtvision.selection.operator_boards import assign_candidate_lanes
 from courtvision.projection.recalibration import (
     get_recalibration_mode,
@@ -1186,14 +1185,6 @@ class PredictionPipeline:
             }
             scoring_result = self.scoring_policy.apply_scoring_metadata(scoring_input)
 
-            # Compute Kelly stake fraction for bet sizing
-            stake_fraction = compute_kelly_fraction(
-                edge=edge_pct,
-                odds=float(odds) if odds else 1.91,
-                confidence=float(confidence) if confidence else 0.0,
-            )
-            recommended_bet = round(DEFAULT_BANKROLL * stake_fraction, 2)
-
             # Determine qualification_reason based on market source
             # For live markets, set qualification_reason to pass the live gate filter
             if is_live_market and not synthetic_line:
@@ -1203,13 +1194,8 @@ class PredictionPipeline:
             else:
                 qualification_reason = "stat_only_qualified"
 
-            # Compute Kelly stake fraction for bet sizing
-            stake_fraction = compute_kelly_fraction(
-                edge=edge_pct,
-                odds=float(odds) if odds else 1.91,
-                confidence=float(confidence) if confidence else 0.0,
-            )
-            recommended_bet = round(DEFAULT_BANKROLL * stake_fraction, 2)
+            # Projection gaps and minute-based confidence are research diagnostics.
+            # No probability source in this legacy producer is money-qualified.
 
             return {
                 "prediction_date": self.config.prediction_date,
@@ -1256,8 +1242,6 @@ class PredictionPipeline:
                 "line_source": "live_market" if is_live_market and not synthetic_line else "synthetic",
                 "source_lane": "live_market_candidate" if is_live_market and not synthetic_line else "partial_fill_candidate",
                 "pre_rejection_reason": pre_rejection_reason,
-                "stake_fraction": stake_fraction,
-                "recommended_bet": recommended_bet,
                 # Game status fields for slate-lock gate diagnostics
                 "game_status": _game_info.get("game_status", ""),
                 "game_status_bucket": _game_info.get("game_status_bucket", ""),
@@ -1269,6 +1253,12 @@ class PredictionPipeline:
                 # Recalibration fields (shadow/enabled modes)
                 **recal_fields,
                 **injury_metadata,
+                # Last so unrelated metadata cannot restore monetary outputs.
+                "stake_fraction": 0.0,
+                "recommended_bet": 0.0,
+                "expected_value": None,
+                "kelly_eligible": False,
+                "economic_ineligibility_reason": "economic_probability_provenance_unqualified",
             }
 
         def reject_candidate(
