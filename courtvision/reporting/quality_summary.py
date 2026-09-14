@@ -543,6 +543,33 @@ def _elite_artifact_has_no_rows(path: Path, elite_df: pd.DataFrame) -> bool:
     return path.exists() and (not isinstance(elite_df, pd.DataFrame) or elite_df.empty)
 
 
+def _quarantine_economic_reporting(kelly_df: pd.DataFrame) -> pd.DataFrame:
+    """Copy legacy reporting rows into the current economic quarantine.
+
+    This artifact has no approved economic-probability provenance contract.
+    Research probability metadata and legacy flags cannot qualify its rows.
+    Keep research fields and diagnostics while replacing monetary advice.
+    """
+    quarantined = kelly_df.assign(
+        eligible=False,
+        kelly_eligible=False,
+        stake_fraction=0.0,
+        stake_amount=0.0,
+        expected_value=None,
+        economic_ineligibility_reason="economic_probability_provenance_unqualified",
+        recommended_action="DO_NOT_BET_UNTIL_REVIEWED",
+        operator_action="DO_NOT_BET_UNTIL_REVIEWED",
+        manual_review_required=True,
+        review_before_bet=True,
+        review_policy_hold=True,
+        stake_policy="HOLD",
+        review_status="REVIEW_REQUIRED",
+    )
+    if "recommended_bet" in quarantined.columns:
+        quarantined["recommended_bet"] = 0.0
+    return quarantined
+
+
 def _kelly_df_for_reporting(
     *,
     elite_path: Path,
@@ -557,7 +584,7 @@ def _kelly_df_for_reporting(
                 "treating Kelly exposure as zero for reporting."
             )
         return pd.DataFrame(columns=list(kelly_df.columns) if isinstance(kelly_df, pd.DataFrame) else [])
-    return kelly_df
+    return _quarantine_economic_reporting(kelly_df)
 
 
 def _nonempty_text_series(series: pd.Series) -> pd.Series:
@@ -730,14 +757,64 @@ def _rejection_reasons(
     return rows, int(rejected_total)
 
 
+def _financial_ev_summary(kelly_df: pd.DataFrame) -> dict[str, Any]:
+    """Summarize EV only after independent economic-provenance admission.
+
+    Legacy reporting rows currently have no approved qualification mechanism,
+    so even a stored numeric zero is unavailable economic EV. Any unavailable
+    row makes the full cohort total unavailable.
+    """
+    kelly_df = _quarantine_economic_reporting(kelly_df)
+    reasons: Counter[str] = Counter()
+    values: list[float] = []
+    for row in kelly_df.to_dict("records"):
+        reason = _safe_text(row.get("economic_ineligibility_reason"))
+        flags = [row[key] for key in ("eligible", "kelly_eligible") if key in row]
+        if reason:
+            reasons[reason] += 1
+        elif not flags or not all(_is_truthy(flag) for flag in flags):
+            reasons[_safe_text(row.get("skip_reason")) or "financial_ev_ineligible"] += 1
+        else:
+            value = None if isinstance(row.get("expected_value"), bool) else _safe_float(row.get("expected_value"))
+            if value is None:
+                reasons["financial_ev_missing_or_invalid"] += 1
+            else:
+                values.append(value)
+    if kelly_df.empty:
+        reasons["financial_ev_empty_cohort"] = 1
+    total = None
+    if not reasons:
+        try:
+            total = round(math.fsum(values), 2)
+        except OverflowError:
+            reasons["financial_ev_total_non_finite"] = 1
+        if total is not None and not math.isfinite(total):
+            total = None
+            reasons["financial_ev_total_non_finite"] = 1
+    return {
+        "total_expected_value": total,
+        "expected_value_available_count": len(values),
+        "expected_value_unavailable_count": len(kelly_df) - len(values),
+        "expected_value_reasons": dict(sorted(reasons.items())),
+    }
+
+
+def _financial_ev_coverage_text(summary: dict[str, Any]) -> str:
+    available = summary.get("expected_value_available_count", 0)
+    unavailable = summary.get("expected_value_unavailable_count", 0)
+    reasons = summary.get("expected_value_reasons", {})
+    return f"EV coverage: {available}/{available + unavailable} available; reasons={reasons}"
+
+
 def _kelly_safety_summary(kelly_df: pd.DataFrame) -> dict[str, Any]:
+    kelly_df = _quarantine_economic_reporting(kelly_df)
     if kelly_df.empty:
         return {
             "total_rows": 0,
             "kelly_eligible_count": 0,
             "skipped_count": 0,
             "total_stake": 0.0,
-            "total_expected_value": 0.0,
+            **_financial_ev_summary(kelly_df),
             "context_high_caution_over_skip_count": 0,
             "medium_neutral_over_dampened_count": 0,
             "total_stake_reduction_from_dampeners": 0.0,
@@ -753,7 +830,6 @@ def _kelly_safety_summary(kelly_df: pd.DataFrame) -> dict[str, Any]:
         else pd.Series(False, index=kelly_df.index)
     )
     stake = pd.to_numeric(kelly_df.get("stake_amount", pd.Series(0, index=kelly_df.index)), errors="coerce").fillna(0.0)
-    expected_value = pd.to_numeric(kelly_df.get("expected_value", pd.Series(0, index=kelly_df.index)), errors="coerce").fillna(0.0)
     factors = pd.to_numeric(
         kelly_df.get("stake_dampener_factor", pd.Series(1.0, index=kelly_df.index)),
         errors="coerce",
@@ -801,7 +877,7 @@ def _kelly_safety_summary(kelly_df: pd.DataFrame) -> dict[str, Any]:
         "kelly_eligible_count": int(eligible_mask.sum()),
         "skipped_count": int((~eligible_mask).sum()),
         "total_stake": round(float(stake.sum()), 2),
-        "total_expected_value": round(float(expected_value.sum()), 2),
+        **_financial_ev_summary(kelly_df),
         "context_high_caution_over_skip_count": int(skip_reason.eq("context_high_caution_over").sum()),
         "medium_neutral_over_dampened_count": int(dampened_mask.sum()),
         "total_stake_reduction_from_dampeners": round(float(stake_reduction), 2),
@@ -844,7 +920,7 @@ def _exposure_summary(kelly_df: pd.DataFrame, elite_df: pd.DataFrame) -> dict[st
             "warnings": ["Kelly stakes artifact is missing or empty."],
         }
 
-    working = kelly_df.copy()
+    working = _quarantine_economic_reporting(kelly_df)
     if "stake_amount" not in working.columns:
         working["stake_amount"] = 0.0
     working["stake_amount"] = pd.to_numeric(working["stake_amount"], errors="coerce").fillna(0.0)
@@ -1112,6 +1188,7 @@ def _rejection_reasons_by_market(
 def _kelly_counts_by_market(kelly_df: pd.DataFrame) -> dict[str, dict[str, int]]:
     if not isinstance(kelly_df, pd.DataFrame) or kelly_df.empty:
         return {}
+    kelly_df = _quarantine_economic_reporting(kelly_df)
     markets = _market_series(kelly_df)
     eligible_col = "kelly_eligible" if "kelly_eligible" in kelly_df.columns else "eligible"
     eligible_mask = (
@@ -1694,7 +1771,7 @@ def _quality_history_row(payload: dict[str, Any], *, fallback_prediction_date: s
         "medium_neutral_over_dampened_count": _history_int(kelly.get("medium_neutral_over_dampened_count")),
         "kelly_review_policy_hold_count": _history_int(kelly.get("review_policy_hold_count")),
         "total_stake": _history_float(kelly.get("total_stake")),
-        "total_expected_value": _history_float(kelly.get("total_expected_value")),
+        "total_expected_value": _safe_float(kelly.get("total_expected_value")),
         "max_player_exposure": _history_float(exposure.get("max_player_exposure")),
         "max_team_exposure": _history_float(exposure.get("max_team_exposure")),
         "max_game_exposure": _history_float(exposure.get("max_game_exposure")),
@@ -2509,7 +2586,8 @@ def _format_quality_summary_text(payload: dict[str, Any]) -> str:
             f"- kelly_eligible count: {kelly['kelly_eligible_count']}",
             f"- skipped count: {kelly['skipped_count']}",
             f"- total stake: ${kelly['total_stake']:.2f}",
-            f"- total expected value: ${kelly['total_expected_value']:.2f}",
+            "- total expected value: " + ("n/a" if _safe_float(kelly.get("total_expected_value")) is None else f"${kelly['total_expected_value']:.2f}"),
+            "- " + _financial_ev_coverage_text(kelly),
             f"- context_high_caution_over skip count: {kelly['context_high_caution_over_skip_count']}",
             f"- medium_neutral_over_dampener count: {kelly['medium_neutral_over_dampened_count']}",
             f"- total stake reduction from dampeners: ${kelly['total_stake_reduction_from_dampeners']:.2f}",

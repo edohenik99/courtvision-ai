@@ -63,9 +63,9 @@ def test_daily_summary_empty_elite_ignores_stale_kelly_file(tmp_path: Path) -> N
     assert metadata["elite_count"] == 0
     assert metadata["kelly_eligible_count"] == 0
     assert metadata["total_exposure"] == 0.0
-    assert metadata["expected_ev"] == 0.0
+    assert metadata["expected_ev"] is None
     assert "Total exposure: $0.00" in text
-    assert "Expected EV: $0.00" in text
+    assert "Expected EV: n/a" in text
     assert "Ignoring Kelly stakes artifact because elite board has 0 rows" in text
 
 
@@ -94,12 +94,12 @@ def test_quality_summary_empty_elite_ignores_stale_kelly_file(tmp_path: Path) ->
     assert payload["kelly_safety_summary"]["total_rows"] == 0
     assert payload["kelly_safety_summary"]["kelly_eligible_count"] == 0
     assert payload["kelly_safety_summary"]["total_stake"] == 0.0
-    assert payload["kelly_safety_summary"]["total_expected_value"] == 0.0
+    assert payload["kelly_safety_summary"]["total_expected_value"] is None
     assert "total Kelly rows: 0" in text
     assert "Ignoring Kelly stakes artifact because elite board has 0 rows" in text
 
 
-def test_daily_summary_non_empty_elite_preserves_kelly_reporting(tmp_path: Path) -> None:
+def test_daily_summary_non_empty_elite_preserves_quarantined_kelly_diagnostics(tmp_path: Path) -> None:
     prediction_date = "2026-05-06"
     runtime_root = tmp_path / "runtime"
     history_root = tmp_path / "history"
@@ -116,14 +116,26 @@ def test_daily_summary_non_empty_elite_preserves_kelly_reporting(tmp_path: Path)
 
     text = output_path.read_text(encoding="utf-8")
     assert metadata["elite_count"] == 1
-    assert metadata["kelly_eligible_count"] == 1
-    assert metadata["total_exposure"] == 20.0
-    assert metadata["expected_ev"] == 2.11
-    assert "Total exposure: $20.00" in text
-    assert "Expected EV: $2.11" in text
+    # Stored stakes and eligibility do not establish economic provenance.
+    assert metadata["kelly_eligible_count"] == 0
+    assert metadata["total_exposure"] == 0.0
+    assert metadata["expected_ev"] is None
+    coverage = metadata["expected_value_coverage"]
+    assert coverage["expected_value_available_count"] == 0
+    assert coverage["expected_value_unavailable_count"] == 1
+    assert coverage["expected_value_reasons"] == {
+        "economic_probability_provenance_unqualified": 1,
+    }
+    assert metadata["kelly_manual_review_required_count"] == 1
+    assert metadata["kelly_review_before_bet_count"] == 1
+    assert "Stale Kelly: player_points under 27.5 stake=$0.00 EV=n/a" in text
+    assert "economic_ineligibility_reason=economic_probability_provenance_unqualified" in text
+    assert "recommended_action=DO_NOT_BET_UNTIL_REVIEWED" in text
+    assert "Total exposure: $0.00" in text
+    assert "Expected EV: n/a" in text
 
 
-def test_quality_summary_non_empty_elite_preserves_kelly_reporting(tmp_path: Path) -> None:
+def test_quality_summary_non_empty_elite_preserves_quarantined_kelly_diagnostics(tmp_path: Path) -> None:
     prediction_date = "2026-05-06"
     runtime_root = tmp_path / "runtime"
     operator = runtime_root / "operator"
@@ -132,7 +144,7 @@ def test_quality_summary_non_empty_elite_preserves_kelly_reporting(tmp_path: Pat
     _write_csv(operator / f"full_market_board_{prediction_date}.csv", [_elite_row(prediction_date)])
     _write_csv(operator / f"sgp_board_{prediction_date}.csv", [], columns=["prediction_date"])
 
-    _text, payload = build_quality_summary(
+    text, payload = build_quality_summary(
         prediction_date=prediction_date,
         runtime_root=runtime_root,
         out_dir=tmp_path,
@@ -142,9 +154,19 @@ def test_quality_summary_non_empty_elite_preserves_kelly_reporting(tmp_path: Pat
     assert payload["candidate_funnel"]["elite_board_count"] == 1
     assert payload["candidate_funnel"]["kelly_rows_count"] == 1
     assert payload["kelly_safety_summary"]["total_rows"] == 1
-    assert payload["kelly_safety_summary"]["kelly_eligible_count"] == 1
-    assert payload["kelly_safety_summary"]["total_stake"] == 20.0
-    assert payload["kelly_safety_summary"]["total_expected_value"] == 2.11
+    # Keep the legacy row visible while quarantining its stored monetary values.
+    assert payload["kelly_safety_summary"]["kelly_eligible_count"] == 0
+    assert payload["kelly_safety_summary"]["total_stake"] == 0.0
+    assert payload["kelly_safety_summary"]["total_expected_value"] is None
+    assert payload["kelly_safety_summary"]["skipped_count"] == 1
+    assert payload["kelly_safety_summary"]["expected_value_available_count"] == 0
+    assert payload["kelly_safety_summary"]["expected_value_unavailable_count"] == 1
+    assert payload["kelly_safety_summary"]["expected_value_reasons"] == {
+        "economic_probability_provenance_unqualified": 1,
+    }
+    assert "total Kelly rows: 1" in text
+    assert "total expected value: n/a" in text
+    assert "economic_probability_provenance_unqualified" in text
 
 
 def test_candidate_scoring_py_is_untouched_by_stale_kelly_reporting() -> None:

@@ -2,7 +2,8 @@
 
 Reads the daily elite board CSV produced by the prediction pipeline,
 applies the Kelly-criterion sizing rules from `courtvision.betting.kelly`
-to every eligible row, and writes a per-pick stake CSV.
+to qualified inputs, and writes a per-pick stake CSV. The current legacy
+projection source is quarantined: no row is admitted to monetary sizing.
 
 This is intentionally a thin orchestration layer over `kelly.py`. It does
 *not* alter prediction logic and does *not* generate fake stakes - if a
@@ -115,7 +116,7 @@ class StakeRow:
     confidence: float | None
     stake_fraction: float
     stake_amount: float
-    expected_value: float
+    expected_value: float | None
     eligible: bool
     skip_reason: str
     context_caution_level: str
@@ -141,6 +142,7 @@ class StakeRow:
     source_identity_conflict_reason: str
     source_identity_conflict_details: str
     source_identity_conflict_policy: str
+    economic_ineligibility_reason: str = "economic_probability_provenance_unqualified"
 
 
 def _log(msg: str) -> None:
@@ -371,10 +373,34 @@ def _medium_neutral_over_dampener(selection: str, context_caution_level: str, co
 
 
 def _refresh_expected_value(stake: StakeRow) -> None:
-    if stake.eligible and stake.edge_pct is not None:
-        stake.expected_value = round(stake.stake_amount * float(stake.edge_pct), 2)
-    else:
-        stake.expected_value = 0.0
+    # A statistic gap is not ROI, including after an exposure adjustment.
+    stake.expected_value = None
+
+
+def _quarantine_stake(stake: StakeRow) -> None:
+    """No legacy source is admitted here, regardless of supplied approval flags."""
+    stake.economic_ineligibility_reason = "economic_probability_provenance_unqualified"
+    stake.eligible = False
+    stake.stake_fraction = 0.0
+    stake.stake_amount = 0.0
+    stake.expected_value = None
+    # Preserve stricter identity/source/review/market rejection diagnostics.
+    if not stake.skip_reason:
+        stake.skip_reason = stake.economic_ineligibility_reason
+    if stake.recommended_action != IDENTITY_QUARANTINE_ACTION:
+        stake.recommended_action = DO_NOT_BET_UNTIL_REVIEWED_ACTION
+    stake.operator_action = DO_NOT_BET_UNTIL_REVIEWED_ACTION
+    stake.manual_review_required = True
+    stake.review_before_bet = True
+    stake.review_policy_hold = True
+    stake.stake_policy = "HOLD"
+    stake.review_status = "REVIEW_REQUIRED"
+    if stake.economic_ineligibility_reason not in stake.operator_note:
+        stake.operator_note = "; ".join(filter(None, (stake.operator_note, stake.economic_ineligibility_reason)))
+
+
+def _format_expected_value(value: float | None) -> str:
+    return "n/a" if _to_float(value) is None else f"${value:.2f}"
 
 
 def _apply_stake_dampeners(stakes: list[StakeRow]) -> None:
@@ -527,17 +553,10 @@ def _build_stake_row(row: dict[str, str], edge_col: str, bankroll: float) -> Sta
             skip_reason = KELLY_SKIP_NON_POSITIVE_EDGE
             eligible = False
 
-    if eligible:
-        stake_fraction = compute_kelly_fraction(
-            edge=float(edge_pct_raw),
-            odds=float(decimal_odds),
-            confidence=float(confidence),
-        )
-        if stake_fraction <= 0:
-            eligible = False
-            skip_reason = KELLY_SKIP_RETURNED_ZERO
-    else:
-        stake_fraction = 0.0
+    # All current sources are unqualified. Do not treat confidence, a supplied
+    # probability/eligible flag, or a projected statistic gap as approved ROI.
+    eligible = False
+    stake_fraction = 0.0
 
     stake_dampener_reason, stake_dampener_factor = _medium_neutral_over_dampener(
         selection=selection,
@@ -547,13 +566,9 @@ def _build_stake_row(row: dict[str, str], edge_col: str, bankroll: float) -> Sta
     )
 
     stake_amount = round(bankroll * stake_fraction, 2)
-    # Expected value of one unit stake: edge * stake_amount (treating edge_pct as ROI signal)
-    if eligible and edge_pct_raw is not None:
-        expected_value = round(stake_amount * float(edge_pct_raw), 2)
-    else:
-        expected_value = 0.0
+    expected_value = None
 
-    return StakeRow(
+    stake = StakeRow(
         player_id=str(row.get("player_id", row.get("canonical_player_id", "")) or ""),
         player_name=str(row.get("player_name", "")),
         team_abbr=team_abbr,
@@ -595,6 +610,8 @@ def _build_stake_row(row: dict[str, str], edge_col: str, bankroll: float) -> Sta
         source_identity_conflict_details=str(row.get("source_identity_conflict_details", "") or ""),
         source_identity_conflict_policy=str(row.get("source_identity_conflict_policy", "") or ""),
     )
+    _quarantine_stake(stake)
+    return stake
 
 
 def _write_stakes(
@@ -635,6 +652,7 @@ def _write_stakes(
         "stake_fraction",
         "stake_amount",
         "expected_value",
+        "economic_ineligibility_reason",
         "bankroll",
         "kelly_eligible",
         "eligible",
@@ -661,6 +679,9 @@ def _write_stakes(
         writer = csv.DictWriter(fh, fieldnames=fieldnames)
         writer.writeheader()
         for s in stakes:
+            # Export is an admission boundary too; pre-populated StakeRows
+            # cannot bypass construction or restore old stake/EV values.
+            _quarantine_stake(s)
             writer.writerow({
                 "prediction_date": prediction_date,
                 "player_id": s.player_id,
@@ -678,6 +699,7 @@ def _write_stakes(
                 "stake_fraction": s.stake_fraction,
                 "stake_amount": s.stake_amount,
                 "expected_value": s.expected_value,
+                "economic_ineligibility_reason": s.economic_ineligibility_reason,
                 "bankroll": bankroll,
                 "kelly_eligible": s.eligible,
                 "eligible": s.eligible,
@@ -859,7 +881,7 @@ def main(argv: list[str] | None = None) -> int:
             f"stake player={s.player_name!r} market={s.market_type} sel={s.selection} "
             f"line={s.line} odds={s.american_odds} dec={s.decimal_odds} "
             f"edge_pct={s.edge_pct} conf={s.confidence} "
-            f"frac={s.stake_fraction:.4f} amount=${s.stake_amount:.2f} ev=${s.expected_value:.2f} "
+            f"frac={s.stake_fraction:.4f} amount=${s.stake_amount:.2f} ev={_format_expected_value(s.expected_value)} "
             f"dampener={s.stake_dampener_factor:g} reason={s.stake_dampener_reason or 'none'} "
             f"recommended_action={s.recommended_action} "
             f"manual_review_required={s.manual_review_required} "
@@ -867,7 +889,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     total_exposure = round(sum(s.stake_amount for s in eligible), 2)
-    total_ev = round(sum(s.expected_value for s in eligible), 2)
+    total_ev = None  # No qualified financial estimates in this gate.
     avg_stake = round(total_exposure / len(eligible), 2) if eligible else 0.0
     exposure_pct = round(100.0 * total_exposure / bankroll, 2) if bankroll > 0 else 0.0
     _log(f"final_total_exposure=${total_exposure:.2f} ({exposure_pct:.2f}% of bankroll)")
@@ -875,7 +897,7 @@ def main(argv: list[str] | None = None) -> int:
     _log(f"bankroll_used=${bankroll:.2f}")
     _log(f"total_exposure=${total_exposure:.2f} ({exposure_pct:.2f}% of bankroll)")
     _log(f"avg_stake=${avg_stake:.2f}")
-    _log(f"expected_value_total=${total_ev:.2f}")
+    _log(f"expected_value_total={_format_expected_value(total_ev)} economic_probability_provenance_unqualified")
 
     _write_stakes(output_path, stakes, bankroll, prediction_date, force=args.force)
     _log(f"output={output_path}")

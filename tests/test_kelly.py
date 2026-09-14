@@ -166,7 +166,7 @@ class TestConservativeKellyLogic:
             decimal_places = len(result_str.split('.')[1])
             assert decimal_places <= 4, f"Result should have at most 4 decimal places: {result}"
 
-    def test_kelly_stake_runner_accepts_valid_under_side_edge(self):
+    def test_kelly_stake_runner_preserves_under_side_edge_without_economic_qualification(self):
         fieldnames = ["player_name", "market_type", "selection", "odds", "confidence", "edge_pct", "side_edge_pct"]
         edge_col = _validate_columns(fieldnames)
         row = {
@@ -185,12 +185,16 @@ class TestConservativeKellyLogic:
         stake = _build_stake_row(row, edge_col, bankroll=1000.0)
 
         assert edge_col == "side_edge_pct"
-        assert stake.eligible is True
+        assert stake.eligible is False
         assert stake.edge_pct == 0.10
         assert stake.side_edge_pct == 0.10
         assert stake.context_caution_level == "high"
         assert stake.context_pick_alignment == "aligned"
-        assert stake.stake_amount > 0
+        assert stake.stake_amount == 0.0
+        assert stake.selection == "under"
+        assert stake.stake_fraction == 0.0
+        assert stake.expected_value is None
+        assert stake.economic_ineligibility_reason == "economic_probability_provenance_unqualified"
 
     def test_high_caution_over_is_skipped_by_kelly(self):
         fieldnames = ["player_name", "market_type", "selection", "odds", "confidence", "edge_pct", "side_edge_pct", "context_caution_level"]
@@ -205,7 +209,7 @@ class TestConservativeKellyLogic:
         assert stake.stake_dampener_reason == ""
         assert stake.stake_dampener_factor == 1.0
 
-    def test_medium_neutral_over_is_eligible_and_dampened(self):
+    def test_medium_neutral_context_is_preserved_without_monetary_dampening(self):
         fieldnames = ["player_name", "market_type", "selection", "odds", "confidence", "edge_pct", "side_edge_pct", "context_caution_level", "context_pick_alignment"]
         edge_col = _validate_columns(fieldnames)
 
@@ -214,19 +218,21 @@ class TestConservativeKellyLogic:
             edge_col,
             bankroll=1000.0,
         )
-        normal_stake_amount = stake.stake_amount
-        normal_stake_fraction = stake.stake_fraction
 
         _apply_stake_dampeners([stake])
 
-        assert stake.eligible is True
-        assert stake.skip_reason == ""
-        assert stake.stake_dampener_reason == "medium_neutral_over_dampener"
-        assert stake.stake_dampener_factor == 0.5
-        assert stake.stake_amount == round(normal_stake_amount * 0.5, 2)
-        assert stake.stake_fraction == round(normal_stake_fraction * 0.5, 6)
+        assert stake.eligible is False
+        assert stake.skip_reason == "economic_probability_provenance_unqualified"
+        assert stake.stake_dampener_reason == ""
+        assert stake.stake_dampener_factor == 1.0
+        assert stake.stake_amount == 0.0
+        assert stake.stake_fraction == 0.0
+        assert stake.context_caution_level == "medium"
+        assert stake.context_pick_alignment == "neutral"
+        assert stake.expected_value is None
+        assert stake.economic_ineligibility_reason == "economic_probability_provenance_unqualified"
 
-    def test_medium_aligned_over_is_not_dampened(self):
+    def test_medium_aligned_context_is_preserved_without_staking(self):
         fieldnames = ["player_name", "market_type", "selection", "odds", "confidence", "edge_pct", "side_edge_pct", "context_caution_level", "context_pick_alignment"]
         edge_col = _validate_columns(fieldnames)
 
@@ -235,16 +241,21 @@ class TestConservativeKellyLogic:
             edge_col,
             bankroll=1000.0,
         )
-        normal_stake_amount = stake.stake_amount
 
         _apply_stake_dampeners([stake])
 
-        assert stake.eligible is True
+        assert stake.eligible is False
         assert stake.stake_dampener_reason == ""
         assert stake.stake_dampener_factor == 1.0
-        assert stake.stake_amount == normal_stake_amount
+        assert stake.stake_amount == 0.0
+        assert stake.selection == "over"
+        assert stake.context_caution_level == "medium"
+        assert stake.context_pick_alignment == "aligned"
+        assert stake.stake_fraction == 0.0
+        assert stake.expected_value is None
+        assert stake.economic_ineligibility_reason == "economic_probability_provenance_unqualified"
 
-    def test_under_pick_is_not_dampened_by_medium_neutral_rule(self):
+    def test_under_medium_neutral_context_is_preserved_without_staking(self):
         fieldnames = ["player_name", "market_type", "selection", "odds", "confidence", "edge_pct", "side_edge_pct", "context_caution_level", "context_pick_alignment"]
         edge_col = _validate_columns(fieldnames)
 
@@ -253,35 +264,52 @@ class TestConservativeKellyLogic:
             edge_col,
             bankroll=1000.0,
         )
-        normal_stake_amount = stake.stake_amount
 
         _apply_stake_dampeners([stake])
 
-        assert stake.eligible is True
+        assert stake.eligible is False
         assert stake.stake_dampener_reason == ""
         assert stake.stake_dampener_factor == 1.0
-        assert stake.stake_amount == normal_stake_amount
+        assert stake.stake_amount == 0.0
+        assert stake.selection == "under"
+        assert stake.context_caution_level == "medium"
+        assert stake.context_pick_alignment == "neutral"
+        assert stake.stake_fraction == 0.0
+        assert stake.expected_value is None
+        assert stake.economic_ineligibility_reason == "economic_probability_provenance_unqualified"
 
-    def test_high_caution_under_is_not_skipped_by_context_over_rule(self):
+    def test_high_caution_under_preserves_context_but_requires_economic_qualification(self):
         fieldnames = ["player_name", "market_type", "selection", "odds", "confidence", "edge_pct", "side_edge_pct", "context_caution_level"]
         edge_col = _validate_columns(fieldnames)
 
         stake = _build_stake_row(_kelly_row(selection="under", context_caution_level="high"), edge_col, bankroll=1000.0)
 
-        assert stake.eligible is True
-        assert stake.skip_reason == ""
-        assert stake.stake_amount > 0
+        assert stake.eligible is False
+        assert stake.skip_reason == "economic_probability_provenance_unqualified"
+        assert stake.stake_amount == 0.0
+        assert stake.selection == "under"
+        assert stake.context_caution_level == "high"
+        assert stake.context_pick_alignment == "aligned"
+        assert stake.stake_fraction == 0.0
+        assert stake.expected_value is None
+        assert stake.economic_ineligibility_reason == "economic_probability_provenance_unqualified"
 
     @pytest.mark.parametrize("level", ["medium", "low"])
-    def test_medium_low_caution_over_remains_eligible(self, level):
+    def test_medium_low_caution_over_preserves_context_without_economic_qualification(self, level):
         fieldnames = ["player_name", "market_type", "selection", "odds", "confidence", "edge_pct", "side_edge_pct", "context_caution_level"]
         edge_col = _validate_columns(fieldnames)
 
         stake = _build_stake_row(_kelly_row(selection="over", context_caution_level=level), edge_col, bankroll=1000.0)
 
-        assert stake.eligible is True
-        assert stake.skip_reason == ""
-        assert stake.stake_amount > 0
+        assert stake.eligible is False
+        assert stake.skip_reason == "economic_probability_provenance_unqualified"
+        assert stake.stake_amount == 0.0
+        assert stake.selection == "over"
+        assert stake.context_caution_level == level
+        assert stake.context_pick_alignment == "aligned"
+        assert stake.stake_fraction == 0.0
+        assert stake.expected_value is None
+        assert stake.economic_ineligibility_reason == "economic_probability_provenance_unqualified"
 
     def test_non_player_points_market_remains_non_kelly_eligible(self):
         fieldnames = ["player_name", "market_type", "selection", "odds", "confidence", "edge_pct", "side_edge_pct", "context_caution_level"]
@@ -344,11 +372,11 @@ class TestConservativeKellyLogic:
         assert skipped["C"]["skip_reason"] == "context_high_caution_over"
         assert float(skipped["C"]["stake_amount"]) == 0.0
 
-    def test_output_includes_medium_neutral_over_dampener_metadata(self, tmp_path):
+    def test_output_preserves_medium_neutral_context_without_applied_dampener(self, tmp_path):
         input_path = tmp_path / "elite_board.csv"
         output_path = tmp_path / "kelly_stakes.csv"
         row = _kelly_row(
-            player_name="Dampened Over",
+            player_name="Medium Neutral Over",
             selection="over",
             context_caution_level="medium",
             context_pick_alignment="neutral",
@@ -380,15 +408,19 @@ class TestConservativeKellyLogic:
         out_rows = list(csv.DictReader(output_path.open("r", encoding="utf-8", newline="")))
         assert len(out_rows) == 1
         out = out_rows[0]
-        assert out["eligible"] == "True"
-        assert out["kelly_eligible"] == "True"
-        assert out["skip_reason"] == ""
-        assert out["stake_dampener_reason"] == "medium_neutral_over_dampener"
-        assert out["stake_dampener_factor"] == "0.5"
-        assert float(out["stake_amount"]) == 10.0
-        assert float(out["stake_fraction"]) == 0.01
+        assert out["eligible"] == "False"
+        assert out["kelly_eligible"] == "False"
+        assert out["skip_reason"] == "economic_probability_provenance_unqualified"
+        assert out["stake_dampener_reason"] == ""
+        assert out["stake_dampener_factor"] == "1.0"
+        assert float(out["stake_amount"]) == 0.0
+        assert float(out["stake_fraction"]) == 0.0
+        assert out["context_caution_level"] == "medium"
+        assert out["context_pick_alignment"] == "neutral"
+        assert out["expected_value"] == ""
+        assert out["economic_ineligibility_reason"] == "economic_probability_provenance_unqualified"
 
-    def test_output_carries_manual_review_action_metadata(self, tmp_path, capsys):
+    def test_output_preserves_warning_metadata_while_unqualified_rows_require_review(self, tmp_path, capsys):
         input_path = tmp_path / "elite_board.csv"
         output_path = tmp_path / "kelly_stakes.csv"
         rows = [
@@ -457,15 +489,26 @@ class TestConservativeKellyLogic:
         assert float(review["stake_amount"]) == 0.0
         assert float(review["stake_fraction"]) == 0.0
         assert clean["same_opponent_under_warning"] == "False"
-        assert clean["manual_review_required"] == "False"
-        assert clean["recommended_action"] == "OK_TO_CONSIDER"
-        assert clean["review_before_bet"] == "False"
-        assert clean["review_policy_hold"] == "False"
-        assert clean["kelly_eligible"] == "True"
-        assert float(clean["stake_amount"]) > 0.0
+        assert clean["manual_review_required"] == "True"
+        assert clean["recommended_action"] == "DO_NOT_BET_UNTIL_REVIEWED"
+        assert clean["review_before_bet"] == "True"
+        assert clean["review_policy_hold"] == "True"
+        assert clean["kelly_eligible"] == "False"
+        assert float(clean["stake_amount"]) == 0.0
         log = capsys.readouterr().out
-        assert "manual_review_required_count=1" in log
-        assert "review_before_bet_count=1" in log
+        assert "manual_review_required_count=2" in log
+        assert "review_before_bet_count=2" in log
+        assert clean["same_opponent_warning_reason"] == ""
+        assert clean["manual_review_reason"] == ""
+        assert float(clean["stake_fraction"]) == 0.0
+        assert review["expected_value"] == ""
+        assert clean["expected_value"] == ""
+        assert review["economic_ineligibility_reason"] == "economic_probability_provenance_unqualified"
+        assert clean["economic_ineligibility_reason"] == "economic_probability_provenance_unqualified"
+        assert clean["eligible"] == "False"
+        assert clean["operator_action"] == "DO_NOT_BET_UNTIL_REVIEWED"
+        assert clean["review_status"] == "REVIEW_REQUIRED"
+        assert clean["stake_policy"] == "HOLD"
 
 
 _REQUIRED_POLICY_COLUMNS = (
@@ -539,25 +582,30 @@ class TestReviewPolicyOutput:
         assert "manual_review_reason=same_opponent_under_warning" in stake.operator_note
         assert "same_opponent_warning_reason=last_same_opponent_actual_exceeded_current_under_line" in stake.operator_note
 
-    def test_clear_pick_sets_normal_policy(self):
+    def test_no_warning_pick_requires_review_without_economic_qualification(self):
         fieldnames = ["player_name", "market_type", "selection", "odds", "confidence",
                       "edge_pct", "side_edge_pct", "manual_review_required"]
         edge_col = _validate_columns(fieldnames)
         row = {**_kelly_row(selection="under", edge="0.10", confidence="0.75"), "manual_review_required": "False"}
         stake = _build_stake_row(row, edge_col, bankroll=1000.0)
 
-        assert stake.eligible is True
-        assert stake.stake_amount > 0.0
-        assert stake.recommended_action == "OK_TO_CONSIDER"
-        assert stake.review_before_bet is False
-        assert stake.review_policy_hold is False
-        assert stake.review_status == "CLEAR"
-        assert stake.stake_policy == "NORMAL"
-        assert stake.operator_action == "OK_TO_CONSIDER"
-        assert stake.operator_note == ""
+        assert stake.eligible is False
+        assert stake.stake_amount == 0.0
+        assert stake.recommended_action == "DO_NOT_BET_UNTIL_REVIEWED"
+        assert stake.review_before_bet is True
+        assert stake.review_policy_hold is True
+        assert stake.review_status == "REVIEW_REQUIRED"
+        assert stake.stake_policy == "HOLD"
+        assert stake.operator_action == "DO_NOT_BET_UNTIL_REVIEWED"
+        assert "economic_probability_provenance_unqualified" in stake.operator_note
+        assert stake.manual_review_required is True
+        assert stake.same_opponent_under_warning is False
+        assert stake.stake_fraction == 0.0
+        assert stake.expected_value is None
+        assert stake.economic_ineligibility_reason == "economic_probability_provenance_unqualified"
 
-    def test_manual_review_required_zeroes_stake_without_touching_clean_row(self):
-        """Manual-review rows are preserved but hard-blocked before Kelly math."""
+    def test_manual_review_and_unqualified_control_both_hold_zero_stakes(self):
+        """Preserve warning diagnostics while both unqualified rows carry zero stake."""
         fieldnames = ["player_name", "market_type", "selection", "odds", "confidence",
                       "edge_pct", "side_edge_pct", "manual_review_required",
                       "manual_review_reason", "same_opponent_warning_reason"]
@@ -578,11 +626,24 @@ class TestReviewPolicyOutput:
         assert stake_review.stake_fraction == 0.0
         assert stake_review.operator_action == "DO_NOT_BET_UNTIL_REVIEWED"
         assert stake_review.stake_policy == "HOLD"
-        assert stake_clean.eligible is True
-        assert stake_clean.stake_amount > 0.0
-        assert stake_clean.stake_fraction > 0.0
-        assert stake_clean.operator_action == "OK_TO_CONSIDER"
-        assert stake_clean.stake_policy == "NORMAL"
+        assert stake_clean.eligible is False
+        assert stake_clean.stake_amount == 0.0
+        assert stake_clean.stake_fraction == 0.0
+        assert stake_clean.operator_action == "DO_NOT_BET_UNTIL_REVIEWED"
+        assert stake_clean.stake_policy == "HOLD"
+        assert stake_review.same_opponent_under_warning is True
+        assert stake_clean.same_opponent_under_warning is False
+        assert stake_review.manual_review_reason == "same_opponent_under_warning"
+        assert stake_clean.manual_review_reason == ""
+        assert stake_clean.manual_review_required is True
+        assert stake_clean.review_before_bet is True
+        assert stake_clean.review_policy_hold is True
+        assert stake_clean.review_status == "REVIEW_REQUIRED"
+        assert stake_clean.recommended_action == "DO_NOT_BET_UNTIL_REVIEWED"
+        assert stake_review.expected_value is None
+        assert stake_review.economic_ineligibility_reason == "economic_probability_provenance_unqualified"
+        assert stake_clean.expected_value is None
+        assert stake_clean.economic_ineligibility_reason == "economic_probability_provenance_unqualified"
 
     # ------------------------------------------------------------------
     # CSV column presence – the primary regression the user hit
@@ -605,8 +666,8 @@ class TestReviewPolicyOutput:
         missing = [col for col in _REQUIRED_POLICY_COLUMNS if col not in header]
         assert missing == [], f"missing required columns: {missing}"
 
-    def test_review_policy_fields_in_csv_output(self, tmp_path):
-        """End-to-end: review rows are kept in the CSV with zero stake and hold fields."""
+    def test_review_policy_fields_hold_warning_and_unqualified_control_rows(self, tmp_path):
+        """Keep policy/schema coverage for warning and unqualified comparison rows."""
         rows = self._two_rows()
         input_path = self._make_input_csv(tmp_path, rows)
         output_path = tmp_path / "kelly_stakes.csv"
@@ -636,31 +697,39 @@ class TestReviewPolicyOutput:
         assert "manual_review_reason=same_opponent_under_warning" in hold["operator_note"]
         assert "same_opponent_warning_reason=last_same_opponent_actual_exceeded_current_under_line" in hold["operator_note"]
 
-        assert clear["review_status"] == "CLEAR"
-        assert clear["stake_policy"] == "NORMAL"
-        assert clear["operator_action"] == "OK_TO_CONSIDER"
-        assert clear["recommended_action"] == "OK_TO_CONSIDER"
-        assert clear["review_before_bet"] == "False"
-        assert clear["review_policy_hold"] == "False"
-        assert clear["operator_note"] == ""
+        assert clear["review_status"] == "REVIEW_REQUIRED"
+        assert clear["stake_policy"] == "HOLD"
+        assert clear["operator_action"] == "DO_NOT_BET_UNTIL_REVIEWED"
+        assert clear["recommended_action"] == "DO_NOT_BET_UNTIL_REVIEWED"
+        assert clear["review_before_bet"] == "True"
+        assert clear["review_policy_hold"] == "True"
+        assert "economic_probability_provenance_unqualified" in clear["operator_note"]
 
         assert hold["kelly_eligible"] == "False"
         assert float(hold["stake_amount"]) == 0.0
         assert float(hold["stake_fraction"]) == 0.0
-        assert clear["kelly_eligible"] == "True"
-        assert float(clear["stake_amount"]) > 0.0
-        assert float(clear["stake_fraction"]) > 0.0
+        assert clear["kelly_eligible"] == "False"
+        assert float(clear["stake_amount"]) == 0.0
+        assert float(clear["stake_fraction"]) == 0.0
+        assert clear["same_opponent_under_warning"] == "False"
+        assert clear["manual_review_reason"] == ""
+        assert clear["manual_review_required"] == "True"
+        assert clear["eligible"] == "False"
+        assert hold["expected_value"] == ""
+        assert clear["expected_value"] == ""
+        assert hold["economic_ineligibility_reason"] == "economic_probability_provenance_unqualified"
+        assert clear["economic_ineligibility_reason"] == "economic_probability_provenance_unqualified"
 
     # ------------------------------------------------------------------
-    # Ajay regression: manual-review row has HOLD, clean row has NORMAL,
-    # and the review row carries no stake.
+    # Ajay regression: preserve warning metadata and HOLD policy;
+    # the no-warning comparison also needs economic qualification.
     # ------------------------------------------------------------------
 
-    def test_ajay_regression_hold_policy_and_stake_zeroed(self, tmp_path):
+    def test_ajay_warning_and_unqualified_control_preserve_hold_policy(self, tmp_path):
         """
         Regression: Ajay's under pick triggered same_opponent_under_warning.
-        The written CSV must have stake_policy=HOLD for that row and
-        stake_policy=NORMAL for a clean row, with the review stake zeroed.
+        The written CSV retains the warning diagnostics and holds both
+        economically unqualified rows with zero stake.
         """
         rows = [
             {
@@ -706,25 +775,37 @@ class TestReviewPolicyOutput:
         assert ajay["recommended_action"] == "DO_NOT_BET_UNTIL_REVIEWED"
         assert ajay["review_before_bet"] == "True"
         assert ajay["review_policy_hold"] == "True"
-        assert clean["stake_policy"] == "NORMAL", f"expected NORMAL, got {clean['stake_policy']!r}"
-        assert clean["review_status"] == "CLEAR"
-        assert clean["operator_action"] == "OK_TO_CONSIDER"
-        assert clean["review_before_bet"] == "False"
-        assert clean["review_policy_hold"] == "False"
+        assert clean["stake_policy"] == "HOLD", f"expected HOLD, got {clean['stake_policy']!r}"
+        assert clean["review_status"] == "REVIEW_REQUIRED"
+        assert clean["operator_action"] == "DO_NOT_BET_UNTIL_REVIEWED"
+        assert clean["review_before_bet"] == "True"
+        assert clean["review_policy_hold"] == "True"
 
         assert ajay["kelly_eligible"] == "False"
         assert float(ajay["stake_amount"]) == 0.0
         assert float(ajay["stake_fraction"]) == 0.0
-        assert clean["kelly_eligible"] == "True"
-        assert float(clean["stake_amount"]) > 0.0
-        assert float(clean["stake_fraction"]) > 0.0
+        assert clean["kelly_eligible"] == "False"
+        assert float(clean["stake_amount"]) == 0.0
+        assert float(clean["stake_fraction"]) == 0.0
+        assert ajay["same_opponent_under_warning"] == "True"
+        assert ajay["manual_review_reason"] == "same_opponent_under_warning"
+        assert ajay["same_opponent_warning_reason"] == "last_same_opponent_actual_exceeded_current_under_line"
+        assert clean["same_opponent_under_warning"] == "False"
+        assert clean["manual_review_reason"] == ""
+        assert clean["manual_review_required"] == "True"
+        assert clean["eligible"] == "False"
+        assert clean["recommended_action"] == "DO_NOT_BET_UNTIL_REVIEWED"
+        assert ajay["expected_value"] == ""
+        assert clean["expected_value"] == ""
+        assert ajay["economic_ineligibility_reason"] == "economic_probability_provenance_unqualified"
+        assert clean["economic_ineligibility_reason"] == "economic_probability_provenance_unqualified"
 
     # ------------------------------------------------------------------
     # Console [COUNT] lines
     # ------------------------------------------------------------------
 
-    def test_review_policy_counts_in_console_log(self, tmp_path, capsys):
-        """All four new [COUNT] lines must appear with correct values."""
+    def test_review_policy_counts_include_all_unqualified_rows(self, tmp_path, capsys):
+        """All three legacy rows require review, including the no-warning control."""
         rows = [
             {
                 **_kelly_row(player_name="Hold A", selection="under", edge="0.10", confidence="0.75"),
@@ -754,10 +835,10 @@ class TestReviewPolicyOutput:
 
         assert rc == 0
         log = capsys.readouterr().out
-        assert "[COUNT] review_required_count=2" in log
-        assert "[COUNT] hold_policy_count=2" in log
-        assert "[COUNT] clear_policy_count=1" in log
-        assert "[COUNT] do_not_bet_until_reviewed_count=2" in log
+        assert "[COUNT] review_required_count=3" in log
+        assert "[COUNT] hold_policy_count=3" in log
+        assert "[COUNT] clear_policy_count=0" in log
+        assert "[COUNT] do_not_bet_until_reviewed_count=3" in log
 
 
 _SAFETY_METADATA_COLUMNS = (
@@ -811,7 +892,7 @@ class TestPreKellyHardBlocks:
         assert stake.eligible is False
         assert stake.stake_amount == 0.0
         assert stake.stake_fraction == 0.0
-        assert stake.expected_value == 0.0
+        assert stake.expected_value is None
         assert stake.manual_review_required is True
         assert stake.review_before_bet is True
         assert stake.review_policy_hold is True
@@ -821,19 +902,23 @@ class TestPreKellyHardBlocks:
         assert stake.recommended_action in {"DO_NOT_BET_UNTIL_REVIEWED", "DATA_INVALID"}
         assert expected_reason in stake.operator_note
 
-    def test_clean_row_behavior_remains_unchanged(self):
+    def test_no_hard_block_row_still_requires_economic_qualification(self):
         stake = self._stake({})
 
-        assert stake.eligible is True
-        assert stake.stake_amount > 0.0
-        assert stake.stake_fraction > 0.0
-        assert stake.recommended_action == "OK_TO_CONSIDER"
-        assert stake.review_before_bet is False
-        assert stake.review_policy_hold is False
-        assert stake.operator_action == "OK_TO_CONSIDER"
-        assert stake.stake_policy == "NORMAL"
-        assert stake.review_status == "CLEAR"
-        assert stake.operator_note == ""
+        assert stake.eligible is False
+        assert stake.stake_amount == 0.0
+        assert stake.stake_fraction == 0.0
+        assert stake.recommended_action == "DO_NOT_BET_UNTIL_REVIEWED"
+        assert stake.review_before_bet is True
+        assert stake.review_policy_hold is True
+        assert stake.operator_action == "DO_NOT_BET_UNTIL_REVIEWED"
+        assert stake.stake_policy == "HOLD"
+        assert stake.review_status == "REVIEW_REQUIRED"
+        assert "economic_probability_provenance_unqualified" in stake.operator_note
+        assert stake.manual_review_required is True
+        assert stake.skip_reason == "economic_probability_provenance_unqualified"
+        assert stake.expected_value is None
+        assert stake.economic_ineligibility_reason == "economic_probability_provenance_unqualified"
 
     def test_kelly_csv_preserves_safety_metadata_columns(self, tmp_path):
         input_path = tmp_path / "elite_board.csv"

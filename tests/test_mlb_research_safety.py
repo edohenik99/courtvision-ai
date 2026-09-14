@@ -30,7 +30,11 @@ def _research_row(**overrides: object) -> dict[str, object]:
     return row
 
 
-def test_mlb_research_row_is_blocked_before_sizing() -> None:
+def test_mlb_research_row_is_blocked_before_sizing(monkeypatch) -> None:
+    def reject_sizing_call(*args, **kwargs):
+        pytest.fail("MLB research rows must be blocked before Kelly sizing")
+
+    monkeypatch.setattr("scripts.run_kelly_stakes.compute_kelly_fraction", reject_sizing_call)
     row = _research_row()
     edge_col = _validate_columns(list(row))
 
@@ -39,7 +43,7 @@ def test_mlb_research_row_is_blocked_before_sizing() -> None:
     assert result.eligible is False
     assert result.stake_fraction == 0.0
     assert result.stake_amount == 0.0
-    assert result.expected_value == 0.0
+    assert result.expected_value is None
     assert "sport=MLB" in result.operator_note
     assert "mode=research" in result.operator_note
     assert "eligible_for_betting=false" in result.operator_note
@@ -90,7 +94,7 @@ def test_mlb_only_input_cannot_create_staking_artifact(tmp_path) -> None:
     assert not output_path.exists()
 
 
-def test_explicit_nba_row_retains_existing_staking_behavior() -> None:
+def test_explicit_nba_identity_preserves_research_fields_without_economic_qualification() -> None:
     row = {
         "player_name": "NBA Candidate",
         "sport": "NBA",
@@ -104,5 +108,27 @@ def test_explicit_nba_row_retains_existing_staking_behavior() -> None:
     }
     result = _build_stake_row(row, _validate_columns(list(row)), bankroll=1000.0)
 
-    assert result.eligible is True
-    assert result.stake_amount > 0.0
+    # Explicit NBA identity and research diagnostics do not qualify economic probability.
+    assert row["sport"] == "NBA"
+    assert result.player_name == "NBA Candidate"
+    assert result.market_type == "player_points"
+    assert result.selection == "over"
+    assert result.line == 20.5
+    assert result.american_odds == -110
+    assert result.decimal_odds == pytest.approx(1.9091)
+    assert result.confidence == pytest.approx(0.75)
+    assert result.edge_pct == pytest.approx(0.10)
+    assert result.side_edge_pct == pytest.approx(0.10)
+    assert result.eligible is False
+    assert result.stake_fraction == 0.0
+    assert result.stake_amount == 0.0
+    assert result.expected_value is None
+    assert result.economic_ineligibility_reason == "economic_probability_provenance_unqualified"
+    assert result.skip_reason == "economic_probability_provenance_unqualified"
+    assert result.recommended_action == "DO_NOT_BET_UNTIL_REVIEWED"
+    assert result.operator_action == "DO_NOT_BET_UNTIL_REVIEWED"
+    assert result.manual_review_required is True
+    assert result.review_before_bet is True
+    assert result.review_policy_hold is True
+    assert result.review_status == "REVIEW_REQUIRED"
+    assert result.stake_policy == "HOLD"

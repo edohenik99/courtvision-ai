@@ -15,6 +15,11 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from courtvision.reporting.under_research_snapshot import get_under_research_snapshot_text
+from courtvision.reporting.quality_summary import (
+    _financial_ev_summary,
+    _financial_ev_coverage_text,
+    _quarantine_economic_reporting,
+)
 from courtvision.reporting.kelly_performance import build_kelly_decision_performance
 from courtvision.reporting.combo_under_watchlist import (
     OBSERVATION_ONLY_NOTE as COMBO_UNDER_OBSERVATION_ONLY_NOTE,
@@ -229,7 +234,7 @@ def _kelly_df_for_reporting(
                 "treating Kelly exposure as zero for reporting."
             )
         return pd.DataFrame(columns=list(kelly_df.columns) if isinstance(kelly_df, pd.DataFrame) else [])
-    return kelly_df
+    return _quarantine_economic_reporting(kelly_df)
 
 
 def _empty_kelly_decision_performance(reason: str) -> dict[str, Any]:
@@ -560,6 +565,7 @@ def _alignment_performance_line(label: str, item: Any) -> str:
 
 
 def _kelly_line(row: pd.Series) -> str:
+    row = _quarantine_economic_reporting(row.to_frame().T).iloc[0]
     player = _safe_text(row.get("player_name")) or "Unknown"
     market = _safe_text(row.get("market_type")) or "unknown"
     side = _safe_text(row.get("selection")) or "n/a"
@@ -568,9 +574,10 @@ def _kelly_line(row: pd.Series) -> str:
     ev = _format_money(_safe_float(row.get("expected_value")))
     edge = _format_pct(row.get("edge_pct"))
     caution = _safe_text(row.get("context_caution_level")) or "insufficient_data"
-    action = _safe_text(row.get("recommended_action")) or "OK_TO_CONSIDER"
+    action = _safe_text(row.get("recommended_action"))
     reason = _safe_text(row.get("manual_review_reason"))
     reason_text = f" manual_review_reason={reason}" if reason else ""
+    reason_text += f" economic_ineligibility_reason={row['economic_ineligibility_reason']}"
     return (
         f"- {player}: {market} {side} {line} stake={stake} EV={ev} "
         f"edge={edge} caution={caution} recommended_action={action}{reason_text}"
@@ -694,27 +701,22 @@ def build_daily_summary(
         if not kelly_eligible.empty
         else 0.0
     )
-    expected_ev = (
-        float(pd.to_numeric(kelly_eligible.get("expected_value", pd.Series(dtype=float)), errors="coerce").fillna(0).sum())
-        if not kelly_eligible.empty
-        else 0.0
-    )
+    ev_summary = _financial_ev_summary(kelly_df)
+    expected_ev = ev_summary["total_expected_value"]
     kelly_manual_review_required_count = (
         int(kelly_df["manual_review_required"].map(_is_truthy).sum())
         if not kelly_df.empty and "manual_review_required" in kelly_df.columns
         else 0
     )
-    kelly_review_before_bet_count = (
-        int(
-            kelly_df["recommended_action"]
+    kelly_review_before_bet_count = int(
+        (
+            kelly_df.get("recommended_action", pd.Series("", index=kelly_df.index))
             .fillna("")
             .astype(str)
             .str.strip()
             .eq("REVIEW_BEFORE_BET")
-            .sum()
-        )
-        if not kelly_df.empty and "recommended_action" in kelly_df.columns
-        else 0
+            | kelly_df.get("review_before_bet", pd.Series(False, index=kelly_df.index)).map(_is_truthy)
+        ).sum()
     )
     kelly_review_policy_hold_count = (
         int(
@@ -1367,13 +1369,14 @@ def build_daily_summary(
         lines.append(f"- warning: {warning}")
 
     lines.extend(["", "Kelly Stakes", "-" * 72])
-    if kelly_eligible.empty:
+    if kelly_df.empty:
         lines.append("- None")
     else:
-        for _, row in _sort_for_display(kelly_eligible).iterrows():
+        for _, row in _sort_for_display(kelly_df).iterrows():
             lines.append(_kelly_line(row))
     lines.append(f"Total exposure: {_format_money(total_exposure)}")
     lines.append(f"Expected EV: {_format_money(expected_ev)}")
+    lines.append(_financial_ev_coverage_text(ev_summary))
     lines.append(f"manual_review_required_count: {kelly_manual_review_required_count}")
     lines.append(f"review_before_bet_count: {kelly_review_before_bet_count}")
     lines.append(f"hold_policy_count: {kelly_review_policy_hold_count}")
@@ -1513,7 +1516,8 @@ def build_daily_summary(
         "elite_count": int(len(elite_df)),
         "kelly_eligible_count": int(len(kelly_eligible)),
         "total_exposure": round(total_exposure, 2),
-        "expected_ev": round(expected_ev, 2),
+        "expected_ev": expected_ev,
+        "expected_value_coverage": ev_summary,
         "full_market_counts": dict(sorted(counts.items())),
         "elite_context_alignment": elite_alignment,
         "elite_context_caution": elite_caution,
@@ -1634,6 +1638,8 @@ def _build_no_slate_daily_summary(
         "- No operator action required for this no-game/no-slate date.",
         "- Full slate generation was not run.",
         "- Auxiliary report generation was skipped.",
+        "Expected EV: n/a",
+        "EV coverage: 0/0 available; reasons={'financial_ev_empty_cohort': 1}",
     ]
 
     metadata: dict[str, Any] = {
@@ -1660,7 +1666,8 @@ def _build_no_slate_daily_summary(
         "paper_kelly_simulation_exposure": 0.0,
         "paper_kelly_simulation_expected_ev": 0.0,
         "total_exposure": 0.0,
-        "expected_ev": 0.0,
+        "expected_ev": None,
+        "expected_value_coverage": _financial_ev_summary(pd.DataFrame()),
         "paper_kelly_performance_report_count": 0,
         "paper_kelly_performance_current_date_rows": 0,
         "paper_kelly_performance_pending_rows": 0,
@@ -1927,7 +1934,7 @@ def main(argv: list[str] | None = None) -> int:
         f"market_shadow_rows={metadata.get('market_shadow_rows', 0)} "
         f"market_shadow_non_points={metadata.get('market_shadow_non_points_rows', 0)} "
         f"exposure={float(metadata.get('total_exposure', 0.0)):.2f} "
-        f"expected_ev={float(metadata.get('expected_ev', 0.0)):.2f} "
+        f"expected_ev={_format_money(_safe_float(metadata.get('expected_ev')))} "
         f"pending_grading={metadata.get('pending_grading_count', 0)}"
     )
     return 0
