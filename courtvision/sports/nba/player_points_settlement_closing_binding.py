@@ -1827,9 +1827,28 @@ class _SettlementV2RootLock:
     def __enter__(self) -> "_SettlementV2RootLock":
         _make_safe_directory(self._root, self._root)
         deadline = time.monotonic() + 10.0
+        permission_retries = 0
         while True:
             try:
                 self._fd = os.open(self._path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except FileExistsError as exc:
+                if time.monotonic() >= deadline:
+                    raise NBAPlayerPointsClosingBindingError(
+                        f"settlement writer lock is already held: {self._path}"
+                    ) from exc
+                time.sleep(0.01)
+            except PermissionError:
+                if permission_retries >= 3 or time.monotonic() >= deadline:
+                    raise
+                try:
+                    self._path.lstat()
+                except FileNotFoundError:
+                    # Windows can deny creation while the previous lock disappears.
+                    permission_retries += 1
+                    time.sleep(0.001)
+                    continue
+                raise
+            else:
                 os.write(
                     self._fd,
                     canonical_json_bytes(
@@ -1838,12 +1857,6 @@ class _SettlementV2RootLock:
                 )
                 os.fsync(self._fd)
                 return self
-            except FileExistsError as exc:
-                if time.monotonic() >= deadline:
-                    raise NBAPlayerPointsClosingBindingError(
-                        f"settlement writer lock is already held: {self._path}"
-                    ) from exc
-                time.sleep(0.01)
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
         if self._fd is not None:
