@@ -8,10 +8,12 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+from threading import Barrier
 
 import pytest
 
 import courtvision.sports.nba.player_points_research_runner as runner_module
+import courtvision.sports.nba.player_points_settlement_closing_binding as binding_module
 from courtvision.sports.nba.player_points_research_runner import (
     NBAPlayerPointsPathSecurityError,
     NBAPlayerPointsPrerequisiteEvidenceError,
@@ -490,6 +492,213 @@ def test_v2_atomic_interruptions_leave_no_completed_segment_and_release_lock(
     assert recovered.completion_status == "complete"
 
 
+def _stub_v2_lock_attempts(monkeypatch: pytest.MonkeyPatch, errors):
+    original_open = os.open
+    remaining_errors = iter(errors)
+    attempts: list[Path] = []
+    sleeps: list[float] = []
+
+    def open_lock(path, flags, mode):
+        attempts.append(path)
+        error = next(remaining_errors, None)
+        if error is not None:
+            raise error
+        return original_open(path, flags, mode)
+
+    monkeypatch.setattr(binding_module.os, "open", open_lock)
+    monkeypatch.setattr(binding_module.time, "sleep", sleeps.append)
+    return attempts, sleeps
+
+
+@pytest.mark.parametrize("denials", [1, 2, 3])
+def test_v2_root_lock_recovers_when_permission_denied_lock_disappears(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    denials: int,
+) -> None:
+    lock = binding_module._SettlementV2RootLock(tmp_path)
+    original_open = os.open
+    attempts: list[Path] = []
+    sleeps: list[float] = []
+
+    def disappearing_lock(path, flags, mode):
+        attempts.append(path)
+        if len(attempts) <= denials:
+            path.write_bytes(b"other writer")
+            path.unlink()
+            raise PermissionError(13, "lock disappeared", str(path))
+        return original_open(path, flags, mode)
+
+    monkeypatch.setattr(binding_module.os, "open", disappearing_lock)
+    monkeypatch.setattr(binding_module.time, "sleep", sleeps.append)
+    with lock:
+        assert lock._fd is not None
+        assert lock._path.is_file()
+    assert attempts == [lock._path] * (denials + 1)
+    assert sleeps == [0.001] * denials
+    assert lock._fd is None
+    assert not lock._path.exists()
+
+
+@pytest.mark.parametrize("lock_exists", [False, True])
+def test_v2_root_lock_persistent_permission_denial_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lock_exists: bool,
+) -> None:
+    lock = binding_module._SettlementV2RootLock(tmp_path)
+    denial = PermissionError(13, "persistent denial", str(lock._path))
+    if lock_exists:
+        lock._path.write_bytes(b"existing owner")
+    attempts, sleeps = _stub_v2_lock_attempts(monkeypatch, [denial] * 4)
+
+    with pytest.raises(PermissionError) as raised:
+        with lock:
+            pytest.fail("permission denial acquired the lock")
+
+    assert raised.value is denial
+    assert len(attempts) == (1 if lock_exists else 4)
+    assert sleeps == ([] if lock_exists else [0.001] * 3)
+    assert lock._fd is None
+    if lock_exists:
+        assert lock._path.read_bytes() == b"existing owner"
+    else:
+        assert not lock._path.exists()
+
+
+@pytest.mark.parametrize("error_type", [OSError, FileNotFoundError])
+def test_v2_root_lock_unrelated_oserror_fails_immediately(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[OSError],
+) -> None:
+    lock = binding_module._SettlementV2RootLock(tmp_path)
+    error = error_type("unrelated open failure")
+    attempts, sleeps = _stub_v2_lock_attempts(monkeypatch, [error])
+
+    with pytest.raises(error_type) as raised:
+        with lock:
+            pytest.fail("unrelated error acquired the lock")
+
+    assert raised.value is error
+    assert attempts == [lock._path]
+    assert sleeps == []
+    assert lock._fd is None
+    assert not lock._path.exists()
+
+
+@pytest.mark.parametrize("error_type", [PermissionError, OSError])
+def test_v2_root_lock_indeterminate_path_probe_fails_immediately(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[OSError],
+) -> None:
+    lock = binding_module._SettlementV2RootLock(tmp_path)
+    probe_error = error_type("cannot establish lock disappearance")
+    original_lstat = Path.lstat
+    attempts, sleeps = _stub_v2_lock_attempts(monkeypatch, [PermissionError(13, "denied")])
+
+    def indeterminate_lstat(path, *args, **kwargs):
+        if path == lock._path:
+            raise probe_error
+        return original_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", indeterminate_lstat)
+    with pytest.raises(error_type) as raised:
+        with lock:
+            pytest.fail("indeterminate path acquired the lock")
+
+    assert raised.value is probe_error
+    assert attempts == [lock._path]
+    assert sleeps == []
+    assert lock._fd is None
+
+
+@pytest.mark.parametrize(
+    ("error_type", "clock_values", "expected_sleeps", "expected_attempts"),
+    [
+        (FileExistsError, [100.0, 100.1, 110.0], [0.01], 2),
+        (PermissionError, [100.0, 110.0], [], 1),
+    ],
+)
+def test_v2_root_lock_preserves_contention_interval_and_ten_second_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[OSError],
+    clock_values: list[float],
+    expected_sleeps: list[float],
+    expected_attempts: int,
+) -> None:
+    lock = binding_module._SettlementV2RootLock(tmp_path)
+    error = error_type("acquisition failed")
+    attempts, sleeps = _stub_v2_lock_attempts(monkeypatch, [error] * 2)
+    clock = iter(clock_values)
+    monkeypatch.setattr(binding_module.time, "monotonic", lambda: next(clock))
+    expected_error = (
+        NBAPlayerPointsClosingBindingError if error_type is FileExistsError else PermissionError
+    )
+
+    with pytest.raises(expected_error) as raised:
+        with lock:
+            pytest.fail("expired acquisition retried")
+
+    assert len(attempts) == expected_attempts
+    assert sleeps == expected_sleeps
+    assert lock._fd is None
+    if error_type is FileExistsError:
+        assert "already held" in str(raised.value)
+        assert raised.value.__cause__ is error
+    else:
+        assert raised.value is error
+
+
+def test_v2_root_lock_permission_retry_budget_survives_interleaved_contention(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock = binding_module._SettlementV2RootLock(tmp_path)
+    denial = PermissionError(13, "persistent denial")
+    contention = FileExistsError("another writer")
+    attempts, sleeps = _stub_v2_lock_attempts(
+        monkeypatch,
+        [denial, contention, denial, contention, denial, contention, denial],
+    )
+    monkeypatch.setattr(binding_module.time, "monotonic", lambda: 100.0)
+
+    with pytest.raises(PermissionError) as raised:
+        with lock:
+            pytest.fail("contention reset the permission retry budget")
+
+    assert raised.value is denial
+    assert attempts == [lock._path] * 7
+    assert sleeps == [0.001, 0.01, 0.001, 0.01, 0.001, 0.01]
+    assert lock._fd is None
+
+
+@pytest.mark.parametrize("operation", ["write", "fsync"])
+def test_v2_root_lock_metadata_permission_error_is_not_retried(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    lock = binding_module._SettlementV2RootLock(tmp_path)
+    denial = PermissionError(13, "metadata denied")
+    attempts, sleeps = _stub_v2_lock_attempts(monkeypatch, [])
+
+    def deny_metadata(*args):
+        raise denial
+
+    monkeypatch.setattr(binding_module.os, operation, deny_metadata)
+    try:
+        with pytest.raises(PermissionError) as raised:
+            lock.__enter__()
+        assert raised.value is denial
+        assert attempts == [lock._path]
+        assert sleeps == []
+    finally:
+        lock.__exit__(None, None, None)
+
+
 def test_concurrent_identical_and_conflicting_v2_publication(tmp_path: Path) -> None:
     _, _, _, context, plan_build = _prepare_v2_plan(tmp_path)
     envelope = _approval_envelope(context, plan_build)
@@ -513,6 +722,39 @@ def test_concurrent_identical_and_conflicting_v2_publication(tmp_path: Path) -> 
     )
     with pytest.raises(NBAPlayerPointsClosingBindingError, match="conflicting"):
         _write_v2(context, plan_build, changed_envelope)
+
+
+def test_concurrent_conflicting_v2_publications_fail_closed(tmp_path: Path) -> None:
+    _, paths, _, context, plan_build = _prepare_v2_plan(tmp_path)
+    envelopes = [
+        _approval_envelope(context, plan_build),
+        _approval_envelope(context, plan_build, timestamp="2026-06-06T04:02:00Z"),
+    ]
+    ready = Barrier(2)
+
+    def synchronize(stage: str) -> None:
+        if stage == "before_any_write":
+            ready.wait(timeout=10.0)
+
+    def publish(envelope):
+        try:
+            return _write_v2(
+                context, plan_build, envelope, failure_hook=synchronize
+            ).completion_status
+        except NBAPlayerPointsClosingBindingError as exc:
+            assert "conflicting" in str(exc)
+            return "conflicting"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(publish, envelopes))
+
+    assert sorted(outcomes) == ["complete", "conflicting"]
+    root = paths["evidence_root"] / "nba_player_points_evidence"
+    assert len(list(root.glob("settlement/segments/*/*/COMPLETE"))) == 1
+    assert not (root / ".settlement-writer.lock").exists()
+    report = verify_nba_player_points_settlement_evidence_v2(root)
+    assert report.ok is True
+    assert report.binding_status_counts["closing-bound"] == 1
 
 
 def test_v2_verification_and_v1_legacy_classification(tmp_path: Path) -> None:
