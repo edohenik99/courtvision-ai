@@ -21,6 +21,7 @@ from courtvision.sports.mlb.training import hr_research_baseline as baseline
 NOW = datetime(2026, 8, 6, 17, 0, tzinfo=timezone.utc)
 CLOSING_NOW = datetime(2026, 8, 6, 22, 45, tzinfo=timezone.utc)
 SETTLEMENT_NOW = datetime(2026, 8, 7, 5, 0, tzinfo=timezone.utc)
+SETTLEMENT_AUTHORIZATION_ID = "cvfa-v1-" + "a" * 64
 
 
 def _clock(value: datetime = NOW):
@@ -42,6 +43,8 @@ def _write_csv(
     rows: list[dict[str, object]],
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    if "snapshot_time" in columns and "market" in columns and "event_type" not in columns:
+        columns = (*columns, "event_type")
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(columns), lineterminator="\n")
         writer.writeheader()
@@ -201,6 +204,7 @@ def _odds_row(**overrides: object) -> dict[str, object]:
         "bookmaker_key": "draftkings",
         "bookmaker": "DraftKings",
         "market": "batter_home_runs_alternate",
+        "event_type": "regular_season",
         "player": "Alpha Batter",
         "side": "Over",
         "price": 400,
@@ -475,6 +479,7 @@ def test_special_events_and_post_start_rows_are_explicitly_excluded(
             _odds_row(
                 event_id="all-star",
                 home_team="National League",
+                event_type="all_star",
                 away_team="American League",
             ),
             _odds_row(event_id="started", commence_time="2026-08-06T16:00:00Z"),
@@ -794,11 +799,22 @@ def _settle(
     control: trial.ControlActivationResult,
     *,
     clock_value: datetime = SETTLEMENT_NOW,
+    executing_commit: str | None = None,
+    authorization_id: str = SETTLEMENT_AUTHORIZATION_ID,
 ) -> dict[str, object]:
+    if executing_commit is None:
+        prediction = next(
+            row
+            for row in _read_csv(control.control_dir / "prospective_ledger.csv")
+            if row["record_type"] == "prediction"
+        )
+        executing_commit = prediction["prediction_git_commit"]
     return trial.settle_prospective_paper_day(
         control_dir=control.control_dir,
         results_csv=workspace["results"],
         trial_root=workspace["trial"],
+        executing_commit=executing_commit,
+        authorization_id=authorization_id,
         clock=_clock(clock_value),
     )
 
@@ -811,6 +827,30 @@ def test_final_strict_result_appends_one_settlement(workspace: dict[str, Path]) 
     assert rows[-1]["record_type"] == "settlement"
     assert rows[-1]["final_hr_outcome"] == "1"
     assert rows[-1]["grade"] == "win"
+    assert result["settlement_executing_commit"] == rows[0]["prediction_git_commit"]
+    assert result["settlement_authorization_id"] == SETTLEMENT_AUTHORIZATION_ID
+
+
+def test_settlement_wrong_executing_commit_fails_before_ledger_mutation(
+    workspace: dict[str, Path],
+) -> None:
+    control, _ = _published_run(workspace)
+    ledger = control.control_dir / "prospective_ledger.csv"
+    before = ledger.read_bytes()
+    with pytest.raises(trial.MLBHRProspectiveTrialError, match="executing commit"):
+        _settle(workspace, control, executing_commit="f" * 40)
+    assert ledger.read_bytes() == before
+
+
+def test_settlement_missing_authorization_fails_before_ledger_mutation(
+    workspace: dict[str, Path],
+) -> None:
+    control, _ = _published_run(workspace)
+    ledger = control.control_dir / "prospective_ledger.csv"
+    before = ledger.read_bytes()
+    with pytest.raises(trial.MLBHRProspectiveTrialError, match="authorization identity"):
+        _settle(workspace, control, authorization_id="")
+    assert ledger.read_bytes() == before
 
 
 def test_settlement_uses_strict_event_and_normalized_player_join(
@@ -956,7 +996,11 @@ def test_settlement_rejects_ledger_without_committed_prediction(
     orphan["grade"] = "win"
     _write_csv(ledger_path, trial.LEDGER_COLUMNS, [orphan])
     with pytest.raises(trial.MLBHRProspectiveTrialError, match="not exact|no committed"):
-        _settle(workspace, control)
+        _settle(
+            workspace,
+            control,
+            executing_commit=prediction["prediction_git_commit"],
+        )
 
 
 def test_grade_files_are_never_read_as_settlement_labels(
@@ -1026,21 +1070,21 @@ def test_windows_permission_error_leaves_visible_lock_untouched(
     )
     owner.acquire()
     before = owner.path.read_bytes()
-    real_open = trial.os.open
+    real_link = trial.os.link
 
-    def denied(path: object, flags: int, mode: int = 0o777) -> int:
-        if str(path) == str(owner.path):
+    def denied(source: object, destination: object) -> None:
+        if str(destination) == str(owner.path):
             raise PermissionError("denied")
-        return real_open(path, flags, mode)
+        return real_link(source, destination)
 
-    monkeypatch.setattr(trial.os, "open", denied)
+    monkeypatch.setattr(trial.os, "link", denied)
     contender = trial._TrialStoreLock(  # type: ignore[attr-defined]
         workspace["trial"], operation="other", control_id="control", clock=_clock()
     )
     with pytest.raises(trial.MLBHRProspectiveTrialBusyError):
         contender.acquire()
     assert owner.path.read_bytes() == before
-    monkeypatch.setattr(trial.os, "open", real_open)
+    monkeypatch.setattr(trial.os, "link", real_link)
     owner.release()
 
 

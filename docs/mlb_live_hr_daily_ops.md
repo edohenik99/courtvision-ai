@@ -65,8 +65,10 @@ The daily collection runner does not grade results. Grading can remain manual or
 
 ## Consolidated nightly finalization
 
-The consolidated nightly pipeline is the intended 3:30 AM local automation. It
-updates local `main`, selects completed MLB dates that need processing, runs the
+The candidate consolidated nightly pipeline is a controller-only operation.
+It verifies one controller-issued authorization, its actual source root and
+clean commit, the exact operating date, and frozen prediction/control evidence
+before runtime output. It never changes its source tree. It runs the
 offline daily health check, regenerates the results workbook with
 `--preserve-results`, fills results from MLB StatsAPI without
 `--overwrite-filled`, exports the strict grader CSV, checks coverage per date,
@@ -74,7 +76,7 @@ grades only dates whose date-scoped coverage reports `Ready to grade: YES`, and
 writes a concise JSON and text run summary.
 
 Incomplete dates are skipped without failing the whole run. No-data dates are
-logged and treated as successful skips. Failures from git, the health check,
+logged and treated as successful skips. Failures from source verification, the health check,
 workbook generation, result filling, export, coverage execution, grading, or
 grade-summary generation fail the run and appear in the timestamped summaries.
 
@@ -84,49 +86,30 @@ the workbook, and relies on the existing date-scoped coverage gate before
 grading. For final games, rostered players without batting stats are marked
 `void` by the existing filler so non-participants do not block coverage.
 
-Manual dry-run command:
+The candidate wrapper requires Date, ExpectedCommit, AuthorizationReceipt,
+AuthorizationId, ControlId, ExecutionReceiptPath and an absolute
+PythonExecutable. Contract verification, pipeline execution, child tools and
+receipt publication use that one interpreter. There is no source-verification
+bypass. The CLI refuses a source root or date that differs from the receipt.
+Before result writers run, existing workbook and strict-results bytes are
+copied into a unique create-only `result_revisions` directory with a digest
+manifest. Preservation failure stops the result writers. Execution receipts
+bind the exact strict-results path and digest; consumers must supply that path
+and reject changed bytes. A dry run never publishes an execution receipt.
 
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\dev\Sport_Project1\tools\run_courtvision_mlb_nightly_pipeline.ps1 -DryRun
-```
+Keep every existing task disabled and preserve its definition. The versioned
+candidate wrappers are under `automation/mlb_hr_recovery`; the installed
+automation directory is not modified. Internal MLB archive grading and summary
+remain part of the finalizer completion sequence; the unrelated generic nightly
+grader is not a recovery dependency.
 
-Manual date-scoped dry-run command:
+The controller must qualify terminal game status and the four-hour buffer,
+then authorize exactly one operating date. A dry-run flag is not a network or
+write boundary. Offline tests require host-enforced isolation, and the future
+full-day rehearsal and activation each require separate authorization.
 
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\dev\Sport_Project1\tools\run_courtvision_mlb_nightly_pipeline.ps1 -DryRun -Date YYYY-MM-DD
-```
-
-The `-DryRun` mode copies the master/workbook/results inputs under
-`automation_logs\dry_run_YYYYMMDD_HHMMSS\` and writes dry-run result, grade, and
-report outputs there. It does not mutate the canonical workbook, strict results
-CSV, grade CSV, or grade summary report. Use `-SkipGit` only for local validation
-when uncommitted work is present; scheduled production runs must omit it.
-
-Manual production test command after review:
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\dev\Sport_Project1\tools\run_courtvision_mlb_nightly_pipeline.ps1
-```
-
-Repoint the existing 3:30 AM finalizer task only after a dry-run and manual
-production test have passed:
-
-```powershell
-schtasks /Change /TN "CourtVision MLB HR Finalizer" /TR "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\dev\Sport_Project1\tools\run_courtvision_mlb_nightly_pipeline.ps1" /ST 03:30
-```
-
-Do not disable the existing 2:00 AM Nightly Grader until the new nightly pipeline
-has passed at least one manual production test and one scheduled run. After that
-validation, the review command to disable it is:
-
-```powershell
-schtasks /Change /TN "CourtVision Nightly Grader" /DISABLE
-```
-
-The 3:30 AM local pipeline normally processes yesterday plus the prior completed
-dates in its lookback window. This gives late West Coast games and extra innings
-more time to reach final status before the MLB StatsAPI fill runs, and it retries
-recent incomplete dates idempotently.
+This candidate is statically prepared; behavioral qualification, provider
+calls, control publication, manual rehearsal and activation are NOT_EXECUTED.
 
 If target-date coverage remains incomplete, diagnose the blank workbook rows without
 changing results or running the grader:

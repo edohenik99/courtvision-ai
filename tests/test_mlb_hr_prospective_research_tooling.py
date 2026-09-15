@@ -35,6 +35,8 @@ from courtvision.sports.mlb.training.hr_research_baseline import (
 
 def _write_csv(path: Path, columns: tuple[str, ...], rows: list[dict[str, object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    if "snapshot_time" in columns and "market" in columns and "event_type" not in columns:
+        columns = (*columns, "event_type")
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(columns))
         writer.writeheader()
@@ -56,6 +58,7 @@ def _odds_row(**overrides: object) -> dict[str, object]:
         "bookmaker_key": "draftkings",
         "bookmaker": "DraftKings",
         "market": "batter_home_runs_alternate",
+        "event_type": "regular_season",
         "player": "Alpha Batter",
         "side": "Over",
         "price": 400,
@@ -167,6 +170,7 @@ def _all_star_odds(path: Path, *, player_count: int = 7) -> Path:
             commence_time="2026-07-15T00:01:00Z",
             snapshot_time="2026-07-14T15:30:05Z",
             home_team="National League",
+            event_type="all_star",
             away_team="American League",
             bookmaker_key="fanduel",
             bookmaker="FanDuel",
