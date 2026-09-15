@@ -55,4 +55,7 @@ jobs:
 
       - name: Test MLB HR recovery PowerShell contracts
         shell: pwsh
-        run: ./tests/test_mlb_hr_recovery_contracts.ps1 -ScratchRoot (Join-Path $env:RUNNER_TEMP ('mlb-recovery-contracts-' + [guid]::NewGuid().ToString('N')))
+        run: |
+          $scratchRoot = Join-Path $env:RUNNER_TEMP ('mlb-recovery-contracts-' + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $scratchRoot -ErrorAction Stop | Out-Null
+          ./tests/test_mlb_hr_recovery_contracts.ps1 -ScratchRoot $scratchRoot
