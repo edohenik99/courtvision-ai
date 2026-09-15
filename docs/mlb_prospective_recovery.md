@@ -68,10 +68,40 @@ Predictor/closing runners accept explicitly digest-bound `-LocalOddsCsv`,
 manual operation. Live paths require an explicit collection setting and remain
 unexecuted during candidate validation. Prediction creates a new source revision
 that binds provider events to exactly one official schedule game by teams,
-full start timestamp, operating date and positive gamePk. Only official game type
-`R` and HR Over 0.5 are accepted. Original source files are never enriched in place.
+Toronto operating date and positive integer `gamePk`. Both starts must be on that
+operating date and differ by at most 120 seconds, inclusive. Home and away team
+names must match exactly, and only official game type `R` and HR Over 0.5 are
+accepted. Cancelled and postponed games remain excluded. Zero matches, multiple
+matches, repeated official game identities, or two provider event IDs binding
+the same `gamePk` fail closed before creating a revision. Same-team doubleheaders
+are distinguished only when exactly one start falls within the bound; the matcher
+never selects the nearest or first candidate. Rows for one provider event must
+retain identical provider start/home/away identity.
+
+Original source files are never enriched in place. The revision preserves raw
+`commence_time`, retains existing canonical `game_pk` and `game_type` fields,
+and adds `official_commence_time_utc` and `schedule_start_drift_seconds` (provider
+minus official, signed seconds). It binds both input digests. Python performs the
+authoritative matching and, for prediction, requires the complete eligible slate
+with `--require-complete-slate`. PowerShell verifies the enriched file and receipt
+instead of repeating an exact provider/MLB start-time comparison. Closing retains
+its existing provider timestamp identity checks; terminal status still comes
+from the official schedule.
 The baseline also rejects unsupported markets, ambiguous/missing event types and
 historical prediction dates. Existing historical readers remain compatible.
+
+The September 15 rehearsal at merged commit
+`354ff86b0474303bad13abfeeeb110eb7d56e2e3` stopped before prediction because three
+preserved provider starts were exactly 60 seconds later than MLB's schedule.
+Repair validation reuses that snapshot and schedule without provider recollection
+or real prediction publication. Regression fixtures use invented event IDs and
+minimal structural facts; provider payloads remain outside Git.
+
+Preserve control `mlb-hr-control-v1-c6978fde4ecae0b3d136` and its immutable
+configuration as an aborted pre-publication attempt bound to that commit. This
+repair requires another NEW control and configuration after merge, bound to the
+final merged runtime. Identity validation does not authorize historical backfill,
+task changes, betting, or OfficialPick activation.
 
 The nightly controller preserves the terminal-game and four-hour buffer chain:
 authorization, pinned finalizer, result generation/export, internal MLB archive

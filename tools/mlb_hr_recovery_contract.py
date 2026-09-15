@@ -29,6 +29,7 @@ RESEARCH_FLAGS = {
     "eligible_for_betting": False,
     "eligible_for_official_pick": False,
 }
+MATCH_TOLERANCE_SECONDS = 120
 PARENTS = {
     "predictor": "CourtVision MLB HR Prospective Predictor",
     "closing": "CourtVision MLB HR Closing Scheduler",
@@ -217,8 +218,13 @@ def verify_task_identity(tasks: list[dict], expected: dict) -> str:
 
 
 def enrich_odds(*, odds_path: Path, odds_sha256: str, schedule_path: Path,
-                schedule_sha256: str, operating_date: str, output: Path) -> dict:
-    """Publish a new input revision; never change the preserved provider source."""
+                schedule_sha256: str, operating_date: str, output: Path,
+                require_complete_slate: bool = False) -> dict:
+    """Bind unique official identities without rewriting provider timestamps.
+
+    Identity-only callers may validate a subset. Prediction requires the complete
+    eligible official slate, using this same matcher before any revision is written.
+    """
     date.fromisoformat(operating_date)
     source = read_bound(odds_path, odds_sha256)
     schedule = read_json(read_bound(schedule_path, schedule_sha256))
@@ -240,35 +246,72 @@ def enrich_odds(*, odds_path: Path, odds_sha256: str, schedule_path: Path,
     if not rows or not reader.fieldnames:
         raise RecoveryContractError("odds source is empty")
     def timestamp(value):
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if not isinstance(value, str):
+            raise RecoveryContractError("explicit schedule timestamp required")
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise RecoveryContractError("invalid schedule timestamp") from exc
         if parsed.tzinfo is None:
             raise RecoveryContractError("timezone-aware schedule identity required")
         return parsed.astimezone(timezone.utc)
+
+    operating_timezone = ZoneInfo("America/Toronto")
+    official_games = []
+    for game in games:
+        if game.get("gameType") != "R" or game.get("status", {}).get("detailedState") in (
+            "Cancelled", "Postponed",
+        ):
+            continue
+        official_start = timestamp(game.get("gameDate"))
+        if official_start.astimezone(operating_timezone).date().isoformat() != operating_date:
+            continue
+        if type(game.get("gamePk")) is not int or game["gamePk"] <= 0:
+            if require_complete_slate:
+                raise RecoveryContractError("missing authoritative regular-season gamePk")
+            continue
+        official_games.append((game, official_start))
+    official_ids = {str(game["gamePk"]) for game, _ in official_games}
+    if len(official_ids) != len(official_games):
+        raise RecoveryContractError("ambiguous authoritative regular-season gamePk")
+
     seen = {}
+    provider_identities = {}
     for row in rows:
         if None in row or any(value is None for value in row.values()):
             raise RecoveryContractError("odds source row width does not match its headers")
         if row.get("market") not in ("batter_home_runs", "batter_home_runs_alternate") or row.get("side", "").lower() != "over" or row.get("point") not in ("0.5", ".5"):
             raise RecoveryContractError("unsupported market/side/line")
         start = timestamp(row["commence_time"])
-        if start.astimezone(ZoneInfo("America/Toronto")).date().isoformat() != operating_date:
+        if start.astimezone(operating_timezone).date().isoformat() != operating_date:
             raise RecoveryContractError("odds operating date mismatch")
-        matches = [game for game in games if timestamp(game["gameDate"]) == start
+        if not row["home_team"] or not row["away_team"]:
+            raise RecoveryContractError("explicit canonical home and away teams required")
+        identity = (row["commence_time"], row["home_team"], row["away_team"])
+        if (not row["event_id"]
+                or provider_identities.setdefault(row["event_id"], identity) != identity):
+            raise RecoveryContractError("provider event identity conflict")
+        matches = [(game, official_start) for game, official_start in official_games
+                   if abs((start - official_start).total_seconds()) <= MATCH_TOLERANCE_SECONDS
                    and game["teams"]["home"]["team"]["name"] == row["home_team"]
                    and game["teams"]["away"]["team"]["name"] == row["away_team"]]
-        if (len(matches) != 1 or matches[0].get("gameType") != "R"
-                or type(matches[0].get("gamePk")) is not int
-                or matches[0]["gamePk"] <= 0):
+        if len(matches) != 1:
             raise RecoveryContractError("missing/ambiguous authoritative regular-season identity")
-        game_id = str(matches[0]["gamePk"])
+        game, official_start = matches[0]
+        game_id = str(game["gamePk"])
         if not row.get("event_id") or seen.setdefault(row["event_id"], game_id) != game_id:
             raise RecoveryContractError("provider event identity conflict")
         row.update(event_type="regular_season", game_type="R", game_pk=game_id,
+                   official_commence_time_utc=official_start.isoformat().replace("+00:00", "Z"),
+                   schedule_start_drift_seconds=(start - official_start).total_seconds(),
                    schedule_sha256=schedule_sha256, source_odds_sha256=odds_sha256)
     if len(set(seen.values())) != len(seen):
         raise RecoveryContractError("multiple provider events resolve to one official game")
+    if require_complete_slate and set(seen.values()) != official_ids:
+        raise RecoveryContractError("provider slate does not match complete official game identities")
     columns = list(reader.fieldnames)
-    for key in ("event_type", "game_type", "game_pk", "schedule_sha256", "source_odds_sha256"):
+    for key in ("event_type", "game_type", "game_pk", "official_commence_time_utc",
+                "schedule_start_drift_seconds", "schedule_sha256", "source_odds_sha256"):
         if key not in columns:
             columns.append(key)
     stream = io.StringIO(newline="")
@@ -279,8 +322,14 @@ def enrich_odds(*, odds_path: Path, odds_sha256: str, schedule_path: Path,
     assert_no_reparse_path(output)
     with output.open("xb") as handle:
         handle.write(payload)
-    return {"path": str(output), "sha256": hashlib.sha256(payload).hexdigest(),
+    return {"success": True, "path": str(output), "sha256": hashlib.sha256(payload).hexdigest(),
             "rows": len(rows), "source_odds_sha256": odds_sha256,
+            "operating_date": operating_date,
+            "match_tolerance_seconds": MATCH_TOLERANCE_SECONDS,
+            "complete_slate_required": require_complete_slate,
+            "provider_events": len(seen), "canonical_game_bindings": len(set(seen.values())),
+            "eligible_official_games": len(official_games),
+            "ambiguous_bindings": 0, "unmatched_bindings": 0,
             "schedule_sha256": schedule_sha256, **RESEARCH_FLAGS}
 
 
@@ -296,6 +345,7 @@ def main(argv=None):
     publication.add_argument("--predictions-csv", type=Path, required=True)
     publication.add_argument("--operating-date", required=True)
     enrich = commands.add_parser("enrich-odds")
+    enrich.add_argument("--require-complete-slate", action="store_true")
     for name in ("odds-path", "schedule-path", "output"):
         enrich.add_argument("--" + name, type=Path, required=True)
     for name in ("odds-sha256", "schedule-sha256", "operating-date"):

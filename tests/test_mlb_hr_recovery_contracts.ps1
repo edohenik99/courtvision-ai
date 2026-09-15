@@ -26,6 +26,8 @@ $script:Tasks = @()
 $script:TaskReadFailure = $false
 $script:PythonMode = 'valid'
 $script:PythonCalls = [Collections.Generic.List[object]]::new()
+$script:EnrichmentOverrides = @{}
+$script:EnrichmentOmittedField = $null
 
 function Assert-Test {
     param([bool]$Condition, [string]$Message)
@@ -89,6 +91,34 @@ function Invoke-RecoveryTestPython {
     $arguments = @($args | ForEach-Object { [string]$_ })
     $script:PythonCalls.Add($arguments)
     $global:LASTEXITCODE = 0
+    if ($arguments -contains 'enrich-odds') {
+        Assert-Test ($arguments -contains '--require-complete-slate') 'Canonical enrichment must require the entire eligible slate.'
+        if ($script:PythonMode -eq 'enrichment_failure') {
+            $global:LASTEXITCODE = 1
+            return '{"success":false}'
+        }
+        $values = @{}
+        foreach ($name in @('odds-path', 'odds-sha256', 'schedule-path', 'schedule-sha256', 'operating-date', 'output')) {
+            $index = [Array]::IndexOf($arguments, '--' + $name)
+            Assert-Test ($index -ge 0 -and $index + 1 -lt $arguments.Count) "Missing enrichment argument: $name"
+            $values[$name] = $arguments[$index + 1]
+        }
+        Assert-Test ((Get-FileHash -LiteralPath $values['odds-path'] -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $values['odds-sha256']) 'Provider source digest was not forwarded.'
+        Assert-Test ((Get-FileHash -LiteralPath $values['schedule-path'] -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $values['schedule-sha256']) 'Preserved schedule digest was not forwarded.'
+        Write-NewFixture -Path $values['output'] -Text "event_id,commence_time,game_pk,game_type,official_commence_time_utc,schedule_start_drift_seconds`nsynthetic-event,2030-08-06T23:01:00Z,12345,R,2030-08-06T23:00:00Z,60`n"
+        $receipt = @{
+            success = $true; path = $values['output']
+            sha256 = (Get-FileHash -LiteralPath $values['output'] -Algorithm SHA256).Hash.ToLowerInvariant()
+            rows = 1; source_odds_sha256 = $values['odds-sha256']; schedule_sha256 = $values['schedule-sha256']
+            operating_date = $values['operating-date']; match_tolerance_seconds = 120; complete_slate_required = $true
+            provider_events = 1; canonical_game_bindings = 1; eligible_official_games = 1
+            ambiguous_bindings = 0; unmatched_bindings = 0
+            research_only = $true; approval_status = 'not_approved'; eligible_for_betting = $false; eligible_for_official_pick = $false
+        }
+        foreach ($key in $script:EnrichmentOverrides.Keys) { $receipt[$key] = $script:EnrichmentOverrides[$key] }
+        if ($script:EnrichmentOmittedField) { $receipt.Remove($script:EnrichmentOmittedField) }
+        return ($receipt | ConvertTo-Json -Compress -Depth 5)
+    }
     if ($arguments -contains 'validate-publication') {
         $index = [Array]::IndexOf($arguments, '--predictions-csv')
         if ($script:PythonMode -eq 'publication_failure' -or $index -lt 0 -or
@@ -117,6 +147,7 @@ function Invoke-RecoveryTestPython {
 $repo = Join-Path $testRoot 'repository with spaces'
 $automationRoot = Join-Path (Join-Path $repo 'automation') 'mlb_hr_recovery'
 $trialRoot = Join-Path $testRoot 'disposable_trial'
+$evidenceRoot = Join-Path $testRoot 'disposable_evidence'
 $controlId = 'mlb-hr-control-v1-' + ('a' * 20)
 $expectedCommit = 'b' * 40
 $expectedControlManifestSha256 = 'c' * 64
@@ -202,6 +233,71 @@ Test-ContractCase 'local digest checks succeed and reject changed digest or miss
     Assert-Throws { Get-RecoveryBoundFile -Path (Join-Path $testRoot 'missing-input.txt') -Sha256 $sha } 'does not exist|Cannot find'
 }
 
+$enrichmentOdds = Join-Path $testRoot 'preserved-provider.csv'
+Write-NewFixture -Path $enrichmentOdds -Text "event_id,commence_time,home_team,away_team,market,side,point`nsynthetic-event,2030-08-06T23:01:00Z,Toronto Blue Jays,New York Yankees,batter_home_runs,Over,0.5`n"
+$enrichmentSourceSha = (Get-FileHash -LiteralPath $enrichmentOdds -Algorithm SHA256).Hash
+$enrichmentSchedule = @{
+    dates = @(@{ date = $OperatingDate; games = @(@{
+        gamePk = 12345; gameType = 'R'; gameDate = '2030-08-06T23:00:00Z'
+        teams = @{ home = @{ team = @{ name = 'Toronto Blue Jays' } }; away = @{ team = @{ name = 'New York Yankees' } } }
+    }) })
+}
+Test-ContractCase 'canonical Python drift receipt is accepted without a second time matcher' {
+    $result = New-RecoveryEnrichedOdds -OddsPath $enrichmentOdds -Schedule $enrichmentSchedule
+    $rows = @(Import-Csv -LiteralPath $result.FullName)
+    Assert-Test ($rows.Count -eq 1 -and $rows[0].commence_time -ceq '2030-08-06T23:01:00Z') 'Provider timestamp changed.'
+    Assert-Test ($rows[0].official_commence_time_utc -ceq '2030-08-06T23:00:00Z' -and $rows[0].schedule_start_drift_seconds -ceq '60') 'Authoritative time evidence was not retained.'
+    Assert-Test ((Get-FileHash -LiteralPath $enrichmentOdds -Algorithm SHA256).Hash -ceq $enrichmentSourceSha) 'Preserved source bytes changed.'
+}
+Test-ContractCase 'Python identity rejection cannot produce an accepted revision' {
+    $script:PythonMode = 'enrichment_failure'
+    try { Assert-Throws { New-RecoveryEnrichedOdds -OddsPath $enrichmentOdds -Schedule $enrichmentSchedule } 'identity binding failed' }
+    finally { $script:PythonMode = 'valid' }
+}
+foreach ($field in @('success', 'source_odds_sha256', 'schedule_sha256', 'complete_slate_required',
+    'provider_events', 'eligible_official_games', 'match_tolerance_seconds', 'research_only')) {
+    Test-ContractCase "enrichment receipt rejects missing $field" {
+        $script:EnrichmentOmittedField = $field
+        try { Assert-Throws { New-RecoveryEnrichedOdds -OddsPath $enrichmentOdds -Schedule $enrichmentSchedule } 'receipt is incomplete' }
+        finally { $script:EnrichmentOmittedField = $null }
+    }
+}
+foreach ($case in @(
+    @{ field = 'success'; value = $false },
+    @{ field = 'success'; value = 'true' },
+    @{ field = 'path'; value = $enrichmentOdds },
+    @{ field = 'source_odds_sha256'; value = ('0' * 64) },
+    @{ field = 'schedule_sha256'; value = ('0' * 64) },
+    @{ field = 'operating_date'; value = '2030-08-05' },
+    @{ field = 'match_tolerance_seconds'; value = 121 },
+    @{ field = 'match_tolerance_seconds'; value = '120' },
+    @{ field = 'complete_slate_required'; value = $false },
+    @{ field = 'complete_slate_required'; value = 'true' },
+    @{ field = 'rows'; value = 0 },
+    @{ field = 'provider_events'; value = 0 },
+    @{ field = 'canonical_game_bindings'; value = 2 },
+    @{ field = 'eligible_official_games'; value = 2 },
+    @{ field = 'ambiguous_bindings'; value = 1 },
+    @{ field = 'unmatched_bindings'; value = 1 },
+    @{ field = 'unmatched_bindings'; value = $null },
+    @{ field = 'research_only'; value = $false },
+    @{ field = 'approval_status'; value = 'approved' },
+    @{ field = 'eligible_for_betting'; value = $true },
+    @{ field = 'eligible_for_official_pick'; value = $true }
+)) {
+    Test-ContractCase "enrichment receipt rejects invalid $($case.field)=$($case.value)" {
+        $script:EnrichmentOverrides = @{}
+        $script:EnrichmentOverrides[$case.field] = $case.value
+        try { Assert-Throws { New-RecoveryEnrichedOdds -OddsPath $enrichmentOdds -Schedule $enrichmentSchedule } 'Schedule binding receipt' }
+        finally { $script:EnrichmentOverrides = @{} }
+    }
+}
+Test-ContractCase 'enriched artifact digest is verified before returning its path' {
+    $script:EnrichmentOverrides = @{ sha256 = ('0' * 64) }
+    try { Assert-Throws { New-RecoveryEnrichedOdds -OddsPath $enrichmentOdds -Schedule $enrichmentSchedule } 'digest mismatch' }
+    finally { $script:EnrichmentOverrides = @{} }
+}
+
 function New-CompletionFixture {
     param([string]$Name, [string]$Kind = 'postfinalizer')
     $script:controlDir = Join-Path (Join-Path $trialRoot $Name) $controlId
@@ -240,7 +336,7 @@ Test-ContractCase 'completion rejects corrupt JSON' {
     $fixture = New-CompletionFixture -Name 'corrupt-json'
     $invalid = Join-Path $controlDir 'corrupt-marker.json'
     Write-NewFixture -Path $invalid -Text '{malformed'
-    Assert-Throws { Read-RecoveryCompletionMarker -Path $invalid -OperatingDate $OperatingDate -Kind 'postfinalizer' } 'JSON|Json|parse|Unexpected'
+    Assert-Throws { Read-RecoveryCompletionMarker -Path $invalid -OperatingDate $OperatingDate -Kind 'postfinalizer' } 'JSON|Json|parse|Unexpected|Invalid object passed in'
 }
 Test-ContractCase 'completion rejects corrupted evidence prefix' {
     $fixture = New-CompletionFixture -Name 'corrupt-prefix'
@@ -280,6 +376,7 @@ Test-ContractCase 'shared source bytes and every task remain unchanged' {
     Assert-Test ($script:TaskMutationCalls -eq 0) 'A task mutation API was invoked.'
     Assert-Test ($script:TaskReadCalls -gt 0) 'No actual shared task lookup was exercised.'
     Assert-Test ($script:PythonCalls.Count -gt 0) 'No actual shared health invocation was exercised.'
+    Assert-Test ((Get-FileHash -LiteralPath $enrichmentOdds -Algorithm SHA256).Hash -ceq $enrichmentSourceSha) 'Enrichment changed the preserved provider source.'
     foreach ($path in @($commonPath, $completionPath)) {
         Assert-Test ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ceq $sourceHashes[$path]) 'Shared source file changed.'
     }

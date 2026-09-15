@@ -163,7 +163,7 @@ try {
     #
     # Scheduling is no longer dependent on a paid morning
     # Odds API snapshot.  The free MLB schedule is authoritative
-    # for the expected number and start-time multiset of games.
+    # for timing and the complete canonical game slate.
     # -------------------------------------------------------
 
     $scheduleUri = (
@@ -210,20 +210,6 @@ try {
     if ($officialGames.Count -eq 0) {
         throw "Official MLB schedule contains no eligible games for $OperatingDate."
     }
-
-    $officialStartKeys = @(
-        $officialGames |
-            ForEach-Object {
-                (
-                    [datetimeoffset]::Parse(
-                        [string]$_.gameDate
-                    )
-                ).UtcDateTime.ToString(
-                    "yyyy-MM-ddTHH:mm"
-                )
-            } |
-            Sort-Object
-    )
 
     $earliestStartUtc = @(
         $officialGames |
@@ -316,8 +302,8 @@ try {
     }
 
     # -------------------------------------------------------
-    # 7. Fail closed unless provider slate matches official
-    #    MLB schedule at the event/start-time level.
+    # 7. New-RecoveryEnrichedOdds already verified Python's complete
+    #    canonical-slate binding and the exact enriched artifact digest.
     # -------------------------------------------------------
 
     $providerEventRows = @(
@@ -328,62 +314,6 @@ try {
                     Select-Object -First 1
             }
     )
-
-    $providerStartKeys = @(
-        $providerEventRows |
-            ForEach-Object {
-                (
-                    [datetimeoffset]::Parse(
-                        [string]$_.commence_time
-                    )
-                ).UtcDateTime.ToString(
-                    "yyyy-MM-ddTHH:mm"
-                )
-            } |
-            Sort-Object
-    )
-
-    if (
-        $providerEventRows.Count -ne
-        $officialGames.Count
-    ) {
-        throw (
-            "Fresh provider slate does not match official MLB game count. " +
-            "Official=$($officialGames.Count) " +
-            "Provider=$($providerEventRows.Count)"
-        )
-    }
-
-    $officialStartGroups = @(
-        $officialStartKeys |
-            Group-Object |
-            Sort-Object Name |
-            ForEach-Object {
-                "$($_.Name)|$($_.Count)"
-            }
-    )
-
-    $providerStartGroups = @(
-        $providerStartKeys |
-            Group-Object |
-            Sort-Object Name |
-            ForEach-Object {
-                "$($_.Name)|$($_.Count)"
-            }
-    )
-
-    $startDifferences = @(
-        Compare-Object `
-            -ReferenceObject $officialStartGroups `
-            -DifferenceObject $providerStartGroups
-    )
-
-    if ($startDifferences.Count -ne 0) {
-        throw (
-            "Fresh provider slate start-time multiset does not match " +
-            "the official MLB schedule."
-        )
-    }
 
     Write-Log (
         "FRESH_SNAPSHOT_OFFICIAL_SCHEDULE_OK rows={0} events={1}" -f `
