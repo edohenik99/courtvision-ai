@@ -1,17 +1,64 @@
 [CmdletBinding()]
 param(
-    [string[]]$Date = @(),
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern("^\d{4}-\d{2}-\d{2}$")]
+    [string]$Date,
+
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern("^[0-9a-f]{40}$")]
+    [string]$ExpectedCommit,
+
+    [Parameter(Mandatory = $true)]
+    [string]$AuthorizationReceipt,
+
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern("^cvfa-v1-[0-9a-f]{64}$")]
+    [string]$AuthorizationId,
+
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern("^mlb-hr-control-v1-[0-9a-f]{20}$")]
+    [string]$ControlId,
+
+    [Parameter(Mandatory = $true)]
+    [string]$ExecutionReceiptPath,
+
+    [Parameter(Mandatory = $true)]
+    [string]$PythonExecutable,
+
     [int]$LookbackDays = 3,
-    [switch]$DryRun,
-    [switch]$SkipGit
+    [switch]$DryRun
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+if (-not [IO.Path]::IsPathRooted($PythonExecutable) -or
+    -not (Test-Path -LiteralPath $PythonExecutable -PathType Leaf)) {
+    throw "An existing absolute PythonExecutable path is required."
+}
+$PythonExecutable = (Resolve-Path -LiteralPath $PythonExecutable).Path
+
 $RepoPath = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
-if (-not (Test-Path -LiteralPath (Join-Path $RepoPath ".git") -PathType Container)) {
+if (-not (Test-Path -LiteralPath (Join-Path $RepoPath ".git"))) {
     throw "Resolved repository root is not a git repository: $RepoPath"
+}
+
+$ContractTool = Join-Path $RepoPath "tools\courtvision_pinned_finalizer_contract.py"
+$ValidationOutput = @(
+    & $PythonExecutable -B $ContractTool validate-claimed `
+        --authorization-receipt $AuthorizationReceipt `
+        --authorization-id $AuthorizationId `
+        --expected-commit $ExpectedCommit `
+        --operating-date $Date `
+        --control-id $ControlId 2>&1
+)
+if ($LASTEXITCODE -ne 0) {
+    throw "Pinned finalizer authorization rejected before runtime mutation: $($ValidationOutput -join ' ')"
+}
+$Authorization = ($ValidationOutput -join "`n") | ConvertFrom-Json
+if (-not $Authorization.success -or
+    [IO.Path]::GetFullPath([string]$Authorization.payload.source_root) -ne $RepoPath) {
+    throw "Authorization source root does not match the executing wrapper."
 }
 
 $SnapshotPath = Join-Path $RepoPath "data\theoddsapi\live_hr_snapshots"
@@ -81,8 +128,15 @@ function Invoke-CheckedCommand {
     )
 
     Write-Host ("> " + (Format-CommandForLog -Executable $Executable -CommandArguments $CommandArguments))
-    $Output = @(& $Executable @CommandArguments 2>&1)
-    $CommandExitCode = $LASTEXITCODE
+    $PriorErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $Output = @(& $Executable @CommandArguments 2>&1)
+        $CommandExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $PriorErrorActionPreference
+    }
     foreach ($Line in $Output) {
         Write-Host (Mask-Text $Line)
     }
@@ -106,6 +160,7 @@ try {
     Set-Location -LiteralPath $RepoPath
 
     $PipelineArguments = @(
+        "-B",
         ".\tools\courtvision_mlb_nightly_pipeline.py",
         "--run-id",
         $RunId,
@@ -117,15 +172,34 @@ try {
         $PipelineArguments += "--dry-run"
     }
 
-    if ($SkipGit) {
-        $PipelineArguments += "--skip-git"
-    }
+    $PipelineArguments += @(
+        "--date", $Date,
+        "--expected-commit", $ExpectedCommit,
+        "--authorization-receipt", $AuthorizationReceipt,
+        "--authorization-id", $AuthorizationId,
+        "--operating-date", $Date,
+        "--control-id", $ControlId
+    )
 
-    foreach ($TargetDate in $Date) {
-        $PipelineArguments += @("--date", $TargetDate)
-    }
+    Invoke-CheckedCommand -Executable $PythonExecutable -CommandArguments $PipelineArguments
 
-    Invoke-CheckedCommand -Executable "python" -CommandArguments $PipelineArguments
+    if (-not $DryRun) {
+        Invoke-CheckedCommand -Executable $PythonExecutable -CommandArguments @(
+            "-B",
+            $ContractTool,
+            "write-execution",
+            "--authorization-receipt", $AuthorizationReceipt,
+            "--authorization-id", $AuthorizationId,
+            "--expected-commit", $ExpectedCommit,
+            "--operating-date", $Date,
+            "--control-id", $ControlId,
+            "--results-csv", (Join-Path $SnapshotPath "live_hr_results.csv"),
+            "--output-path", $ExecutionReceiptPath
+        )
+    }
+    else {
+        Write-Host "Dry-run output cannot authorize settlement; no execution receipt written."
+    }
     Write-Host "CourtVision MLB nightly pipeline completed successfully."
 }
 catch {

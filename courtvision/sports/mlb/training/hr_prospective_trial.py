@@ -778,22 +778,13 @@ class _TrialStoreLock:
                 "cannot create explicit trial root"
             ) from exc
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        prepared = self.path.with_name(
+            f".prospective-lock-{self.metadata['owner_token']}.tmp"
+        )
         try:
-            descriptor = os.open(self.path, flags, 0o600)
-        except FileExistsError:
-            _classify_existing_lock(self.path)
-        except PermissionError as exc:
-            try:
-                visible = os.path.lexists(self.path)
-            except OSError as visibility_exc:
-                raise MLBHRProspectiveTrialLockError(
-                    "trial-store lock visibility is inaccessible"
-                ) from visibility_exc
-            if visible:
-                _classify_existing_lock(self.path)
-            raise MLBHRProspectiveTrialLockError("cannot create trial-store lock") from exc
+            descriptor = os.open(prepared, flags, 0o600)
         except OSError as exc:
-            raise MLBHRProspectiveTrialLockError("cannot create trial-store lock") from exc
+            raise MLBHRProspectiveTrialLockError("cannot prepare trial-store lock") from exc
         try:
             with os.fdopen(descriptor, "wb") as handle:
                 handle.write(self.data)
@@ -801,14 +792,41 @@ class _TrialStoreLock:
                 os.fsync(handle.fileno())
         except OSError as exc:
             raise MLBHRProspectiveTrialLockError(
-                "failed to initialize trial-store lock; lock was left in place"
+                "failed to initialize trial-store lock; private staging evidence retained"
             ) from exc
-        metadata, data, _ = _load_lock(self.path)
-        if metadata != self.metadata or data != self.data:
-            raise MLBHRProspectiveTrialLockError(
-                "new trial-store lock ownership could not be verified"
-            )
-        self.acquired = True
+        # A hard link publishes the already-complete file atomically and refuses
+        # an existing destination on both NTFS and POSIX filesystems. Never fall
+        # back to replacement or expose an empty canonical lock while writing.
+        try:
+            try:
+                os.link(prepared, self.path)
+            except FileExistsError:
+                _classify_existing_lock(self.path)
+            except PermissionError as exc:
+                try:
+                    visible = os.path.lexists(self.path)
+                except OSError as visibility_exc:
+                    raise MLBHRProspectiveTrialLockError(
+                        "trial-store lock visibility is inaccessible"
+                    ) from visibility_exc
+                if visible:
+                    _classify_existing_lock(self.path)
+                raise MLBHRProspectiveTrialLockError("cannot publish trial-store lock") from exc
+            except OSError as exc:
+                raise MLBHRProspectiveTrialLockError("cannot publish trial-store lock") from exc
+            metadata, data, _ = _load_lock(self.path)
+            if metadata != self.metadata or data != self.data:
+                raise MLBHRProspectiveTrialLockError(
+                    "new trial-store lock ownership could not be verified"
+                )
+            self.acquired = True
+        finally:
+            try:
+                prepared.unlink()
+            except OSError as exc:
+                raise MLBHRProspectiveTrialLockError(
+                    "could not remove owned private lock staging path"
+                ) from exc
 
     def release(self) -> None:
         if not self.acquired:
@@ -2195,6 +2213,15 @@ def run_prospective_paper_day(
     )
     source_digest_before = _file_sha256(odds_path, "source odds CSV")
     prediction_timestamp = _clock_value(clock, "prediction timestamp")
+    if baseline.courtvision_operating_date(prediction_timestamp).isoformat() != operating_date:
+        raise MLBHRProspectiveTrialError(
+            "prospective date must be the current America/Toronto operating date; "
+            "historical replay cannot enter the prospective store"
+        )
+    if prediction_timestamp < _parse_utc(control["created_at_utc"], "control creation time"):
+        raise MLBHRProspectiveTrialError(
+            "prediction timestamp precedes immutable control creation"
+        )
     try:
         feature_result = baseline.build_live_hr_research_features(
             odds_path=odds_path,
@@ -2953,9 +2980,25 @@ def settle_prospective_paper_day(
     control_dir: str | Path,
     results_csv: str | Path,
     trial_root: str | Path,
+    executing_commit: str,
+    authorization_id: str,
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> dict[str, object]:
     """Append strict final-result settlements without mutating predictions."""
+
+    if len(executing_commit) != 40 or any(
+        character not in "0123456789abcdef" for character in executing_commit
+    ):
+        raise MLBHRProspectiveTrialError("settlement executing commit is invalid")
+    if (
+        not authorization_id.startswith("cvfa-v1-")
+        or len(authorization_id) != 72
+        or any(
+            character not in "0123456789abcdef"
+            for character in authorization_id.removeprefix("cvfa-v1-")
+        )
+    ):
+        raise MLBHRProspectiveTrialError("settlement authorization identity is invalid")
 
     trial = Path(trial_root).expanduser().resolve(strict=False)
     control, control_digest, frozen_control_dir = _read_control(
@@ -2970,6 +3013,11 @@ def settle_prospective_paper_day(
         ledger_path=ledger_path,
     )
     predictions = [row for row in ledger_rows if row["record_type"] == "prediction"]
+    prediction_commits = {row["prediction_git_commit"] for row in predictions}
+    if prediction_commits != {executing_commit}:
+        raise MLBHRProspectiveTrialError(
+            "settlement executing commit does not match every committed prediction"
+        )
     result_path = Path(results_csv).expanduser().resolve(strict=False)
     if not result_path.is_file():
         raise MLBHRProspectiveTrialError("explicit results CSV does not exist")
@@ -3028,6 +3076,12 @@ def settle_prospective_paper_day(
             for row in current
             if row["record_type"] == "prediction"
         }
+        if {
+            row["prediction_git_commit"] for row in current_predictions.values()
+        } != {executing_commit}:
+            raise MLBHRProspectiveTrialError(
+                "settlement executing commit changed or no longer matches predictions"
+            )
         existing_settlements = {
             row["prediction_id"]: row
             for row in current
@@ -3071,6 +3125,8 @@ def settle_prospective_paper_day(
         "pending_predictions": pending,
         "skipped_existing_settlements": skipped,
         "conflicting_settlements": 0,
+        "settlement_executing_commit": executing_commit,
+        "settlement_authorization_id": authorization_id,
         **RESEARCH_BOUNDARY,
     }
 
@@ -3135,18 +3191,33 @@ def _maximum_gate(current: float | None, maximum: float) -> dict[str, object]:
     }
 
 
+def _control_evidence_exclusion(control: Mapping[str, Any]) -> dict[str, object]:
+    configuration = control["identity_material"]["activation_configuration"]
+    evidence_kind = configuration.get("evidence_kind")
+    if evidence_kind in ("disposable_test", "historical_replay") or configuration.get(
+        "promotion_excluded"
+    ) is True:
+        return {
+            "evidence_kind": evidence_kind or "promotion_excluded",
+            "promotion_evidence_eligible": False,
+            "promotion_exclusion_reason": "immutable_control_excludes_promotion",
+        }
+    return {}
+
+
 def report_prospective_status(
     *,
     control_dir: str | Path,
     trial_root: str | Path,
 ) -> dict[str, object]:
-    """Read and verify prospective-only evidence without creating any file."""
+    """Verify stored evidence and its immutable promotion category without writes."""
 
     trial = Path(trial_root).expanduser().resolve(strict=False)
     control, control_digest, frozen_control_dir = _read_control(
         control_dir,
         trial_root=trial,
     )
+    evidence_exclusion = _control_evidence_exclusion(control)
     ledger_path = frozen_control_dir / "prospective_ledger.csv"
     closing_path = frozen_control_dir / "closing_lines.csv"
     ledger_before = _file_sha256(ledger_path, "prospective ledger") if ledger_path.exists() else ""
@@ -3372,6 +3443,8 @@ def report_prospective_status(
             "status": "pass" if not artifact_findings else "fail",
         },
     }
+    if evidence_exclusion:
+        gates["evidence_category"] = _minimum_gate(0, 1)
     if ledger_path.exists() and _file_sha256(
         ledger_path, "prospective ledger"
     ) != ledger_before:
@@ -3394,7 +3467,9 @@ def report_prospective_status(
             "model_version": control["identity_material"]["model_version"],  # type: ignore[index]
         },
         "counts": {
-            "prospective_operating_dates": volume["prediction_dates"],
+            "prospective_operating_dates": 0 if evidence_exclusion else volume["prediction_dates"],
+            **({"diagnostic_operating_dates": volume["prediction_dates"]}
+               if evidence_exclusion else {}),
             "committed_predictions": len(predictions),
             "settled_predictions": len(valid_settlements),
             "pending_predictions": len(pending),
@@ -3420,13 +3495,15 @@ def report_prospective_status(
             "findings": artifact_findings,
         },
         "evidence_separation": {
-            "prospective_trial_predictions": len(predictions),
+            "prospective_trial_predictions": 0 if evidence_exclusion else len(predictions),
+            **({"excluded_predictions": len(predictions)} if evidence_exclusion else {}),
             "historical_training_rows_imported": 0,
             "rehearsal_rows_imported": 0,
             "lifecycle_diagnostic_rows_imported": 0,
             "grade_derivative_rows_imported": 0,
         },
         "automatic_promotion_enabled": False,
+        **evidence_exclusion,
         **RESEARCH_BOUNDARY,
     }
 
@@ -3928,6 +4005,7 @@ def report_prospective_health(
         control_dir,
         trial_root=trial,
     )
+    evidence_exclusion = _control_evidence_exclusion(control)
     ledger_path = frozen_control_dir / "prospective_ledger.csv"
     closing_path = frozen_control_dir / "closing_lines.csv"
     evidence_before = _health_evidence_snapshot(frozen_control_dir)
@@ -4018,7 +4096,7 @@ def report_prospective_health(
     )
     without_closing = len(predictions) - len(closing_by_id)
     status_expected_counts = {
-        "prospective_operating_dates": len(
+        "prospective_operating_dates": 0 if evidence_exclusion else len(
             {row["operating_date"] for row in predictions}
         ),
         "committed_predictions": len(predictions),
@@ -4084,6 +4162,7 @@ def report_prospective_health(
         }
     health_report = {
         "schema_version": HEALTH_SCHEMA_VERSION,
+        **evidence_exclusion,
         "control": {
             "control_id": control["control_id"],
             "model_id": status_control["model_id"],
@@ -4101,7 +4180,9 @@ def report_prospective_health(
         },
         "evidence": {
             **status_expected_counts,
-            "prospective_operating_dates": len(operating_dates),
+            "prospective_operating_dates": 0 if evidence_exclusion else len(operating_dates),
+            **({"diagnostic_operating_dates": len(operating_dates)}
+               if evidence_exclusion else {}),
             "identity_status_coverage": {
                 name: identity_coverage[name] for name in sorted(identity_coverage)
             },
@@ -4161,6 +4242,8 @@ def configure_prospective_cli(
     settle.add_argument("--control-dir", type=Path, required=True)
     settle.add_argument("--results-csv", type=Path, required=True)
     settle.add_argument("--trial-root", type=Path, required=True)
+    settle.add_argument("--executing-commit", required=True)
+    settle.add_argument("--authorization-id", required=True)
 
     report = subparsers.add_parser("report-prospective-status")
     report.add_argument("--control-dir", type=Path, required=True)
@@ -4237,6 +4320,8 @@ def execute_prospective_cli(args: argparse.Namespace) -> dict[str, object]:
             control_dir=args.control_dir,
             results_csv=args.results_csv,
             trial_root=args.trial_root,
+            executing_commit=args.executing_commit,
+            authorization_id=args.authorization_id,
         )
     if args.command == "report-prospective-status":
         return report_prospective_status(

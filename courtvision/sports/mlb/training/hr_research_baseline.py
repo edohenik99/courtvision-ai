@@ -79,6 +79,9 @@ EVENT_TYPE_UNKNOWN: Final = "event_type_unknown"
 EVENT_MANUAL_REVIEW_REQUIRED: Final = "manual_review_required"
 SPECIAL_EVENT_EXCLUSION_REASON: Final = "special_event_out_of_distribution"
 EVENT_TYPE_UNKNOWN_EXCLUSION_REASON: Final = "event_type_unknown"
+SUPPORTED_HR_SOURCE_MARKETS: Final = frozenset(
+    {"batter_home_runs", "batter_home_runs_alternate"}
+)
 REGULAR_SEASON_TEAM_ALLOWLIST_RULE: Final = (
     "both_teams_must_match_current_mlb_club_allowlist"
 )
@@ -708,12 +711,22 @@ def _event_eligibility_from_row(row: Mapping[str, object]) -> tuple[str, str, st
     home_team = _clean(row.get("home_team"))
     away_team = _clean(row.get("away_team"))
     team_pair = frozenset({home_team.casefold(), away_team.casefold()})
-    event_type = _clean(
-        row.get("event_type") or row.get("game_type") or row.get("event_category")
-    ).casefold()
+    regular_types = {"r", "regular", "regular_season", "regular season"}
+    event_types = {
+        _clean(row.get(field)).casefold()
+        for field in ("event_type", "game_type", "event_category")
+        if _clean(row.get(field))
+    }
+    if len({"regular" if value in regular_types else value for value in event_types}) > 1:
+        return (
+            EVENT_MANUAL_REVIEW_REQUIRED,
+            EVENT_TYPE_UNKNOWN_EXCLUSION_REASON,
+            "conflicting_authoritative_event_types",
+        )
+    event_type = next(iter(event_types), "")
 
     if event_type:
-        if event_type in {"regular", "regular_season", "regular season"}:
+        if event_type in regular_types:
             return (
                 EVENT_REGULAR_SEASON_ELIGIBLE,
                 "",
@@ -744,18 +757,10 @@ def _event_eligibility_from_row(row: Mapping[str, object]) -> tuple[str, str, st
             SPECIAL_EVENT_EXCLUSION_REASON,
             SPECIAL_EVENT_TEAM_RULE,
         )
-    if (
-        home_team
-        and away_team
-        and home_team.casefold() in MLB_REGULAR_SEASON_TEAM_NAMES
-        and away_team.casefold() in MLB_REGULAR_SEASON_TEAM_NAMES
-        and home_team.casefold() != away_team.casefold()
-    ):
-        return (EVENT_REGULAR_SEASON_ELIGIBLE, "", REGULAR_SEASON_TEAM_ALLOWLIST_RULE)
     return (
         EVENT_TYPE_UNKNOWN,
         EVENT_TYPE_UNKNOWN_EXCLUSION_REASON,
-        "team_names_not_in_mlb_club_allowlist",
+        "authoritative_event_type_required",
     )
 
 
@@ -975,6 +980,10 @@ def _load_result_index(
 
 def _validate_odds_row(row: Mapping[str, str]) -> tuple[datetime, datetime, int, float, float]:
     row_number = _clean(row.get("__row_number"))
+    if _clean(row.get("market")) not in SUPPORTED_HR_SOURCE_MARKETS:
+        raise MLBHRResearchBaselineError(
+            f"odds CSV row {row_number} is not a supported HR source market"
+        )
     side = _clean(row.get("side"))
     if side != "Over":
         raise MLBHRResearchBaselineError(

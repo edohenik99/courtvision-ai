@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import re
@@ -15,6 +16,18 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Mapping, Protocol, Sequence
+from uuid import uuid4
+
+try:
+    from tools.courtvision_pinned_finalizer_contract import (
+        PinnedFinalizerContractError,
+        validate_authorization,
+    )
+except ModuleNotFoundError:  # Direct-script execution places tools/ on sys.path.
+    from courtvision_pinned_finalizer_contract import (  # type: ignore[no-redef]
+        PinnedFinalizerContractError,
+        validate_authorization,
+    )
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -457,7 +470,7 @@ def _render_text_summary(summary: Mapping[str, object]) -> str:
         f"Ended: {summary.get('run_end_time')}",
         f"Dry run: {summary.get('dry_run')}",
         f"Overall success: {summary.get('overall_success')}",
-        f"Git pull result: {summary.get('git_pull_result')}",
+        f"Runtime source policy: {summary.get('git_pull_result')}",
         f"Dates considered: {summary.get('dates_considered')}",
         f"Dates processed: {summary.get('dates_processed')}",
         f"Dates graded: {summary.get('dates_graded')}",
@@ -490,6 +503,51 @@ def write_summary_files(
     return json_path, text_path
 
 
+def preserve_result_revisions(
+    paths: PipelinePaths, *, run_id: str, authorization_id: str,
+) -> dict[str, object]:
+    """Preserve both pre-finalizer result inputs before any overwrite command."""
+    revision_root = paths.snapshot_dir / "result_revisions" / uuid4().hex
+    revision_root.mkdir(parents=True, exist_ok=False)
+    revisions: list[dict[str, object]] = []
+    for source in (paths.workbook_csv, paths.results_csv):
+        if not source.exists():
+            revisions.append({"source_path": str(source), "present": False})
+            continue
+        before = source.stat()
+        data = source.read_bytes()
+        after = source.stat()
+        before_identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+        after_identity = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        if before_identity != after_identity or len(data) != after.st_size:
+            raise RuntimeError("result evidence changed during revision preservation")
+        archived = revision_root / source.name
+        with archived.open("xb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        digest = hashlib.sha256(data).hexdigest()
+        if hashlib.sha256(archived.read_bytes()).hexdigest() != digest:
+            raise RuntimeError("preserved result revision failed digest verification")
+        revisions.append({
+            "source_path": str(source), "present": True,
+            "archive_path": str(archived), "size": len(data),
+            "source_mtime_ns": after.st_mtime_ns, "sha256": digest,
+        })
+    manifest: dict[str, object] = {
+        "schema_version": "courtvision-result-revisions-v1",
+        "run_id": run_id, "authorization_id": authorization_id,
+        "revisions": revisions,
+    }
+    manifest_path = revision_root / "manifest.json"
+    with manifest_path.open("x", encoding="utf-8") as handle:
+        json.dump(manifest, handle, sort_keys=True, indent=2)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    return {**manifest, "manifest_path": str(manifest_path)}
+
+
 def run_pipeline(
     *,
     paths: PipelinePaths,
@@ -500,7 +558,8 @@ def run_pipeline(
     target_dates: Sequence[str] | None = None,
     lookback_days: int = 3,
     dry_run: bool = False,
-    skip_git: bool = False,
+    expected_commit: str,
+    authorization_id: str,
     masker: SecretMasker | None = None,
 ) -> PipelineResult:
     original_cwd = Path.cwd()
@@ -516,7 +575,10 @@ def run_pipeline(
         "run_start_time": started_at.isoformat(timespec="seconds"),
         "run_end_time": "",
         "repo_root": str(paths.repo_root),
-        "git_pull_result": {"status": "not_started"},
+        "git_pull_result": {"status": "runtime_source_mutation_prohibited"},
+        "expected_commit": expected_commit,
+        "executing_commit": expected_commit,
+        "authorization_id": authorization_id,
         "dates_considered": [],
         "dates_processed": [],
         "games_processed": 0,
@@ -557,34 +619,9 @@ def run_pipeline(
             raise FileNotFoundError(f"Repository root not found: {paths.repo_root}")
         os.chdir(paths.repo_root)
 
-        if skip_git:
-            summary["git_pull_result"] = {"status": "skipped"}
-            warnings.append("Git checkout/pull skipped by explicit operator flag.")
-            log.stage("Git")
-            log.write("Git checkout/pull skipped by explicit operator flag.")
-        else:
-            run_checked(
-                runner,
-                ("git", "checkout", "main"),
-                cwd=paths.repo_root,
-                stage="git_checkout_main",
-                log=log,
-                summary=summary,
-            )
-            pull = run_checked(
-                runner,
-                ("git", "pull", "origin", "main"),
-                cwd=paths.repo_root,
-                stage="git_pull_origin_main",
-                log=log,
-                summary=summary,
-            )
-            pull_output = pull.combined_output.strip()
-            summary["git_pull_result"] = {
-                "status": "success",
-                "exit_code": pull.exit_code,
-                "output": pull_output,
-            }
+        log.stage("Pinned Source")
+        log.write(f"Executing commit: {expected_commit}")
+        log.write(f"Authorization: {authorization_id}")
 
         master_info = load_master_info(paths.master_csv)
         selected_dates = select_processing_dates(
@@ -615,7 +652,7 @@ def run_pipeline(
         if master_info.exists:
             health = run_checked(
                 runner,
-                ("python", _script("run_live_hr_daily_check.py"), str(effective_paths.master_csv)),
+                (sys.executable, _script("run_live_hr_daily_check.py"), str(effective_paths.master_csv)),
                 cwd=paths.repo_root,
                 stage="preflight_live_hr_daily_check",
                 log=log,
@@ -634,10 +671,13 @@ def run_pipeline(
                 warnings.append(warning)
                 log.write(warning)
         else:
+            summary["preserved_result_revisions"] = preserve_result_revisions(
+                effective_paths, run_id=run_id, authorization_id=authorization_id,
+            )
             generated = run_checked(
                 runner,
                 (
-                    "python",
+                    sys.executable,
                     _script("generate_live_hr_results_workbook.py"),
                     "--input",
                     str(effective_paths.master_csv),
@@ -699,7 +739,7 @@ def run_pipeline(
                 fill = run_checked(
                     runner,
                     (
-                        "python",
+                        sys.executable,
                         _script("fill_live_hr_results_from_mlb_statsapi.py"),
                         "--date",
                         target_date,
@@ -737,7 +777,7 @@ def run_pipeline(
             export = run_checked(
                 runner,
                 (
-                    "python",
+                    sys.executable,
                     _script("export_live_hr_results_from_workbook.py"),
                     "--input",
                     str(effective_paths.workbook_csv),
@@ -767,7 +807,7 @@ def run_pipeline(
                 coverage = run_checked(
                     runner,
                     (
-                        "python",
+                        sys.executable,
                         _script("check_live_hr_results_coverage.py"),
                         "--results",
                         str(effective_paths.results_csv),
@@ -832,7 +872,7 @@ def run_pipeline(
                 grade = run_checked(
                     runner,
                     (
-                        "python",
+                        sys.executable,
                         _script("grade_live_hr_results.py"),
                         "--odds-csv",
                         str(effective_paths.master_csv),
@@ -854,7 +894,7 @@ def run_pipeline(
                 run_checked(
                     runner,
                     (
-                        "python",
+                        sys.executable,
                         _script("summarize_live_hr_grades.py"),
                         "--date",
                         target_date,
@@ -887,7 +927,7 @@ def run_pipeline(
                 health = run_checked(
                     runner,
                     (
-                        "python",
+                        sys.executable,
                         _script("run_live_hr_daily_check.py"),
                         str(effective_paths.master_csv),
                     ),
@@ -908,18 +948,6 @@ def run_pipeline(
         errors.append(masked_error)
         summary["overall_success"] = False
         if isinstance(exc, CommandFailure):
-            if exc.stage == "git_pull_origin_main":
-                summary["git_pull_result"] = {
-                    "status": "failed",
-                    "exit_code": exc.exit_code,
-                    "output": exc.output.strip(),
-                }
-            elif exc.stage == "git_checkout_main":
-                summary["git_pull_result"] = {
-                    "status": "not_run",
-                    "reason": "git checkout main failed",
-                }
-
             if "live_hr_daily_check" in exc.stage:
                 duplicate_count = parse_int_line(exc.output, "Duplicates")
                 if duplicate_count is not None:
@@ -990,20 +1018,37 @@ def build_parser() -> argparse.ArgumentParser:
         default=PROJECT_ROOT,
         help=f"Repository root. Default: {PROJECT_ROOT}",
     )
-    parser.add_argument(
-        "--skip-git",
-        action="store_true",
-        help=(
-            "Skip git checkout/pull. Intended only for local dry-run validation "
-            "with uncommitted work."
-        ),
-    )
+    parser.add_argument("--expected-commit", required=True)
+    parser.add_argument("--authorization-receipt", type=Path, required=True)
+    parser.add_argument("--authorization-id", required=True)
+    parser.add_argument("--operating-date", required=True)
+    parser.add_argument("--control-id", required=True)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    try:
+        authorization = validate_authorization(
+            args.authorization_receipt,
+            expected_state="claimed",
+            expected_commit=args.expected_commit,
+            operating_date=args.operating_date,
+            control_id=args.control_id,
+            authorization_id=args.authorization_id,
+        )
+        authorized_root = Path(authorization["payload"]["source_root"]).resolve()
+        if args.repo_root.resolve() != authorized_root or PROJECT_ROOT != authorized_root:
+            raise PinnedFinalizerContractError(
+                "pipeline source root does not match the authorized executing source"
+            )
+        if args.target_dates != [args.operating_date]:
+            raise PinnedFinalizerContractError(
+                "pipeline must process exactly the authorized operating date"
+            )
+    except PinnedFinalizerContractError as exc:
+        parser.error(str(exc))
     started_at = datetime.now().astimezone()
     run_id = args.run_id or started_at.strftime("%Y%m%d_%H%M%S")
     paths = PipelinePaths.defaults(args.repo_root.resolve())
@@ -1015,7 +1060,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         target_dates=args.target_dates,
         lookback_days=args.lookback_days,
         dry_run=args.dry_run,
-        skip_git=args.skip_git,
+        expected_commit=authorization["executing_commit"],
+        authorization_id=args.authorization_id,
     )
     return result.exit_code
 

@@ -39,6 +39,8 @@ def _write_csv(
     rows: list[dict[str, object]],
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    if "snapshot_time" in columns and "market" in columns and "event_type" not in columns:
+        columns = (*columns, "event_type")
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(
             handle, fieldnames=list(columns), lineterminator="\n"
@@ -166,6 +168,7 @@ def _odds_row(**overrides: object) -> dict[str, object]:
         "bookmaker_key": "draftkings",
         "bookmaker": "DraftKings",
         "market": "batter_home_runs_alternate",
+        "event_type": "regular_season",
         "player": "Alpha Batter",
         "side": "Over",
         "price": 400,
@@ -806,6 +809,8 @@ def test_outcome_and_settlement_evidence_cannot_change_output(tmp_path: Path) ->
         control_dir=control.control_dir,
         results_csv=workspace["results"],
         trial_root=workspace["trial_root"],
+        executing_commit=_git(workspace["repository"], "rev-parse", "HEAD"),
+        authorization_id="cvfa-v1-" + "a" * 64,
         clock=_clock(SETTLEMENT_NOW),
     )
     results = workspace["results"]

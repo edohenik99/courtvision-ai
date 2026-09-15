@@ -3,8 +3,12 @@ from __future__ import annotations
 import csv
 from datetime import date, datetime
 from pathlib import Path
+import sys
 from typing import Sequence
 
+import pytest
+
+from tools import courtvision_mlb_nightly_pipeline as pipeline
 from tools.courtvision_mlb_nightly_pipeline import (
     CompletedCommand,
     PipelinePaths,
@@ -30,6 +34,9 @@ MASTER_COLUMNS = [
     "point",
     "hr_label",
 ]
+
+EXPECTED_COMMIT = "a" * 40
+AUTHORIZATION_ID = "cvfa-v1-" + "b" * 64
 
 
 class FakeRunner:
@@ -212,7 +219,8 @@ def _run(
         started_at=datetime(2026, 7, 10, 3, 30),
         today=date(2026, 7, 10),
         target_dates=target_dates or ["2026-07-09"],
-        skip_git=True,
+        expected_commit=EXPECTED_COMMIT,
+        authorization_id=AUTHORIZATION_ID,
     )
     assert result.json_summary_path.exists()
     assert result.text_summary_path.exists()
@@ -258,6 +266,59 @@ def test_complete_coverage_calls_grader_and_summary(tmp_path: Path) -> None:
     assert any(stage == "grade_2026-07-09" for stage in runner.stages())
     assert any(stage == "summarize_grades_2026-07-09" for stage in runner.stages())
     assert len(summary["grading_output_paths"]) == 2
+    assert all(command[0] == sys.executable for command in runner.commands())
+
+
+def test_preexisting_result_bytes_survive_finalizer_overwrites(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    _write_master(paths.master_csv, [_master_row()])
+    _write_workbook(paths.workbook_csv, actual="2", status="final")
+    paths.results_csv.write_text(
+        "event_id,player,actual_home_runs,game_status\nevent-1,Aaron Judge,2,final\n",
+        encoding="utf-8",
+    )
+    before = {path.name: path.read_bytes() for path in (paths.workbook_csv, paths.results_csv)}
+
+    class OverwritingRunner(FakeRunner):
+        def run(self, args: Sequence[str], *, cwd: Path, stage: str) -> CompletedCommand:
+            if stage == "generate_results_workbook":
+                _write_workbook(paths.workbook_csv, actual="1", status="final")
+            if stage == "export_strict_results":
+                paths.results_csv.write_text(
+                    "event_id,player,actual_home_runs,game_status\nevent-1,Aaron Judge,1,final\n",
+                    encoding="utf-8",
+                )
+            return super().run(args, cwd=cwd, stage=stage)
+
+    summary = _run(tmp_path, OverwritingRunner())
+    assert summary["overall_success"] is True
+    revision = summary["preserved_result_revisions"]
+    assert Path(revision["manifest_path"]).is_file()
+    assert revision["authorization_id"] == AUTHORIZATION_ID
+    for preserved in revision["revisions"]:
+        archived = Path(preserved["archive_path"])
+        assert archived.read_bytes() == before[archived.name]
+        assert Path(preserved["source_path"]).read_bytes() != before[archived.name]
+
+
+def test_revision_preservation_failure_blocks_result_writers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _paths(tmp_path)
+    _write_master(paths.master_csv, [_master_row()])
+    _write_workbook(paths.workbook_csv, actual="2", status="final")
+    before = paths.workbook_csv.read_bytes()
+
+    def denied(*args: object, **kwargs: object) -> dict[str, object]:
+        raise OSError("revision archive unavailable")
+
+    monkeypatch.setattr(pipeline, "preserve_result_revisions", denied)
+    runner = FakeRunner()
+    summary = _run(tmp_path, runner)
+    assert summary["overall_success"] is False
+    assert "generate_results_workbook" not in runner.stages()
+    assert "export_strict_results" not in runner.stages()
+    assert paths.workbook_csv.read_bytes() == before
 
 
 def test_repeated_run_uses_stable_outputs_and_no_append_commands(
@@ -347,7 +408,8 @@ def test_child_script_failure_propagates_nonzero_exit_code(tmp_path: Path) -> No
         started_at=datetime(2026, 7, 10, 3, 30),
         today=date(2026, 7, 10),
         target_dates=["2026-07-09"],
-        skip_git=True,
+        expected_commit=EXPECTED_COMMIT,
+        authorization_id=AUTHORIZATION_ID,
     )
 
     assert result.exit_code == 1
@@ -370,7 +432,8 @@ def test_api_keys_are_not_exposed_in_logs_or_summary(tmp_path: Path) -> None:
         started_at=datetime(2026, 7, 10, 3, 30),
         today=date(2026, 7, 10),
         target_dates=["2026-07-09"],
-        skip_git=True,
+        expected_commit=EXPECTED_COMMIT,
+        authorization_id=AUTHORIZATION_ID,
         masker=masker,
     )
 
@@ -398,7 +461,8 @@ def test_pipeline_restores_caller_working_directory(
         started_at=datetime(2026, 7, 10, 3, 30),
         today=date(2026, 7, 10),
         target_dates=["2026-07-09"],
-        skip_git=True,
+        expected_commit=EXPECTED_COMMIT,
+        authorization_id=AUTHORIZATION_ID,
     )
 
     assert result.exit_code == 0
