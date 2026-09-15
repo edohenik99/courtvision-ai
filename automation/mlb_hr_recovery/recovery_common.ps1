@@ -168,8 +168,43 @@ function New-RecoveryEnrichedOdds {
     $result = & $pythonExecutable -B -m tools.mlb_hr_recovery_contract enrich-odds `
         --odds-path $OddsPath --odds-sha256 $oddsDigest `
         --schedule-path $schedulePath --schedule-sha256 $scheduleDigest `
-        --operating-date $OperatingDate --output $enrichedPath
+        --operating-date $OperatingDate --output $enrichedPath --require-complete-slate
     if ($LASTEXITCODE -ne 0) { throw 'Official schedule/odds identity binding failed.' }
     $revision = ($result | Out-String) | ConvertFrom-Json
+    # Python owns schedule candidate matching. Verify its explicit, digest-bound
+    # complete-slate receipt instead of matching provider timestamps a second time.
+    $requiredFields = @('success', 'path', 'sha256', 'rows', 'source_odds_sha256',
+        'schedule_sha256', 'operating_date', 'match_tolerance_seconds',
+        'complete_slate_required', 'provider_events', 'canonical_game_bindings',
+        'eligible_official_games', 'ambiguous_bindings', 'unmatched_bindings',
+        'research_only', 'approval_status', 'eligible_for_betting', 'eligible_for_official_pick')
+    foreach ($field in $requiredFields) {
+        if ($null -eq $revision -or $field -cnotin $revision.PSObject.Properties.Name) {
+            throw 'Schedule binding receipt is incomplete.'
+        }
+    }
+    foreach ($field in @('rows', 'match_tolerance_seconds', 'provider_events',
+        'canonical_game_bindings', 'eligible_official_games', 'ambiguous_bindings', 'unmatched_bindings')) {
+        if ($revision.$field -isnot [int] -and $revision.$field -isnot [long]) {
+            throw 'Schedule binding receipt requires integer counts and tolerance.'
+        }
+    }
+    if ($revision.success -isnot [bool] -or -not $revision.success -or
+        $revision.complete_slate_required -isnot [bool] -or -not $revision.complete_slate_required -or
+        $revision.path -cne $enrichedPath -or $revision.source_odds_sha256 -cne $oddsDigest -or
+        $revision.schedule_sha256 -cne $scheduleDigest -or $revision.operating_date -cne $OperatingDate -or
+        $revision.match_tolerance_seconds -ne 120 -or $revision.provider_events -le 0 -or
+        $revision.rows -lt $revision.provider_events -or
+        $revision.provider_events -ne $revision.canonical_game_bindings -or
+        $revision.canonical_game_bindings -ne $revision.eligible_official_games -or
+        $revision.ambiguous_bindings -ne 0 -or $revision.unmatched_bindings -ne 0) {
+        throw 'Schedule binding receipt does not prove the complete canonical slate.'
+    }
+    if ($revision.research_only -isnot [bool] -or -not $revision.research_only -or
+        $revision.approval_status -cne 'not_approved' -or
+        $revision.eligible_for_betting -isnot [bool] -or $revision.eligible_for_betting -or
+        $revision.eligible_for_official_pick -isnot [bool] -or $revision.eligible_for_official_pick) {
+        throw 'Schedule binding receipt crossed the research boundary.'
+    }
     return (Get-RecoveryBoundFile -Path $revision.path -Sha256 $revision.sha256)
 }
