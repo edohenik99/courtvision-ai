@@ -224,15 +224,26 @@ No lifecycle writer, official-pick service, provider, or sizing API is imported.
             return
         if identity.identity_status is IdentityStatus.NOT_APPLICABLE:
             raise ValueError("participant-scoped market requires participant identity")
-        # Named selections can be checked without resolving a player.  Side-only
-        # selections carry no participant name; their sport adapter must bind it.
         selection_name = " ".join(self.quote.selection_name.casefold().split())
+        names = {
+            " ".join(name.casefold().split())
+            for name in (identity.participant_name, identity.canonical_participant_name)
+            if name is not None
+        }
+        if self.taxonomy.participant_scope is ParticipantScope.TEAM:
+            home_team = " ".join(self.quote.home_team.casefold().split())
+            away_team = " ".join(self.quote.away_team.casefold().split())
+            event_teams = names & {home_team, away_team}
+            if len(event_teams) != 1 or home_team == away_team:
+                raise ValueError("team participant identity must match exactly one event team")
+            selected_team = {"home": home_team, "away": away_team}.get(selection_name)
+            if selected_team is not None and selected_team not in event_teams:
+                raise ValueError("team participant identity does not match home/away selection")
+            # Over/Under identifies no team; the adapter must prove which event
+            # team the team-total quote belongs to before constructing this view.
+        # Named selections can be checked without resolving a player. Player
+        # side-only quotes still require their sport adapter to prove binding.
         if selection_name not in {"over", "under", "yes", "no", "home", "away", "draw"}:
-            names = {
-                " ".join(name.casefold().split())
-                for name in (identity.participant_name, identity.canonical_participant_name)
-                if name is not None
-            }
             if selection_name not in names:
                 raise ValueError("participant identity does not match named quote selection")
 

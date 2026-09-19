@@ -47,6 +47,9 @@ class MarketStatistic(str, Enum):
     POINTS = "points"
     REBOUNDS = "rebounds"
     ASSISTS = "assists"
+    POINTS_REBOUNDS = "points_rebounds"
+    POINTS_ASSISTS = "points_assists"
+    REBOUNDS_ASSISTS = "rebounds_assists"
     POINTS_REBOUNDS_ASSISTS = "points_rebounds_assists"
     THREES = "threes"
     STEALS = "steals"
@@ -142,10 +145,13 @@ _DEFINITIONS: Mapping[tuple[str, str], _Semantics] = MappingProxyType({
         ("NBA", f"player_{statistic.value}"): _prop(ParticipantScope.PLAYER, statistic)
         for statistic in (
             MarketStatistic.POINTS, MarketStatistic.REBOUNDS, MarketStatistic.ASSISTS,
-            MarketStatistic.POINTS_REBOUNDS_ASSISTS, MarketStatistic.THREES,
+            MarketStatistic.POINTS_REBOUNDS, MarketStatistic.POINTS_ASSISTS,
+            MarketStatistic.REBOUNDS_ASSISTS, MarketStatistic.POINTS_REBOUNDS_ASSISTS,
             MarketStatistic.STEALS, MarketStatistic.BLOCKS,
         )
     },
+    # NBA runtime normalization owns aliases; use its canonical market key here.
+    ("NBA", "player_3pt_made"): _prop(ParticipantScope.PLAYER, MarketStatistic.THREES),
     **{
         ("NFL", f"player_{statistic.value}"): _prop(
             ParticipantScope.PLAYER, statistic, StatisticDomain.DISCRETE_INTEGER,
@@ -250,7 +256,10 @@ class MarketTaxonomy:
 
 
 def resolve_market_taxonomy(sport: str, market_type: str) -> MarketTaxonomy:
-    """Resolve a defined market without consulting or modifying runtime support."""
+    """Resolve canonical markets without consulting or modifying runtime support.
+
+    Sport/provider adapters must normalize aliases before taxonomy resolution.
+    """
 
     key = _market_key(sport, market_type)
     return MarketTaxonomy(*key, *_DEFINITIONS[key])

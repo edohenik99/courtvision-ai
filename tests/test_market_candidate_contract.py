@@ -377,3 +377,115 @@ def test_required_quote_line_cannot_be_omitted() -> None:
             probability=_probability(target_statistic=taxonomy.statistic.value),
             participant_identity=ParticipantIdentity(None, "game_scope", IdentityStatus.NOT_APPLICABLE),
         )
+
+
+def _team_candidate(
+    selection: str, participant: ParticipantIdentity, market_type: str = "moneyline",
+) -> MarketCandidate:
+    taxonomy = resolve_market_taxonomy("NBA", market_type)
+    line = 110.5 if market_type == "team_total" else None
+    quote = _quote(
+        market_identity=OddsMarketIdentity(
+            sport="NBA", league="NBA", event_id="fixture-boston-at-new-york",
+            event_date=date(2026, 9, 19), home_team="New York", away_team="Boston",
+            market_type=market_type,
+        ),
+        selection=OddsSelection(selection, line=line),
+    )
+    direction = ThresholdDirection.NOT_APPLICABLE
+    if line is not None:
+        direction = (ThresholdDirection.LESS_THAN if selection.casefold() == "under"
+                     else ThresholdDirection.GREATER_THAN)
+    return _candidate(
+        quote=quote, taxonomy=taxonomy, participant_identity=participant,
+        probability=_probability(
+            target_statistic=taxonomy.statistic.value, threshold=line, direction=direction,
+        ),
+    )
+
+
+@pytest.mark.parametrize("selection,team", [
+    ("Home", "New York"), ("Away", "Boston"),
+    ("New York", "New York"), ("Boston", "Boston"),
+    (" HOME ", "  new   YORK  "), (" away ", " BOSTON "),
+])
+def test_team_identity_binds_to_event_and_selection(selection: str, team: str) -> None:
+    identity = ParticipantIdentity(team, "fixture_event_team")
+    assert _team_candidate(selection, identity).participant_identity is identity
+
+
+@pytest.mark.parametrize("selection,team,match", [
+    ("Home", "Boston", "home/away selection"),
+    ("Away", "New York", "home/away selection"),
+    ("Home", "Los Angeles", "event team"),
+    ("Away", "Los Angeles", "event team"),
+    ("Los Angeles", "Los Angeles", "event team"),
+    ("Home", "New", "event team"),
+    ("New York", "Boston", "named quote selection"),
+])
+def test_wrong_team_identity_fails_closed(selection: str, team: str, match: str) -> None:
+    with pytest.raises(ValueError, match=match):
+        _team_candidate(selection, ParticipantIdentity(team, "fixture_event_team"))
+
+
+def test_team_from_another_event_fails_closed() -> None:
+    candidate = _team_candidate("Home", ParticipantIdentity("New York", "fixture_event_team"))
+    other_quote = replace(candidate.quote, market_identity=replace(
+        candidate.quote.market_identity, event_id="fixture-chicago-at-los-angeles",
+        home_team="Los Angeles", away_team="Chicago",
+    ))
+    with pytest.raises(ValueError, match="event team"):
+        replace(candidate, quote=other_quote, event_identity=EventIdentity(other_quote.event_id, "fixture"))
+
+
+@pytest.mark.parametrize("side", ["Over", "Under"])
+@pytest.mark.parametrize("team", ["New York", "Boston"])
+def test_team_total_side_accepts_either_event_team(side: str, team: str) -> None:
+    identity = ParticipantIdentity(team, "adapter_bound_team_total")
+    assert _team_candidate(side, identity, "team_total").participant_identity is identity
+
+
+@pytest.mark.parametrize("side", ["Over", "Under"])
+def test_team_total_rejects_unrelated_team(side: str) -> None:
+    with pytest.raises(ValueError, match="event team"):
+        _team_candidate(side, ParticipantIdentity("Los Angeles", "fixture"), "team_total")
+
+
+def test_resolved_team_can_bind_using_canonical_name() -> None:
+    identity = ParticipantIdentity(
+        "NYK", "adapter_resolved_team", IdentityStatus.RESOLVED,
+        canonical_participant_id="fixture-nyk", canonical_participant_name="New York",
+    )
+    assert _team_candidate("Home", identity).participant_identity is identity
+    with pytest.raises(ValueError, match="home/away selection"):
+        _team_candidate("Away", identity)
+
+
+def test_conflicting_event_team_names_fail_closed() -> None:
+    identity = ParticipantIdentity(
+        "Boston", "fixture_conflicting_mapping", IdentityStatus.RESOLVED,
+        canonical_participant_id="fixture-nyk", canonical_participant_name="New York",
+    )
+    with pytest.raises(ValueError, match="exactly one event team"):
+        _team_candidate("Home", identity)
+
+
+@pytest.mark.parametrize("sport,market_type,statistic", [
+    ("NBA", "player_points", "points"),
+    ("MLB", "batter_home_runs", "home_runs"),
+    ("MLB", "pitcher_strikeouts", "strikeouts"),
+])
+def test_player_side_binding_remains_adapter_responsibility(
+    sport: str, market_type: str, statistic: str,
+) -> None:
+    quote = _quote(
+        market_identity=replace(_quote().market_identity, sport=sport, league=sport, market_type=market_type),
+        selection=OddsSelection("Over", line=0.5),
+    )
+    candidate = _candidate(
+        quote=quote, taxonomy=resolve_market_taxonomy(sport, market_type),
+        probability=_probability(target_statistic=statistic),
+    )
+    assert candidate.participant_identity.participant_name == "Example Batter"
+    with pytest.raises(ValueError, match="named quote selection"):
+        replace(candidate, quote=replace(quote, selection=OddsSelection("Other Player", line=0.5)))

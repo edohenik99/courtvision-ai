@@ -14,6 +14,48 @@ from courtvision.core.market_taxonomy import (
     resolve_market_taxonomy,
 )
 from courtvision.core.sport_registry import SPORT_REGISTRY, get_plugin
+from courtvision.markets.prop_types import canonical_market_type_from_prop_type
+from courtvision.runtime_markets import normalize_market_alias
+
+
+@pytest.mark.parametrize("market_type,statistic", [
+    ("player_points", MarketStatistic.POINTS),
+    ("player_rebounds", MarketStatistic.REBOUNDS),
+    ("player_assists", MarketStatistic.ASSISTS),
+    ("player_3pt_made", MarketStatistic.THREES),
+    ("player_steals", MarketStatistic.STEALS),
+    ("player_blocks", MarketStatistic.BLOCKS),
+    ("player_points_rebounds", MarketStatistic.POINTS_REBOUNDS),
+    ("player_points_assists", MarketStatistic.POINTS_ASSISTS),
+    ("player_rebounds_assists", MarketStatistic.REBOUNDS_ASSISTS),
+    ("player_points_rebounds_assists", MarketStatistic.POINTS_REBOUNDS_ASSISTS),
+])
+def test_existing_canonical_nba_markets_resolve(market_type: str, statistic: MarketStatistic) -> None:
+    before = tuple(plugin.to_dict() for plugin in SPORT_REGISTRY.all())
+    assert normalize_market_alias(market_type) == market_type
+    assert canonical_market_type_from_prop_type(market_type) == market_type
+    market = resolve_market_taxonomy("NBA", market_type)
+    assert market.market_type == market_type
+    assert market.statistic is statistic
+    assert market.participant_scope is ParticipantScope.PLAYER
+    assert market.market_family is MarketFamily.PLAYER_PROP
+    assert market.statistic_domain is StatisticDomain.DISCRETE_COUNT
+    assert tuple(plugin.to_dict() for plugin in SPORT_REGISTRY.all()) == before
+
+
+@pytest.mark.parametrize("alias,canonical", [
+    ("player_threes", "player_3pt_made"),
+    ("threes", "player_3pt_made"),
+    ("pra", "player_points_rebounds_assists"),
+    ("points_rebounds", "player_points_rebounds"),
+    ("points_assists", "player_points_assists"),
+    ("rebounds_assists", "player_rebounds_assists"),
+])
+def test_nba_aliases_are_normalized_before_taxonomy_resolution(alias: str, canonical: str) -> None:
+    with pytest.raises(ValueError, match="Undefined market taxonomy"):
+        resolve_market_taxonomy("NBA", alias)
+    assert normalize_market_alias(alias) == canonical
+    assert resolve_market_taxonomy("NBA", normalize_market_alias(alias)).market_type == canonical
 
 
 def test_hr_semantics_are_normalized_deterministic_and_immutable() -> None:
