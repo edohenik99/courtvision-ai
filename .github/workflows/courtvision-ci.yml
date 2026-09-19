@@ -47,6 +47,9 @@ jobs:
       - name: Test NBA player points settlement closing binding
         run: python -B -m pytest -p no:cacheprovider tests\test_nba_player_points_settlement_closing_binding.py -q
 
+      - name: Test Phase B market contracts
+        run: python -B -m pytest -p no:cacheprovider tests/test_market_taxonomy.py tests/test_probability_contract.py tests/test_reasoning_contract.py tests/test_market_candidate_contract.py tests/test_mlb_hr_market_adapter.py -q
+
       - name: Validate MLB HR research syntax
         run: python -B -m py_compile courtvision\sports\mlb\training\hr_research_baseline.py courtvision\sports\mlb\training\hr_prospective_trial.py tools\mlb_hr_recovery_contract.py tools\courtvision_pinned_finalizer_contract.py tools\courtvision_mlb_nightly_pipeline.py
 
