@@ -1,8 +1,8 @@
 """Pure normalization of supplied The Odds API MLB event-odds mappings.
 
 No collection, credentials, persistence, or canonical identity resolution occurs.
-The caller supplies capture time and immutable evidence references. A manual,
-research-only quote accompanies each accepted bookmaker outcome.
+The caller supplies capture time, immutable evidence references and acquisition
+type (manual by default). Each accepted outcome yields a research-only quote.
 """
 
 from __future__ import annotations
@@ -165,7 +165,8 @@ def _identity_keys(event: Mapping, book: Mapping, market: Mapping, outcome: Mapp
 
 
 def _record(event: Mapping, book: Mapping, market: Mapping, outcome: Mapping,
-            collected_at: datetime, source_refs: tuple[str, ...]) -> MLBPlayerPropSourceRecord:
+            collected_at: datetime, source_refs: tuple[str, ...],
+            source_type: str) -> MLBPlayerPropSourceRecord:
     sport_key = _text(event, "sport_key")
     if sport_key != "baseball_mlb":
         raise _InvalidRow("INVALID", "sport_key")
@@ -201,7 +202,8 @@ def _record(event: Mapping, book: Mapping, market: Mapping, outcome: Mapping,
             canonical_market_type=canonical, market_variant=variant,
             participant_name=_text(outcome, "description"), side=side, line=line,
             american_odds=price, market_updated_at=updated, collected_at=collected_at,
-            source_refs=source_refs, provider_outcome_id=_optional_id(outcome),
+            source_refs=source_refs, source_type=source_type,
+            provider_outcome_id=_optional_id(outcome),
             provider_market_id=_optional_id(market), provider_bookmaker_id=_optional_id(book),
         )
     except _InvalidRow:
@@ -221,6 +223,7 @@ class _Claim:
 
 def normalize_mlb_event_odds(
     payload: Mapping[str, object], *, collected_at: datetime, source_refs: tuple[str, ...],
+    source_type: str = "manual",
 ) -> MLBMarketDataBatch:
     """Normalize one supplied event, keeping diagnostics and rejecting conflicts.
 
@@ -231,6 +234,8 @@ def normalize_mlb_event_odds(
     Timestamps retain the supplied instant in UTC (including DST-fold inputs).
     Ordering is independent of bookmaker, market, and outcome array positions.
     """
+    if not isinstance(source_type, str) or source_type not in ("manual", "live"):
+        raise ValueError("source_type must be manual or live")
     collected_at = _timestamp(collected_at, "collected_at")
     if not isinstance(source_refs, tuple) or not source_refs or any(
         not isinstance(ref, str) or not ref.strip() or ref != ref.strip() for ref in source_refs
@@ -278,7 +283,7 @@ def normalize_mlb_event_odds(
                 context = _context(payload, book, market, outcome)
                 keys = _identity_keys(payload, book, market, outcome)
                 try:
-                    record = _record(payload, book, market, outcome, collected_at, source_refs)
+                    record = _record(payload, book, market, outcome, collected_at, source_refs, source_type)
                     claims.append(_Claim(record, keys, context))
                 except _InvalidRow as exc:
                     reject(exc.category, exc.field, context)
