@@ -77,7 +77,9 @@ class BatterHitsBaselineFeatures:
     The caller attests every source was available by evidence_cutoff, including
     the season totals and external opportunity projection. Batter and event
     references prevent accidentally attaching another subject's feature set.
-    Source references are retained; they are not opened or resolved here.
+    The cutoff describes only evidence used by the specialist model, independent
+    of quote receipt or candidate assembly. Source references are retained;
+    they are not opened or resolved here.
     """
 
     season_hits: int
@@ -196,7 +198,7 @@ def assemble_batter_hits_candidate(
     the caller's resolution. Name-only research never acquires a canonical ID.
     Keep participant_name in the quote's observed spelling; source, feature and
     canonical names may use the shared MLB normalization's compatible aliases.
-    The evidence cutoff covers this assembled snapshot, including quote receipt.
+    Model evidence and quote observation have independent pregame timelines.
     """
     for name, value, expected in (
         ("quote", quote, NormalizedOddsQuote),
@@ -245,8 +247,8 @@ def assemble_batter_hits_candidate(
     if source_evidence.snapshot_timestamp != quote.quote_timestamp:
         raise ValueError("source snapshot_timestamp must match quote_timestamp")
     if quote.is_live is True or not (
-        quote.quote_timestamp <= quote.collected_at <= probability.generated_at < quote.event_start_time
-        and quote.collected_at <= features.evidence_cutoff <= probability.generated_at
+        quote.quote_timestamp <= quote.collected_at < quote.event_start_time
+        and features.evidence_cutoff <= probability.generated_at < quote.event_start_time
     ):
         raise ValueError("quote, evidence_cutoff and generation must be consistent and pregame")
     expected_probability = compute_batter_hits_probability(features, generated_at=probability.generated_at)
@@ -261,7 +263,7 @@ def assemble_batter_hits_candidate(
         market_implied_probability=ReasoningDimension.available(quote.implied_probability, derived),
         edge=ReasoningDimension.available(probability.model_probability - quote.implied_probability, derived),
         opportunity=ReasoningDimension.available(
-            features.projected_at_bats, fact, reason="Externally supplied projected at-bats, not realized at-bats.",
+            features.projected_at_bats, derived, reason="Externally supplied projected at-bats, not realized at-bats.",
         ),
         identity_quality=ReasoningDimension.available(identity.identity_status.value, fact),
         threshold_cushion=ReasoningDimension.unavailable(derived, "No main-versus-alternate comparison supplied."),

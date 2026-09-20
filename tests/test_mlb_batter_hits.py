@@ -32,7 +32,7 @@ from courtvision.core.probability import (
     ProbabilityOutput,
     ThresholdDirection,
 )
-from courtvision.core.reasoning import EvidenceAvailability
+from courtvision.core.reasoning import EvidenceAvailability, EvidenceKind
 from courtvision.sports.mlb.batter_hits import (
     BatterHitsBaselineFeatures,
     BatterHitsSourceEvidence,
@@ -207,15 +207,19 @@ def test_probability_rejects_naive_or_pre_evidence_generation(generated_at) -> N
         compute_batter_hits_probability(_features(), generated_at=generated_at)
 
 
-def test_model_probability_is_independent_of_sportsbook_price() -> None:
+def test_model_probability_is_independent_of_sportsbook_price_and_timestamps() -> None:
     features = _features()
-    first_probability = compute_batter_hits_probability(features, generated_at=GENERATED)
-    second_probability = compute_batter_hits_probability(features, generated_at=GENERATED)
-    first = _candidate(features=features, probability=first_probability, quote=_quote(american_odds=-150))
-    second = _candidate(features=features, probability=second_probability, quote=_quote(american_odds=120))
+    probability = compute_batter_hits_probability(features, generated_at=GENERATED)
+    later = GENERATED + timedelta(minutes=10)
+    first = _candidate(features=features, probability=probability, quote=_quote(american_odds=-150))
+    second = _candidate(
+        features=features, probability=probability,
+        quote=_quote(american_odds=120, quote_timestamp=later, collected_at=later + timedelta(seconds=1)),
+        source_evidence=_source(snapshot_timestamp=later),
+    )
     assert first.probability.model_probability == second.probability.model_probability
-    assert first.probability is first_probability
-    assert second.probability is second_probability
+    assert first.probability is probability
+    assert second.probability is probability
     assert first.reasoning.market_implied_probability.value != second.reasoning.market_implied_probability.value
     assert first.reasoning.edge.value != second.reasoning.edge.value
     assert first.probability.model_probability != first.quote.implied_probability
@@ -281,6 +285,8 @@ def test_reasoning_exposes_exact_values_and_explained_absence() -> None:
     assert reasoning.market_implied_probability.value == candidate.quote.implied_probability
     assert reasoning.edge.value == candidate.probability.model_probability - candidate.quote.implied_probability
     assert reasoning.opportunity.value == _features().projected_at_bats
+    assert reasoning.opportunity.kind is EvidenceKind.DERIVED_REASONING_FEATURE
+    assert reasoning.opportunity.reason == "Externally supplied projected at-bats, not realized at-bats."
     assert reasoning.identity_quality.value == IdentityStatus.NAME_ONLY_RESEARCH.value
     for name in (
         "threshold_cushion", "projection_confidence", "matchup", "environment",
@@ -454,7 +460,7 @@ def test_source_observation_must_bind_to_quote(key, value) -> None:
     ("quote_timestamp", None), ("quote_timestamp", SNAPSHOT.replace(tzinfo=None)),
     ("collected_at", None), ("collected_at", CUTOFF.replace(tzinfo=None)),
     ("collected_at", SNAPSHOT - timedelta(seconds=1)),
-    ("collected_at", GENERATED + timedelta(seconds=1)),
+    ("collected_at", START), ("collected_at", START + timedelta(seconds=1)),
     ("event_start_time", None), ("event_start_time", START.replace(tzinfo=None)),
     ("event_start_time", GENERATED), ("event_start_time", GENERATED - timedelta(seconds=1)),
     ("is_live", True),
@@ -464,13 +470,36 @@ def test_candidate_rejects_unproven_or_postgame_point_in_time_evidence(key, valu
         _candidate(quote=_quote(**{key: value}))
 
 
-def test_source_snapshot_cannot_be_later_than_feature_evidence_cutoff() -> None:
-    later = CUTOFF + timedelta(seconds=1)
+@pytest.mark.parametrize("cutoff_offset,generated_offset,quote_offset,collected_offset", [
+    pytest.param(0, 1, 2, 3, id="model-first-quote-later"),
+    pytest.param(2, 3, 0, 1, id="quote-first-model-later"),
+    pytest.param(0, 3, 1, 2, id="quote-between-model-evidence-and-generation"),
+])
+def test_model_and_quote_timelines_are_independent(
+    cutoff_offset, generated_offset, quote_offset, collected_offset,
+) -> None:
+    times = [SNAPSHOT + timedelta(minutes=index) for index in range(5)]
+    features = _features(evidence_cutoff=times[cutoff_offset])
+    probability = compute_batter_hits_probability(features, generated_at=times[generated_offset])
+    quote = _quote(
+        quote_timestamp=times[quote_offset], collected_at=times[collected_offset],
+        event_start_time=times[4],
+    )
+    candidate = _candidate(
+        features=features, probability=probability, quote=quote,
+        source_evidence=_source(snapshot_timestamp=times[quote_offset]),
+    )
+    assert candidate.probability is probability
+    assert candidate.quote is quote
+    assert candidate.probability.evidence_cutoff == features.evidence_cutoff
+    assert candidate.probability.model_probability == 1 - (1 - 125 / 500) ** 4.0
+
+
+@pytest.mark.parametrize("generated_at", [START, START + timedelta(seconds=1)])
+def test_candidate_rejects_model_generated_at_or_after_event_start(generated_at) -> None:
+    probability = compute_batter_hits_probability(_features(), generated_at=generated_at)
     with pytest.raises(ValueError):
-        _candidate(
-            quote=_quote(quote_timestamp=later, collected_at=later),
-            source_evidence=_source(snapshot_timestamp=later),
-        )
+        _candidate(probability=probability)
 
 
 @pytest.mark.parametrize("key,value", [
