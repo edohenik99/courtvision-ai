@@ -37,7 +37,13 @@ from courtvision.sports.mlb.batter_hits import (
     BatterHitsBaselineFeatures,
     BatterHitsSourceEvidence,
     assemble_batter_hits_candidate,
+    batter_hits_source_evidence_from_market_record,
     compute_batter_hits_probability,
+)
+from courtvision.sports.mlb.market_data import (
+    MLBMarketVariant,
+    MLBPlayerPropSourceRecord,
+    MLBPropSide,
 )
 
 
@@ -78,6 +84,31 @@ def _source(**updates: object) -> BatterHitsSourceEvidence:
     }
     values.update(updates)
     return BatterHitsSourceEvidence(**values)
+
+
+def _market_record(**updates: object) -> MLBPlayerPropSourceRecord:
+    values = {
+        "provider": "offline-source",
+        "provider_sport_key": "baseball_mlb",
+        "provider_event_id": EVENT_ID,
+        "home_team": "NYY",
+        "away_team": "BOS",
+        "commence_time": START,
+        "bookmaker_key": "offline-book-key",
+        "bookmaker_name": "offline-book",
+        "provider_market_key": "batter_hits",
+        "canonical_market_type": "batter_hits",
+        "market_variant": MLBMarketVariant.MAIN,
+        "participant_name": BATTER,
+        "side": MLBPropSide.OVER,
+        "line": 0.5,
+        "american_odds": -150,
+        "market_updated_at": SNAPSHOT,
+        "collected_at": CUTOFF,
+        "source_refs": ("fixture-source-market-record",),
+    }
+    values.update(updates)
+    return MLBPlayerPropSourceRecord(**values)
 
 
 def _quote(**updates: object) -> NormalizedOddsQuote:
@@ -517,8 +548,8 @@ def test_adapter_rejects_probability_not_derived_from_supplied_baseline(key, val
 
 def test_specialist_and_candidate_assembly_perform_no_io_or_environment_mutation(monkeypatch) -> None:
     features = _features()
-    quote = _quote()
-    source = _source()
+    record = _market_record()
+    quote = record.to_normalized_quote()
     identity = _identity()
     event = EventIdentity(EVENT_ID, "offline-explicit-reference")
     provenance = CandidateProvenance("offline-test", ("source-fixture",))
@@ -537,6 +568,7 @@ def test_specialist_and_candidate_assembly_perform_no_io_or_environment_mutation
         patch.setattr(socket, "create_connection", forbidden)
         for name in ("Popen", "run", "call", "check_call", "check_output"):
             patch.setattr(subprocess, name, forbidden)
+        source = batter_hits_source_evidence_from_market_record(record)
         probability = compute_batter_hits_probability(features, generated_at=GENERATED)
         candidate = assemble_batter_hits_candidate(
             candidate_id="offline-pure-test", quote=quote, source_evidence=source,
@@ -546,3 +578,71 @@ def test_specialist_and_candidate_assembly_perform_no_io_or_environment_mutation
     assert candidate.quote is quote
     assert candidate.probability is probability
     assert dict(os.environ) == environment_before
+
+
+def test_main_hits_market_record_bridges_to_existing_candidate_without_inference() -> None:
+    record = _market_record()
+    quote = record.to_normalized_quote()
+    source = batter_hits_source_evidence_from_market_record(record)
+    candidate = _candidate(quote=quote, source_evidence=source)
+
+    assert source.market == record.provider_market_key == "batter_hits"
+    assert source.side == record.side.value == "OVER"
+    assert source.point == record.line == 0.5
+    assert source.batter_name == record.participant_name == BATTER
+    assert source.snapshot_timestamp == record.market_updated_at == SNAPSHOT
+    assert source.event_id == record.provider_event_id == EVENT_ID
+    assert source.provider == record.provider == "offline-source"
+    assert source.sportsbook == record.bookmaker_name == "offline-book"
+    assert source.source_refs == record.source_refs
+    assert candidate.quote is quote
+    assert candidate.quote.raw_provider_market_id == record.provider_market_key
+    assert candidate.quote.quote_timestamp == record.market_updated_at
+    assert set(record.source_refs) <= set(candidate.provenance.source_refs)
+    assert candidate.participant_identity.identity_status is IdentityStatus.NAME_ONLY_RESEARCH
+    assert candidate.participant_identity.canonical_player_id is None
+    assert candidate.event_identity.identity_status is IdentityStatus.UNRESOLVED
+    assert candidate.research_only is True
+    assert candidate.eligible_for_betting is False
+    assert candidate.eligible_for_official_pick is False
+    assert candidate.approval_status == "not_approved"
+
+
+@pytest.mark.parametrize("raw_market,canonical,variant,side,line", [
+    ("batter_hits_alternate", "batter_hits", MLBMarketVariant.ALTERNATE, MLBPropSide.OVER, 1.5),
+    ("batter_hits_alternate", "batter_hits", MLBMarketVariant.ALTERNATE, MLBPropSide.OVER, 0.5),
+    ("batter_hits", "batter_hits", MLBMarketVariant.MAIN, MLBPropSide.UNDER, 0.5),
+    ("batter_hits", "batter_hits", MLBMarketVariant.MAIN, MLBPropSide.OVER, 1.5),
+    ("batter_total_bases", "batter_total_bases", MLBMarketVariant.MAIN, MLBPropSide.OVER, 0.5),
+])
+def test_normalized_source_does_not_broaden_supported_hits_candidate_semantics(
+    raw_market, canonical, variant, side, line,
+) -> None:
+    record = _market_record(
+        provider_market_key=raw_market, canonical_market_type=canonical,
+        market_variant=variant, side=side, line=line,
+    )
+    quote = record.to_normalized_quote()
+    assert quote.raw_provider_market_id == raw_market
+    assert quote.market_type == canonical
+    assert quote.line == line
+    with pytest.raises(ValueError):
+        batter_hits_source_evidence_from_market_record(record)
+
+
+def test_alternate_half_hit_quote_still_rejects_spoofed_main_source_evidence() -> None:
+    record = _market_record(
+        provider_market_key="batter_hits_alternate",
+        market_variant=MLBMarketVariant.ALTERNATE,
+    )
+    quote = record.to_normalized_quote()
+    assert quote.market_type == "batter_hits"
+    assert quote.line == 0.5
+    assert quote.raw_provider_market_id == "batter_hits_alternate"
+    with pytest.raises(ValueError, match="raw provider market"):
+        _candidate(quote=quote, source_evidence=_source())
+
+
+def test_hits_market_bridge_requires_typed_source_record() -> None:
+    with pytest.raises(TypeError, match="MLBPlayerPropSourceRecord"):
+        batter_hits_source_evidence_from_market_record({})
