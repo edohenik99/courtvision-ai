@@ -339,9 +339,12 @@ def test_success_has_immutable_exchange_usage_and_research_quote(tmp_path):
     assert "apiKey" not in dict(exchange.query)
     assert len(result.market_batches) == 1
     assert len(result.market_batches[0].records) == 1
+    assert result.market_batches[0].records[0].source_type == "live"
     with pytest.raises((FrozenInstanceError, AttributeError)):
         result.status = "FORGED"
     for quote in result.market_batches[0].quotes:
+        assert quote.source_type == "live"
+        assert quote.is_live is False
         assert quote.mode == "research"
         assert quote.eligible_for_betting is False
         assert quote.kelly_eligible is False
@@ -467,6 +470,9 @@ def test_eight_market_response_reuses_pure_adapter_and_keeps_independent_rows(tm
     assert batch.diagnostics
     assert result.normalization_diagnostics
     for record, quote in zip(batch.records, batch.quotes, strict=True):
+        assert record.source_type == quote.source_type == "live"
+        assert quote.mode == "research"
+        assert quote.is_live is False
         assert record.provider_event_id == quote.raw_event_id == "event-a"
         assert record.participant_name == "Example Batter"
         assert quote.selection_id is None
@@ -498,6 +504,12 @@ def test_http_exchange_to_existing_hits_candidate_stays_name_only_research(tmp_p
         event_identity=EventIdentity(record.provider_event_id, "provider_reference_only"),
         provenance=CandidateProvenance("offline-ingestion-test", ("synthetic-candidate-input",)),
     )
+    assert result.status == "COMPLETE"
+    assert record.source_type == quote.source_type == "live"
+    assert quote.mode == "research"
+    assert quote.is_live is False
+    assert quote.kelly_eligible is False
+    assert candidate.quote is quote
     assert source.batter_name == "Example Batter"
     assert source.market == "batter_hits"
     assert source.side == "OVER"

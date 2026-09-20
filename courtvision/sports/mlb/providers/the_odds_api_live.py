@@ -585,7 +585,7 @@ def execute_ingestion(plan: MLBOddsRequestPlan, *, api_key: str | None = None,
                         raise ValueError("INVALID_RESPONSE_SHAPE")
                     if (received.commence_time - responded_at).total_seconds() < config.minimum_pregame_lead_seconds:
                         raise ValueError("PREGAME_LEAD_TIME")
-                    batch = normalize_mlb_event_odds(payload, collected_at=responded_at,
+                    batch = normalize_mlb_event_odds(payload, collected_at=responded_at, source_type="live",
                         source_refs=(f"mlb-odds:{run_id}:{request.request_id}:{hashlib.sha256(raw.encode('utf-8')).hexdigest()}",))
                     batches.append(batch)
             except Exception as error:

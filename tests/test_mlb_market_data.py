@@ -53,6 +53,7 @@ def test_source_record_preserves_evidence_and_is_immutable() -> None:
         provider_market_id="market-1",
         provider_bookmaker_id="book-1",
     )
+    assert record.source_type == record.to_normalized_quote().source_type == "manual"
     assert record.provider_event_id == "provider-event-1"
     assert record.provider_sport_key == "baseball_mlb"
     assert record.provider_sport_title == "MLB"
@@ -74,6 +75,26 @@ def test_source_record_preserves_evidence_and_is_immutable() -> None:
     with pytest.raises(TypeError):
         record.source_refs[0] = "changed"  # type: ignore[index]
     assert not hasattr(record, "__dict__")
+
+
+@pytest.mark.parametrize("source_type", ["manual", "live"])
+def test_acquisition_type_is_immutable_and_independent_of_inplay(source_type: str) -> None:
+    record = _record(source_type=source_type)
+    quote = record.to_normalized_quote()
+    assert record.source_type == quote.source_type == source_type
+    assert quote.mode == "research"
+    assert quote.is_live is False
+    assert quote.eligible_for_betting is False
+    assert quote.kelly_eligible is False
+    assert quote.approval_status == "not_approved"
+    with pytest.raises(FrozenInstanceError):
+        record.source_type = "manual"  # type: ignore[misc]
+
+
+@pytest.mark.parametrize("invalid", ["", " ", "unknown", "LIVE", " live ", "mock", "historical", "sample", None, True, 1, [], {}])
+def test_source_acquisition_type_fails_closed(invalid: object) -> None:
+    with pytest.raises(ValueError, match="source_type"):
+        _record(source_type=invalid)
 
 
 @pytest.mark.parametrize("side, expected", [(" Over ", MLBPropSide.OVER), ("under", MLBPropSide.UNDER)])

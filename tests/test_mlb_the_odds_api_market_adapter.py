@@ -179,11 +179,33 @@ def test_multiple_books_markets_participants_and_sides_keep_distinct_offers():
         assert quote.event_start_time == record.commence_time == START
         assert quote.quote_timestamp <= quote.collected_at < quote.event_start_time
         assert quote.mode == "research"
-        assert quote.source_type == "manual"
+        assert record.source_type == quote.source_type == "manual"
         assert quote.is_live is False
         assert quote.eligible_for_betting is False
         assert quote.kelly_eligible is False
         assert quote.approval_status == "not_approved"
+
+
+@pytest.mark.parametrize("source_type", ["manual", "live"])
+def test_explicit_acquisition_type_reaches_every_record_and_quote(source_type):
+    result = normalize_mlb_event_odds(
+        _multi_event(), collected_at=COLLECTED, source_refs=SOURCE_REFS,
+        source_type=source_type,
+    )
+    assert len(result.records) == len(result.quotes) == 27
+    assert not result.diagnostics
+    assert all(record.source_type == source_type for record in result.records)
+    assert all(quote.source_type == source_type for quote in result.quotes)
+
+
+@pytest.mark.parametrize("invalid", ["", " ", "unknown", "LIVE", " live ", "mock", "historical", "sample", None, True, 1, [], {}])
+@pytest.mark.parametrize("payload", [None, {}, {"bookmakers": []}])
+def test_invalid_acquisition_type_is_rejected_before_payload_normalization(invalid, payload):
+    with pytest.raises(ValueError, match="source_type"):
+        normalize_mlb_event_odds(
+            payload, collected_at=COLLECTED, source_refs=SOURCE_REFS,
+            source_type=invalid,
+        )
 
 
 def test_deeply_immutable_mapping_input_is_supported_without_mutation():

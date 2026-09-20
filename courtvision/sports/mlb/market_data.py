@@ -64,6 +64,7 @@ class MLBPlayerPropSourceRecord:
     or integers and remain unavailable when omitted. They never become canonical IDs.
     Numeric lines/prices and side/variant labels have deterministic canonical
     representations. References are supplied evidence labels, never opened.
+    source_type declares manual or live acquisition, never in-play/betting state.
     """
 
     provider: str
@@ -88,8 +89,11 @@ class MLBPlayerPropSourceRecord:
     provider_outcome_id: str | int | None = None
     provider_market_id: str | int | None = None
     provider_bookmaker_id: str | int | None = None
+    source_type: str = "manual"
 
     def __post_init__(self) -> None:
+        if not isinstance(self.source_type, str) or self.source_type not in ("manual", "live"):
+            raise ValueError("source_type must be manual or live")
         for field_name in (
             "provider", "provider_sport_key", "provider_event_id", "home_team",
             "away_team", "bookmaker_key", "bookmaker_name", "provider_market_key",
@@ -165,7 +169,7 @@ class MLBPlayerPropSourceRecord:
             _source_text(reference, "source reference")
 
     def to_normalized_quote(self) -> NormalizedOddsQuote:
-        """Bind exact source facts to the existing research/manual odds contract.
+        """Bind exact source facts and acquisition type to the research odds contract.
 
         The provider event reference occupies event_id without claiming StatsAPI
         resolution. selection_id stays unavailable, even with a provider outcome
@@ -191,7 +195,7 @@ class MLBPlayerPropSourceRecord:
                 sportsbook=self.bookmaker_name,
                 provider=self.provider,
                 mode="research",
-                source_type="manual",
+                source_type=self.source_type,
                 raw_provider_market_id=self.provider_market_key,
                 raw_event_id=self.provider_event_id,
             ),
