@@ -326,8 +326,8 @@ def test_success_has_immutable_exchange_usage_and_research_quote(tmp_path):
     assert result.provider_remaining == 400
     assert not result.transport_failures
     exchange = result.exchanges[0]
-    assert json.loads(exchange.raw_json) == _event()
-    assert hashlib.sha256(exchange.raw_json.encode()).hexdigest() == exchange.response_sha256
+    assert json.loads(exchange.canonical_json) == _event()
+    assert hashlib.sha256(exchange.canonical_json.encode()).hexdigest() == exchange.canonical_json_sha256
     assert exchange.requested_at == exchange.responded_at == NOW
     assert exchange.http_status == 200
     assert exchange.actual_reported_last_cost == 1
@@ -436,7 +436,7 @@ def test_discovery_then_partial_failure_retains_a_and_b_and_never_executes_c(tmp
     assert len(result.market_batches) == 1
     assert [request.event_id for request in transport.calls] == [None, "event-a", "event-b"]
     assert list(tmp_path.rglob("COMPLETE"))
-    raw_files = list(tmp_path.rglob("raw/*.json"))
+    raw_files = list(tmp_path.rglob("canonical/*.json"))
     assert len(raw_files) == 3
 
 
@@ -629,14 +629,22 @@ class MockHTTPSession:
         return self.response
 
 
-def _concrete_send(monkeypatch, response, **overrides):
+def _concrete_send(monkeypatch, tmp_path, response, **overrides):
     from courtvision.sports.mlb.providers.the_odds_api_transport import RequestsOddsAPITransport
 
     session = MockHTTPSession(response)
     monkeypatch.setattr(requests, "Session", lambda: session)
     kwargs = dict(api_key=SECRET, timeout_seconds=15, max_response_bytes=4 * 1024 * 1024)
     kwargs.update(overrides)
-    result = RequestsOddsAPITransport(network_enabled=True).send(_plan().requests[0], **kwargs)
+    plan = _plan(_config(timeout_seconds=kwargs["timeout_seconds"], max_response_bytes=kwargs["max_response_bytes"]))
+    claim = live.acquire_ingestion_claim(output_root=tmp_path / "concrete-evidence",
+        run_id="concrete-run", operating_date=DAY, plan_identity=live.request_plan_identity(plan))
+    issuer = live.create_execution_permit_issuer(plan, claim)
+    try:
+        result = RequestsOddsAPITransport(network_enabled=True).send(
+            plan.requests[0], permit=issuer.issue(plan.requests[0]), run_id="concrete-run", **kwargs)
+    finally:
+        issuer.close()
     assert SECRET not in repr(result)
     return result, session
 
@@ -651,10 +659,10 @@ def test_concrete_transport_requires_its_own_explicit_network_flag(monkeypatch):
     assert response.body == b""
 
 
-def test_concrete_transport_uses_only_fixed_https_bounded_get_with_no_redirect_or_retry(monkeypatch):
+def test_concrete_transport_uses_only_fixed_https_bounded_get_with_no_redirect_or_retry(tmp_path, monkeypatch):
     response = MockHTTPResponse(headers={**dict(_headers()), "Authorization": SECRET,
                                          "Set-Cookie": SECRET, "Retry-After": "60"})
-    result, session = _concrete_send(monkeypatch, response)
+    result, session = _concrete_send(monkeypatch, tmp_path, response)
     assert result.status_code == 200
     assert session.trust_env is False
     assert len(session.calls) == 1
@@ -680,8 +688,8 @@ def test_concrete_transport_uses_only_fixed_https_bounded_get_with_no_redirect_o
     (MockHTTPResponse(headers={"Content-Length": "invalid"}), "INVALID_RESPONSE_SHAPE", 0),
     (MockHTTPResponse(headers={"Content-Length": "-1"}), "INVALID_RESPONSE_SHAPE", 0),
 ])
-def test_concrete_transport_bounds_declared_and_streamed_response_size(monkeypatch, response, expected, reads):
-    result, session = _concrete_send(monkeypatch, response, max_response_bytes=1024)
+def test_concrete_transport_bounds_declared_and_streamed_response_size(tmp_path, monkeypatch, response, expected, reads):
+    result, session = _concrete_send(monkeypatch, tmp_path, response, max_response_bytes=1024)
     assert result.error == expected
     assert result.body == b""
     assert response.read_count == reads
@@ -695,8 +703,8 @@ def test_concrete_transport_bounds_declared_and_streamed_response_size(monkeypat
     (MockHTTPResponse(status=429), None), (MockHTTPResponse(status=500), None),
     (MockHTTPResponse(status=302, headers={"Location": "https://example.invalid/"}), None),
 ])
-def test_concrete_transport_never_retries_or_exposes_client_exception_url(monkeypatch, response, expected):
-    result, session = _concrete_send(monkeypatch, response)
+def test_concrete_transport_never_retries_or_exposes_client_exception_url(tmp_path, monkeypatch, response, expected):
+    result, session = _concrete_send(monkeypatch, tmp_path, response)
     assert result.error == expected
     assert len(session.calls) == 1
     assert session.closed
@@ -713,7 +721,7 @@ def test_concrete_invalid_parameters_never_construct_http_session(monkeypatch, u
     kwargs = dict(api_key=SECRET, timeout_seconds=15, max_response_bytes=4096)
     kwargs.update(updates)
     result = RequestsOddsAPITransport(network_enabled=True).send(_plan().requests[0], **kwargs)
-    assert result.error == "INVALID_REQUEST"
+    assert result.error == "EXECUTION_PERMIT_REQUIRED"
 
 
 def test_arbitrary_host_override_is_not_part_of_concrete_transport_api():
@@ -737,7 +745,7 @@ def test_partial_failure_with_unexpected_cost_never_attempts_budget_exceeding_ev
     assert [request.event_id for request in transport.calls] == [None, "event-a", "event-b"]
     assert len(result.market_batches) == 1
     assert len(result.exchanges) == 3
-    assert len(list(tmp_path.rglob("raw/*.json"))) == 3
+    assert len(list(tmp_path.rglob("canonical/*.json"))) == 3
 
 
 @pytest.mark.parametrize("run_id", ["CON", "NUL", "COM1", "LPT9"])
@@ -810,7 +818,7 @@ def test_raw_redaction_stays_explicit_when_credit_violation_takes_status_priorit
     assert len(manifests) == 1
     manifest = json.loads(manifests[0].read_text())
     assert manifest["requests"][0]["raw_body_redacted"] is True
-    assert "synthetic-other-secret" not in result.exchanges[0].raw_json
+    assert "synthetic-other-secret" not in result.exchanges[0].canonical_json
 
 
 def test_safe_retry_after_is_retained_for_429_without_sleep_or_retry(tmp_path, monkeypatch):
@@ -855,7 +863,7 @@ def test_post_request_clock_failure_preserves_response_and_stops(tmp_path, bad_t
     assert result.transport_failures == ("CLOCK_FAILURE",)
     assert len(result.exchanges) == len(transport.calls) == 1
     assert result.exchanges[0].responded_at >= result.exchanges[0].requested_at
-    assert json.loads(result.exchanges[0].raw_json) == _event()
+    assert json.loads(result.exchanges[0].canonical_json) == _event()
     assert not result.market_batches
 
 
@@ -914,15 +922,11 @@ def test_debug_http_logger_blocks_session_construction_and_preserves_safe_failur
     original_level = logger.level
     try:
         logger.setLevel(logging.DEBUG)
-        response = RequestsOddsAPITransport(network_enabled=True).send(
-            _plan().requests[0], api_key=SECRET, timeout_seconds=15, max_response_bytes=4096,
-        )
+        result = _execute(tmp_path, RequestsOddsAPITransport(network_enabled=True))
     finally:
         logger.setLevel(original_level)
-    assert response.error == "UNSAFE_HTTP_LOGGING"
     assert constructed == []
-    assert SECRET not in repr(response)
-    result = _execute(tmp_path, FakeTransport(response))
+    assert SECRET not in repr(result)
     assert result.status == "FAILED"
     assert result.transport_failures == ("UNSAFE_HTTP_LOGGING",)
     assert not result.market_batches
@@ -930,7 +934,7 @@ def test_debug_http_logger_blocks_session_construction_and_preserves_safe_failur
 
 @pytest.mark.parametrize("connection_name", ["HTTPConnection", "HTTPSConnection"])
 @pytest.mark.parametrize("module_name", ["http.client", "urllib3.connection"])
-def test_http_client_wire_debug_blocks_session_before_secret_use(monkeypatch, connection_name, module_name):
+def test_http_client_wire_debug_blocks_session_before_secret_use(tmp_path, monkeypatch, connection_name, module_name):
     import importlib
     from courtvision.sports.mlb.providers.the_odds_api_transport import RequestsOddsAPITransport
 
@@ -942,9 +946,213 @@ def test_http_client_wire_debug_blocks_session_before_secret_use(monkeypatch, co
 
     monkeypatch.setattr(requests, "Session", forbidden_session)
     monkeypatch.setattr(getattr(importlib.import_module(module_name), connection_name), "debuglevel", 1)
-    response = RequestsOddsAPITransport(network_enabled=True).send(
-        _plan().requests[0], api_key=SECRET, timeout_seconds=15, max_response_bytes=4096,
-    )
-    assert response.error == "UNSAFE_HTTP_LOGGING"
+    result = _execute(tmp_path, RequestsOddsAPITransport(network_enabled=True))
+    assert result.transport_failures == ("UNSAFE_HTTP_LOGGING",)
     assert constructed == []
-    assert SECRET not in repr(response)
+    assert SECRET not in repr(result)
+
+
+def test_claim_creation_failure_stops_before_any_transport(tmp_path, monkeypatch):
+    from courtvision.sports.mlb import market_ingestion_evidence as evidence
+
+    original = evidence._write_bytes
+    def unwritable_claim(path, data):
+        if path.name.endswith(".claim.json"):
+            raise PermissionError("synthetic unwritable root")
+        return original(path, data)
+    monkeypatch.setattr(evidence, "_write_bytes", unwritable_claim)
+    transport = FakeTransport(_response())
+    result = _execute(tmp_path, transport)
+    assert result.status == "EVIDENCE_CLAIM_FAILED"
+    assert result.executed_request_count == 0
+    assert transport.calls == []
+
+
+@pytest.mark.parametrize("material", [".synthetic-run.claim.json", ".synthetic-run.staging", ".synthetic-run.staging-old"])
+def test_stale_run_material_prevents_http(tmp_path, material):
+    parent = tmp_path / "research-evidence" / "runs" / DAY.isoformat()
+    parent.mkdir(parents=True)
+    path = parent / material
+    if material.endswith(".json"):
+        path.write_text("{}")
+    else:
+        path.mkdir()
+    transport = FakeTransport(_response())
+    result = _execute(tmp_path, transport)
+    assert result.status == "EVIDENCE_CLAIM_FAILED"
+    assert result.executed_request_count == 0
+    assert transport.calls == []
+    assert path.exists()
+
+
+def test_two_simultaneous_executors_acquire_one_transport_lane(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    barrier = Barrier(2)
+    original = live.acquire_ingestion_claim
+    def simultaneous_claim(**kwargs):
+        barrier.wait(timeout=10)
+        return original(**kwargs)
+    monkeypatch.setattr(live, "acquire_ingestion_claim", simultaneous_claim)
+    transports = [FakeTransport(_response()), FakeTransport(_response())]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(_execute, tmp_path, transport) for transport in transports]
+        results = [future.result(timeout=20) for future in futures]
+    assert sorted(result.status for result in results) == ["COMPLETE", "EVIDENCE_CLAIM_FAILED"]
+    assert sum(len(transport.calls) for transport in transports) == 1
+    assert sum(result.executed_request_count for result in results) == 1
+    assert len(list(tmp_path.rglob("*.claim.json"))) == 1
+
+
+def test_crash_after_request_a_preserves_durable_evidence_and_blocks_rerun(tmp_path, monkeypatch):
+    original = live.stage_ingestion_exchange
+    class ProcessCrash(BaseException):
+        pass
+    def crash_after_stage(claim, exchange):
+        original(claim, exchange)
+        raise ProcessCrash()
+    monkeypatch.setattr(live, "stage_ingestion_exchange", crash_after_stage)
+    transport = FakeTransport(_response(), _response(_event("event-b")))
+    plan = _plan(events=[_event(), _event("event-b")])
+    with pytest.raises(ProcessCrash):
+        _execute(tmp_path, transport, plan)
+    assert len(transport.calls) == 1
+    assert not list(tmp_path.rglob("COMPLETE"))
+    canonical = list(tmp_path.rglob("canonical/*.json"))
+    received = list(tmp_path.rglob("received/*.body"))
+    assert len(canonical) == len(received) == 1
+    assert json.loads(canonical[0].read_bytes()) == _event()
+    body_hash = hashlib.sha256(received[0].read_bytes()).hexdigest()
+    canonical_hash = hashlib.sha256(canonical[0].read_bytes()).hexdigest()
+    metadata = [path.read_text() for path in tmp_path.rglob("*.json")
+                if path not in canonical + received]
+    assert any(body_hash in text and canonical_hash in text for text in metadata)
+    retry = FakeTransport(_response())
+    result = _execute(tmp_path, retry, plan)
+    assert result.status == "EVIDENCE_CLAIM_FAILED"
+    assert retry.calls == []
+    assert received[0].exists() and canonical[0].exists()
+
+
+def test_each_exchange_is_persisted_before_following_transport(tmp_path):
+    class InspectingTransport(FakeTransport):
+        def send(self, *args, **kwargs):
+            if self.calls:
+                files = list(tmp_path.rglob("canonical/*.json"))
+                assert len(files) == 1
+                assert json.loads(files[0].read_bytes()) == _event()
+                assert not list(tmp_path.rglob("COMPLETE"))
+            return super().send(*args, **kwargs)
+    transport = InspectingTransport(_response(), _response(_event("event-b")))
+    result = _execute(tmp_path, transport, _plan(events=[_event(), _event("event-b")]))
+    assert result.status == "COMPLETE"
+    assert len(transport.calls) == 2
+
+
+def test_staging_failure_blocks_following_request_and_complete_publication(tmp_path, monkeypatch):
+    def fail_stage(*args):
+        raise OSError("synthetic disk failure")
+    monkeypatch.setattr(live, "stage_ingestion_exchange", fail_stage)
+    transport = FakeTransport(_response(), _response(_event("event-b")))
+    result = _execute(tmp_path, transport, _plan(events=[_event(), _event("event-b")]))
+    assert result.status == "EVIDENCE_STAGING_FAILED"
+    assert result.executed_request_count == len(transport.calls) == 1
+    assert not list(tmp_path.rglob("COMPLETE"))
+    assert list(tmp_path.rglob("*.claim.json"))
+
+
+def test_exact_received_hash_differs_while_canonical_and_normalization_match(tmp_path):
+    payload = _event()
+    first_body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+    second_body = json.dumps(dict(reversed(list(payload.items()))), indent=2).encode()
+    first = _execute(tmp_path / "one", FakeTransport(_response(body=first_body)))
+    second = _execute(tmp_path / "two", FakeTransport(_response(body=second_body)))
+    assert first.status == second.status == "COMPLETE"
+    a, b = first.exchanges[0], second.exchanges[0]
+    assert a.received_body == first_body and b.received_body == second_body
+    assert a.received_body_sha256 != b.received_body_sha256
+    assert a.canonical_json_sha256 == b.canonical_json_sha256
+    assert first.market_batches == second.market_batches
+    for result, body in ((first, first_body), (second, second_body)):
+        directory = result.evidence_result.run_directory
+        manifest = json.loads((directory / "manifest.json").read_bytes())
+        row = manifest["requests"][0]
+        assert row["received_body_sha256"] == hashlib.sha256(body).hexdigest()
+        assert (directory / row["received_body_file"]).read_bytes() == body
+        assert row["canonical_json_sha256"] == a.canonical_json_sha256
+        assert row["received_body_file"] != row["canonical_json_file"]
+
+
+@pytest.mark.parametrize("secret_field", ["apiKey", "password", "Authorization", "debug"])
+def test_secret_body_withholds_exact_file_and_hash(tmp_path, secret_field):
+    payload = _event()
+    payload[secret_field] = ("https://example.invalid/?apiKey=" + SECRET
+                             if secret_field == "debug" else SECRET)
+    result = _execute(tmp_path, FakeTransport(_response(payload)))
+    exchange = result.exchanges[0]
+    assert exchange.raw_body_redacted is True
+    assert exchange.received_body is exchange.received_body_sha256 is None
+    assert exchange.canonical_json is not None
+    assert exchange.canonical_json_sha256 == hashlib.sha256(exchange.canonical_json.encode()).hexdigest()
+    assert not list(tmp_path.rglob("received/*.body"))
+    manifest = json.loads((result.evidence_result.run_directory / "manifest.json").read_bytes())
+    row = manifest["requests"][0]
+    assert row["received_body_file"] is row["received_body_sha256"] is None
+    assert row["raw_body_redacted"] is True
+
+
+@pytest.mark.parametrize("unsafe_key", ["https://user:password@example.invalid/", "?access_token=other-secret"])
+def test_credential_material_in_json_keys_is_removed(tmp_path, unsafe_key):
+    payload = _event()
+    payload[unsafe_key] = "debug"
+    result = _execute(tmp_path, FakeTransport(_response(payload)))
+    exchange = result.exchanges[0]
+    assert exchange.raw_body_redacted is True
+    assert exchange.received_body is None
+    assert unsafe_key not in exchange.canonical_json
+    assert not result.market_batches
+    for path in tmp_path.rglob("*"):
+        if path.is_file():
+            assert unsafe_key.encode() not in path.read_bytes()
+
+
+def test_numeric_api_key_cannot_survive_as_json_number(tmp_path):
+    numeric_key = "867530998765"
+    payload = _event()
+    payload["debug"] = int(numeric_key)
+    class NumericKeyTransport:
+        def send(self, request, *, api_key, **kwargs):
+            assert api_key == numeric_key
+            return _response(payload)
+    result = live.execute_ingestion(_plan(), api_key=numeric_key,
+        transport=NumericKeyTransport(), output_root=tmp_path / "evidence",
+        run_id="numeric-key-run", clock=lambda: NOW)
+    exchange = result.exchanges[0]
+    assert exchange.raw_body_redacted is True
+    assert exchange.received_body is exchange.received_body_sha256 is None
+    assert exchange.canonical_json is not None
+    for path in tmp_path.rglob("*"):
+        if path.is_file():
+            assert numeric_key.encode() not in path.read_bytes()
+            assert hashlib.sha256(numeric_key.encode()).hexdigest().encode() not in path.read_bytes()
+
+
+def test_normalization_exception_preserves_paid_response_and_stops(tmp_path, monkeypatch):
+    def failed_normalization(*args, **kwargs):
+        raise RuntimeError("untrusted secret: " + SECRET)
+    monkeypatch.setattr(live, "normalize_mlb_event_odds", failed_normalization)
+    transport = FakeTransport(_response(), _response(_event("event-b")))
+    result = _execute(tmp_path, transport, _plan(events=[_event(), _event("event-b")]))
+    assert result.status == "FAILED"
+    assert result.executed_request_count == len(transport.calls) == 1
+    assert result.exchanges[0].received_body is not None
+    assert result.evidence_result.status == "COMPLETE"
+    assert not result.market_batches
+
+
+def test_invalid_secret_json_marks_exact_body_withheld(tmp_path):
+    result = _execute(tmp_path, FakeTransport(_response(body=b'{"password":"other-secret",')))
+    assert result.exchanges[0].raw_body_redacted is True
+    assert result.exchanges[0].received_body is None
+    assert not list(tmp_path.rglob("received/*.body"))

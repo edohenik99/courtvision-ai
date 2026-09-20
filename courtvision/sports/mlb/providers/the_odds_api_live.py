@@ -4,11 +4,12 @@ No CLI, scheduler, environment credentials or cache. A caller explicitly opts
 into networking and supplies a key, immutable plan and isolated evidence root.
 Discovery reserves worst-case declared cost; no provider billing is inferred.
 The default 4 MiB decoded/canonical body ceiling is configurable up to 16 MiB.
-Every failure stops the run, retaining all attempted exchanges for publication.
+Each exchange is durably staged before the next request; claims and incomplete
+staging remain forensic evidence and are never automatically resumed or deleted.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timezone
 import hashlib
 import json
@@ -21,10 +22,14 @@ from zoneinfo import ZoneInfo
 from courtvision.sports.mlb.market_data import MLBMarketDataBatch
 from courtvision.sports.mlb.market_ingestion_evidence import (
     MLBOddsHTTPExchange, MLBOddsEvidenceWriteResult, validate_evidence_destination,
-    is_sensitive_evidence_key, write_ingestion_evidence,
+    is_sensitive_evidence_key, is_sensitive_evidence_text, write_ingestion_evidence,
+    acquire_ingestion_claim, stage_ingestion_exchange,
 )
 from .the_odds_api_market_adapter import PROVIDER_MARKET_MAPPING, normalize_mlb_event_odds
-from .the_odds_api_transport import OddsAPIHTTPResponse, OddsAPITransport
+from .the_odds_api_transport import (
+    OddsAPIHTTPResponse, OddsAPITransport, RequestsOddsAPITransport,
+    create_execution_permit_issuer,
+)
 
 INITIAL_RESEARCH_MARKETS = ("batter_hits",)
 _USAGE = ("x-requests-last", "x-requests-used", "x-requests-remaining")
@@ -166,6 +171,18 @@ class MLBOddsRequestPlan:
     eligible_events: tuple[MLBOddsEvent, ...] = ()
     discovery_pending: bool = False
     skipped_duplicate_request_count: int = 0
+
+
+def request_plan_identity(plan: MLBOddsRequestPlan) -> dict:
+    """Credential-free identity of the fully validated, reserved request scope."""
+    plan = _validated_plan(plan)
+    # Round-trip dates so the same identity is shared by claim and permit gates.
+    scope = json.loads(json.dumps(asdict(plan), sort_keys=True,
+                                 default=lambda item: item.isoformat(), allow_nan=False))
+    return {"provider": plan.config.provider, "research_only": True,
+            "max_http_requests": plan.config.maximum_http_requests,
+            "declared_credit_budget": plan.config.maximum_provider_credits,
+            "requested_markets": list(plan.config.markets), "plan": scope}
 
 
 def _event(value: object) -> MLBOddsEvent:
@@ -338,20 +355,23 @@ def _safe_json(body: bytes, api_key: str, limit: int) -> tuple[object, str, bool
         value = json.loads(body, object_pairs_hook=pairs, parse_constant=invalid_constant)
     except (ValueError, UnicodeError, RecursionError):
         raise ValueError("INVALID_JSON") from None
-    redacted = False
+    redacted = api_key.encode("utf-8") in body
     def clean(item):
         nonlocal redacted
         if isinstance(item, dict):
             result = {}
             for key, child in item.items():
-                if is_sensitive_evidence_key(key) or api_key in key:
+                if is_sensitive_evidence_key(key) or is_sensitive_evidence_text(key) or api_key in key:
                     redacted = True
                     continue
                 result[key] = clean(child)
             return result
         if isinstance(item, list):
             return [clean(child) for child in item]
-        if isinstance(item, str) and (api_key in item or re.search(r"(?i)(apikey|authorization|cookie|access_token)\s*[=:]", item)):
+        if isinstance(item, str) and (api_key in item or is_sensitive_evidence_text(item)):
+            redacted = True
+            return "[REDACTED]"
+        if item is not None and not isinstance(item, (dict, list, str)) and api_key in _canonical(item):
             redacted = True
             return "[REDACTED]"
         return item
@@ -360,6 +380,8 @@ def _safe_json(body: bytes, api_key: str, limit: int) -> tuple[object, str, bool
         raw = _canonical(value)
     except (ValueError, OverflowError, RecursionError):
         raise ValueError("INVALID_JSON") from None
+    if api_key in raw:
+        raise ValueError("SECRET_REDACTED")
     if len(raw.encode("utf-8")) > limit:
         raise ValueError("RESPONSE_TOO_LARGE")
     return value, raw, redacted
@@ -426,6 +448,17 @@ def execute_ingestion(plan: MLBOddsRequestPlan, *, api_key: str | None = None,
     except (ValueError, OSError):
         return replace(preview, run_id=run_id, status="INVALID_EVIDENCE_ROOT")
     config = plan.config
+    try:
+        claim = acquire_ingestion_claim(output_root=root, run_id=run_id,
+            operating_date=config.operating_date, plan_identity=request_plan_identity(plan))
+    except (ValueError, OSError):
+        return replace(preview, run_id=run_id, status="EVIDENCE_CLAIM_FAILED")
+    issuer = None
+    if isinstance(transport, RequestsOddsAPITransport):
+        try:
+            issuer = create_execution_permit_issuer(plan, claim)
+        except (ValueError, OSError):
+            return replace(preview, run_id=run_id, status="EXECUTION_PERMIT_REQUIRED")
     pending = list(plan.requests)
     eligible = plan.eligible_events
     batches = []
@@ -468,8 +501,9 @@ def execute_ingestion(plan: MLBOddsRequestPlan, *, api_key: str | None = None,
             break
         attempted.add(request.request_id)
         try:
+            permission = {"permit": issuer.issue(request), "run_id": run_id} if issuer is not None else {}
             response = transport.send(request, api_key=api_key, timeout_seconds=config.timeout_seconds,
-                                      max_response_bytes=config.max_response_bytes)
+                                      max_response_bytes=config.max_response_bytes, **permission)
         except TimeoutError:
             response = OddsAPIHTTPResponse(None, (), b"", "TIMEOUT")
         except Exception:
@@ -494,6 +528,7 @@ def execute_ingestion(plan: MLBOddsRequestPlan, *, api_key: str | None = None,
         status = response.error if isinstance(response.error, str) and response.error in {
             "TIMEOUT", "NETWORK_ERROR", "NETWORK_DISABLED", "RESPONSE_TOO_LARGE",
             "INVALID_RESPONSE_SHAPE", "INVALID_REQUEST", "UNSAFE_HTTP_LOGGING",
+            "EXECUTION_PERMIT_REQUIRED",
         } else "OK" if response.error is None else "INVALID_RESPONSE_SHAPE"
         http_status = response.status_code
         if http_status is not None and (type(http_status) is not int or not 100 <= http_status <= 599):
@@ -502,11 +537,14 @@ def execute_ingestion(plan: MLBOddsRequestPlan, *, api_key: str | None = None,
         if http_status is None and status == "OK":
             status = "INVALID_RESPONSE_SHAPE"
         payload = raw = None
-        redacted = False
+        redacted = (api_key.encode("utf-8") in response.body
+                    or is_sensitive_evidence_text(response.body.decode("utf-8", errors="ignore")))
         if response.body:
             try:
                 payload, raw, redacted = _safe_json(response.body, api_key, config.max_response_bytes)
             except ValueError as error:
+                if str(error) == "SECRET_REDACTED":
+                    redacted = True
                 if status == "OK":
                     status = str(error)
         elif status == "OK":
@@ -550,20 +588,38 @@ def execute_ingestion(plan: MLBOddsRequestPlan, *, api_key: str | None = None,
                     batch = normalize_mlb_event_odds(payload, collected_at=responded_at,
                         source_refs=(f"mlb-odds:{run_id}:{request.request_id}:{hashlib.sha256(raw.encode('utf-8')).hexdigest()}",))
                     batches.append(batch)
-            except (ValueError, TypeError, OverflowError) as error:
+            except Exception as error:
+                # Retain the paid response even if pure normalization fails.
                 # Only fixed exception codes generated in this module are safe.
                 status = str(error) if str(error) in {"BUDGET_EXCEEDED", "SLATE_EXCEEDS_LIMIT", "CONFLICTING_DUPLICATE", "PREGAME_LEAD_TIME"} else "INVALID_RESPONSE_SHAPE"
         exchange = MLBOddsHTTPExchange(
             request_id=request.request_id, kind=request.kind, endpoint=request.endpoint, query=request.query,
             requested_at=requested_at, responded_at=responded_at, http_status=http_status,
-            usage_headers=safe_headers, raw_json=raw,
-            response_sha256=hashlib.sha256(raw.encode("utf-8")).hexdigest() if raw is not None else None,
+            usage_headers=safe_headers, canonical_json=raw,
+            canonical_json_sha256=hashlib.sha256(raw.encode("utf-8")).hexdigest() if raw is not None else None,
+            received_body=response.body if raw is not None and not redacted else None,
+            received_body_sha256=hashlib.sha256(response.body).hexdigest() if raw is not None and not redacted else None,
             status=status, raw_body_redacted=redacted, declared_budget=config.maximum_provider_credits,
             declared_cost_before_request=remaining_reservation, declared_max_credit_cost=request.declared_max_credit_cost,
             actual_reported_last_cost=last, actual_reported_used=used, actual_reported_remaining=remaining,
             normalized_record_count=len(batch.records) if batch else 0, diagnostic_count=len(batch.diagnostics) if batch else 0,
         )
         exchanges.append(exchange)
+        try:
+            stage_ingestion_exchange(claim, exchange)
+            if issuer is not None:
+                issuer.after_staging(exchange)
+        except (ValueError, OSError):
+            # Never publish or issue another HTTP request after a failed durable
+            # stage. The claim and all bytes already written remain inspectable.
+            if issuer is not None:
+                issuer.close()
+            return replace(preview, run_id=run_id, status="EVIDENCE_STAGING_FAILED",
+                executed_request_count=len(exchanges),
+                reported_credit_cost=actual_total if accounting_complete else None,
+                provider_remaining=previous_remaining, eligible_events=eligible,
+                market_batches=tuple(batches), exchanges=tuple(exchanges),
+                transport_failures=tuple(failures) + ("EVIDENCE_STAGING_FAILED",))
         remaining_reservation = sum(r.declared_max_credit_cost for r in pending)
         if status != "OK":
             failures.append(status)
@@ -580,7 +636,10 @@ def execute_ingestion(plan: MLBOddsRequestPlan, *, api_key: str | None = None,
                                    "diagnostics": e.diagnostic_count} for e in exchanges]}
     try:
         receipt = write_ingestion_evidence(output_root=root, run_id=run_id, operating_date=config.operating_date,
-            exchanges=tuple(exchanges), normalization_summary=summary, run_status=run_status)
+            exchanges=tuple(exchanges), normalization_summary=summary, run_status=run_status, claim=claim)
         return replace(result, evidence_result=receipt)
     except (ValueError, OSError):
         return replace(result, status="EVIDENCE_FAILED", transport_failures=result.transport_failures + ("EVIDENCE_WRITE_FAILED",))
+    finally:
+        if issuer is not None:
+            issuer.close()
