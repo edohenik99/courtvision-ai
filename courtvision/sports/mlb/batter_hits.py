@@ -37,6 +37,7 @@ from courtvision.core.reasoning import (
     ReasoningAssessment,
     ReasoningDimension,
 )
+from courtvision.sports.mlb.market_data import MLBMarketVariant, MLBPlayerPropSourceRecord
 from courtvision.sports.mlb.player_name_normalization import normalize_mlb_player_name
 
 
@@ -144,6 +145,33 @@ class BatterHitsSourceEvidence:
             _text(getattr(self, name), name)
         _aware(self.snapshot_timestamp, "snapshot_timestamp")
         _refs(self.source_refs)
+
+
+def batter_hits_source_evidence_from_market_record(
+    record: MLBPlayerPropSourceRecord,
+) -> BatterHitsSourceEvidence:
+    """Retain a source observation's explicit main-market Over 0.5 semantics.
+
+    Canonical Hits classification alone is insufficient: the original provider
+    market remains bound to the evidence, so alternate Hits cannot enter this
+    specialist through canonicalization. No quote, features or probability is
+    inferred here.
+    """
+    if not isinstance(record, MLBPlayerPropSourceRecord):
+        raise TypeError("record must be MLBPlayerPropSourceRecord")
+    if record.market_variant is not MLBMarketVariant.MAIN or record.canonical_market_type != "batter_hits":
+        raise ValueError("Hits evidence requires the main batter_hits source market")
+    return BatterHitsSourceEvidence(
+        market=record.provider_market_key,
+        side=record.side.value,
+        point=record.line,
+        batter_name=record.participant_name,
+        snapshot_timestamp=record.market_updated_at,
+        event_id=record.provider_event_id,
+        provider=record.provider,
+        sportsbook=record.bookmaker_name,
+        source_refs=record.source_refs,
+    )
 
 
 def compute_batter_hits_probability(
@@ -300,5 +328,6 @@ __all__ = [
     "BatterHitsBaselineFeatures",
     "BatterHitsSourceEvidence",
     "assemble_batter_hits_candidate",
+    "batter_hits_source_evidence_from_market_record",
     "compute_batter_hits_probability",
 ]
