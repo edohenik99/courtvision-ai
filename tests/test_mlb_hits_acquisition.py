@@ -185,7 +185,14 @@ def _feed(*, duplicate_name=False):
     return json.dumps(payload, sort_keys=True).encode("utf-8")
 
 
-def _season_payload(*, player_id=700001, name="José Ramírez", hits=125, at_bats=500):
+def _season_payload(
+    *,
+    player_id=700001,
+    name="José Ramírez",
+    hits=125,
+    at_bats=500,
+    season="2026",
+):
     return json.dumps({
         "people": [{
             "id": player_id,
@@ -194,7 +201,7 @@ def _season_payload(*, player_id=700001, name="José Ramírez", hits=125, at_bat
                 "type": {"displayName": "season"},
                 "group": {"displayName": "hitting"},
                 "splits": [{
-                    "season": "2026",
+                    "season": season,
                     "player": {"id": player_id, "fullName": name},
                     "stat": {"hits": hits, "atBats": at_bats},
                 }],
@@ -379,6 +386,7 @@ def test_season_request_is_id_bound_and_uses_hydrated_hitting_stats(tmp_path: Pa
 
     assert request.player_id == PLAYER_ID
     assert request.event_id == GAME_ID
+    assert request.season == 2026
     assert request.request_id == "hits-season-2026-700001"
     assert "/api/v1/people/700001?" in request.url
     assert "hydrate=" in request.url
@@ -471,14 +479,23 @@ def test_tampered_preserved_body_is_rejected_before_feature_parsing(tmp_path: Pa
         captured_hits_source(capture, request_id=request.request_id)
 
 
-def test_wrong_player_stats_never_cross_subject_materialize(tmp_path: Path):
+@pytest.mark.parametrize(
+    "body,note_fragment",
+    [
+        (_season_payload(player_id=700999, name="Wrong Batter"), "wrong player"),
+        (_season_payload(season="2025"), "wrong season"),
+        (_season_payload(hits="125"), "integer counts"),
+        (b'{"people":[],"people":[]}', "duplicate json field"),
+        (b'{"people":NaN}', "non-finite json value"),
+    ],
+)
+def test_invalid_season_stats_rejected_before_immutable_reuse(
+    tmp_path: Path, body: bytes, note_fragment: str
+):
     event, player, feed_capture = _resolved_player(tmp_path)
     request = hits_season_hitting_request(player, season=2026)
     provider = MockProvider({
-        request.request_id: _response(
-            _season_payload(player_id=700999, name="Wrong Batter"),
-            SEASON_ACQUIRE_AT,
-        )
+        request.request_id: _response(body, SEASON_ACQUIRE_AT)
     })
     season_capture = acquire_hits_season_hitting(
         event,
@@ -491,7 +508,12 @@ def test_wrong_player_stats_never_cross_subject_materialize(tmp_path: Path):
         git_commit=COMMIT,
     )
 
-    with pytest.raises(ValueError, match="wrong player"):
+    assert season_capture.capture_state == "rejected"
+    manifest = json.loads(season_capture.manifest_path.read_text(encoding="utf-8"))
+    source = manifest["sources"][0]
+    assert source["availability_status"] == "rejected"
+    assert note_fragment in source["availability_note"].casefold()
+    with pytest.raises(HitsAcquisitionError, match="not completed"):
         materialize_acquired_hits_evidence(
             player,
             season=2026,
