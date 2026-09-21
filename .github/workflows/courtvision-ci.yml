@@ -53,6 +53,9 @@ jobs:
       - name: Test MLB batter hits research slice
         run: python -B -m pytest -p no:cacheprovider tests/test_mlb_batter_hits.py tests/test_mlb_batting_results.py -q
 
+      - name: Test MLB Hits identity and feature assembly
+        run: python -B -m pytest -p no:cacheprovider tests/test_mlb_hits_identity.py tests/test_mlb_hits_features.py -q
+
       - name: Test MLB multi-market source normalization
         run: python -B -m pytest -p no:cacheprovider tests/test_mlb_market_data.py tests/test_mlb_the_odds_api_market_adapter.py -q
 
