@@ -474,6 +474,27 @@ def test_duplicate_immutable_capture_is_no_op_without_provider_call(tmp_path: Pa
     assert provider.calls == ["feed-823184"]
 
 
+def test_capture_manifest_and_disk_paths_share_portable_posix_keys(tmp_path: Path) -> None:
+    provider = MockProvider({"feed-823184": _response()})
+    result = _acquire(tmp_path, provider)
+    manifest = _manifest(result)
+
+    expected = {"acquisition_manifest_v1.json"}
+    for source in manifest["sources"]:
+        if source.get("body_path"):
+            expected.add(source["body_path"])
+        if source.get("metadata_path"):
+            expected.add(source["metadata_path"])
+
+    actual = {
+        path.relative_to(result.capture_dir).as_posix()
+        for path in result.capture_dir.rglob("*")
+        if path.is_file()
+    }
+    assert actual == expected
+    assert all("\\" not in key for key in expected)
+
+
 def test_completed_capture_is_no_op_after_volatile_schedule_metadata_changes(
     tmp_path: Path,
 ) -> None:
