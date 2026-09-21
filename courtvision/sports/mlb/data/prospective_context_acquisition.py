@@ -1083,6 +1083,19 @@ def acquire_event_cluster(
                     record["availability_status"] = "rejected"
                     record["availability_note"] = str(exc)
             elif (
+                request.source_name == "mlb_statsapi_hits_game_feed"
+                and record["availability_status"] == "completed"
+            ):
+                event = next(item for item in cluster.events if item.event_id == request.event_id)
+                try:
+                    # Hits needs the authoritative event binding, but an early
+                    # feed may legitimately lack a boxscore and probable
+                    # pitchers can change after the schedule snapshot.
+                    validate_game_feed_identity(response.body, event)
+                except ProspectiveAcquisitionError as exc:
+                    record["availability_status"] = "rejected"
+                    record["availability_note"] = str(exc)
+            elif (
                 request.source_name == "nws_hourly_forecast"
                 and record["availability_status"] == "completed"
             ):
