@@ -389,6 +389,7 @@ def test_season_request_is_id_bound_and_uses_hydrated_hitting_stats(tmp_path: Pa
     request = hits_season_hitting_request(player, season=2026)
 
     assert request.player_id == PLAYER_ID
+    assert request.player_name == "José Ramírez"
     assert request.event_id == GAME_ID
     assert request.season == 2026
     assert request.request_id == "hits-season-2026-700001"
@@ -434,6 +435,47 @@ def test_two_phase_capture_materializes_typed_baseball_evidence(tmp_path: Path):
     assert acquired.evidence_cutoff == ACQUISITION_CUTOFF
     assert "projection" not in type(acquired).__annotations__
     assert "projected_at_bats" not in type(acquired).__annotations__
+
+
+@pytest.mark.parametrize(
+    "name,split_name",
+    [
+        ("Jose Ramirez", "José Ramírez"),
+        ("José Ramírez", "Jose Ramirez"),
+    ],
+)
+def test_equivalent_normalized_season_names_remain_usable(
+    tmp_path: Path, name: str, split_name: str
+):
+    event, player, feed_capture = _resolved_player(tmp_path)
+    request = hits_season_hitting_request(player, season=2026)
+    provider = MockProvider({
+        request.request_id: _response(
+            _season_payload(name=name, split_name=split_name),
+            SEASON_ACQUIRE_AT,
+        )
+    })
+    season_capture = acquire_hits_season_hitting(
+        event,
+        (player,),
+        season=2026,
+        observed_at_utc=SEASON_ACQUIRE_AT,
+        evidence_cutoff=ACQUISITION_CUTOFF,
+        provider=provider,
+        acquisition_root=tmp_path,
+        git_commit=COMMIT,
+    )
+
+    assert season_capture.capture_state == "completed"
+    acquired = materialize_acquired_hits_evidence(
+        player,
+        season=2026,
+        game_feed_capture=feed_capture,
+        season_capture=season_capture,
+    )
+    assert acquired.season_evidence.mlbam_player_id == PLAYER_ID
+    assert acquired.season_evidence.hits == 125
+    assert acquired.season_evidence.at_bats == 500
 
 
 def test_multiple_player_requests_are_deterministic_and_deduplicated(tmp_path: Path):
@@ -487,6 +529,8 @@ def test_tampered_preserved_body_is_rejected_before_feature_parsing(tmp_path: Pa
     "body,note_fragment",
     [
         (_season_payload(player_id=700999, name="Wrong Batter"), "wrong player"),
+        (_season_payload(name="Wrong Batter"), "wrong player name"),
+        (_season_payload(split_name="Wrong Batter"), "conflicting player name"),
         (_season_payload(season="2025"), "wrong season"),
         (_season_payload(hits="125"), "integer counts"),
         (_season_payload(name=123), "non-empty unpadded text"),
