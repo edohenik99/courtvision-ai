@@ -148,6 +148,7 @@ def hits_season_hitting_request(
         url=f"https://statsapi.mlb.com/api/v1/people/{player_id}?{query}",
         event_id=player_binding.mlbam_game_id,
         player_id=player_id,
+        season=season,
     )
 
 
