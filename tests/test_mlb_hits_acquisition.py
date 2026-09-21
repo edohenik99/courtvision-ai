@@ -242,7 +242,7 @@ def test_declared_requests_use_canonical_ids_and_no_name_search():
     feed_request = hits_game_feed_request(event)
     assert feed_request.request_id == "hits-game-feed-823184"
     assert feed_request.event_id == GAME_ID
-    assert feed_request.source_name == "mlb_statsapi_game_feed"
+    assert feed_request.source_name == "mlb_statsapi_hits_game_feed"
     assert feed_request.url.endswith("/api/v1.1/game/823184/feed/live")
     assert "search" not in feed_request.url.casefold()
 
@@ -262,6 +262,42 @@ def test_game_feed_capture_resolves_unique_player_and_preserves_raw(tmp_path: Pa
     assert source.first_observed_at_utc == ACQUIRE_AT
     assert source.evidence_cutoff == ACQUISITION_CUTOFF
     assert source.source_refs[0].startswith(f"capture:{capture.capture_id}:")
+
+
+def test_early_feed_without_boxscore_remains_usable_for_hits(tmp_path: Path):
+    payload = json.loads(_feed().decode("utf-8"))
+    payload.pop("liveData")
+    feed = json.dumps(payload, sort_keys=True).encode("utf-8")
+    event, capture, provider = _identity_capture(tmp_path, feed=feed)
+
+    assert capture.capture_state == "completed"
+    assert provider.calls == [hits_game_feed_request(event).request_id]
+
+    player = resolve_hits_player_from_capture(_record(), event, capture)
+    assert player.mlbam_player_id == PLAYER_ID
+
+    request = hits_season_hitting_request(player, season=2026)
+    season_provider = MockProvider({
+        request.request_id: _response(_season_payload(), SEASON_ACQUIRE_AT)
+    })
+    season_capture = acquire_hits_season_hitting(
+        event,
+        (player,),
+        season=2026,
+        observed_at_utc=SEASON_ACQUIRE_AT,
+        evidence_cutoff=ACQUISITION_CUTOFF,
+        provider=season_provider,
+        acquisition_root=tmp_path,
+        git_commit=COMMIT,
+    )
+    acquired = materialize_acquired_hits_evidence(
+        player,
+        season=2026,
+        game_feed_capture=capture,
+        season_capture=season_capture,
+    )
+    assert acquired.lineup_evidence.lineup_status == "unavailable"
+    assert acquired.lineup_evidence.batting_order_position is None
 
 
 def test_ambiguous_roster_never_creates_player_season_request(tmp_path: Path):
