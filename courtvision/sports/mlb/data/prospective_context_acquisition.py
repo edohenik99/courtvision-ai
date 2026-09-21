@@ -332,6 +332,30 @@ def _required_mapping(value: object, field_name: str) -> Mapping[str, object]:
     return value
 
 
+def _strict_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ProspectiveAcquisitionError(f"duplicate JSON field: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ProspectiveAcquisitionError(f"non-finite JSON value is invalid: {value}")
+
+
+def _strict_json_bytes(raw_json: bytes, label: str) -> object:
+    try:
+        return json.loads(
+            raw_json.decode("utf-8-sig"),
+            object_pairs_hook=_strict_json_object,
+            parse_constant=_reject_json_constant,
+        )
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ProspectiveAcquisitionError(f"{label} is not valid JSON") from exc
+
+
 def _required_id(value: object, field_name: str) -> str:
     text = "" if value is None else str(value).strip()
     if not _MLBAM_ID.fullmatch(text):
@@ -498,10 +522,7 @@ def classify_cluster_time(cluster: EventCluster, observed_at_utc: datetime | str
 
 
 def validate_game_feed_identity(raw_json: bytes, event: ScheduledEvent) -> Mapping[str, object]:
-    try:
-        payload = json.loads(raw_json.decode("utf-8-sig"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
-        raise ProspectiveAcquisitionError("StatsAPI game feed is not valid JSON") from exc
+    payload = _strict_json_bytes(raw_json, "StatsAPI game feed")
     root = _required_mapping(payload, "StatsAPI game feed")
     if _required_id(root.get("gamePk"), "feed.gamePk") != event.event_id:
         raise ProspectiveAcquisitionError("conflicting game identity in StatsAPI feed")
