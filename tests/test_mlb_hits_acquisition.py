@@ -328,6 +328,41 @@ def test_wrong_game_hits_feed_is_rejected_before_capture_reuse(tmp_path: Path):
         captured_hits_source(capture, request_id=request.request_id)
 
 
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        b'{"gamePk":823185,"gamePk":823184,"gameData":{"datetime":{"dateTime":"2026-09-20T23:00:00+00:00"},"teams":{"home":{"id":114},"away":{"id":142}},"venue":{"id":5}}}',
+        b'{"gamePk":823184,"gameData":{"datetime":{"dateTime":"2026-09-20T23:00:00+00:00"},"teams":{"home":{"id":114},"away":{"id":142}},"venue":{"id":5}},"bad":NaN}',
+    ],
+)
+def test_ambiguous_or_nonfinite_hits_feed_is_rejected_before_capture_reuse(
+    tmp_path: Path, malformed: bytes
+):
+    event = _event_binding()
+    request = hits_game_feed_request(event)
+    provider = MockProvider({
+        request.request_id: _response(malformed, ACQUIRE_AT)
+    })
+
+    capture = acquire_hits_game_feed(
+        event,
+        observed_at_utc=ACQUIRE_AT,
+        evidence_cutoff=ACQUISITION_CUTOFF,
+        provider=provider,
+        acquisition_root=tmp_path,
+        git_commit=COMMIT,
+    )
+
+    assert capture.capture_state == "rejected"
+    manifest = json.loads(capture.manifest_path.read_text(encoding="utf-8"))
+    source = manifest["sources"][0]
+    assert source["availability_status"] == "rejected"
+    note = source["availability_note"].casefold()
+    assert "duplicate json field" in note or "non-finite json value" in note
+    with pytest.raises(HitsAcquisitionError, match="not completed"):
+        captured_hits_source(capture, request_id=request.request_id)
+
+
 def test_ambiguous_roster_never_creates_player_season_request(tmp_path: Path):
     event, capture, _ = _identity_capture(tmp_path, feed=_feed(duplicate_name=True))
     player = resolve_hits_player_from_capture(_record(), event, capture)
