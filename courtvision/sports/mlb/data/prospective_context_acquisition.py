@@ -22,6 +22,8 @@ from types import MappingProxyType
 from typing import Final, Mapping, Protocol, Sequence
 import urllib.request
 
+from courtvision.sports.mlb.player_name_normalization import normalize_mlb_player_name
+
 
 ACQUISITION_SCHEMA_VERSION: Final = "mlb-hr-prospective-context-acquisition-v1"
 RAW_RESPONSE_SCHEMA_VERSION: Final = "mlb-hr-context-raw-response-v1"
@@ -165,6 +167,7 @@ class EvidenceRequest:
     player_id: str | None = None
     headers: Mapping[str, str] = MappingProxyType({})
     season: int | None = None
+    player_name: str | None = None
 
     def __post_init__(self) -> None:
         for field_name, value in (
@@ -184,6 +187,14 @@ class EvidenceRequest:
             isinstance(self.season, bool) or not isinstance(self.season, int) or self.season <= 0
         ):
             raise ProspectiveAcquisitionError("season must be a positive integer when supplied")
+        if self.player_name is not None and (
+            not isinstance(self.player_name, str)
+            or not self.player_name.strip()
+            or self.player_name != self.player_name.strip()
+        ):
+            raise ProspectiveAcquisitionError(
+                "player_name must be non-empty unpadded text when supplied"
+            )
 
     def identity_payload(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -198,6 +209,8 @@ class EvidenceRequest:
         }
         if self.season is not None:
             payload["season"] = self.season
+        if self.player_name is not None:
+            payload["player_name"] = self.player_name
         return payload
 
 
@@ -564,11 +577,18 @@ def validate_player_season_hitting_identity(
     raw_json: bytes,
     *,
     player_id: str,
+    player_name: str,
     season: int,
 ) -> Mapping[str, object]:
     """Validate one StatsAPI season-hitting response before immutable completion."""
 
     expected_player_id = _required_id(player_id, "season.player_id")
+    expected_player_name = _required_unpadded_text(
+        player_name, "season.player_name"
+    )
+    expected_name_key = normalize_mlb_player_name(expected_player_name)
+    if not expected_name_key:
+        raise ProspectiveAcquisitionError("season player name cannot normalize to empty")
     if isinstance(season, bool) or not isinstance(season, int) or season <= 0:
         raise ProspectiveAcquisitionError("season must be a positive integer")
     payload = _strict_json_bytes(raw_json, "StatsAPI season hitting response")
@@ -582,6 +602,10 @@ def validate_player_season_hitting_identity(
     person_name = _required_unpadded_text(
         person.get("fullName"), "season.person.fullName"
     )
+    if normalize_mlb_player_name(person_name) != expected_name_key:
+        raise ProspectiveAcquisitionError(
+            "season hitting response has the wrong player name"
+        )
     blocks = person.get("stats")
     if not isinstance(blocks, list) or len(blocks) != 1:
         raise ProspectiveAcquisitionError("season hitting response requires exactly one stats block")
@@ -603,8 +627,10 @@ def validate_player_season_hitting_identity(
         split_name = _required_unpadded_text(
             split_player.get("fullName"), "season.split.player.fullName"
         )
-        if split_name != person_name:
-            raise ProspectiveAcquisitionError("season hitting split has a conflicting player name")
+        if normalize_mlb_player_name(split_name) != normalize_mlb_player_name(person_name):
+            raise ProspectiveAcquisitionError(
+                "season hitting split has a conflicting player name"
+            )
     stats = _required_mapping(split.get("stat"), "season hitting stats")
     hits = stats.get("hits")
     at_bats = stats.get("atBats")
@@ -1192,13 +1218,18 @@ def acquire_event_cluster(
                 and record["availability_status"] == "completed"
             ):
                 try:
-                    if request.player_id is None or request.season is None:
+                    if (
+                        request.player_id is None
+                        or request.player_name is None
+                        or request.season is None
+                    ):
                         raise ProspectiveAcquisitionError(
-                            "season hitting request requires declared player and season"
+                            "season hitting request requires declared player name, id, and season"
                         )
                     validate_player_season_hitting_identity(
                         response.body,
                         player_id=request.player_id,
+                        player_name=request.player_name,
                         season=request.season,
                     )
                 except ProspectiveAcquisitionError as exc:
