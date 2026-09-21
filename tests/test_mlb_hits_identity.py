@@ -170,17 +170,21 @@ def test_statsapi_official_date_can_precede_toronto_start_date():
         "gamePk": 823184, "officialDate": "2026-09-20",
         "gameDate": west_coast_start.isoformat(),
         "teams": {
-            "home": {"team": {"id": 114, "name": "Cleveland Guardians"}},
-            "away": {"team": {"id": 142, "name": "Minnesota Twins"}},
+            "home": {"team": {"id": 137, "name": "San Francisco Giants"}},
+            "away": {"team": {"id": 115, "name": "Colorado Rockies"}},
         },
-        "venue": {"id": 5, "name": "Progressive Field"},
+        "venue": {"id": 2395, "name": "Oracle Park"},
         "status": {"detailedState": "Pre-Game"},
     }]}]}
     scheduled, = parse_mlb_schedule(
         json.dumps(payload).encode(), operating_date=date(2026, 9, 20)
     )
     assert scheduled.operating_date == date(2026, 9, 20)
-    binding = bind(source(commence_time=west_coast_start), (scheduled,))
+    binding = bind(source(
+        commence_time=west_coast_start,
+        home_team="San Francisco Giants",
+        away_team="Colorado Rockies",
+    ), (scheduled,))
     assert binding.identity_status is IdentityStatus.RESOLVED
     assert binding.mlbam_game_id == "823184"
 
