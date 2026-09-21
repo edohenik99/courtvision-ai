@@ -120,7 +120,7 @@ def hits_game_feed_request(event_binding: MLBEventIdentityBinding) -> EvidenceRe
     return EvidenceRequest(
         request_id=f"hits-game-feed-{game_id}",
         evidence_class="volatile_pregame",
-        source_name="mlb_statsapi_game_feed",
+        source_name="mlb_statsapi_hits_game_feed",
         provider="mlb_statsapi",
         url=f"https://statsapi.mlb.com/api/v1.1/game/{game_id}/feed/live",
         event_id=game_id,
