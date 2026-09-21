@@ -138,6 +138,11 @@ def hits_season_hitting_request(
     official_start = player_binding.event_binding.official_commence_time
     if official_start is None or season != official_start.year:
         raise HitsAcquisitionError("season hitting evidence must match the bound game season")
+    canonical_name = player_binding.participant_identity.canonical_participant_name
+    if not isinstance(canonical_name, str) or not canonical_name.strip():
+        raise HitsAcquisitionError(
+            "season acquisition requires the resolved canonical player name"
+        )
     hydrate = f"stats(group=[hitting],type=[season],season={season})"
     query = urlencode({"hydrate": hydrate})
     return EvidenceRequest(
@@ -149,6 +154,7 @@ def hits_season_hitting_request(
         event_id=player_binding.mlbam_game_id,
         player_id=player_id,
         season=season,
+        player_name=canonical_name,
     )
 
 
