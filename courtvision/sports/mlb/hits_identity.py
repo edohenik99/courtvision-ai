@@ -78,12 +78,14 @@ def _schedule_event(event: ScheduledEvent) -> None:
 
 
 def _event_matches(home: str, away: str, start: datetime, event: ScheduledEvent) -> bool:
-    operating_date = start.astimezone(_OPERATING_TIMEZONE).date()
+    provider_operating_date = start.astimezone(_OPERATING_TIMEZONE).date()
+    official_operating_date = event.scheduled_start_utc.astimezone(_OPERATING_TIMEZONE).date()
+    # ScheduledEvent.operating_date preserves StatsAPI officialDate, which can be
+    # the venue-local prior date for West Coast games after midnight in Toronto.
     return (
         home == event.home_team
         and away == event.away_team
-        and operating_date == event.operating_date
-        and operating_date == event.scheduled_start_utc.astimezone(_OPERATING_TIMEZONE).date()
+        and provider_operating_date == official_operating_date
         and abs((start - event.scheduled_start_utc).total_seconds()) <= MATCH_TOLERANCE_SECONDS
     )
 
