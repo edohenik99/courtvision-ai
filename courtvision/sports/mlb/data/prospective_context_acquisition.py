@@ -340,6 +340,14 @@ def _required_mapping(value: object, field_name: str) -> Mapping[str, object]:
     return value
 
 
+def _required_unpadded_text(value: object, field_name: str) -> str:
+    if not isinstance(value, str) or not value.strip() or value != value.strip():
+        raise ProspectiveAcquisitionError(
+            f"{field_name} must be non-empty unpadded text"
+        )
+    return value
+
+
 def _strict_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
@@ -571,9 +579,9 @@ def validate_player_season_hitting_identity(
     person = _required_mapping(people[0], "season person")
     if _required_id(person.get("id"), "season.person.id") != expected_player_id:
         raise ProspectiveAcquisitionError("season hitting response has the wrong player")
-    person_name = str(person.get("fullName") or "").strip()
-    if not person_name:
-        raise ProspectiveAcquisitionError("season hitting response player name is required")
+    person_name = _required_unpadded_text(
+        person.get("fullName"), "season.person.fullName"
+    )
     blocks = person.get("stats")
     if not isinstance(blocks, list) or len(blocks) != 1:
         raise ProspectiveAcquisitionError("season hitting response requires exactly one stats block")
@@ -592,8 +600,10 @@ def validate_player_season_hitting_identity(
         split_player = _required_mapping(split["player"], "season split player")
         if _required_id(split_player.get("id"), "season.split.player.id") != expected_player_id:
             raise ProspectiveAcquisitionError("season hitting split has the wrong player")
-        split_name = str(split_player.get("fullName") or "").strip()
-        if not split_name or split_name != person_name:
+        split_name = _required_unpadded_text(
+            split_player.get("fullName"), "season.split.player.fullName"
+        )
+        if split_name != person_name:
             raise ProspectiveAcquisitionError("season hitting split has a conflicting player name")
     stats = _required_mapping(split.get("stat"), "season hitting stats")
     hits = stats.get("hits")
