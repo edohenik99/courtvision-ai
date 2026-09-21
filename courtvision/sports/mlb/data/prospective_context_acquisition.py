@@ -163,8 +163,8 @@ class EvidenceRequest:
     url: str
     event_id: str | None = None
     player_id: str | None = None
-    season: int | None = None
     headers: Mapping[str, str] = MappingProxyType({})
+    season: int | None = None
 
     def __post_init__(self) -> None:
         for field_name, value in (
