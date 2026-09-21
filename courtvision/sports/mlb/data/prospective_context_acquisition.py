@@ -163,6 +163,7 @@ class EvidenceRequest:
     url: str
     event_id: str | None = None
     player_id: str | None = None
+    season: int | None = None
     headers: Mapping[str, str] = MappingProxyType({})
 
     def __post_init__(self) -> None:
@@ -179,9 +180,13 @@ class EvidenceRequest:
             raise ProspectiveAcquisitionError("unsupported evidence_class")
         if not self.url.startswith(("https://", "mock://")):
             raise ProspectiveAcquisitionError("evidence request URL must use HTTPS")
+        if self.season is not None and (
+            isinstance(self.season, bool) or not isinstance(self.season, int) or self.season <= 0
+        ):
+            raise ProspectiveAcquisitionError("season must be a positive integer when supplied")
 
     def identity_payload(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "request_id": self.request_id,
             "evidence_class": self.evidence_class,
             "source_name": self.source_name,
@@ -191,6 +196,9 @@ class EvidenceRequest:
             "player_id": self.player_id,
             "headers": dict(sorted(self.headers.items())),
         }
+        if self.season is not None:
+            payload["season"] = self.season
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -541,6 +549,59 @@ def validate_game_feed_identity(raw_json: bytes, event: ScheduledEvent) -> Mappi
     venue = _required_mapping(game_data.get("venue"), "feed.gameData.venue")
     if _numeric_id(venue.get("id"), "feed.venue.id") != event.venue_id:
         raise ProspectiveAcquisitionError("conflicting venue identity in StatsAPI feed")
+    return root
+
+
+def validate_player_season_hitting_identity(
+    raw_json: bytes,
+    *,
+    player_id: str,
+    season: int,
+) -> Mapping[str, object]:
+    """Validate one StatsAPI season-hitting response before immutable completion."""
+
+    expected_player_id = _required_id(player_id, "season.player_id")
+    if isinstance(season, bool) or not isinstance(season, int) or season <= 0:
+        raise ProspectiveAcquisitionError("season must be a positive integer")
+    payload = _strict_json_bytes(raw_json, "StatsAPI season hitting response")
+    root = _required_mapping(payload, "StatsAPI season hitting response")
+    people = root.get("people")
+    if not isinstance(people, list) or len(people) != 1:
+        raise ProspectiveAcquisitionError("season hitting response requires exactly one person")
+    person = _required_mapping(people[0], "season person")
+    if _required_id(person.get("id"), "season.person.id") != expected_player_id:
+        raise ProspectiveAcquisitionError("season hitting response has the wrong player")
+    person_name = str(person.get("fullName") or "").strip()
+    if not person_name:
+        raise ProspectiveAcquisitionError("season hitting response player name is required")
+    blocks = person.get("stats")
+    if not isinstance(blocks, list) or len(blocks) != 1:
+        raise ProspectiveAcquisitionError("season hitting response requires exactly one stats block")
+    block = _required_mapping(blocks[0], "season stats block")
+    stat_type = _required_mapping(block.get("type"), "season stats type")
+    stat_group = _required_mapping(block.get("group"), "season stats group")
+    if stat_type.get("displayName") != "season" or stat_group.get("displayName") != "hitting":
+        raise ProspectiveAcquisitionError("season hitting response has the wrong stat contract")
+    splits = block.get("splits")
+    if not isinstance(splits, list) or len(splits) != 1:
+        raise ProspectiveAcquisitionError("season hitting response requires exactly one split")
+    split = _required_mapping(splits[0], "season split")
+    if split.get("season") != str(season):
+        raise ProspectiveAcquisitionError("season hitting response has the wrong season")
+    if "player" in split:
+        split_player = _required_mapping(split["player"], "season split player")
+        if _required_id(split_player.get("id"), "season.split.player.id") != expected_player_id:
+            raise ProspectiveAcquisitionError("season hitting split has the wrong player")
+        split_name = str(split_player.get("fullName") or "").strip()
+        if not split_name or split_name != person_name:
+            raise ProspectiveAcquisitionError("season hitting split has a conflicting player name")
+    stats = _required_mapping(split.get("stat"), "season hitting stats")
+    hits = stats.get("hits")
+    at_bats = stats.get("atBats")
+    if type(hits) is not int or type(at_bats) is not int:
+        raise ProspectiveAcquisitionError("season hits and at-bats must be integer counts")
+    if not 0 <= hits <= at_bats or at_bats <= 0:
+        raise ProspectiveAcquisitionError("season hitting counts are invalid")
     return root
 
 
@@ -1117,6 +1178,23 @@ def acquire_event_cluster(
                     record["availability_status"] = "rejected"
                     record["availability_note"] = str(exc)
             elif (
+                request.source_name == "mlb_statsapi_player_season_hitting"
+                and record["availability_status"] == "completed"
+            ):
+                try:
+                    if request.player_id is None or request.season is None:
+                        raise ProspectiveAcquisitionError(
+                            "season hitting request requires declared player and season"
+                        )
+                    validate_player_season_hitting_identity(
+                        response.body,
+                        player_id=request.player_id,
+                        season=request.season,
+                    )
+                except ProspectiveAcquisitionError as exc:
+                    record["availability_status"] = "rejected"
+                    record["availability_note"] = str(exc)
+            elif (
                 request.source_name == "nws_hourly_forecast"
                 and record["availability_status"] == "completed"
             ):
@@ -1534,6 +1612,7 @@ __all__ = [
     "parse_utc",
     "utc_text",
     "validate_game_feed_identity",
+    "validate_player_season_hitting_identity",
     "validate_historical_statcast_rows",
     "validate_park_observation",
     "validate_probable_pitcher_identity",
