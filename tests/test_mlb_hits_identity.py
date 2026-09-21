@@ -148,9 +148,8 @@ def test_event_drift_outside_bound_remains_unresolved(drift):
     {"home_team": "CLEVELAND GUARDIANS"},
     {"away_team": "Minnesota Twin"},
     {"home_team": "Minnesota Twins", "away_team": "Cleveland Guardians"},
-    {"operating_date": date(2026, 9, 21)},
 ])
-def test_event_teams_and_date_must_agree(updates):
+def test_event_teams_must_agree(updates):
     if updates.get("home_team", "").endswith(" "):
         with pytest.raises(ValueError):
             bind(events=(event(**updates),))
@@ -163,6 +162,31 @@ def test_toronto_date_cannot_be_inferred_from_utc_date():
     record = source(commence_time=before_midnight)
     official = event(scheduled_start_utc=before_midnight + timedelta(seconds=60))
     assert bind(record, (official,)).identity_status is IdentityStatus.UNRESOLVED
+
+
+def test_statsapi_official_date_can_precede_toronto_start_date():
+    west_coast_start = datetime(2026, 9, 21, 5, 10, tzinfo=timezone.utc)
+    payload = {"dates": [{"games": [{
+        "gamePk": 823184, "officialDate": "2026-09-20",
+        "gameDate": west_coast_start.isoformat(),
+        "teams": {
+            "home": {"team": {"id": 137, "name": "San Francisco Giants"}},
+            "away": {"team": {"id": 115, "name": "Colorado Rockies"}},
+        },
+        "venue": {"id": 2395, "name": "Oracle Park"},
+        "status": {"detailedState": "Pre-Game"},
+    }]}]}
+    scheduled, = parse_mlb_schedule(
+        json.dumps(payload).encode(), operating_date=date(2026, 9, 20)
+    )
+    assert scheduled.operating_date == date(2026, 9, 20)
+    binding = bind(source(
+        commence_time=west_coast_start,
+        home_team="San Francisco Giants",
+        away_team="Colorado Rockies",
+    ), (scheduled,))
+    assert binding.identity_status is IdentityStatus.RESOLVED
+    assert binding.mlbam_game_id == "823184"
 
 
 def test_empty_schedule_does_not_promote_numeric_provider_event_id():
