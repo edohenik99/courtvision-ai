@@ -300,6 +300,34 @@ def test_early_feed_without_boxscore_remains_usable_for_hits(tmp_path: Path):
     assert acquired.lineup_evidence.batting_order_position is None
 
 
+def test_wrong_game_hits_feed_is_rejected_before_capture_reuse(tmp_path: Path):
+    payload = json.loads(_feed().decode("utf-8"))
+    payload["gamePk"] = 823185
+    wrong_feed = json.dumps(payload, sort_keys=True).encode("utf-8")
+    event = _event_binding()
+    request = hits_game_feed_request(event)
+    provider = MockProvider({
+        request.request_id: _response(wrong_feed, ACQUIRE_AT)
+    })
+
+    capture = acquire_hits_game_feed(
+        event,
+        observed_at_utc=ACQUIRE_AT,
+        evidence_cutoff=ACQUISITION_CUTOFF,
+        provider=provider,
+        acquisition_root=tmp_path,
+        git_commit=COMMIT,
+    )
+
+    assert capture.capture_state == "rejected"
+    manifest = json.loads(capture.manifest_path.read_text(encoding="utf-8"))
+    source = manifest["sources"][0]
+    assert source["availability_status"] == "rejected"
+    assert "game" in source["availability_note"].casefold()
+    with pytest.raises(HitsAcquisitionError, match="not completed"):
+        captured_hits_source(capture, request_id=request.request_id)
+
+
 def test_ambiguous_roster_never_creates_player_season_request(tmp_path: Path):
     event, capture, _ = _identity_capture(tmp_path, feed=_feed(duplicate_name=True))
     player = resolve_hits_player_from_capture(_record(), event, capture)
