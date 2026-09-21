@@ -819,15 +819,20 @@ def _validate_existing_capture(destination: Path, expected_capture_id: str) -> s
         path = destination / relative
         if not path.is_file() or _sha256_bytes(path.read_bytes()) != source.get("sha256"):
             raise ImmutableCaptureConflictError("existing raw response digest mismatch")
-        expected_files.add(relative.replace("/", "\\"))
+        # Raw capture paths are serialized with Path.as_posix() when written.
+        # Compare using the same canonical representation on every host so a
+        # Windows capture contract behaves identically on POSIX systems.
+        expected_files.add(relative)
         metadata = str(source.get("metadata_path") or "")
         if metadata:
             metadata_path = destination / metadata
             if not metadata_path.is_file():
                 raise ImmutableCaptureConflictError("existing raw metadata is missing")
-            expected_files.add(metadata.replace("/", "\\"))
+            expected_files.add(metadata)
     actual_files = {
-        str(path.relative_to(destination)) for path in destination.rglob("*") if path.is_file()
+        path.relative_to(destination).as_posix()
+        for path in destination.rglob("*")
+        if path.is_file()
     }
     if actual_files != expected_files:
         raise ImmutableCaptureConflictError("existing capture has unbound files")
