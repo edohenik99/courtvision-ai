@@ -56,6 +56,9 @@ jobs:
       - name: Test MLB Hits identity and feature assembly
         run: python -B -m pytest -p no:cacheprovider tests/test_mlb_hits_identity.py tests/test_mlb_hits_features.py -q
 
+      - name: Test MLB Hits evidence acquisition
+        run: python -B -m pytest -p no:cacheprovider tests/test_mlb_hits_acquisition.py -q
+
       - name: Test MLB multi-market source normalization
         run: python -B -m pytest -p no:cacheprovider tests/test_mlb_market_data.py tests/test_mlb_the_odds_api_market_adapter.py -q
 
@@ -74,3 +77,32 @@ jobs:
           $scratchRoot = Join-Path $env:RUNNER_TEMP ('mlb-recovery-contracts-' + [guid]::NewGuid().ToString('N'))
           New-Item -ItemType Directory -Path $scratchRoot -ErrorAction Stop | Out-Null
           ./tests/test_mlb_hr_recovery_contracts.ps1 -ScratchRoot $scratchRoot
+
+  validate-hits-acquisition-posix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install -e .
+
+      - name: Test MLB Hits acquisition on POSIX
+        run: >-
+          python -B -m pytest -p no:cacheprovider
+          tests/test_mlb_hits_acquisition.py
+          tests/test_mlb_hr_prospective_context_acquisition.py::test_capture_manifest_and_disk_paths_share_portable_posix_keys
+          -q
+

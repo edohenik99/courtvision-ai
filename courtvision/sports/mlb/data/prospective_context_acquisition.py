@@ -22,6 +22,8 @@ from types import MappingProxyType
 from typing import Final, Mapping, Protocol, Sequence
 import urllib.request
 
+from courtvision.sports.mlb.player_name_normalization import normalize_mlb_player_name
+
 
 ACQUISITION_SCHEMA_VERSION: Final = "mlb-hr-prospective-context-acquisition-v1"
 RAW_RESPONSE_SCHEMA_VERSION: Final = "mlb-hr-context-raw-response-v1"
@@ -164,6 +166,8 @@ class EvidenceRequest:
     event_id: str | None = None
     player_id: str | None = None
     headers: Mapping[str, str] = MappingProxyType({})
+    season: int | None = None
+    player_name: str | None = None
 
     def __post_init__(self) -> None:
         for field_name, value in (
@@ -179,9 +183,21 @@ class EvidenceRequest:
             raise ProspectiveAcquisitionError("unsupported evidence_class")
         if not self.url.startswith(("https://", "mock://")):
             raise ProspectiveAcquisitionError("evidence request URL must use HTTPS")
+        if self.season is not None and (
+            isinstance(self.season, bool) or not isinstance(self.season, int) or self.season <= 0
+        ):
+            raise ProspectiveAcquisitionError("season must be a positive integer when supplied")
+        if self.player_name is not None and (
+            not isinstance(self.player_name, str)
+            or not self.player_name.strip()
+            or self.player_name != self.player_name.strip()
+        ):
+            raise ProspectiveAcquisitionError(
+                "player_name must be non-empty unpadded text when supplied"
+            )
 
     def identity_payload(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "request_id": self.request_id,
             "evidence_class": self.evidence_class,
             "source_name": self.source_name,
@@ -191,6 +207,11 @@ class EvidenceRequest:
             "player_id": self.player_id,
             "headers": dict(sorted(self.headers.items())),
         }
+        if self.season is not None:
+            payload["season"] = self.season
+        if self.player_name is not None:
+            payload["player_name"] = self.player_name
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -330,6 +351,38 @@ def _required_mapping(value: object, field_name: str) -> Mapping[str, object]:
     if not isinstance(value, Mapping):
         raise ProspectiveAcquisitionError(f"{field_name} must be an object")
     return value
+
+
+def _required_unpadded_text(value: object, field_name: str) -> str:
+    if not isinstance(value, str) or not value.strip() or value != value.strip():
+        raise ProspectiveAcquisitionError(
+            f"{field_name} must be non-empty unpadded text"
+        )
+    return value
+
+
+def _strict_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ProspectiveAcquisitionError(f"duplicate JSON field: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ProspectiveAcquisitionError(f"non-finite JSON value is invalid: {value}")
+
+
+def _strict_json_bytes(raw_json: bytes, label: str) -> object:
+    try:
+        return json.loads(
+            raw_json.decode("utf-8-sig"),
+            object_pairs_hook=_strict_json_object,
+            parse_constant=_reject_json_constant,
+        )
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ProspectiveAcquisitionError(f"{label} is not valid JSON") from exc
 
 
 def _required_id(value: object, field_name: str) -> str:
@@ -498,10 +551,7 @@ def classify_cluster_time(cluster: EventCluster, observed_at_utc: datetime | str
 
 
 def validate_game_feed_identity(raw_json: bytes, event: ScheduledEvent) -> Mapping[str, object]:
-    try:
-        payload = json.loads(raw_json.decode("utf-8-sig"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
-        raise ProspectiveAcquisitionError("StatsAPI game feed is not valid JSON") from exc
+    payload = _strict_json_bytes(raw_json, "StatsAPI game feed")
     root = _required_mapping(payload, "StatsAPI game feed")
     if _required_id(root.get("gamePk"), "feed.gamePk") != event.event_id:
         raise ProspectiveAcquisitionError("conflicting game identity in StatsAPI feed")
@@ -520,6 +570,74 @@ def validate_game_feed_identity(raw_json: bytes, event: ScheduledEvent) -> Mappi
     venue = _required_mapping(game_data.get("venue"), "feed.gameData.venue")
     if _numeric_id(venue.get("id"), "feed.venue.id") != event.venue_id:
         raise ProspectiveAcquisitionError("conflicting venue identity in StatsAPI feed")
+    return root
+
+
+def validate_player_season_hitting_identity(
+    raw_json: bytes,
+    *,
+    player_id: str,
+    player_name: str,
+    season: int,
+) -> Mapping[str, object]:
+    """Validate one StatsAPI season-hitting response before immutable completion."""
+
+    expected_player_id = _required_id(player_id, "season.player_id")
+    expected_player_name = _required_unpadded_text(
+        player_name, "season.player_name"
+    )
+    expected_name_key = normalize_mlb_player_name(expected_player_name)
+    if not expected_name_key:
+        raise ProspectiveAcquisitionError("season player name cannot normalize to empty")
+    if isinstance(season, bool) or not isinstance(season, int) or season <= 0:
+        raise ProspectiveAcquisitionError("season must be a positive integer")
+    payload = _strict_json_bytes(raw_json, "StatsAPI season hitting response")
+    root = _required_mapping(payload, "StatsAPI season hitting response")
+    people = root.get("people")
+    if not isinstance(people, list) or len(people) != 1:
+        raise ProspectiveAcquisitionError("season hitting response requires exactly one person")
+    person = _required_mapping(people[0], "season person")
+    if _required_id(person.get("id"), "season.person.id") != expected_player_id:
+        raise ProspectiveAcquisitionError("season hitting response has the wrong player")
+    person_name = _required_unpadded_text(
+        person.get("fullName"), "season.person.fullName"
+    )
+    if normalize_mlb_player_name(person_name) != expected_name_key:
+        raise ProspectiveAcquisitionError(
+            "season hitting response has the wrong player name"
+        )
+    blocks = person.get("stats")
+    if not isinstance(blocks, list) or len(blocks) != 1:
+        raise ProspectiveAcquisitionError("season hitting response requires exactly one stats block")
+    block = _required_mapping(blocks[0], "season stats block")
+    stat_type = _required_mapping(block.get("type"), "season stats type")
+    stat_group = _required_mapping(block.get("group"), "season stats group")
+    if stat_type.get("displayName") != "season" or stat_group.get("displayName") != "hitting":
+        raise ProspectiveAcquisitionError("season hitting response has the wrong stat contract")
+    splits = block.get("splits")
+    if not isinstance(splits, list) or len(splits) != 1:
+        raise ProspectiveAcquisitionError("season hitting response requires exactly one split")
+    split = _required_mapping(splits[0], "season split")
+    if split.get("season") != str(season):
+        raise ProspectiveAcquisitionError("season hitting response has the wrong season")
+    if "player" in split:
+        split_player = _required_mapping(split["player"], "season split player")
+        if _required_id(split_player.get("id"), "season.split.player.id") != expected_player_id:
+            raise ProspectiveAcquisitionError("season hitting split has the wrong player")
+        split_name = _required_unpadded_text(
+            split_player.get("fullName"), "season.split.player.fullName"
+        )
+        if normalize_mlb_player_name(split_name) != normalize_mlb_player_name(person_name):
+            raise ProspectiveAcquisitionError(
+                "season hitting split has a conflicting player name"
+            )
+    stats = _required_mapping(split.get("stat"), "season hitting stats")
+    hits = stats.get("hits")
+    at_bats = stats.get("atBats")
+    if type(hits) is not int or type(at_bats) is not int:
+        raise ProspectiveAcquisitionError("season hits and at-bats must be integer counts")
+    if not 0 <= hits <= at_bats or at_bats <= 0:
+        raise ProspectiveAcquisitionError("season hitting counts are invalid")
     return root
 
 
@@ -819,15 +937,20 @@ def _validate_existing_capture(destination: Path, expected_capture_id: str) -> s
         path = destination / relative
         if not path.is_file() or _sha256_bytes(path.read_bytes()) != source.get("sha256"):
             raise ImmutableCaptureConflictError("existing raw response digest mismatch")
-        expected_files.add(relative.replace("/", "\\"))
+        # Raw capture paths are serialized with Path.as_posix() when written.
+        # Compare using the same canonical representation on every host so a
+        # Windows capture contract behaves identically on POSIX systems.
+        expected_files.add(relative)
         metadata = str(source.get("metadata_path") or "")
         if metadata:
             metadata_path = destination / metadata
             if not metadata_path.is_file():
                 raise ImmutableCaptureConflictError("existing raw metadata is missing")
-            expected_files.add(metadata.replace("/", "\\"))
+            expected_files.add(metadata)
     actual_files = {
-        str(path.relative_to(destination)) for path in destination.rglob("*") if path.is_file()
+        path.relative_to(destination).as_posix()
+        for path in destination.rglob("*")
+        if path.is_file()
     }
     if actual_files != expected_files:
         raise ImmutableCaptureConflictError("existing capture has unbound files")
@@ -1074,6 +1197,41 @@ def acquire_event_cluster(
                 try:
                     validate_probable_pitcher_identity(response.body, event)
                     record["lineup_slots_by_side"] = lineup_coverage(response.body, event)
+                except ProspectiveAcquisitionError as exc:
+                    record["availability_status"] = "rejected"
+                    record["availability_note"] = str(exc)
+            elif (
+                request.source_name == "mlb_statsapi_hits_game_feed"
+                and record["availability_status"] == "completed"
+            ):
+                event = next(item for item in cluster.events if item.event_id == request.event_id)
+                try:
+                    # Hits needs the authoritative event binding, but an early
+                    # feed may legitimately lack a boxscore and probable
+                    # pitchers can change after the schedule snapshot.
+                    validate_game_feed_identity(response.body, event)
+                except ProspectiveAcquisitionError as exc:
+                    record["availability_status"] = "rejected"
+                    record["availability_note"] = str(exc)
+            elif (
+                request.source_name == "mlb_statsapi_player_season_hitting"
+                and record["availability_status"] == "completed"
+            ):
+                try:
+                    if (
+                        request.player_id is None
+                        or request.player_name is None
+                        or request.season is None
+                    ):
+                        raise ProspectiveAcquisitionError(
+                            "season hitting request requires declared player name, id, and season"
+                        )
+                    validate_player_season_hitting_identity(
+                        response.body,
+                        player_id=request.player_id,
+                        player_name=request.player_name,
+                        season=request.season,
+                    )
                 except ProspectiveAcquisitionError as exc:
                     record["availability_status"] = "rejected"
                     record["availability_note"] = str(exc)
@@ -1495,6 +1653,7 @@ __all__ = [
     "parse_utc",
     "utc_text",
     "validate_game_feed_identity",
+    "validate_player_season_hitting_identity",
     "validate_historical_statcast_rows",
     "validate_park_observation",
     "validate_probable_pitcher_identity",
