@@ -73,7 +73,17 @@ def project_batter_at_bats(
         )
 
     generated = _aware(generated_at, "generated_at")
-    evidence_cutoff = _aware(acquired.evidence_cutoff, "evidence_cutoff")
+    evidence_cutoff = max(
+        _aware(acquired.evidence_cutoff, "evidence_cutoff"),
+        _aware(event.observed_at, "event.observed_at"),
+        _aware(event.evidence_cutoff, "event.evidence_cutoff"),
+        _aware(player.observed_at, "player.observed_at"),
+        _aware(player.evidence_cutoff, "player.evidence_cutoff"),
+        _aware(season.observed_at, "season.observed_at"),
+        _aware(season.evidence_cutoff, "season.evidence_cutoff"),
+        _aware(lineup.observed_at, "lineup.observed_at"),
+        _aware(lineup.evidence_cutoff, "lineup.evidence_cutoff"),
+    )
     if generated < evidence_cutoff:
         raise AtBatProjectionError(
             "projection cannot be generated before its evidence cutoff"
