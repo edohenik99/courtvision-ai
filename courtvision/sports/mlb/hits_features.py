@@ -97,6 +97,7 @@ class BatterSeasonHittingEvidence:
     evidence_cutoff: datetime
     source: str
     source_refs: tuple[str, ...]
+    games_played: int | None = None
 
     def __post_init__(self) -> None:
         if type(self.season) is not int or self.season <= 0:
@@ -108,6 +109,10 @@ class BatterSeasonHittingEvidence:
             raise ValueError("hits and at_bats must be integer counts")
         if not 0 <= self.hits <= self.at_bats or self.at_bats <= 0:
             raise ValueError("require 0 <= hits <= at_bats and at_bats > 0")
+        if self.games_played is not None and (
+            type(self.games_played) is not int or self.games_played <= 0
+        ):
+            raise ValueError("games_played must be a positive integer when supplied")
         _observation(self.observed_at, self.evidence_cutoff)
         if self.season > self.observed_at.year:
             raise ValueError("season cannot be after the observation year")
@@ -117,11 +122,13 @@ class BatterSeasonHittingEvidence:
 
 @dataclass(frozen=True, slots=True)
 class BatterAtBatProjectionEvidence:
-    """An external opportunity projection, never an estimate inferred here.
+    """An explicit opportunity projection with provenance and no hidden default.
 
-    evidence_cutoff describes the projection's inputs; generated_at describes
-    when the supplied projection existed. Both must precede feature assembly.
-    There is intentionally no default for projected_at_bats.
+    The projection may be supplied by a validated external model or generated
+    by a CourtVision-owned model. evidence_cutoff describes the projection's
+    inputs; generated_at describes when the projection existed. Both must
+    precede feature assembly. There is intentionally no default for
+    projected_at_bats.
     """
 
     mlbam_game_id: str
@@ -319,7 +326,7 @@ def parse_batter_season_hitting_evidence(
     evidence = BatterSeasonHittingEvidence(
         season, player_binding.mlbam_player_id, player_name,
         counts.get("hits"), counts.get("atBats"), observed_at, evidence_cutoff,
-        "mlb_statsapi", source_refs,
+        "mlb_statsapi", source_refs, counts.get("gamesPlayed"),
     )
     if evidence_cutoff >= min(player_binding.event_binding.provider_commence_time,
                               player_binding.event_binding.official_commence_time):
@@ -387,6 +394,7 @@ def assemble_batter_hits_features(
         "player_identity_method": identity.identity_method,
         "season": str(season_evidence.season),
         "season_source": season_evidence.source,
+        "season_games_played": season_evidence.games_played,
         "team_side": lineup_evidence.team_side,
         "batting_order_position": lineup_evidence.batting_order_position,
         "projection_method": projection_evidence.projection_method,

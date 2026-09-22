@@ -192,6 +192,7 @@ def _season_payload(
     split_name=None,
     hits=125,
     at_bats=500,
+    games_played=130,
     season="2026",
 ):
     return json.dumps({
@@ -207,7 +208,11 @@ def _season_payload(
                         "id": player_id,
                         "fullName": name if split_name is None else split_name,
                     },
-                    "stat": {"hits": hits, "atBats": at_bats},
+                    "stat": {
+                        "hits": hits,
+                        "atBats": at_bats,
+                        "gamesPlayed": games_played,
+                    },
                 }],
             }],
         }],
@@ -429,6 +434,7 @@ def test_two_phase_capture_materializes_typed_baseball_evidence(tmp_path: Path):
     assert provider.calls == [request.request_id]
     assert acquired.season_evidence.hits == 125
     assert acquired.season_evidence.at_bats == 500
+    assert acquired.season_evidence.games_played == 130
     assert acquired.season_evidence.source == "mlb_statsapi"
     assert acquired.lineup_evidence.lineup_status == "statsapi_batting_order_present"
     assert acquired.lineup_evidence.batting_order_position == 2
@@ -476,6 +482,7 @@ def test_equivalent_normalized_season_names_remain_usable(
     assert acquired.season_evidence.mlbam_player_id == PLAYER_ID
     assert acquired.season_evidence.hits == 125
     assert acquired.season_evidence.at_bats == 500
+    assert acquired.season_evidence.games_played == 130
 
 
 def test_multiple_player_requests_are_deterministic_and_deduplicated(tmp_path: Path):
@@ -533,6 +540,7 @@ def test_tampered_preserved_body_is_rejected_before_feature_parsing(tmp_path: Pa
         (_season_payload(split_name="Wrong Batter"), "conflicting player name"),
         (_season_payload(season="2025"), "wrong season"),
         (_season_payload(hits="125"), "integer counts"),
+        (_season_payload(games_played=0), "gamesplayed"),
         (_season_payload(name=123), "non-empty unpadded text"),
         (_season_payload(name=" José Ramírez "), "non-empty unpadded text"),
         (_season_payload(split_name=" José Ramírez "), "non-empty unpadded text"),

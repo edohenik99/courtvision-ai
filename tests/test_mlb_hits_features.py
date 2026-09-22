@@ -147,7 +147,7 @@ def _season_payload():
             "type": {"displayName": "season"}, "group": {"displayName": "hitting"},
             "splits": [{"season": "2026",
                         "player": {"id": int(PLAYER_ID), "fullName": CANONICAL_NAME},
-                        "stat": {"hits": 125, "atBats": 500}}],
+                        "stat": {"hits": 125, "atBats": 500, "gamesPlayed": 130}}],
         }],
     }]}
 
@@ -157,6 +157,7 @@ def _season(**updates):
         season=2026, mlbam_player_id=PLAYER_ID, player_name=CANONICAL_NAME,
         hits=125, at_bats=500, observed_at=OBSERVED,
         evidence_cutoff=CUTOFF, source="mlb_statsapi", source_refs=("fixture:season",),
+        games_played=130,
     )
     values.update(updates)
     return BatterSeasonHittingEvidence(**values)
@@ -246,6 +247,10 @@ def test_season_adapter_accepts_explicit_supplied_hitting_split(as_bytes):
     parsed = _parse(json.dumps(payload).encode() if as_bytes else payload)
     assert parsed == _season()
     assert payload == before
+
+
+def test_season_parser_preserves_games_played_when_available():
+    assert _parse().games_played == 130
 
 
 def test_season_split_can_inherit_explicit_people_identity():

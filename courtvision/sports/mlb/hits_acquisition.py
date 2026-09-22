@@ -75,7 +75,12 @@ class AcquiredBatterHitsEvidence:
         if self.player_binding.mlbam_game_id != self.lineup_evidence.mlbam_game_id:
             raise HitsAcquisitionError("lineup evidence game conflicts with identity")
         cutoff = parse_utc(self.evidence_cutoff, "evidence_cutoff")
+        event_binding = self.player_binding.event_binding
         if max(
+            event_binding.observed_at,
+            event_binding.evidence_cutoff,
+            self.player_binding.observed_at,
+            self.player_binding.evidence_cutoff,
             self.season_evidence.observed_at,
             self.season_evidence.evidence_cutoff,
             self.lineup_evidence.observed_at,
@@ -395,7 +400,15 @@ def materialize_acquired_hits_evidence(
     )
     if season_evidence.mlbam_player_id != player_id:
         raise HitsAcquisitionError("season evidence changed canonical player identity")
-    evidence_cutoff = max(feed.evidence_cutoff, season_source.evidence_cutoff)
+    event_binding = player_binding.event_binding
+    evidence_cutoff = max(
+        feed.evidence_cutoff,
+        season_source.evidence_cutoff,
+        event_binding.observed_at,
+        event_binding.evidence_cutoff,
+        player_binding.observed_at,
+        player_binding.evidence_cutoff,
+    )
     return AcquiredBatterHitsEvidence(
         player_binding=player_binding,
         season_evidence=season_evidence,
