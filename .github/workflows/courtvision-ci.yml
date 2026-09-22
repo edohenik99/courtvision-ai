@@ -59,6 +59,9 @@ jobs:
       - name: Test MLB Hits evidence acquisition
         run: python -B -m pytest -p no:cacheprovider tests/test_mlb_hits_acquisition.py -q
 
+      - name: Test MLB CourtVision AB projection
+        run: python -B -m pytest -p no:cacheprovider tests/test_mlb_ab_projection.py -q
+
       - name: Test MLB multi-market source normalization
         run: python -B -m pytest -p no:cacheprovider tests/test_mlb_market_data.py tests/test_mlb_the_odds_api_market_adapter.py -q
 
