@@ -634,10 +634,15 @@ def validate_player_season_hitting_identity(
     stats = _required_mapping(split.get("stat"), "season hitting stats")
     hits = stats.get("hits")
     at_bats = stats.get("atBats")
+    games_played = stats.get("gamesPlayed")
     if type(hits) is not int or type(at_bats) is not int:
         raise ProspectiveAcquisitionError("season hits and at-bats must be integer counts")
     if not 0 <= hits <= at_bats or at_bats <= 0:
         raise ProspectiveAcquisitionError("season hitting counts are invalid")
+    if type(games_played) is not int or games_played <= 0:
+        raise ProspectiveAcquisitionError(
+            "season gamesPlayed must be a positive integer for AB projection"
+        )
     return root
 
 
