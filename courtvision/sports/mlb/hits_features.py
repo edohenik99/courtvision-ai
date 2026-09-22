@@ -122,11 +122,13 @@ class BatterSeasonHittingEvidence:
 
 @dataclass(frozen=True, slots=True)
 class BatterAtBatProjectionEvidence:
-    """An external opportunity projection, never an estimate inferred here.
+    """An explicit opportunity projection with provenance and no hidden default.
 
-    evidence_cutoff describes the projection's inputs; generated_at describes
-    when the supplied projection existed. Both must precede feature assembly.
-    There is intentionally no default for projected_at_bats.
+    The projection may be supplied by a validated external model or generated
+    by a CourtVision-owned model. evidence_cutoff describes the projection's
+    inputs; generated_at describes when the projection existed. Both must
+    precede feature assembly. There is intentionally no default for
+    projected_at_bats.
     """
 
     mlbam_game_id: str
