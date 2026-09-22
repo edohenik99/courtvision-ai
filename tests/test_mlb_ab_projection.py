@@ -16,7 +16,10 @@ from courtvision.sports.mlb.ab_projection import (
     assemble_acquired_batter_hits_features,
     project_batter_at_bats,
 )
-from courtvision.sports.mlb.hits_acquisition import AcquiredBatterHitsEvidence
+from courtvision.sports.mlb.hits_acquisition import (
+    AcquiredBatterHitsEvidence,
+    HitsAcquisitionError,
+)
 from courtvision.sports.mlb.hits_features import (
     BatterLineupEvidence,
     BatterSeasonHittingEvidence,
@@ -178,6 +181,41 @@ def _acquired(
         lineup_evidence=lineup,
         evidence_cutoff=CUTOFF,
     )
+
+
+def test_identity_clocks_are_part_of_effective_projection_cutoff():
+    acquired = _acquired()
+    player = acquired.player_binding
+    later_event = replace(
+        player.event_binding,
+        observed_at=CUTOFF + timedelta(minutes=1),
+        evidence_cutoff=CUTOFF + timedelta(minutes=2),
+    )
+    later_player = replace(
+        player,
+        event_binding=later_event,
+        observed_at=CUTOFF + timedelta(minutes=2),
+        evidence_cutoff=CUTOFF + timedelta(minutes=3),
+    )
+
+    with pytest.raises(HitsAcquisitionError, match="newer than evidence_cutoff"):
+        replace(
+            acquired,
+            player_binding=later_player,
+            evidence_cutoff=CUTOFF,
+        )
+
+    valid = replace(
+        acquired,
+        player_binding=later_player,
+        evidence_cutoff=CUTOFF + timedelta(minutes=3),
+    )
+    projection = project_batter_at_bats(
+        valid,
+        generated_at=CUTOFF + timedelta(minutes=4),
+    )
+    assert projection.evidence_cutoff == CUTOFF + timedelta(minutes=3)
+    assert projection.generated_at == CUTOFF + timedelta(minutes=4)
 
 
 def test_v1_projects_player_observed_season_at_bats_per_game():
