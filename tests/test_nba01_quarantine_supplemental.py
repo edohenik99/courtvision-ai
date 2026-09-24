@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import csv
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -11,15 +10,45 @@ import tempfile
 
 import pytest
 
-_spec = importlib.util.spec_from_file_location(
-    "nba01_core_tests", Path(__file__).with_name("test_nba01_quarantine.py")
-)
-core = importlib.util.module_from_spec(_spec)
-assert _spec.loader is not None
-_spec.loader.exec_module(core)
-
-DATE, REASON = core.DATE, core.REASON
+DATE = "2026-05-06"
+REASON = "economic_probability_provenance_unqualified"
 ACTIONABLE = {"OK_TO_CONSIDER", "BET_NOW", "BET", "PLAY"}
+
+
+def _modules():
+    # Import the current consumers directly; no dependency on an absent test file.
+    import pandas as pd
+    from courtvision.reporting import quality_summary
+    from scripts import run_kelly_stakes, write_daily_summary
+
+    return pd, run_kelly_stakes, quality_summary, write_daily_summary
+
+
+def _report_inputs(tmp_path, rows):
+    pd, _, quality, daily = _modules()
+    runtime = tmp_path / "reports" / "runtime"
+    operator = runtime / "operator"
+    operator.mkdir(parents=True, exist_ok=True)
+    columns = ["prediction_date", "player_name", "market_type", "selection", "line"]
+    frame = pd.DataFrame(rows) if rows else pd.DataFrame(columns=columns)
+    # A nonempty board keeps quarantined rows visible to both report consumers.
+    for stem in ("elite_board", "full_market_board", "kelly_stakes"):
+        frame.to_csv(operator / f"{stem}_{DATE}.csv", index=False)
+    pd.DataFrame(columns=["prediction_date"]).to_csv(
+        operator / f"sgp_board_{DATE}.csv", index=False
+    )
+    text, payload = quality.build_quality_summary(
+        prediction_date=DATE,
+        runtime_root=runtime,
+        out_dir=tmp_path / "reports",
+        generated_at=f"{DATE}T00:00:00+00:00",
+    )
+    output, metadata = daily.write_daily_summary_outputs(
+        prediction_date=DATE,
+        runtime_root=runtime,
+        history_root=tmp_path / "reports" / "history",
+    )
+    return text, payload, output.read_text(encoding="utf-8"), metadata
 
 
 @pytest.fixture(autouse=True)
@@ -51,7 +80,7 @@ def test_legacy_flags_numeric_ev_are_not_admitted(tmp_path):
         "recommended_action": "OK_TO_CONSIDER",
     }]
 
-    _, payload, dtext, meta = core.report_inputs(tmp_path, rows)
+    _, payload, dtext, meta = _report_inputs(tmp_path, rows)
     ev = payload["kelly_safety_summary"]
 
     print("NBA01_SUPP_LEGACY " + json.dumps({
@@ -86,7 +115,7 @@ def test_contradictory_quarantine_cannot_render_money_or_action(tmp_path):
         "recommended_action": "",
     }]
 
-    _, payload, dtext, meta = core.report_inputs(tmp_path, rows)
+    _, payload, dtext, meta = _report_inputs(tmp_path, rows)
 
     assert payload["kelly_safety_summary"]["total_expected_value"] is None
     assert meta["expected_ev"] is None
@@ -97,7 +126,7 @@ def test_contradictory_quarantine_cannot_render_money_or_action(tmp_path):
 
 
 def test_preconstructed_export_cannot_keep_actionable_strings(tmp_path):
-    mods = core.modules()
+    mods = _modules()
     stakes = next(
         m for m in mods
         if hasattr(m, "_build_stake_row") and hasattr(m, "_write_stakes")
@@ -182,7 +211,7 @@ def test_preconstructed_export_cannot_keep_actionable_strings(tmp_path):
         assert float(saved[key]) == research[key]
     for key in ("player_id", "player_name", "market_type", "selection"):
         assert saved[key] == research[key]
-    _, payload, dtext, meta = core.report_inputs(tmp_path, [saved])
+    _, payload, dtext, meta = _report_inputs(tmp_path, [saved])
     _assert_report_quarantined(payload, dtext, meta, count=1)
     assert json.loads(json.dumps(payload))["kelly_safety_summary"]["total_expected_value"] is None
 
@@ -236,7 +265,7 @@ def test_direct_reporting_boundaries_require_economic_provenance(expected_value,
     # The separate research probability contract is not an approved monetary
     # path. In this legacy artifact even a stored zero must remain unavailable;
     # do not fabricate a qualified-zero fixture from approval-looking fields.
-    pd, _, _, quality, daily = core.modules()
+    pd, _, quality, daily = _modules()
     row = {
         "player_id": "1001", "player_name": "Direct boundary", "team_abbr": "NYK",
         "game_id": "2001", "market_type": "player_points", "selection": "under",
@@ -292,7 +321,7 @@ def test_direct_reporting_boundaries_require_economic_provenance(expected_value,
 def test_empty_and_mixed_unqualified_reporting_cohorts(tmp_path, rows):
     # No supported qualified monetary path exists; this mixed legacy cohort
     # must not acquire one merely because some rows contain finite or zero EV.
-    _, payload, dtext, meta = core.report_inputs(tmp_path, rows)
+    _, payload, dtext, meta = _report_inputs(tmp_path, rows)
     _assert_report_quarantined(payload, dtext, meta, count=len(rows))
     reasons = payload["kelly_safety_summary"]["expected_value_reasons"]
     assert reasons == ({REASON: len(rows)} if rows else {"financial_ev_empty_cohort": 1})
