@@ -15,7 +15,7 @@ from courtvision.sports.mlb import research_preview_sources as sources
 from courtvision.sports.mlb.hits_features import parse_batter_season_hitting_evidence
 from courtvision.sports.mlb.research_preview import (
     HITS_LIMITATION, HR_LIMITATION, HR_WARNING, hits_failure_reason,
-    preview_hits_evidence, preview_hr_prediction, preview_summary, sort_preview_rows, unavailable_row,
+    preview_availability, preview_hits_evidence, preview_hr_prediction, preview_summary, sort_preview_rows, unavailable_row,
 )
 from test_mlb_ab_projection import _acquired, _record, GENERATED, START
 from test_mlb_hits_acquisition import _season_payload
@@ -296,12 +296,128 @@ def test_streamlit_renders_generated_board_without_modifying_predictions(tmp_pat
         f"render_mlb_research_preview(Path({str(output)!r}), '2026-09-20')\n"
     ).run(timeout=30)
     assert not app.exception
-    assert any(HR_WARNING == item.value for item in app.warning)
+    assert any(HR_WARNING in item.value and HR_LIMITATION in item.value for item in app.warning)
     assert len(app.dataframe[0].value) == 3
     assert "Blocked" in set(app.dataframe[0].value["Status"])
     app.radio[0].set_value("Home Runs").run()
     assert len(app.dataframe[0].value) == 1
     assert before == (board.read_bytes(), summary.read_bytes())
+
+
+def test_partial_availability_counts_only_real_usable_predictions():
+    hr = preview_hr_prediction(_hr(), day="2026-09-20", source_ref="fixture:prediction")
+    marker = unavailable_row("2026-09-20", "batter_hits", "HITS_SOURCES_UNAVAILABLE")
+    summary = preview_summary([marker, hr], "2026-09-20")
+    assert summary["status"] == "MLB_PREVIEW_PARTIAL_AVAILABILITY"
+    assert summary["prediction_rows"] == summary["usable_prediction_rows"] == 1
+    assert summary["market_status"]["batter_hits"]["status"] == "SOURCE UNAVAILABLE"
+    assert summary["market_status"]["batter_hits"]["prediction_rows"] == 0
+    assert summary["market_status"]["batter_home_runs"]["status"] == "1 LEGACY RESEARCH ROWS LOADED"
+
+
+@pytest.mark.parametrize("blocked_player", [False, True])
+def test_no_usable_market_means_overall_unavailable(blocked_player):
+    rows = [unavailable_row("2026-09-20", market, "SOURCE_MISSING")
+            for market in ("batter_hits", "batter_home_runs")]
+    if blocked_player:
+        rows.append(_hits(games_played=None))
+    summary = preview_summary(rows, "2026-09-20")
+    assert summary["status"] == "MLB_PREVIEW_SOURCE_DATA_UNAVAILABLE"
+    assert summary["usable_prediction_rows"] == 0
+    assert summary["prediction_rows"] == int(blocked_player)
+
+
+def test_both_markets_loaded_mean_overall_research_available():
+    hr = preview_hr_prediction(_hr(), day="2026-09-20", source_ref="fixture:prediction")
+    summary = preview_summary([_hits(), hr], "2026-09-20")
+    assert summary["status"] == "MLB_PREVIEW_RESEARCH_ONLY"
+    assert summary["usable_prediction_rows"] == 2
+
+
+def test_legacy_summary_is_validated_and_presented_without_rewriting(tmp_path):
+    rows = [unavailable_row("2026-09-20", "batter_hits", "HITS_SOURCES_UNAVAILABLE"),
+            preview_hr_prediction(_hr(), day="2026-09-20", source_ref="fixture:prediction")]
+    board, summary_path = sources.write_preview(rows, "2026-09-20", tmp_path)
+    summary = json.loads(summary_path.read_text())
+    for key in preview_availability(rows):
+        summary.pop(key)
+    summary["status"] = "MLB_PREVIEW_SOURCE_DATA_UNAVAILABLE"
+    summary_path.write_text(json.dumps(summary))
+    before = board.read_bytes(), summary_path.read_bytes()
+    loaded, presented = sources.load_preview_board(tmp_path, "2026-09-20")
+    assert loaded == sort_preview_rows(rows)
+    assert presented["status"] == "MLB_PREVIEW_PARTIAL_AVAILABILITY"
+    assert before == (board.read_bytes(), summary_path.read_bytes())
+    summary["hr_market_contaminated"] += 1
+    summary_path.write_text(json.dumps(summary))
+    with pytest.raises(ValueError, match="summary content mismatch"):
+        sources.load_preview_board(tmp_path, "2026-09-20")
+
+
+def _preview_app(tmp_path, rows):
+    from streamlit.testing.v1 import AppTest
+    output = tmp_path / "outputs"
+    sources.write_preview(rows, "2026-09-20", output / "runtime" / "mlb" / "research")
+    return AppTest.from_string(
+        "from pathlib import Path\nfrom courtvision.streamlit_mlb_preview import render_mlb_research_preview\n"
+        f"render_mlb_research_preview(Path({str(output)!r}), '2026-09-20')\n"
+    ).run(timeout=30)
+
+
+def test_source_availability_is_separate_and_details_default_to_real_player(tmp_path):
+    marker = unavailable_row("2026-09-20", "batter_hits", "HITS_SOURCES_UNAVAILABLE")
+    hr = preview_hr_prediction(_hr(), day="2026-09-20", source_ref="fixture:prediction")
+    app = _preview_app(tmp_path, [marker, hr])
+    assert not app.exception
+    assert len(app.dataframe[0].value) == 1
+    assert app.dataframe[0].value.iloc[0]["Player"] == hr.player_name
+    assert all("Source unavailable" not in label for label in app.selectbox[0].options)
+    assert json.loads(app.json[-1].value) == json.loads(json.dumps(hr.to_dict()))
+    assert any("Hits" in item.value and "SOURCE UNAVAILABLE" in item.value for item in app.markdown)
+    assert any("Home Runs" in item.value and "LEGACY RESEARCH ROWS LOADED" in item.value for item in app.markdown)
+    assert any("HITS_SOURCES_UNAVAILABLE" in item.value for item in app.caption)
+    assert not any("MLB_PREVIEW_SOURCE_DATA_UNAVAILABLE" in item.value for item in app.warning)
+    assert any("Partial availability" in item.value for item in app.info)
+    assert any(HR_LIMITATION in item.value and HR_WARNING in item.value for item in app.warning)
+    assert any(HITS_LIMITATION in item.value for item in app.info)
+    labels = {item.value for item in app.caption}
+    assert {"Player", "Game", "Market", "Line", "CourtVision probability", "Market implied probability",
+            "Prediction status", "Market independence", "Limitation status", "Identity status", "Lineup status",
+            "Model ID", "Model version", "Evidence cutoff", "Block reason"} <= labels
+    values = {item.value for item in app.text}
+    assert {hr.player_name, hr.model_id, hr.model_version, "12.3%", "20.0%", "NO", HR_LIMITATION} <= values
+    assert {e.label for e in app.expander} >= {"Advanced / Raw Evidence", "Advanced / Raw Source Evidence"}
+    assert json.loads(app.json[0].value)[0]["row_kind"] == "SOURCE_STATUS"
+
+
+def test_blocked_real_player_is_still_visible_and_readable(tmp_path):
+    blocked = _hits(games_played=None)
+    app = _preview_app(tmp_path, [blocked, unavailable_row("2026-09-20", "batter_home_runs", "HR_SOURCE_UNAVAILABLE")])
+    assert not app.exception
+    assert len(app.dataframe[0].value) == 1
+    assert app.dataframe[0].value.iloc[0]["Status"] == "Blocked"
+    assert blocked.block_reason in {item.value for item in app.text}
+    assert blocked.block_detail in {item.value for item in app.text}
+    assert json.loads(app.json[-1].value)["model_probability"] is None
+
+
+def test_qualified_hits_details_show_baseline_inputs(tmp_path):
+    app = _preview_app(tmp_path, [_hits()])
+    assert not app.exception
+    assert {"Season hits", "Season at-bats", "Projected at-bats"} <= {item.value for item in app.caption}
+    assert {"125", "500", str(500 / 130)} <= {item.value for item in app.text}
+
+
+def test_all_sources_unavailable_has_no_player_board_or_selected_detail(tmp_path):
+    rows = [unavailable_row("2026-09-20", market, "SOURCE_MISSING")
+            for market in ("batter_hits", "batter_home_runs")]
+    app = _preview_app(tmp_path, rows)
+    assert not app.exception
+    assert not app.dataframe
+    assert not app.selectbox
+    assert any("MLB_PREVIEW_SOURCE_DATA_UNAVAILABLE" in item.value for item in app.warning)
+    assert "Market availability" in {item.value for item in app.subheader}
+    assert len(json.loads(app.json[0].value)) == 2
 
 
 def test_workstation_mlb_route_does_not_construct_nba_engine(monkeypatch):

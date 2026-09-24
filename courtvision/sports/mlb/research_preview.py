@@ -280,6 +280,46 @@ def sort_preview_rows(rows: list[MLBResearchPreviewRow]) -> list[MLBResearchPrev
     ))
 
 
+def preview_availability(rows: list[MLBResearchPreviewRow]) -> dict:
+    """Separate source availability from real player rows without changing either."""
+    markets = {}
+    for market, label in (("batter_hits", "Hits"), ("batter_home_runs", "Home Runs")):
+        market_rows = [row for row in rows if row.market_type == market]
+        players = [row for row in market_rows if row.row_kind == "PLAYER"]
+        qualified = sum(row.prediction_status == "QUALIFIED_RESEARCH" for row in players)
+        legacy = sum(row.prediction_status == "LEGACY_RESEARCH" for row in players)
+        blocked = sum(row.prediction_status == "BLOCKED" for row in players)
+        unavailable = sum(row.prediction_status == "UNAVAILABLE" for row in players)
+        reasons = sorted({row.block_reason for row in market_rows if row.row_kind == "SOURCE_STATUS"})
+        loaded = []
+        if qualified:
+            loaded.append(f"{qualified} QUALIFIED RESEARCH ROWS LOADED")
+        if legacy:
+            loaded.append(f"{legacy} LEGACY RESEARCH ROWS LOADED")
+        if blocked:
+            loaded.append(f"{blocked} BLOCKED PLAYER ROWS")
+        if unavailable:
+            loaded.append(f"{unavailable} UNAVAILABLE PLAYER ROWS")
+        if reasons or not market_rows:
+            loaded.append("SOURCE UNAVAILABLE")
+        markets[market] = {
+            "label": label, "status": " · ".join(loaded), "prediction_rows": len(players),
+            "usable_rows": qualified + legacy, "blocked_rows": blocked,
+            "unavailable_player_rows": unavailable, "source_reasons": reasons,
+        }
+    usable = sum(market["usable_rows"] for market in markets.values())
+    incomplete = any(not market["usable_rows"] or market["blocked_rows"]
+                     or market["unavailable_player_rows"] or market["source_reasons"] for market in markets.values())
+    return {
+        "availability_schema_version": "mlb-preview-availability-v1",
+        "market_status": markets,
+        "prediction_rows": sum(market["prediction_rows"] for market in markets.values()),
+        "usable_prediction_rows": usable,
+        "status": "MLB_PREVIEW_SOURCE_DATA_UNAVAILABLE" if not usable else
+                  "MLB_PREVIEW_PARTIAL_AVAILABILITY" if incomplete else "MLB_PREVIEW_RESEARCH_ONLY",
+    }
+
+
 def preview_summary(rows: list[MLBResearchPreviewRow], day: str) -> dict:
     if any(row.operating_date != day for row in rows):
         raise ValueError("cannot combine different operating dates")
@@ -300,7 +340,6 @@ def preview_summary(rows: list[MLBResearchPreviewRow], day: str) -> dict:
         "total_rows": len(rows), "source_status_rows": sum(r.row_kind == "SOURCE_STATUS" for r in rows),
         "research_only": True, "eligible_for_betting": False, "kelly_eligible": False,
         "approval_status": "not_approved", "hr_warning": HR_WARNING,
-        "status": "MLB_PREVIEW_SOURCE_DATA_UNAVAILABLE" if any(r.prediction_status == "UNAVAILABLE" for r in rows)
-                  else "MLB_PREVIEW_RESEARCH_ONLY",
+        **preview_availability(rows),
         "missing_sources": sorted({f"{r.market_type}: {r.block_reason}" for r in rows if r.prediction_status == "UNAVAILABLE"}),
     }

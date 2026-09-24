@@ -25,7 +25,7 @@ from courtvision.sports.mlb.providers.the_odds_api_market_adapter import normali
 from courtvision.sports.mlb.research_preview import (
     HITS_LIMITATION, MODEL_ID, MODEL_VERSION, OPERATING_TIMEZONE,
     MLBResearchPreviewRow, hits_failure_reason, hits_source_row, preview_hits_evidence,
-    preview_hr_prediction, preview_summary, sort_preview_rows, timestamp, unavailable_row,
+    preview_availability, preview_hr_prediction, preview_summary, sort_preview_rows, timestamp, unavailable_row,
 )
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -273,9 +273,16 @@ def load_preview_board(output_root: Path, day: str) -> tuple[list[MLBResearchPre
         data["source_refs"] = tuple(json.loads(data["source_refs"]))
         rows.append(MLBResearchPreviewRow(**data))
     recomputed = preview_summary(rows, day)
-    if any(summary.get(key) != value for key, value in recomputed.items()):
+    expected = recomputed
+    if "availability_schema_version" not in summary:
+        # Verify the original summary semantics before presenting the new view.
+        # Existing immutable artifacts are never rewritten or trusted unchecked.
+        expected = {key: value for key, value in recomputed.items() if key not in preview_availability(rows)}
+        expected["status"] = "MLB_PREVIEW_SOURCE_DATA_UNAVAILABLE" if any(
+            row.prediction_status == "UNAVAILABLE" for row in rows) else "MLB_PREVIEW_RESEARCH_ONLY"
+    if any(summary.get(key) != value for key, value in expected.items()):
         raise ValueError("preview summary content mismatch")
-    return rows, {**summary, "board_path": str(board), "summary_path": str(summary_path)}
+    return rows, {**summary, **recomputed, "board_path": str(board), "summary_path": str(summary_path)}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -307,6 +314,8 @@ def main(argv: list[str] | None = None) -> int:
                        ("HR unavailable", "hr_unavailable")):
         print(f"{label}: {summary[key]}")
     print(summary["status"])
+    for market in summary["market_status"].values():
+        print(f"{market['label']}: {market['status']}")
     for missing in summary["missing_sources"]:
         print(f"Missing source: {missing}")
     print("Unavailable source markers are not player predictions.")
