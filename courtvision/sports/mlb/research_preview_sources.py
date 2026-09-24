@@ -13,6 +13,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 from courtvision.core.candidates import IdentityStatus
@@ -26,6 +27,7 @@ from courtvision.sports.mlb.hits_identity import bind_mlb_events
 from courtvision.sports.mlb.providers.the_odds_api_market_adapter import normalize_mlb_event_odds
 from courtvision.sports.mlb.research_preview import (
     HITS_LIMITATION, MODEL_ID, MODEL_VERSION, OPERATING_TIMEZONE,
+    LEGACY_HITS_PROVENANCE_UNQUALIFIED, LEGACY_PREVIEW_SCHEMA_VERSION, PREVIEW_SCHEMA_VERSION,
     MLBResearchPreviewRow, hits_failure_reason, hits_source_row, preview_hits_evidence,
     preview_availability, preview_hr_prediction, preview_summary, sort_preview_rows, timestamp, unavailable_row,
 )
@@ -233,6 +235,11 @@ def build_local_preview(
 
 def write_preview(rows: list[MLBResearchPreviewRow], day: str, output_root: Path) -> tuple[Path, Path]:
     """Publish a new run. The summary is the completion marker; no overwrite."""
+    # Revalidate before creating files, including frozen objects changed outside
+    # their supported API. New publication never labels old rows as schema v2.
+    rows = [MLBResearchPreviewRow(**row.to_dict()) for row in rows]
+    if any(row.preview_schema_version != PREVIEW_SCHEMA_VERSION for row in rows):
+        raise ValueError("new preview publication requires the current schema")
     summary = preview_summary(rows, day)
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + "-" + uuid4().hex[:8]
     root = output_root.resolve() / day / run_id
@@ -263,6 +270,9 @@ def load_preview_board(output_root: Path, day: str) -> tuple[list[MLBResearchPre
         return rows, preview_summary(rows, day)
     summary_path = summaries[-1]
     summary = _json(summary_path)
+    schema = summary.get("preview_schema_version")
+    if schema not in {PREVIEW_SCHEMA_VERSION, LEGACY_PREVIEW_SCHEMA_VERSION}:
+        raise ValueError("unsupported persisted preview schema")
     expected_name = f"mlb_research_board_{day}.csv"
     if summary.get("board_filename") != expected_name or summary.get("operating_date") != day:
         raise ValueError("preview summary date/path mismatch")
@@ -270,9 +280,14 @@ def load_preview_board(output_root: Path, day: str) -> tuple[list[MLBResearchPre
     raw = board.read_bytes()
     if hashlib.sha256(raw).hexdigest() != summary.get("board_sha256"):
         raise ValueError("preview board integrity mismatch")
-    rows = []
-    for raw_row in csv.DictReader(io.StringIO(raw.decode("utf-8"))):
+    rows, original_views = [], []
+    reader = csv.DictReader(io.StringIO(raw.decode("utf-8")))
+    if not reader.fieldnames or len(reader.fieldnames) != len(set(reader.fieldnames)):
+        raise ValueError("invalid preview CSV header")
+    for raw_row in reader:
         data = {key: value if value != "" else None for key, value in raw_row.items()}
+        if data.get("preview_schema_version") != schema:
+            raise ValueError("preview row/summary schema mismatch")
         for key in ("research_only", "eligible_for_betting", "kelly_eligible"):
             if data[key] not in {"True", "False"}:
                 raise ValueError("invalid preview safety flag")
@@ -283,19 +298,38 @@ def load_preview_board(output_root: Path, day: str) -> tuple[list[MLBResearchPre
         for key in ("american_odds", "season_hits", "season_at_bats", "distinct_batting_games"):
             if data.get(key) is not None:
                 data[key] = int(data[key])
-        data["source_refs"] = tuple(json.loads(data["source_refs"]))
-        rows.append(MLBResearchPreviewRow(**data))
-    recomputed = preview_summary(rows, day)
-    expected = recomputed
-    if "availability_schema_version" not in summary:
-        # Verify the original summary semantics before presenting the new view.
-        # Existing immutable artifacts are never rewritten or trusted unchecked.
-        expected = {key: value for key, value in recomputed.items() if key not in preview_availability(rows)}
+        refs = json.loads(data["source_refs"])
+        if not isinstance(refs, list):
+            raise ValueError("preview source refs must be a JSON array")
+        data["source_refs"] = tuple(refs)
+        presented = dict(data)
+        if (schema == LEGACY_PREVIEW_SCHEMA_VERSION and data["market_type"] == "batter_hits"
+                and data["prediction_status"] == "QUALIFIED_RESEARCH"):
+            # Historical qualification is not current sovereign qualification.
+            # Preserve bytes and declared metadata; never invent missing lineage.
+            probability = data.get("model_probability")
+            if probability is None or not 0 <= probability <= 1:
+                raise ValueError("invalid legacy preview probability")
+            presented.update(prediction_status="BLOCKED", model_probability=None,
+                probability_market_independence="NOT_TESTED",
+                block_reason=LEGACY_HITS_PROVENANCE_UNQUALIFIED,
+                block_detail="Legacy Hits provenance is not sovereign; saved v1 qualification is diagnostic only.")
+        row = MLBResearchPreviewRow(**presented)
+        rows.append(row)
+        # Private summary-only view, never a qualified MLBResearchPreviewRow.
+        # Defaults come from the validated presentation, original values from
+        # the parsed artifact. Verify its original counts before adapting them.
+        original_views.append(SimpleNamespace(**{**row.to_dict(), **data}))
+    expected = preview_summary(original_views, day)
+    expected["preview_schema_version"] = schema
+    if schema == LEGACY_PREVIEW_SCHEMA_VERSION and "availability_schema_version" not in summary:
+        expected = {key: value for key, value in expected.items() if key not in preview_availability(original_views)}
         expected["status"] = "MLB_PREVIEW_SOURCE_DATA_UNAVAILABLE" if any(
-            row.prediction_status == "UNAVAILABLE" for row in rows) else "MLB_PREVIEW_RESEARCH_ONLY"
+            row.prediction_status == "UNAVAILABLE" for row in original_views) else "MLB_PREVIEW_RESEARCH_ONLY"
     if any(summary.get(key) != value for key, value in expected.items()):
         raise ValueError("preview summary content mismatch")
-    return rows, {**summary, **recomputed, "board_path": str(board), "summary_path": str(summary_path)}
+    return rows, {**summary, **preview_summary(rows, day), "source_preview_schema_version": schema,
+                  "board_path": str(board), "summary_path": str(summary_path)}
 
 
 def main(argv: list[str] | None = None) -> int:

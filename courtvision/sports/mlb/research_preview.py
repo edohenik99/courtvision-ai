@@ -10,17 +10,23 @@ from typing import Mapping
 from zoneinfo import ZoneInfo
 
 from courtvision.core.candidates import CandidateProvenance
-from courtvision.sports.mlb.ab_projection import AB_PROJECTION_V2_VERSION, assemble_sovereign_batter_hits_features
+from courtvision.sports.mlb.ab_projection import (
+    AB_PROJECTION_V2_METHOD, AB_PROJECTION_V2_VERSION, assemble_sovereign_batter_hits_features,
+)
 from courtvision.sports.mlb.batter_hits import (
     MODEL_ID, MODEL_VERSION, assemble_batter_hits_candidate,
     batter_hits_source_evidence_from_market_record, compute_batter_hits_probability,
 )
 from courtvision.sports.mlb.hits_acquisition import AcquiredBatterHitsEvidence, SovereignBatterHitsEvidence
 from courtvision.sports.mlb.hits_season_ledger import CANONICAL_HITS_SEASON_SOURCE, HitsLedgerError
+from courtvision.sports.mlb.fact_ledger import _unique_object
+from courtvision.sports.mlb.game_facts import _hash, _id
 from courtvision.sports.mlb.market_adapter import adapt_mlb_hr_prediction
 from courtvision.sports.mlb.market_data import MLBPlayerPropSourceRecord
 
-PREVIEW_SCHEMA_VERSION = "mlb-research-preview-v1"
+LEGACY_PREVIEW_SCHEMA_VERSION = "mlb-research-preview-v1"
+PREVIEW_SCHEMA_VERSION = "mlb-research-preview-v2"
+LEGACY_HITS_PROVENANCE_UNQUALIFIED = "LEGACY_HITS_PROVENANCE_UNQUALIFIED"
 OPERATING_TIMEZONE = ZoneInfo("America/Toronto")
 HITS_LIMITATION = "NAIVE_UNCALIBRATED_BASELINE"
 HR_LIMITATION = "LEGACY_MARKET_CONTAMINATED"
@@ -97,7 +103,7 @@ class MLBResearchPreviewRow:
     def __post_init__(self) -> None:
         date.fromisoformat(self.operating_date)
         status = PredictionStatus(self.prediction_status)
-        if self.preview_schema_version != PREVIEW_SCHEMA_VERSION or self.sport != "MLB":
+        if self.preview_schema_version not in {PREVIEW_SCHEMA_VERSION, LEGACY_PREVIEW_SCHEMA_VERSION} or self.sport != "MLB":
             raise ValueError("unsupported preview schema or sport")
         if self.market_type not in {"batter_hits", "batter_home_runs"}:
             raise ValueError("unsupported preview market")
@@ -125,17 +131,79 @@ class MLBResearchPreviewRow:
                     or self.event_status != "resolved" or self.lineup_status != "statsapi_batting_order_present"
                     or self.market_implied_probability is None or self.projected_at_bats is None):
                 raise ValueError("qualified Hits requires the complete evidence chain")
-            if self.season_source == CANONICAL_HITS_SEASON_SOURCE and (
-                self.ab_projection_version != AB_PROJECTION_V2_VERSION or not self.season_aggregate_hash
-                or type(self.distinct_batting_games) is not int or self.distinct_batting_games <= 0
-            ):
-                raise ValueError("qualified ledger Hits requires aggregate provenance and AB v2")
         if self.row_kind not in {"PLAYER", "SOURCE_STATUS"}:
             raise ValueError("invalid row kind")
         if self.row_kind == "SOURCE_STATUS" and (self.player_name or status != PredictionStatus.UNAVAILABLE):
             raise ValueError("source status must not invent a player")
         if not isinstance(self.source_refs, tuple) or any(not isinstance(ref, str) for ref in self.source_refs):
             raise ValueError("source refs must be immutable text")
+        if status == PredictionStatus.QUALIFIED_RESEARCH:
+            self._validate_sovereign_hits()
+
+    def _validate_sovereign_hits(self) -> None:
+        """Recheck persisted v2 lineage; never infer it from code or file paths.
+
+        These are the existing ledger content identities and AB v2 provenance,
+        not an assertion that external fact files were reacquired or audited.
+        """
+        if (self.preview_schema_version != PREVIEW_SCHEMA_VERSION
+                or self.season_source != CANONICAL_HITS_SEASON_SOURCE
+                or self.ab_projection_version != AB_PROJECTION_V2_VERSION):
+            raise ValueError("qualified Hits requires v2 ledger provenance and AB v2")
+        _id(self.player_id, "player_id")
+        _id(self.canonical_event_id, "canonical_event_id")
+        _hash(self.season_aggregate_hash, "season_aggregate_hash")
+        if (type(self.season_at_bats) is not int or self.season_at_bats <= 0
+                or type(self.season_hits) is not int or not 0 <= self.season_hits <= self.season_at_bats
+                or type(self.distinct_batting_games) is not int or self.distinct_batting_games <= 0
+                or type(self.projected_at_bats) not in {int, float}
+                or not math.isfinite(self.projected_at_bats) or self.projected_at_bats <= 0):
+            raise ValueError("qualified Hits requires valid season counts and projected AB")
+
+        def reference(prefix: str) -> str:
+            values = {ref[len(prefix):] for ref in self.source_refs if ref.startswith(prefix)}
+            if len(values) != 1:
+                raise ValueError(f"qualified Hits requires one unambiguous {prefix} reference")
+            return values.pop()
+
+        if reference("cv-ledger-season:sha256:") != self.season_aggregate_hash:
+            raise ValueError("season aggregate reference differs from row identity")
+        _hash(reference("cv-ledger-coverage:sha256:"), "ledger coverage reference")
+        projection = json.loads(reference("cv_ab_projection_provenance="), object_pairs_hook=_unique_object)
+        expected = {
+            "model_version": self.ab_projection_version, "projection_method": AB_PROJECTION_V2_METHOD,
+            "season_source": self.season_source, "season_aggregate_hash": self.season_aggregate_hash,
+            "season": date.fromisoformat(self.operating_date).year, "season_at_bats": self.season_at_bats,
+            "distinct_batting_games": self.distinct_batting_games, "game_id": self.canonical_event_id,
+            "player_id": self.player_id, "lineup_status": self.lineup_status,
+        }
+        if (not isinstance(projection, dict)
+                or any(type(projection.get(key)) is not type(value) or projection[key] != value
+                       for key, value in expected.items())
+                or type(projection.get("batting_order_position")) is not int
+                or not 1 <= projection["batting_order_position"] <= 9):
+            raise ValueError("AB v2 provenance differs from qualified Hits identity/counts/lineup")
+        features = json.loads(reference("hits_feature_provenance="), object_pairs_hook=_unique_object)
+        expected_features = {
+            "game_id": self.canonical_event_id, "player_id": self.player_id,
+            "season_source": self.season_source, "season_games_played": None,
+            "season": str(expected["season"]), "projection_model_version": self.ab_projection_version,
+            "projection_method": AB_PROJECTION_V2_METHOD, "projection_source": "courtvision",
+            "batting_order_position": projection["batting_order_position"],
+        }
+        if (not isinstance(features, dict)
+                or any(key not in features or type(features[key]) is not type(value) or features[key] != value
+                       for key, value in expected_features.items())):
+            raise ValueError("feature provenance conflicts with sovereign Hits lineage")
+        for name in ("season_hits", "season_at_bats", "projected_at_bats"):
+            if reference(f"features.{name}=") != str(getattr(self, name)):
+                raise ValueError(f"persisted {name} differs from feature provenance")
+        try:
+            expected_ab = self.season_at_bats / self.distinct_batting_games
+        except OverflowError as exc:
+            raise ValueError("invalid AB v2 opportunity") from exc
+        if self.projected_at_bats != expected_ab:
+            raise ValueError("projected AB differs from AB v2 season opportunity")
 
     def to_dict(self) -> dict:
         return asdict(self)

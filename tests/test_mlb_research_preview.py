@@ -297,13 +297,17 @@ def test_legacy_summary_is_validated_and_presented_without_rewriting(tmp_path):
             preview_hr_prediction(_hr(), day="2026-09-20", source_ref="fixture:prediction")]
     board, summary_path = sources.write_preview(rows, "2026-09-20", tmp_path)
     summary = json.loads(summary_path.read_text())
+    # An actual old schema, not a current board with removed guarantees.
+    board.write_bytes(board.read_bytes().replace(b"mlb-research-preview-v2", b"mlb-research-preview-v1"))
+    summary["preview_schema_version"] = "mlb-research-preview-v1"
+    summary["board_sha256"] = hashlib.sha256(board.read_bytes()).hexdigest()
     for key in preview_availability(rows):
         summary.pop(key)
     summary["status"] = "MLB_PREVIEW_SOURCE_DATA_UNAVAILABLE"
     summary_path.write_text(json.dumps(summary))
     before = board.read_bytes(), summary_path.read_bytes()
     loaded, presented = sources.load_preview_board(tmp_path, "2026-09-20")
-    assert loaded == sort_preview_rows(rows)
+    assert loaded == sort_preview_rows([replace(row, preview_schema_version="mlb-research-preview-v1") for row in rows])
     assert presented["status"] == "MLB_PREVIEW_PARTIAL_AVAILABILITY"
     assert before == (board.read_bytes(), summary_path.read_bytes())
     summary["hr_market_contaminated"] += 1
@@ -364,7 +368,7 @@ def test_qualified_hits_details_show_baseline_inputs(tmp_path):
     assert not app.exception
     assert {"Season hits", "Season at-bats", "Projected at-bats"} <= {item.value for item in app.caption}
     assert {"3", "12", "4.0"} <= {item.value for item in app.text}
-    assert {"COURTVISION_GAME_FACT_LEDGER", "cv_ab_projection_v2"} <= {item.value for item in app.text}
+    assert {"CourtVision Game Fact Ledger", "cv_ab_projection_v2"} <= {item.value for item in app.text}
 
 
 def test_all_sources_unavailable_has_no_player_board_or_selected_detail(tmp_path):
