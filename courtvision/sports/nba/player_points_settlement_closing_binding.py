@@ -7,6 +7,8 @@ provider I/O and never resolves a "latest" batch.
 
 from __future__ import annotations
 
+from courtvision.sports.nba.artifact_domains import NBA_OUTCOME_EVIDENCE, require_artifact_path
+
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -1022,6 +1024,7 @@ def _parse_jsonl(data: bytes, label: str) -> tuple[Mapping[str, object], ...]:
 
 
 def _actual_evidence_root(path: Path) -> Path:
+    require_artifact_path(path, NBA_OUTCOME_EVIDENCE)
     base = path.expanduser().absolute()
     return base if base.name == NBA_PLAYER_POINTS_EVIDENCE_DIR_NAME else base / NBA_PLAYER_POINTS_EVIDENCE_DIR_NAME
 

@@ -23,6 +23,10 @@ from types import MappingProxyType
 from typing import Any, Final
 from uuid import uuid4
 
+from courtvision.sports.nba.artifact_domains import (
+    NBA_PROSPECTIVE_EVIDENCE, contains_target_game_outcome, require_artifact_path,
+)
+
 from courtvision.sports.nba.player_minutes_research import (
     NBA_PLAYER_MINUTES_FEATURE_SCHEMA_VERSION,
 )
@@ -34,6 +38,8 @@ from courtvision.sports.nba.player_points_assembly import (
     NBAPlayerPointsAssemblyBatchResult,
     NBAPlayerPointsSourceManifestPreview,
     generate_preview_prediction_id,
+    validate_probability_identity_payload,
+    validate_projection_identity_payload,
 )
 from courtvision.sports.nba.player_points_research import (
     NBA_PLAYER_POINTS_MARKET,
@@ -188,6 +194,7 @@ class NBAPlayerPointsEvidenceWriterConfig:
             "completion_marker_file_name",
         ):
             _require_safe_path_component(getattr(self, field_name), field_name)
+            require_artifact_path(getattr(self, field_name), NBA_PROSPECTIVE_EVIDENCE)
         if (
             isinstance(self.lock_timeout_seconds, bool)
             or not isinstance(self.lock_timeout_seconds, (int, float))
@@ -1518,6 +1525,14 @@ def _validate_assembled_payload(
     source_manifest_hash: str,
     repository_commit_sha: str,
 ) -> None:
+    if contains_target_game_outcome(payload):
+        raise NBAPlayerPointsEvidenceError("prospective evidence contains target-game outcomes")
+    try:
+        validate_probability_identity_payload(payload)
+        if payload.get("artifact_domain") == NBA_PROSPECTIVE_EVIDENCE and payload.get("projection_research_eligible"):
+            validate_projection_identity_payload(payload)
+    except ValueError as exc:
+        raise NBAPlayerPointsEvidenceError(str(exc)) from exc
     if payload.get("schema_version") != NBA_PLAYER_POINTS_RESEARCH_SCHEMA_VERSION:
         raise NBAPlayerPointsEvidenceError("unsupported prediction schema_version")
     if payload.get("assembly_schema_version") != NBA_PLAYER_POINTS_ASSEMBLY_SCHEMA_VERSION:
@@ -1679,6 +1694,13 @@ def _ledger_record_from_row(
         "assembled_record_hash": row["assembled_record_hash"],
         "research_label": row["research_only_label"],
     }
+    # Preserve the exact legacy ledger shape when auditing frozen evidence.
+    record.update({name: row[name] for name in (
+        "probability_identity", "probability_identity_hash", "probability_assessment_hash",
+        "probability_source_id", "probability_source_hash", "probability_schema_version",
+        "probability_timestamp_utc", "research_only", "artifact_domain",
+        "projection_evidence", "projection_identity_hash", "minutes_identity",
+    ) if row.get("artifact_domain") == NBA_PROSPECTIVE_EVIDENCE and name in row})
     if _contains_prohibited_prediction_field(record):
         raise NBAPlayerPointsEvidenceError("ledger record contains prohibited field")
     record["ledger_record_hash"] = _ledger_record_hash(record)
@@ -1750,6 +1772,10 @@ def _ledger_record_hash(record: Mapping[str, object]) -> str:
 
 
 def _validate_ledger_record_payload(row: Mapping[str, object]) -> None:
+    try:
+        validate_probability_identity_payload(row)
+    except ValueError as exc:
+        raise NBAPlayerPointsEvidenceError(str(exc)) from exc
     missing = [field for field in _ledger_record_field_names() if field not in row]
     if missing:
         raise NBAPlayerPointsEvidenceError(
@@ -2079,6 +2105,8 @@ def _conflict_row(
 
 
 def _contains_prohibited_prediction_field(payload: object) -> bool:
+    if contains_target_game_outcome(payload):
+        return True
     if isinstance(payload, Mapping):
         for key, value in payload.items():
             text = str(key).casefold()
@@ -2194,6 +2222,7 @@ def _call_failure_hook(failure_hook: FailureHook | None, stage: str) -> None:
 
 
 def _evidence_root(path: Path, config: NBAPlayerPointsEvidenceWriterConfig) -> Path:
+    require_artifact_path(path, NBA_PROSPECTIVE_EVIDENCE)
     base = path.expanduser()
     evidence_root = base if base.name == config.evidence_dir_name else base / config.evidence_dir_name
     if evidence_root.name != config.evidence_dir_name:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from nba_provenance_fixtures import assembly_fixture
+
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 import hashlib
@@ -43,7 +45,7 @@ EVIDENCE_CONFIG = NBAPlayerPointsEvidenceWriterConfig()
 
 
 def _load_fixture() -> dict[str, object]:
-    return json.loads(ASSEMBLY_CASES_FIXTURE.read_text(encoding="utf-8"))
+    return assembly_fixture(json.loads(ASSEMBLY_CASES_FIXTURE.read_text(encoding="utf-8")))
 
 
 def _deep_merge(base: object, overrides: object) -> object:
@@ -650,7 +652,7 @@ def test_later_pre_tip_observation_creates_new_selection_without_mutating_old_se
     assert _snapshot(first.observation_segment_directory) == first_segment_snapshot
     assert second.selection_batch_id != first.selection_batch_id
     assert len(_observation_rows(tmp_path)) == 2
-    assert _selection_rows(tmp_path)[-1]["closing_line"] == 34.5
+    assert _read_jsonl(second.selection_segment_directory / "selected_closing_rows.jsonl")[0]["closing_line"] == 34.5
 
 
 def test_cross_batch_effective_selection_evolves_append_only_and_replay_safe(tmp_path: Path) -> None:

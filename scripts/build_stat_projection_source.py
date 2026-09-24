@@ -17,6 +17,10 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from scripts.run_market_projection_join import normalize_player_name
+from courtvision.sports.nba.artifact_domains import (
+    NBA_PROSPECTIVE_EVIDENCE, NBA_STAT_ARTIFACT_SCHEMA, contains_target_game_outcome,
+    require_artifact_path, stat_artifact_path, validate_prospective_stat_rows,
+)
 
 
 STAT_PROJECTION_OK = "STAT_PROJECTION_OK"
@@ -33,6 +37,9 @@ MAX_MINUTES_FACTOR = 1.15
 LOW_MINUTES_THRESHOLD = 20.0
 
 OUTPUT_COLUMNS = [
+    "artifact_domain", "artifact_schema_version", "prospective_status",
+    "operating_date", "source_timestamp_utc", "projection_timestamp_utc",
+    "evidence_cutoff_timestamp_utc", "commence_time_utc",
     "player_id",
     "player_name",
     "team_abbr",
@@ -93,13 +100,16 @@ def build_stat_projection_source(
     """Build one research-only projection row per cleaned player context row."""
     target_date_text = _validate_date(target_date)
     output_dir_path = Path(output_dir)
-    diagnostics_dir_path = Path(diagnostics_dir)
+    diagnostics_dir_path = require_artifact_path(Path(diagnostics_dir) / "nba" / "prospective", NBA_PROSPECTIVE_EVIDENCE)
     input_path = Path(cleaned_context) if cleaned_context else (
         output_dir_path / f"projection_context_clean_{target_date_text}.csv"
     )
-    output_path = output_dir_path / f"stat_projection_source_{target_date_text}.csv"
+    output_path = stat_artifact_path(output_dir_path, NBA_PROSPECTIVE_EVIDENCE, target_date_text)
+    require_artifact_path(input_path, NBA_PROSPECTIVE_EVIDENCE)
+    if output_path.exists():
+        raise FileExistsError("projection artifact already exists; overwrite is prohibited")
     diagnostics_path = (
-        diagnostics_dir_path / f"stat_projection_source_{target_date_text}.json"
+        diagnostics_dir_path / f"player_stat_projections_{target_date_text}.json"
     )
 
     output_dir_path.mkdir(parents=True, exist_ok=True)
@@ -117,7 +127,13 @@ def build_stat_projection_source(
         columns = _column_lookup(source_df)
         name_column = _first_existing_column(columns, INPUT_ALIASES["player_name"])
 
-        if read_error:
+        if contains_target_game_outcome(source_df.to_dict("records")) or any(
+            str(column).casefold() in {"points", "pts", "minutes", "rebounds", "assists"}
+            for column in source_df.columns
+        ):
+            status = STAT_PROJECTION_SCHEMA_INVALID
+            warnings.append("Target-game actual fields are prohibited in projection context.")
+        elif read_error:
             status = STAT_PROJECTION_SCHEMA_INVALID
             warnings.append(f"Could not read cleaned projection context: {read_error}")
         elif name_column is None:
@@ -125,6 +141,21 @@ def build_stat_projection_source(
             warnings.append("Cleaned projection context is missing a player name column.")
         else:
             output_df, build_warnings = _build_rows(source_df, columns)
+            output_df["artifact_domain"] = NBA_PROSPECTIVE_EVIDENCE
+            output_df["artifact_schema_version"] = NBA_STAT_ARTIFACT_SCHEMA
+            output_df["prospective_status"] = "unqualified"
+            output_df["operating_date"] = target_date_text
+            output_df["projection_timestamp_utc"] = datetime.now(timezone.utc).isoformat()
+            # Preserve declared input clocks. Missing/late clocks stay diagnostic;
+            # a newly calculated projection never inherits a backdated clock.
+            for name in ("source_timestamp_utc", "evidence_cutoff_timestamp_utc", "commence_time_utc"):
+                output_df[name] = [row.get(name) for row in source_df.to_dict("records")
+                                   if normalize_player_name(_source_value(pd.Series(row), columns, INPUT_ALIASES["player_name"]))]
+            try:
+                validate_prospective_stat_rows(output_df.to_dict("records"), target_date_text)
+                output_df["prospective_status"] = "clock_qualified_diagnostic_only"
+            except ValueError as exc:
+                warnings.append(str(exc))
             warnings.extend(build_warnings)
             status = (
                 STAT_PROJECTION_OK
@@ -142,7 +173,8 @@ def build_stat_projection_source(
         output_df=output_df,
         warnings=warnings,
     )
-    output_df.to_csv(output_path, index=False)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_df.to_csv(output_path, index=False, mode="x")
     diagnostics_path.write_text(
         json.dumps(diagnostics, indent=2, sort_keys=True),
         encoding="utf-8",

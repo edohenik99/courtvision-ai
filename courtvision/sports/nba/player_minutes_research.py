@@ -18,6 +18,8 @@ from types import MappingProxyType
 from typing import Any, Final, Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from courtvision.sports.nba.artifact_domains import contains_target_game_outcome
+
 
 NBA_PLAYER_MINUTES_FEATURE_SCHEMA_VERSION: Final = "nba-player-minutes-feature-v1"
 NBA_PLAYER_MINUTES_OPERATING_TIMEZONE: Final = "America/Toronto"
@@ -1695,6 +1697,7 @@ def _volatility_penalty(stddev: float | None) -> str:
 
 
 def _reject_composite_leakage(payload: Mapping[str, object]) -> None:
+    _reject_outcome_leakage(payload)
     for field_name in ("target_game_actual_minutes", "target_game_final_stats", "final_stats", "box_score"):
         if field_name in payload:
             if field_name == "target_game_actual_minutes":
@@ -1703,6 +1706,7 @@ def _reject_composite_leakage(payload: Mapping[str, object]) -> None:
 
 
 def _reject_leakage_fields(payload: Mapping[str, object]) -> None:
+    _reject_outcome_leakage(payload)
     if "projected_minutes" in payload:
         raise NBAPlayerMinutesFeatureSchemaError(
             "projected_minutes is calculated by the feature builder and cannot be supplied by a source row"
@@ -1713,6 +1717,49 @@ def _reject_leakage_fields(payload: Mapping[str, object]) -> None:
     for field_name in ("final_points", "target_game_final_points", "final_stats", "box_score"):
         if field_name in payload:
             raise NBAPlayerMinutesFeatureSchemaError("target-event final statistics are not permitted")
+
+
+def _reject_outcome_leakage(payload: Mapping[str, object]) -> None:
+    if contains_target_game_outcome(payload):
+        raise NBAPlayerMinutesFeatureSchemaError(
+            "target-game actual minutes or target-event final statistics/outcomes are not permitted"
+        )
+
+
+def minutes_evidence_identity(payload: Mapping[str, object]) -> dict[str, object]:
+    """Content identity for existing typed minutes evidence, not a new model.
+
+    The original method and source hashes remain explicit, including external
+    or fixture methods. Missing canonical IDs cannot be qualified by hashing.
+    """
+    _reject_outcome_leakage(payload)
+    normalized = {key: payload.get(key) for key in NBA_PLAYER_MINUTES_FEATURE_FIELDS}
+    for key in ("canonical_event_id", "provider_event_id", "player_id", "source_manifest_id",
+                "minutes_projection_method"):
+        normalized[key] = _require_identifier(payload.get(key), key)
+    for key in NBA_PLAYER_MINUTES_UTC_TIMESTAMP_FIELDS:
+        normalized[key] = _format_utc(_parse_utc_timestamp(payload.get(key), key))
+    timestamp = _parse_utc_timestamp(normalized["feature_timestamp_utc"], "feature_timestamp_utc")
+    cutoff = _parse_utc_timestamp(normalized["feature_cutoff_timestamp_utc"], "feature_cutoff_timestamp_utc")
+    tipoff = _parse_utc_timestamp(normalized["commence_time_utc"], "commence_time_utc")
+    if not timestamp <= cutoff < tipoff:
+        raise NBAPlayerMinutesFeatureSchemaError("minutes timestamp <= cutoff < tipoff is required")
+    hashes = payload.get("minutes_source_hashes", payload.get("source_hashes"))
+    normalized["source_hashes"] = dict(_validate_source_hashes(hashes))
+    if payload.get("source_hashes") is not None and dict(payload["source_hashes"]) != normalized["source_hashes"]:
+        raise NBAPlayerMinutesFeatureSchemaError("minutes source hash aliases disagree")
+    validate_schema_version(payload.get("feature_schema_version"))
+    normalized["projected_minutes"] = _require_nonnegative_number(payload.get("projected_minutes"), "projected_minutes")
+    digest = _canonical_payload_sha256(normalized)
+    return {
+        "minutes_source_id": f"{normalized['source_manifest_id']}:{digest}",
+        "minutes_source_hash": digest,
+        "minutes_evidence": normalized,
+        "minutes_schema_version": normalized["feature_schema_version"],
+        "minutes_timestamp_utc": normalized["feature_timestamp_utc"],
+        "minutes_cutoff_timestamp_utc": normalized["feature_cutoff_timestamp_utc"],
+        "minutes_projection_method": normalized["minutes_projection_method"],
+    }
 
 
 def _validate_projected_minutes_contract(

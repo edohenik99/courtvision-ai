@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from nba_provenance_fixtures import assembly_fixture
+
 from collections.abc import Mapping
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -79,7 +81,7 @@ REQUIRED_CASE_IDS = {
 
 
 def _load_fixture() -> dict[str, object]:
-    return json.loads(ASSEMBLY_CASES_FIXTURE.read_text(encoding="utf-8"))
+    return assembly_fixture(json.loads(ASSEMBLY_CASES_FIXTURE.read_text(encoding="utf-8")))
 
 
 def _sha256(path: Path) -> str:
@@ -369,7 +371,7 @@ def test_crosswalk_quarantined_identity_stays_quarantined_batch_row() -> None:
     assert row.market_status == "valid"
     assert row.projection_status == "valid"
     assert row.minutes_status == "projected"
-    assert row.probability_status == "valid"
+    assert row.probability_status == "malformed"
     assert row.assembly_status == "quarantined"
     assert row.projection_research_eligible is False
     assert row.probability_research_eligible is False

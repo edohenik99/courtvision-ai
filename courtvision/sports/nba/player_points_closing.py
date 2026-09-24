@@ -10,6 +10,10 @@ operator-board, or dashboard paths.
 
 from __future__ import annotations
 
+from courtvision.sports.nba.artifact_domains import (
+    NBA_PROSPECTIVE_EVIDENCE, contains_target_game_outcome, require_artifact_path,
+)
+
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -200,6 +204,7 @@ class NBAPlayerPointsClosingWriterConfig:
             "completion_marker_file_name",
         ):
             _require_safe_path_component(getattr(self, field_name), field_name)
+            require_artifact_path(getattr(self, field_name), NBA_PROSPECTIVE_EVIDENCE)
         if (
             isinstance(self.lock_timeout_seconds, bool)
             or not isinstance(self.lock_timeout_seconds, (int, float))
@@ -2822,6 +2827,7 @@ class _ClosingRootLock:
 
 
 def _evidence_root(path: Path, config: NBAPlayerPointsClosingWriterConfig) -> Path:
+    require_artifact_path(path, NBA_PROSPECTIVE_EVIDENCE)
     base = path.expanduser()
     evidence_root = base if base.name == config.evidence_dir_name else base / config.evidence_dir_name
     if evidence_root.name != config.evidence_dir_name:
@@ -3144,6 +3150,8 @@ def _optional_american_odds(value: object, field_name: str) -> int | None:
 
 
 def _contains_prohibited_field(payload: object) -> bool:
+    if contains_target_game_outcome(payload):
+        return True
     if isinstance(payload, Mapping):
         for key, value in payload.items():
             text = str(key).casefold()

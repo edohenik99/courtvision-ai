@@ -21,6 +21,9 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from courtvision.clients.api_nba_client import ApiNbaClient
+from courtvision.sports.nba.artifact_domains import (
+    NBA_OUTCOME_EVIDENCE, NBA_STAT_ARTIFACT_SCHEMA, require_artifact_path, stat_artifact_path,
+)
 from courtvision.providers.research_schedule_resolver import (
     DEFAULT_MANUAL_SCHEDULE_DIR,
     SOURCE_API_NBA,
@@ -40,6 +43,8 @@ RESEARCH_MODE = "research"
 ELIGIBLE_FOR_BETTING = False
 
 STAT_PROJECTION_COLUMNS = [
+    "artifact_domain",
+    "artifact_schema_version",
     "game_date",
     "game_id",
     "player_id",
@@ -84,9 +89,11 @@ def run_research_mode(
 
     output_dir_path = Path(output_dir)
     runtime_root = output_dir_path.parent
-    diagnostics_dir = runtime_root / "diagnostics"
-    stat_projection_path = output_dir_path / f"stat_projection_source_{target_date_text}.csv"
-    summary_path = output_dir_path / f"research_mode_summary_{target_date_text}.txt"
+    diagnostics_dir = runtime_root / "diagnostics" / "nba" / "outcomes"
+    stat_projection_path = stat_artifact_path(output_dir_path, NBA_OUTCOME_EVIDENCE, target_date_text)
+    if stat_projection_path.exists():
+        raise FileExistsError("outcome artifact already exists; overwrite is prohibited")
+    summary_path = stat_projection_path.parent / f"research_mode_summary_{target_date_text}.txt"
     diagnostics_path = diagnostics_dir / f"research_mode_{target_date_text}.json"
 
     output_dir_path.mkdir(parents=True, exist_ok=True)
@@ -214,6 +221,8 @@ def _stat_row(stat: Any, *, fallback_date: str) -> dict[str, Any]:
     game_date = _clean_text(getattr(stat, "game_date", ""))[:10] or fallback_date
     return {
         "game_date": game_date,
+        "artifact_domain": NBA_OUTCOME_EVIDENCE,
+        "artifact_schema_version": NBA_STAT_ARTIFACT_SCHEMA,
         "game_id": getattr(stat, "game_id", ""),
         "player_id": getattr(stat, "player_id", ""),
         "player_name": getattr(stat, "player_name", ""),
@@ -233,7 +242,9 @@ def _stat_row(stat: Any, *, fallback_date: str) -> dict[str, Any]:
 
 
 def _write_stat_projection_csv(path: Path, rows: list[dict[str, Any]]) -> None:
-    pd.DataFrame(rows, columns=STAT_PROJECTION_COLUMNS).to_csv(path, index=False)
+    require_artifact_path(path, NBA_OUTCOME_EVIDENCE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows, columns=STAT_PROJECTION_COLUMNS).to_csv(path, index=False, mode="x")
 
 
 def _diagnostics_payload(

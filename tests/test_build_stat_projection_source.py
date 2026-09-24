@@ -260,6 +260,8 @@ def test_non_success_statuses_still_write_empty_projection_artifacts(
     assert missing.status == STAT_PROJECTION_INPUT_MISSING
     assert pd.read_csv(missing.output_path).empty
 
+    tmp_path = tmp_path / "invalid-case"
+    _context_path(tmp_path).parent.mkdir(parents=True)
     pd.DataFrame([{"team_abbr": "OKC"}]).to_csv(
         _context_path(tmp_path),
         index=False,
@@ -268,6 +270,8 @@ def test_non_success_statuses_still_write_empty_projection_artifacts(
     assert invalid.status == STAT_PROJECTION_SCHEMA_INVALID
     assert pd.read_csv(invalid.output_path).empty
 
+    tmp_path = tmp_path / "empty-case"
+    _context_path(tmp_path).parent.mkdir(parents=True)
     pd.DataFrame(columns=["player_name", "pts_avg", "pts_recent"]).to_csv(
         _context_path(tmp_path),
         index=False,

@@ -19,8 +19,14 @@ import re
 from types import MappingProxyType
 from typing import Any, Final
 
+from courtvision.sports.nba.artifact_domains import (
+    NBA_PROSPECTIVE_EVIDENCE,
+    contains_target_game_outcome,
+)
+
 from courtvision.sports.nba.player_minutes_research import (
     NBA_PLAYER_MINUTES_FEATURE_SCHEMA_VERSION,
+    minutes_evidence_identity,
 )
 from courtvision.sports.nba.player_points_crosswalk import (
     NBA_PLAYER_POINTS_DEFAULT_EVENT_TIME_TOLERANCE,
@@ -84,6 +90,12 @@ NBA_PLAYER_POINTS_ASSEMBLY_ROW_FIELDS: Final = (
     "probability_source_hash",
     "probability_timestamp_utc",
     "probability_based_edge",
+    "probability_identity",
+    "probability_identity_hash",
+    "probability_assessment_hash",
+    "projection_evidence",
+    "projection_identity_hash",
+    "minutes_identity",
     "market_status",
     "minutes_status",
     "projection_status",
@@ -105,16 +117,6 @@ _SHA256_RE: Final = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT_SHA_RE: Final = re.compile(r"^[0-9a-f]{7,40}$")
 _ZERO_HASH: Final = "0" * 64
 _NONE: Final = object()
-_LEAKAGE_FIELDS: Final = (
-    "actual_points",
-    "final_points",
-    "target_game_actual_points",
-    "target_game_final_points",
-    "actual_minutes",
-    "target_game_actual_minutes",
-    "final_stats",
-    "box_score",
-)
 _STATUS_SORT_ORDER: Final = {
     "eligible_probability_research": 0,
     "eligible_projection_research": 1,
@@ -141,9 +143,16 @@ class NBAPlayerPointsProjectionEvidence:
     projection_source_hash: str
     projection_schema_version: str
     raw_evidence: Mapping[str, object] = field(default_factory=dict)
+    canonical_event_id: str | None = None
+    player_id: str | None = None
+    provider_event_id: str | None = None
 
     def __post_init__(self) -> None:
         _reject_target_game_leakage(self.raw_evidence, "projection_evidence")
+        for name in ("canonical_event_id", "player_id", "provider_event_id"):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(self, name, _require_identifier(value, name))
         object.__setattr__(
             self,
             "projected_points",
@@ -232,15 +241,23 @@ class NBAPlayerPointsProjectionEvidence:
                 "projection_schema_version",
             ),
             raw_evidence=payload,
+            canonical_event_id=payload.get("canonical_event_id"),
+            player_id=payload.get("player_id"),
+            provider_event_id=payload.get("provider_event_id"),
         )
         if commence_time_utc is not None and evidence.projection_timestamp_utc >= commence_time_utc:
             raise NBAPlayerPointsAssemblyContractError(
                 "projection_timestamp_utc must be before tipoff"
             )
+        if commence_time_utc is not None and evidence.projection_cutoff_timestamp_utc >= commence_time_utc:
+            raise NBAPlayerPointsAssemblyContractError("projection cutoff must be before tipoff")
         return evidence
 
     def to_dict(self) -> dict[str, object]:
         return {
+            "canonical_event_id": self.canonical_event_id,
+            "player_id": self.player_id,
+            "provider_event_id": self.provider_event_id,
             "projected_points": self.projected_points,
             "projection_method": self.projection_method,
             "projection_timestamp_utc": _format_utc(self.projection_timestamp_utc),
@@ -268,6 +285,9 @@ class NBAPlayerPointsProbabilityValidation:
     probability_timestamp_utc: datetime | None = None
     claims_probability_eligibility: bool = False
     diagnostics: tuple[str, ...] = ()
+    probability_identity: Mapping[str, object] = field(default_factory=dict)
+    probability_identity_hash: str | None = None
+    probability_assessment_hash: str | None = None
 
     def __post_init__(self) -> None:
         if self.probability_status not in NBA_PLAYER_POINTS_PROBABILITY_STATUSES:
@@ -349,6 +369,12 @@ class NBAPlayerPointsAssembledRow:
     probability_source_hash: str | None = None
     probability_timestamp_utc: datetime | None = None
     probability_based_edge: float | None = None
+    projection_evidence: Mapping[str, object] = field(default_factory=dict)
+    projection_identity_hash: str | None = None
+    minutes_identity: Mapping[str, object] = field(default_factory=dict)
+    probability_identity: Mapping[str, object] = field(default_factory=dict)
+    probability_identity_hash: str | None = None
+    probability_assessment_hash: str | None = None
     directional_diagnostic_label: str = "non_probabilistic_projection_line_difference"
     projection_line_difference: float | None = None
     projected_points_above_line: bool | None = None
@@ -486,6 +512,15 @@ class NBAPlayerPointsAssembledRow:
             raise NBAPlayerPointsAssemblyContractError("research_only_label is unsupported")
         if self.research_only is not True:
             raise NBAPlayerPointsAssemblyContractError("research_only must be true")
+        for name in ("projection_evidence", "minutes_identity"):
+            object.__setattr__(self, name, MappingProxyType(_json_clone_mapping(getattr(self, name))))
+        if self.projection_research_eligible:
+            validate_projection_identity_payload(self._to_payload(False))
+        object.__setattr__(self, "probability_identity", MappingProxyType(
+            _json_clone_mapping(self.probability_identity)
+        ))
+        if self.probability_status == "valid":
+            validate_probability_identity_payload(self._to_payload(False))
         object.__setattr__(
             self,
             "diagnostics",
@@ -501,6 +536,7 @@ class NBAPlayerPointsAssembledRow:
 
     def _to_payload(self, include_hashes: bool) -> dict[str, object]:
         payload = {
+            "artifact_domain": NBA_PROSPECTIVE_EVIDENCE,
             "schema_version": self.schema_version,
             "prediction_id": self.prediction_id,
             "prediction_run_id": self.prediction_run_id,
@@ -559,6 +595,12 @@ class NBAPlayerPointsAssembledRow:
             "probability_source_hash": self.probability_source_hash,
             "probability_timestamp_utc": _format_optional_utc(self.probability_timestamp_utc),
             "probability_based_edge": self.probability_based_edge,
+            "probability_identity": _json_clone(self.probability_identity),
+            "probability_identity_hash": self.probability_identity_hash,
+            "probability_assessment_hash": self.probability_assessment_hash,
+            "projection_evidence": _json_clone(self.projection_evidence),
+            "projection_identity_hash": self.projection_identity_hash,
+            "minutes_identity": _json_clone(self.minutes_identity),
             "market_status": self.market_status,
             "minutes_status": self.minutes_status,
             "projection_status": self.projection_status,
@@ -749,6 +791,8 @@ def projection_evidence_schema() -> dict[str, object]:
             "projection_schema_version",
         ],
         "constraints": [
+            "canonical_event_id, provider_event_id, and player_id required for qualification",
+            "legacy unbound projections are diagnostic only",
             "projected_points finite and non-negative",
             "projection_timestamp_utc UTC-aware and before tipoff",
             "projection_timestamp_utc at or before projection_cutoff_timestamp_utc",
@@ -1083,6 +1127,13 @@ def _assemble_one(
             conflict_reasons.append(str(exc))
 
     if projection_status == "valid":
+        for name in ("canonical_event_id", "player_id", "provider_event_id"):
+            value = getattr(projection, name)
+            expected = market.get(name) if name == "provider_event_id" else crosswalk.get(name)
+            if value is None:
+                exclusion_reasons.append(f"projection {name} is required; legacy projection is unqualified")
+            elif expected is not None and value != expected:
+                conflict_reasons.append(f"projection {name} disagrees with canonical identity")
         projection_timestamp = _coerce_utc_datetime(
             projection_evidence["projection_timestamp_utc"],
             "projection_timestamp_utc",
@@ -1102,19 +1153,57 @@ def _assemble_one(
         if projection_timestamp > projection_cutoff:
             conflict_reasons.append("projection_timestamp_utc must be at or before projection cutoff")
 
-    if _contains_leakage(minutes_evidence):
-        quarantine_reasons.append("minutes_evidence contains target-game leakage")
-    if _contains_leakage(projection_evidence):
-        quarantine_reasons.append("projection_evidence contains target-game leakage")
+    for name, evidence in (("market", market_evidence), ("crosswalk", crosswalk_evidence),
+                           ("minutes", minutes_evidence), ("projection", projection_evidence),
+                           ("probability", probability_evidence), ("provenance", provenance)):
+        if _contains_leakage(evidence):
+            quarantine_reasons.append(f"{name}_evidence contains target-game leakage")
 
     _validate_cross_source_consistency(crosswalk, minutes, conflict_reasons)
     _validate_market_cutoff(market, minutes, crosswalk, conflict_reasons)
     _validate_minutes_cutoff(minutes, conflict_reasons)
+    minutes_identity = {}
+    if minutes.get("minutes_projection_status") == "projected":
+        try:
+            minutes_identity = minutes_evidence_identity(minutes_evidence)
+        except (ValueError, TypeError) as exc:
+            exclusion_reasons.append(f"minutes identity is unqualified: {exc}")
+    if projection_status == "valid" and crosswalk.get("commence_time_utc") is not None:
+        cutoff = minutes.get("feature_cutoff_timestamp_utc")
+        if cutoff != projection.projection_cutoff_timestamp_utc:
+            conflict_reasons.append("minutes and projection cutoffs disagree")
+
+    # The crosswalk is the authority for canonical IDs; provider IDs must also
+    # match the actual market record. Never infer canonical identity from names.
+    if crosswalk_evidence.get("provider_event_id") != market.get("provider_event_id"):
+        conflict_reasons.append("crosswalk provider_event_id disagrees with market")
+    if minutes_evidence.get("provider_event_id") != market.get("provider_event_id"):
+        conflict_reasons.append("minutes provider_event_id disagrees with market")
+    for name in ("canonical_event_id", "player_id"):
+        if not minutes.get(name):
+            exclusion_reasons.append(f"minutes {name} is required")
+        if market_evidence.get(name) is not None and market_evidence[name] != crosswalk.get(name):
+            conflict_reasons.append(f"market {name} disagrees with canonical identity")
+
+    probability_identity = None
+    identity_error = None
+    if probability_evidence:
+        try:
+            probability_identity = build_probability_identity(
+                market_evidence=market_evidence, crosswalk_evidence=crosswalk_evidence,
+                minutes_evidence=minutes_evidence, projection_evidence=projection_evidence,
+                provenance=provenance, probability_evidence=probability_evidence,
+            )
+        except (ValueError, TypeError) as exc:
+            identity_error = str(exc)
 
     probability = _validate_probability_evidence(
         probability_evidence,
         cutoff=minutes.get("feature_cutoff_timestamp_utc"),
         tipoff=crosswalk.get("commence_time_utc"),
+        expected_identity=probability_identity,
+        identity_error=identity_error,
+        line=market.get("line"),
     )
     diagnostics.extend(probability.diagnostics)
     if probability.claims_probability_eligibility and probability.probability_status != "valid":
@@ -1147,6 +1236,12 @@ def _assemble_one(
         probability_evidence,
     )
     conflict_reasons.extend(source_hash_conflicts)
+    if probability.probability_status == "valid" and (
+        conflict_reasons or exclusion_reasons or quarantine_reasons
+    ):
+        probability = replace(probability, probability_status="malformed",
+                              probability_identity_hash=None, probability_assessment_hash=None,
+                              diagnostics=(*probability.diagnostics, "upstream evidence is unqualified"))
 
     projection_line_difference = None
     projected_points_above_line = None
@@ -1253,7 +1348,13 @@ def _assemble_one(
         probability_schema_version=probability.probability_schema_version,
         probability_source_hash=probability.probability_source_hash,
         probability_timestamp_utc=probability.probability_timestamp_utc,
+        probability_identity=probability.probability_identity,
+        probability_identity_hash=probability.probability_identity_hash,
+        probability_assessment_hash=probability.probability_assessment_hash,
         probability_based_edge=None,
+        projection_evidence=projection.to_dict() if projection_status == "valid" else {},
+        projection_identity_hash=_canonical_payload_sha256(projection.to_dict()) if projection_status == "valid" else None,
+        minutes_identity=minutes_identity,
         market_status=market_status,
         minutes_status=str(minutes.get("minutes_projection_status") or "invalid"),
         projection_status=projection_status,
@@ -1518,16 +1619,197 @@ def _validate_minutes_cutoff(
         conflict_reasons.append("minutes timestamp is after cutoff")
 
 
+def build_probability_identity(
+    *,
+    market_evidence: Mapping[str, object],
+    crosswalk_evidence: Mapping[str, object],
+    minutes_evidence: Mapping[str, object],
+    projection_evidence: Mapping[str, object],
+    provenance: Mapping[str, object],
+    probability_evidence: Mapping[str, object],
+) -> dict[str, object]:
+    """Build the declared model provenance envelope for a supplied probability.
+
+    This is an identity operation, not a probability calculation or ownership
+    attestation. Producers must supply this envelope; admission independently
+    rebuilds it against the actual inputs. The separate assessment hash binds
+    the threshold and scalar pair. Neither sportsbook nor prices participate
+    in this model identity or its model-input source manifest.
+    """
+    projection = build_projection_evidence(projection_evidence)
+    identity: dict[str, object] = {"identity_schema_version": "nba-probability-identity-v1"}
+    for name in ("canonical_event_id", "player_id"):
+        identity[name] = _require_identifier(crosswalk_evidence.get(name), name)
+        for label, evidence in (("projection", projection.to_dict()), ("minutes", minutes_evidence),
+                                ("probability", probability_evidence)):
+            if _require_identifier(evidence.get(name), f"{label}.{name}") != identity[name]:
+                raise NBAPlayerPointsAssemblyContractError(f"{label} {name} mismatch")
+    provider_id = _require_identifier(market_evidence.get("provider_event_id"), "provider_event_id")
+    for label, evidence in (("crosswalk", crosswalk_evidence), ("minutes", minutes_evidence),
+                            ("projection", projection_evidence), ("probability", probability_evidence)):
+        if _require_identifier(evidence.get("provider_event_id"), f"{label}.provider_event_id") != provider_id:
+            raise NBAPlayerPointsAssemblyContractError(f"{label} provider_event_id mismatch")
+    identity["provider_event_id"] = provider_id
+    identity["market"] = _normalize_market(probability_evidence.get("market"))
+    tipoff = _coerce_utc_datetime(crosswalk_evidence.get("commence_time_utc"), "commence_time_utc")
+    identity["commence_time_utc"] = _format_utc(tipoff)
+    identity["operating_date"] = toronto_operating_date(tipoff).isoformat()
+    for label, evidence in (("minutes", minutes_evidence), ("probability", probability_evidence)):
+        if _format_utc(_coerce_utc_datetime(evidence.get("commence_time_utc"), "commence_time_utc")) != identity["commence_time_utc"]:
+            raise NBAPlayerPointsAssemblyContractError(f"{label} commence_time_utc mismatch")
+        if str(evidence.get("operating_date")) != identity["operating_date"]:
+            raise NBAPlayerPointsAssemblyContractError(f"{label} operating_date mismatch")
+    identity.update(minutes_evidence_identity(minutes_evidence))
+    for name in ("projection_source_id", "projection_source_hash", "projection_schema_version",
+                 "projection_timestamp_utc", "projection_cutoff_timestamp_utc"):
+        identity[name] = projection.to_dict()[name]
+    identity["projection_identity_hash"] = _canonical_payload_sha256(projection.to_dict())
+    for name in ("probability_model_id", "probability_model_version", "probability_schema_version",
+                 "probability_source_id"):
+        identity[name] = _require_identifier(probability_evidence.get(name), name)
+    identity["probability_source_hash"] = _require_sha256(probability_evidence.get("probability_source_hash"), "probability_source_hash")
+    identity["probability_timestamp_utc"] = _format_utc(_coerce_utc_datetime(
+        probability_evidence.get("probability_timestamp_utc"), "probability_timestamp_utc"))
+    identity["repository_commit_sha"] = _require_text(provenance.get("repository_commit_sha"), "repository_commit_sha").casefold()
+    if re.fullmatch(r"[0-9a-f]{40}", identity["repository_commit_sha"]) is None:
+        raise NBAPlayerPointsAssemblyContractError("full repository_commit_sha is required for probability")
+    identity["source_manifest_id"] = _require_identifier(provenance.get("source_manifest_id"), "source_manifest_id")
+    hashes, errors = _assembled_source_hashes(None, crosswalk_evidence, minutes_evidence,
+                                             projection_evidence, probability_evidence)
+    # The broad assembly manifest also contains market observations. This
+    # explicitly separate model manifest excludes those observations.
+    if errors:
+        raise NBAPlayerPointsAssemblyContractError(";".join(errors))
+    identity["source_manifest"] = {
+        "schema_version": "nba-probability-model-sources-v1",
+        "source_hashes": dict(hashes),
+        "minutes_identity_hash": identity["minutes_source_hash"],
+        "projection_identity_hash": identity["projection_identity_hash"],
+    }
+    identity["source_manifest_hash"] = _canonical_payload_sha256(identity["source_manifest"])
+    minutes_cutoff = _coerce_utc_datetime(identity["minutes_cutoff_timestamp_utc"], "minutes_cutoff_timestamp_utc")
+    if not projection.projection_timestamp_utc <= projection.projection_cutoff_timestamp_utc < tipoff:
+        raise NBAPlayerPointsAssemblyContractError("projection timestamp <= cutoff < tipoff is required")
+    if minutes_cutoff != projection.projection_cutoff_timestamp_utc:
+        raise NBAPlayerPointsAssemblyContractError("minutes and projection cutoffs disagree")
+    if _coerce_utc_datetime(identity["minutes_timestamp_utc"], "minutes_timestamp_utc") > projection.projection_timestamp_utc:
+        raise NBAPlayerPointsAssemblyContractError("minutes observation follows projection")
+    probability_timestamp = _coerce_utc_datetime(identity["probability_timestamp_utc"], "probability_timestamp_utc")
+    if not projection.projection_timestamp_utc <= probability_timestamp <= minutes_cutoff < tipoff:
+        raise NBAPlayerPointsAssemblyContractError("probability derivation clocks are inconsistent")
+    for name, expected in (("projection_source_hash", identity["projection_source_hash"]),
+                           ("minutes_source_hash", identity["minutes_source_hash"])):
+        if probability_evidence.get(name) != expected:
+            raise NBAPlayerPointsAssemblyContractError(f"probability {name} mismatch")
+    return identity
+
+
+def validate_projection_identity_payload(payload: Mapping[str, object]) -> None:
+    """Recheck new persisted projection bindings independently of probability."""
+    projection = payload.get("projection_evidence")
+    minutes = payload.get("minutes_identity")
+    if not isinstance(projection, Mapping) or not isinstance(minutes, Mapping) or not minutes:
+        raise NBAPlayerPointsAssemblyContractError("qualified projection requires projection/minutes identity")
+    evidence = build_projection_evidence(projection, commence_time_utc=payload.get("commence_time_utc"))
+    if _canonical_payload_sha256(evidence.to_dict()) != payload.get("projection_identity_hash"):
+        raise NBAPlayerPointsAssemblyContractError("projection_identity_hash does not recompute")
+    for name in ("canonical_event_id", "provider_event_id", "player_id", "projected_points"):
+        if evidence.to_dict().get(name) != payload.get(name) or payload.get(name) is None:
+            raise NBAPlayerPointsAssemblyContractError(f"projection identity {name} mismatch")
+    if evidence.projection_source_hash != payload.get("source_hashes", {}).get("projection"):
+        raise NBAPlayerPointsAssemblyContractError("projection source hash mismatch")
+    if minutes.get("minutes_cutoff_timestamp_utc") != projection.get("projection_cutoff_timestamp_utc"):
+        raise NBAPlayerPointsAssemblyContractError("projection/minutes cutoff mismatch")
+    snapshot = minutes.get("minutes_evidence")
+    if not isinstance(snapshot, Mapping) or minutes_evidence_identity(snapshot) != dict(minutes):
+        raise NBAPlayerPointsAssemblyContractError("minutes identity does not recompute")
+    for name in ("canonical_event_id", "provider_event_id", "player_id", "projected_minutes"):
+        if snapshot.get(name) != payload.get(name):
+            raise NBAPlayerPointsAssemblyContractError(f"minutes identity {name} mismatch")
+
+
+def validate_probability_identity_payload(payload: Mapping[str, object]) -> None:
+    """Verify persisted qualified identity; historical unbound rows are legacy."""
+    if payload.get("probability_status") != "valid":
+        return
+    identity = payload.get("probability_identity")
+    if not isinstance(identity, Mapping) or not identity:
+        raise NBAPlayerPointsAssemblyContractError("valid probability requires probability_identity")
+    if _canonical_payload_sha256(identity) != payload.get("probability_identity_hash"):
+        raise NBAPlayerPointsAssemblyContractError("probability_identity_hash does not recompute")
+    for name in ("canonical_event_id", "provider_event_id", "player_id", "market", "operating_date",
+                 "commence_time_utc", "repository_commit_sha", "source_manifest_id",
+                 "probability_model_id", "probability_schema_version", "probability_source_id",
+                 "probability_source_hash", "probability_timestamp_utc"):
+        if not identity.get(name) or identity[name] != payload.get(name):
+            raise NBAPlayerPointsAssemblyContractError(f"probability identity {name} mismatch")
+    if identity.get("market") != NBA_PLAYER_POINTS_MARKET:
+        raise NBAPlayerPointsAssemblyContractError("probability identity market must be player_points")
+    if identity.get("identity_schema_version") != "nba-probability-identity-v1":
+        raise NBAPlayerPointsAssemblyContractError("unsupported probability identity schema")
+    validate_projection_identity_payload(payload)
+    for name, value in payload["minutes_identity"].items():
+        if identity.get(name) != value:
+            raise NBAPlayerPointsAssemblyContractError(f"probability minutes binding {name} mismatch")
+    for name in ("projection_source_id", "projection_source_hash", "projection_schema_version",
+                 "projection_timestamp_utc", "projection_cutoff_timestamp_utc"):
+        if identity.get(name) != payload["projection_evidence"].get(name):
+            raise NBAPlayerPointsAssemblyContractError(f"probability projection binding {name} mismatch")
+    clocks = [_coerce_utc_datetime(identity.get(name), name) for name in (
+        "minutes_timestamp_utc", "projection_timestamp_utc", "probability_timestamp_utc",
+        "projection_cutoff_timestamp_utc", "commence_time_utc")]
+    if not clocks[0] <= clocks[1] <= clocks[2] <= clocks[3] < clocks[4]:
+        raise NBAPlayerPointsAssemblyContractError("persisted probability clocks disagree")
+    for name in ("minutes_source_id", "minutes_schema_version", "projection_source_id", "projection_schema_version", "probability_model_version"):
+        _require_identifier(identity.get(name), name)
+    for name in ("minutes_source_hash", "projection_source_hash", "projection_identity_hash", "source_manifest_hash"):
+        _require_sha256(identity.get(name), name)
+    if identity.get("projection_identity_hash") != payload.get("projection_identity_hash"):
+        raise NBAPlayerPointsAssemblyContractError("probability projection identity mismatch")
+    if identity.get("minutes_source_hash") != payload.get("minutes_identity", {}).get("minutes_source_hash"):
+        raise NBAPlayerPointsAssemblyContractError("probability minutes identity mismatch")
+    if _canonical_payload_sha256(identity.get("source_manifest")) != identity.get("source_manifest_hash"):
+        raise NBAPlayerPointsAssemblyContractError("probability source manifest hash does not recompute")
+    expected_manifest = {
+        "schema_version": "nba-probability-model-sources-v1",
+        "source_hashes": {key: value for key, value in payload["source_hashes"].items() if key != "market"},
+        "minutes_identity_hash": identity["minutes_source_hash"],
+        "projection_identity_hash": identity["projection_identity_hash"],
+    }
+    if identity.get("source_manifest") != expected_manifest:
+        raise NBAPlayerPointsAssemblyContractError("probability source manifest disagrees with evidence")
+    assessment = {name: payload.get(name) for name in
+                  ("probability_identity_hash", "line", "model_over_probability", "model_under_probability")}
+    if _canonical_payload_sha256(assessment) != payload.get("probability_assessment_hash"):
+        raise NBAPlayerPointsAssemblyContractError("probability_assessment_hash does not recompute")
+    if payload.get("research_only") is not True:
+        raise NBAPlayerPointsAssemblyContractError("probability remains research_only")
+
+
 def _validate_probability_evidence(
     payload: Mapping[str, object] | None,
     *,
     cutoff: datetime | None,
     tipoff: datetime | None,
+    expected_identity: Mapping[str, object] | None,
+    identity_error: str | None,
+    line: float | None,
 ) -> NBAPlayerPointsProbabilityValidation:
     if payload is None or not payload:
         return NBAPlayerPointsProbabilityValidation(probability_status="unavailable")
     claims = bool(payload.get("claims_probability_eligibility", False))
     diagnostics: list[str] = []
+    if identity_error:
+        diagnostics.append(f"probability identity invalid: {identity_error}")
+    declared_identity = payload.get("probability_identity")
+    if not isinstance(declared_identity, Mapping):
+        diagnostics.append("probability metadata missing: probability_identity")
+    elif expected_identity is None or _json_ready(declared_identity) != _json_ready(expected_identity):
+        diagnostics.append("probability identity disagrees with canonical evidence")
+    if payload.get("line") is None or payload.get("line") != line:
+        diagnostics.append("probability line disagrees with market threshold")
+    if _contains_leakage(payload):
+        diagnostics.append("probability evidence contains target-game leakage")
     has_probability_values = any(
         key in payload
         for key in ("model_over_probability", "model_under_probability")
@@ -1579,7 +1861,8 @@ def _validate_probability_evidence(
     if timestamp is not None and tipoff is not None and timestamp >= tipoff:
         diagnostics.append("probability timestamp must be before tipoff")
     if diagnostics:
-        status = "incomplete" if any("metadata missing" in item for item in diagnostics) else "malformed"
+        bad_values = over is None or under is None or abs(over + under - 1.0) > NBA_PLAYER_POINTS_PROBABILITY_SUM_TOLERANCE
+        status = "incomplete" if not bad_values and any("metadata missing" in item for item in diagnostics) else "malformed"
         return NBAPlayerPointsProbabilityValidation(
             probability_status=status,
             model_over_probability=over,
@@ -1602,11 +1885,17 @@ def _validate_probability_evidence(
         probability_source_hash=source_hash,
         probability_timestamp_utc=timestamp,
         claims_probability_eligibility=claims,
+        probability_identity=MappingProxyType(dict(expected_identity)),
+        probability_identity_hash=_canonical_payload_sha256(expected_identity),
+        probability_assessment_hash=_canonical_payload_sha256({
+            "probability_identity_hash": _canonical_payload_sha256(expected_identity),
+            "line": line, "model_over_probability": over, "model_under_probability": under,
+        }),
     )
 
 
 def _assembled_source_hashes(
-    market: Mapping[str, object],
+    market: Mapping[str, object] | None,
     crosswalk: Mapping[str, object],
     minutes: Mapping[str, object],
     projection: Mapping[str, object],
@@ -1614,7 +1903,8 @@ def _assembled_source_hashes(
 ) -> tuple[Mapping[str, str], list[str]]:
     conflicts: list[str] = []
     hashes: dict[str, str] = {}
-    _add_hash(hashes, conflicts, "market", market.get("market_source_hash"))
+    if market is not None:
+        _add_hash(hashes, conflicts, "market", market.get("market_source_hash"))
     _add_hash(hashes, conflicts, "projection", projection.get("projection_source_hash"))
     for key, value in _mapping_items(crosswalk.get("crosswalk_source_hashes")):
         _add_hash(hashes, conflicts, f"crosswalk:{key}", value)
@@ -1886,15 +2176,7 @@ def _unique_reasons(values: Sequence[str]) -> tuple[str, ...]:
 
 
 def _contains_leakage(payload: object) -> bool:
-    if isinstance(payload, Mapping):
-        for key, value in payload.items():
-            if str(key) in _LEAKAGE_FIELDS:
-                return True
-            if _contains_leakage(value):
-                return True
-    elif isinstance(payload, (list, tuple)):
-        return any(_contains_leakage(item) for item in payload)
-    return False
+    return contains_target_game_outcome(payload)
 
 
 def _reject_target_game_leakage(payload: Mapping[str, object], context: str) -> None:
@@ -2200,6 +2482,9 @@ __all__ = [
     "assemble_player_points_row",
     "assembly_schema_definition",
     "build_projection_evidence",
+    "build_probability_identity",
+    "validate_probability_identity_payload",
+    "validate_projection_identity_payload",
     "build_source_manifest_preview",
     "generate_preview_prediction_id",
     "projection_evidence_schema",

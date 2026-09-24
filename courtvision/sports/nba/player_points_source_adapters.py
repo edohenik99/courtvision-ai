@@ -9,6 +9,8 @@ paths.
 
 from __future__ import annotations
 
+from courtvision.sports.nba.artifact_domains import contains_target_game_outcome
+
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -63,16 +65,6 @@ _UTC: Final = timezone.utc
 _SHA256_RE: Final = re.compile(r"^[0-9a-f]{64}$")
 _KEY_RE: Final = re.compile(r"[^a-z0-9]+")
 _SUPPORTED_MARKET_KEYS: Final = frozenset({"player_points"})
-_LEAKAGE_KEYS: Final = frozenset(
-    {
-        "actual_minutes",
-        "target_game_actual_minutes",
-        "final_points",
-        "target_game_final_points",
-        "final_stats",
-        "box_score",
-    }
-)
 _SUPPORTED_GAME_STATUSES: Final = frozenset(
     {
         "final",
@@ -1278,6 +1270,13 @@ def _load_payload(
         schema_version = _require_text(cloned.get("schema_version"), "schema_version")
         if schema_version != expected_schema_version:
             return MappingProxyType(cloned), f"unsupported provider schema: {schema_version!r}"
+        prospective_envelope = (
+            {key: value for key, value in cloned.items() if key != "players"}
+            if expected_schema_version == NBA_PLAYER_POINTS_MINUTES_INPUT_FIXTURE_SCHEMA_VERSION
+            else cloned
+        )
+        if expected_schema_version != NBA_PLAYER_POINTS_FINAL_STATS_FIXTURE_SCHEMA_VERSION and _contains_leakage(prospective_envelope):
+            return MappingProxyType(cloned), "prospective source contains target-game leakage"
         return MappingProxyType(cloned), None
     except Exception as exc:
         return MappingProxyType({}), str(exc)
@@ -1476,15 +1475,7 @@ def _normalize_participation_status(value: object, *, actual_minutes: float | No
 
 
 def _contains_leakage(value: object) -> bool:
-    if isinstance(value, Mapping):
-        for key, item in value.items():
-            if str(key) in _LEAKAGE_KEYS:
-                return True
-            if _contains_leakage(item):
-                return True
-    elif isinstance(value, list | tuple):
-        return any(_contains_leakage(item) for item in value)
-    return False
+    return contains_target_game_outcome(value)
 
 
 def _required_list(payload: Mapping[str, object], field_name: str) -> list[object]:

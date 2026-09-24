@@ -138,7 +138,7 @@ def test_regular_season_api_nba_stats_output(tmp_path: Path) -> None:
     assert result.status == RESEARCH_OK
     assert client.player_stats_calls == [(10403, target_date)]
 
-    csv_path = output_dir / f"stat_projection_source_{target_date}.csv"
+    csv_path = output_dir / "nba" / "outcomes" / f"player_actual_stats_{target_date}.csv"
     rows = pd.read_csv(csv_path)
     assert rows.columns.tolist() == STAT_PROJECTION_COLUMNS
     assert len(rows) == 1
@@ -153,12 +153,12 @@ def test_regular_season_api_nba_stats_output(tmp_path: Path) -> None:
     assert row["mode"] == "research"
     assert row["eligible_for_betting"] is False
 
-    summary = (output_dir / f"research_mode_summary_{target_date}.txt").read_text(encoding="utf-8")
+    summary = result.summary_path.read_text(encoding="utf-8")
     assert "status: RESEARCH_OK" in summary
     assert "player_stats_row_count: 1" in summary
 
     diagnostics = json.loads(
-        (tmp_path / "outputs" / "runtime" / "diagnostics" / f"research_mode_{target_date}.json").read_text(
+        result.diagnostics_path.read_text(
             encoding="utf-8"
         )
     )
@@ -180,7 +180,7 @@ def test_manual_schedule_fake_game_id_does_not_call_player_stats_endpoint(tmp_pa
     assert result.status == RESEARCH_SCHEDULE_ONLY_API_GAME_ID_MISSING
     assert client.player_stats_calls == []
 
-    rows = pd.read_csv(output_dir / f"stat_projection_source_{target_date}.csv")
+    rows = pd.read_csv(output_dir / "nba" / "outcomes" / f"player_actual_stats_{target_date}.csv")
     assert rows.columns.tolist() == STAT_PROJECTION_COLUMNS
     assert rows.empty
     assert result.diagnostics["skipped_non_numeric_game_ids"] == ["manual_finals_001"]
@@ -195,7 +195,7 @@ def test_eligible_for_betting_is_always_false_even_if_source_object_is_true(tmp_
 
     _result, output_dir = _run(tmp_path, target_date, client)
 
-    rows = pd.read_csv(output_dir / f"stat_projection_source_{target_date}.csv")
+    rows = pd.read_csv(output_dir / "nba" / "outcomes" / f"player_actual_stats_{target_date}.csv")
     assert rows["eligible_for_betting"].tolist() == [False]
 
 

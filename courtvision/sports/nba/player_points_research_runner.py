@@ -8,6 +8,10 @@ production scoring, grading, Kelly, bankroll, dashboard, or runtime entrypoints.
 
 from __future__ import annotations
 
+from courtvision.sports.nba.artifact_domains import (
+    NBA_PROSPECTIVE_EVIDENCE, contains_target_game_outcome, require_artifact_path,
+)
+
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -788,7 +792,9 @@ def _build_pregame_plan(context: _BundleContext) -> _PlanBuild:
     for index, row in enumerate(crosswalk_rows):
         market = _require_mapping(row.get("original_odds_row"), "crosswalk.original_odds_row")
         try:
-            projection = _projection_for_market(projection_candidates, market, index)
+            target = {**market, "canonical_event_id": row.get("canonical_event_id"),
+                      "player_id": row.get("canonical_player_id")}
+            projection = _projection_for_market(projection_candidates, target, index)
             build_projection_evidence(projection, commence_time_utc=market.get("commence_time_utc"))
             projection_hashes.append(
                 {
@@ -806,7 +812,7 @@ def _build_pregame_plan(context: _BundleContext) -> _PlanBuild:
                     + str(row.get("canonical_player_id"))
                 )
                 continue
-            probability = _probability_for_market(probability_candidates, market, index)
+            probability = _probability_for_market(probability_candidates, target, index)
             assembly_records.append(
                 {
                     "market": market,
@@ -2035,7 +2041,16 @@ def _load_input_payloads(
     refs = _path_refs(value, field_name)
     payloads: list[Mapping[str, object]] = []
     for ref in refs:
+        prospective = field_name in {
+            "pregame_odds_payloads", "schedule_identity_payloads", "minutes_payloads",
+            "projection_payloads", "probability_payloads",
+        }
+        if prospective:
+            require_artifact_path(context.input_root / ref, NBA_PROSPECTIVE_EVIDENCE)
         input_file = _load_input_file(context, f"{field_name}[]", ref)
+        if prospective:
+            if contains_target_game_outcome(input_file.payload):
+                raise NBAPlayerPointsBundleError(f"{field_name} contains target-game outcome evidence")
         payloads.append(input_file.payload)
         source_files.append(input_file)
     return tuple(payloads)
@@ -2155,13 +2170,10 @@ def _projection_for_market(
 ) -> Mapping[str, object]:
     if not projections:
         raise NBAPlayerPointsBundleError("projection_payloads must contain projection evidence")
-    for projection in projections:
-        if projection.get("provider_event_id") in (None, market.get("provider_event_id")) and projection.get("player_id") in (
-            None,
-            market.get("player_id"),
-        ):
-            return projection
-    return projections[min(index, len(projections) - 1)]
+    matches = [item for item in projections if _matches_canonical_target(item, market)]
+    if len(matches) != 1:
+        raise NBAPlayerPointsBundleError("exactly one canonical event/player projection is required")
+    return matches[0]
 
 
 def _probability_for_market(
@@ -2171,10 +2183,16 @@ def _probability_for_market(
 ) -> Mapping[str, object] | None:
     if not probabilities:
         return None
-    for probability in probabilities:
-        if probability.get("provider_event_id") in (None, market.get("provider_event_id")):
-            return probability
-    return probabilities[min(index, len(probabilities) - 1)]
+    matches = [item for item in probabilities if _matches_canonical_target(item, market)
+               and item.get("market") == "player_points" and item.get("line") == market.get("line")]
+    if len(matches) != 1:
+        raise NBAPlayerPointsBundleError("exactly one canonical event/player/threshold probability is required")
+    return matches[0]
+
+
+def _matches_canonical_target(evidence: Mapping[str, object], target: Mapping[str, object]) -> bool:
+    return all(target.get(key) not in (None, "", "0") and evidence.get(key) == target[key]
+               for key in ("provider_event_id", "canonical_event_id", "player_id"))
 
 
 def _find_minutes_for_market(
@@ -2184,13 +2202,10 @@ def _find_minutes_for_market(
 ) -> Mapping[str, object] | None:
     canonical_event_id = crosswalk_row.get("canonical_event_id")
     player_id = crosswalk_row.get("canonical_player_id")
-    for row in minutes_rows:
-        if row.get("canonical_event_id") == canonical_event_id and row.get("player_id") == player_id:
-            return row
-    for row in minutes_rows:
-        if row.get("provider_event_id") == market.get("provider_event_id"):
-            return row
-    return None
+    target = {"canonical_event_id": canonical_event_id, "player_id": player_id,
+              "provider_event_id": market.get("provider_event_id")}
+    matches = [row for row in minutes_rows if _matches_canonical_target(row, target)]
+    return matches[0] if len(matches) == 1 else None
 
 
 def _assembly_crosswalk_payload(
@@ -2207,6 +2222,7 @@ def _assembly_crosswalk_payload(
     mapping_hash = str(mapping_records[0]["source_hash"]) if mapping_records else "0" * 64
     return {
         "canonical_event_id": row.get("canonical_event_id"),
+        "provider_event_id": market.get("provider_event_id"),
         "player_id": row.get("canonical_player_id"),
         "canonical_player_name": player_identity.get("canonical_player_name")
         or market.get("provider_player_name"),
