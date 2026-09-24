@@ -3176,6 +3176,19 @@ def main() -> None:
                 unsafe_allow_html=True,
             )
 
+        sport_view = st.radio("Sport", ["NBA", "MLB Research"], key="sport_view")
+        if sport_view == "MLB Research":
+            from courtvision.sports.mlb.research_preview import OPERATING_TIMEZONE
+            from courtvision.streamlit_mlb_preview import render_mlb_research_preview
+
+            mlb_out_dir = st.text_input("Output folder", value=default_out_dir, key="mlb_out_dir")
+            mlb_date = st.date_input("Preview date", value=datetime.now(OPERATING_TIMEZONE).date(), key="mlb_date")
+
+    if sport_view == "MLB Research":
+        render_mlb_research_preview(resolve_output_dir(mlb_out_dir), mlb_date.isoformat())
+        return
+
+    with st.sidebar:
         st.markdown('<div class="cv-sidebar-divider"></div>', unsafe_allow_html=True)
         if _THEME_AVAILABLE:
             render_sidebar_label("Navigation")
