@@ -8,6 +8,8 @@ dashboard, MLB, scheduler, or production runtime paths.
 
 from __future__ import annotations
 
+from courtvision.sports.nba.artifact_domains import NBA_OUTCOME_EVIDENCE, require_artifact_path
+
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -152,6 +154,7 @@ class NBAPlayerPointsSettlementEvidenceWriterConfig:
             "completion_marker_file_name",
         ):
             _require_safe_path_component(getattr(self, field_name), field_name)
+            require_artifact_path(getattr(self, field_name), NBA_OUTCOME_EVIDENCE)
         if (
             isinstance(self.lock_timeout_seconds, bool)
             or not isinstance(self.lock_timeout_seconds, (int, float))
@@ -1806,6 +1809,7 @@ def _evidence_root(
     path: Path,
     config: NBAPlayerPointsSettlementEvidenceWriterConfig,
 ) -> Path:
+    require_artifact_path(path, NBA_OUTCOME_EVIDENCE)
     base = path.expanduser()
     evidence_root = base if base.name == config.evidence_dir_name else base / config.evidence_dir_name
     if evidence_root.name != config.evidence_dir_name:

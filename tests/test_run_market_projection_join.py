@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from courtvision.sports.nba.artifact_domains import NBA_PROSPECTIVE_EVIDENCE, NBA_STAT_ARTIFACT_SCHEMA, stat_artifact_path
+
 import pandas as pd
 
 import scripts.run_market_projection_join as market_projection_join
@@ -70,10 +72,19 @@ def _write_market_board(tmp_path: Path, rows: list[dict[str, Any]]) -> Path:
     return path
 
 
+def _prospective_rows(rows):
+    return [dict(row, artifact_domain=NBA_PROSPECTIVE_EVIDENCE,
+                 artifact_schema_version=NBA_STAT_ARTIFACT_SCHEMA,
+                 operating_date=PREDICTION_DATE, source_timestamp_utc="2026-06-05T14:00:00Z",
+                 projection_timestamp_utc="2026-06-05T14:01:00Z",
+                 evidence_cutoff_timestamp_utc="2026-06-05T14:30:00Z",
+                 commence_time_utc="2026-06-05T23:30:00Z") for row in rows]
+
+
 def _write_stat_projection_source(tmp_path: Path, rows: list[dict[str, Any]]) -> Path:
-    path = _output_dir(tmp_path) / f"stat_projection_source_{PREDICTION_DATE}.csv"
+    path = stat_artifact_path(_output_dir(tmp_path), NBA_PROSPECTIVE_EVIDENCE, PREDICTION_DATE)
     path.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(rows).to_csv(path, index=False)
+    pd.DataFrame(_prospective_rows(rows)).to_csv(path, index=False)
     return path
 
 
@@ -125,10 +136,10 @@ def test_clean_join_maps_projection_values_and_edges_for_supported_markets(
         [
             {
                 "player_name": "jane doe",
-                "points": 27.0,
-                "reb": 9.0,
+                "projected_points": 27.0,
+                "projected_rebounds": 9.0,
                 "projected_assists": 5.0,
-                "minutes": 33.0,
+                "projected_minutes": 33.0,
                 "team_abbreviation": "OKC",
                 "source": "api_nba",
             }
@@ -164,7 +175,7 @@ def test_clean_join_maps_projection_values_and_edges_for_supported_markets(
     assert assists["projection_value"] == 5.0
     assert assists["side_adjusted_edge"] == 1.5
     assert assists["edge_direction"] == "under_edge"
-    assert joined["projection_minutes"].tolist() == [33.0] * 4
+    assert joined["projection_projected_minutes"].tolist() == [33.0] * 4
 
     diagnostics = _read_diagnostics(result.diagnostics_path)
     assert diagnostics["status"] == MARKET_PROJECTION_JOIN_OK
@@ -174,7 +185,7 @@ def test_clean_join_maps_projection_values_and_edges_for_supported_markets(
     assert diagnostics["team_aware_match_count"] == 4
     assert diagnostics["name_only_match_count"] == 0
     assert diagnostics["unmatched_player_count"] == 0
-    assert diagnostics["projection_source_type"] == "stat_projection_source"
+    assert diagnostics["projection_source_type"] == "prospective_projection_source"
     assert diagnostics["used_cleaned_projection_context"] is False
     assert diagnostics["duplicate_normalized_player_warning_count"] == 0
     assert diagnostics["projection_value_available_count"] == 4
@@ -218,7 +229,7 @@ def test_projection_fallback_precedence_and_unavailable_context(tmp_path: Path) 
         [
             {
                 "player_name": "Model Player",
-                "points": 20.0,
+                "projected_points": 20.0,
                 "pts_recent": 18.0,
                 "pts_avg": 17.0,
             },
@@ -233,7 +244,7 @@ def test_projection_fallback_precedence_and_unavailable_context(tmp_path: Path) 
             },
             {
                 "player_name": "No Context Player",
-                "minutes": 30.0,
+                "projected_minutes": 30.0,
             },
         ],
     )
@@ -313,7 +324,7 @@ def test_edge_direction_and_bucket_boundaries(tmp_path: Path) -> None:
     )
     _write_stat_projection_source(
         tmp_path,
-        [{"player_name": "Jane Doe", "points": 10.0}],
+        [{"player_name": "Jane Doe", "projected_points": 10.0}],
     )
 
     result = _run(tmp_path)
@@ -356,7 +367,7 @@ def test_apostrophe_and_hyphen_name_normalization_works(tmp_path: Path) -> None:
     _write_stat_projection_source(
         tmp_path,
         [
-            {"player_name": "DAngelo Russell", "pts": 18.0},
+            {"player_name": "DAngelo Russell", "projected_points": 18.0},
             {"player_name": "Karl Anthony Towns", "points_projection": 24.0},
         ],
     )
@@ -386,7 +397,7 @@ def test_unmatched_players_are_diagnosed_with_partial_match_status(tmp_path: Pat
     )
     _write_stat_projection_source(
         tmp_path,
-        [{"player_name": "Matched Player", "points": 21.0}],
+        [{"player_name": "Matched Player", "projected_points": 21.0}],
     )
 
     result = _run(tmp_path)
@@ -422,7 +433,7 @@ def test_missing_projection_source_is_non_fatal(tmp_path: Path) -> None:
 
     diagnostics = _read_diagnostics(result.diagnostics_path)
     assert diagnostics["projection_source_available"] is False
-    assert diagnostics["projection_source_path"] == ""
+    assert diagnostics["projection_source_path"].endswith(f"player_stat_projections_{PREDICTION_DATE}.csv")
     assert diagnostics["projection_source_type"] == "unavailable"
     assert diagnostics["used_cleaned_projection_context"] is False
     assert diagnostics["matched_player_count"] == 0
@@ -434,7 +445,7 @@ def test_missing_projection_source_is_non_fatal(tmp_path: Path) -> None:
     assert diagnostics["kelly_called"] is False
 
 
-def test_baseline_fallback_attaches_baseline_recent_and_minutes_context(
+def test_undated_baseline_fallback_is_rejected(
     tmp_path: Path,
 ) -> None:
     _write_market_board(
@@ -465,20 +476,11 @@ def test_baseline_fallback_attaches_baseline_recent_and_minutes_context(
 
     result = _run(tmp_path)
 
-    assert result.status == MARKET_PROJECTION_JOIN_OK
+    assert result.status == MARKET_PROJECTION_JOIN_NO_PROJECTION_SOURCE
     joined = pd.read_csv(result.output_path)
-    assert joined["baseline_value"].tolist() == [24.0, 8.0, 6.0]
-    assert joined["recent_avg_value"].tolist() == [26.0, 9.0, 7.0]
-    assert joined["projection_value"].tolist() == [26.0, 9.0, 7.0]
-    assert joined["projection_source_type"].tolist() == ["recent_avg_fallback"] * 3
-    assert joined["projection_quality_flag"].tolist() == [
-        "fallback_recent_average"
-    ] * 3
-    assert joined["projection_min_avg"].tolist() == [32.0, 32.0, 32.0]
-    assert joined["projection_min_recent"].tolist() == [34.0, 34.0, 34.0]
-    assert result.diagnostics["projection_source_path"] == str(baseline_path)
-    assert result.diagnostics["projection_source_type"] == "raw_player_baselines"
-    assert result.diagnostics["team_aware_match_count"] == 3
+    assert joined["projection_value"].isna().all()
+    assert baseline_path.exists()
+    assert result.diagnostics["projection_source_available"] is False
 
 
 def test_stat_projection_source_is_preferred_over_cleaned_context(
@@ -543,7 +545,7 @@ def test_stat_projection_source_is_preferred_over_cleaned_context(
     ] * 3
     assert joined["eligible_for_betting"].tolist() == [False] * 3
     assert result.diagnostics["projection_source_path"] == str(stat_path)
-    assert result.diagnostics["projection_source_type"] == "stat_projection_source"
+    assert result.diagnostics["projection_source_type"] == "prospective_projection_source"
     assert result.diagnostics["projection_source_type_counts"] == {
         "model_projection": 3
     }
@@ -552,7 +554,7 @@ def test_stat_projection_source_is_preferred_over_cleaned_context(
 
     summary = result.summary_path.read_text(encoding="utf-8")
     assert f"projection_source_path: {stat_path}" in summary
-    assert "projection_source_type: stat_projection_source" in summary
+    assert "projection_source_type: prospective_projection_source" in summary
     assert "used_cleaned_projection_context: False" in summary
     assert "team_aware_match_count: 3" in summary
     assert "name_only_match_count: 0" in summary
@@ -567,9 +569,9 @@ def test_explicit_projection_source_overrides_cleaned_context(tmp_path: Path) ->
         [{"player_name": "Jane Doe", "team_abbr": "OKC", "pts_recent": 28.0}],
     )
     explicit_path = tmp_path / "explicit_projection_source.csv"
-    pd.DataFrame(
-        [{"player_name": "Jane Doe", "team_abbr": "OKC", "points": 31.0}]
-    ).to_csv(explicit_path, index=False)
+    pd.DataFrame(_prospective_rows(
+        [{"player_name": "Jane Doe", "team_abbr": "OKC", "projected_points": 31.0}]
+    )).to_csv(explicit_path, index=False)
 
     result = _run(tmp_path, projection_source=explicit_path)
 
@@ -585,8 +587,8 @@ def test_team_aware_match_wins_for_duplicate_normalized_name(tmp_path: Path) -> 
     _write_stat_projection_source(
         tmp_path,
         [
-            {"player_name": "Shared Name", "team_abbr": "BOS", "points": 10.0},
-            {"player_name": "Shared Name", "team_abbr": "OKC", "points": 27.0},
+            {"player_name": "Shared Name", "team_abbr": "BOS", "projected_points": 10.0},
+            {"player_name": "Shared Name", "team_abbr": "OKC", "projected_points": 27.0},
         ],
     )
 
@@ -607,7 +609,7 @@ def test_name_only_match_is_used_when_projection_team_is_not_in_game(
     _write_market_board(tmp_path, [_market_row()])
     _write_stat_projection_source(
         tmp_path,
-        [{"player_name": "Jane Doe", "team_abbr": "BOS", "points": 27.0}],
+        [{"player_name": "Jane Doe", "team_abbr": "BOS", "projected_points": 27.0}],
     )
 
     result = _run(tmp_path)
@@ -629,7 +631,7 @@ def test_no_kelly_elite_or_operator_artifacts_are_written(tmp_path: Path) -> Non
     elite_sentinel.write_text("player_name,score\nExisting,99\n", encoding="utf-8")
 
     _write_market_board(tmp_path, [_market_row(), _market_row(side="under")])
-    _write_stat_projection_source(tmp_path, [{"player_name": "Jane Doe", "points": 27.0}])
+    _write_stat_projection_source(tmp_path, [{"player_name": "Jane Doe", "projected_points": 27.0}])
 
     result = _run(tmp_path)
 

@@ -8,6 +8,10 @@ and creates no runner, scheduler, ledger, official picks, or staking advice.
 
 from __future__ import annotations
 
+from courtvision.sports.nba.artifact_domains import contains_target_game_outcome
+from courtvision.sports.nba.player_minutes_research import minutes_evidence_identity
+from courtvision.sports.nba.player_points_assembly import build_probability_identity
+
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -79,16 +83,6 @@ _BANNED_PREVIEW_PARTS: Final = (
     ("operators",),
     ("kelly",),
 )
-_PREGAME_LEAKAGE_KEYS: Final = {
-    "actual_points",
-    "final_points",
-    "target_game_actual_points",
-    "target_game_final_points",
-    "actual_minutes",
-    "target_game_actual_minutes",
-    "final_stats",
-    "box_score",
-}
 
 
 class NBAPlayerPointsRehearsalError(NBAPlayerPointsResearchSchemaError):
@@ -416,6 +410,47 @@ def build_rehearsal_fixture_bundle() -> NBAPlayerPointsRehearsalFixtureBundle:
             model_under_probability=0.43,
         ),
     )
+    # Bind newly constructed synthetic fixtures using their reviewed crosswalk.
+    # This happens only in the fixture factory, never when admitting a bundle.
+    fixture_crosswalk = join_nba_player_points_crosswalk(
+        _validated_market_rows(market_rows), schedule_rows, player_rows,
+        reviewed_event_mapping=reviewed_mapping, reviewed_player_mapping=reviewed_mapping,
+    )
+    fixture_rows = tuple(row.to_dict() for row in fixture_crosswalk.rows)
+    by_source = {row["original_odds_row"]["market_source_id"]: row for row in fixture_rows}
+    for projection in projection_rows:
+        target = by_source[projection["market_source_id"]]
+        projection.update(canonical_event_id=target["canonical_event_id"],
+                          player_id=target["canonical_player_id"],
+                          provider_event_id=target["original_odds_row"]["provider_event_id"])
+        projection["projection_source_hash"] = rehearsal_source_hash({
+            key: value for key, value in projection.items() if key != "projection_source_hash"
+        })
+    fixture_minutes = _build_minutes_rows(minutes_cases, fixture_rows)
+    fixture_records = _build_assembly_records(
+        market_rows=market_rows, crosswalk_rows=fixture_rows,
+        minutes_rows_by_market_source=fixture_minutes, projection_rows=projection_rows,
+        probability_rows=probability_rows,
+    )
+    for record in fixture_records:
+        probability = record["probability"]
+        if probability is None:
+            continue
+        target = record["crosswalk"]
+        probability.update({key: target[key] for key in
+                            ("canonical_event_id", "player_id", "provider_event_id", "operating_date", "commence_time_utc")})
+        probability.update(market="player_points", line=record["market"]["line"],
+                           probability_model_version="1.0",
+                           projection_source_hash=record["projection"]["projection_source_hash"],
+                           minutes_source_hash=minutes_evidence_identity(record["minutes"])["minutes_source_hash"])
+        probability["probability_source_hash"] = rehearsal_source_hash({
+            key: value for key, value in probability.items() if key != "probability_source_hash"
+        })
+        probability["probability_identity"] = build_probability_identity(
+            market_evidence=record["market"], crosswalk_evidence=target,
+            minutes_evidence=record["minutes"], projection_evidence=record["projection"],
+            provenance=record["provenance"], probability_evidence=probability,
+        )
     final_stat_fixture = _final_stat_fixture()
 
     return NBAPlayerPointsRehearsalFixtureBundle(
@@ -1135,6 +1170,7 @@ def _assembly_crosswalk_view(crosswalk: Mapping[str, object]) -> dict[str, objec
     }
     return {
         "canonical_event_id": crosswalk["canonical_event_id"],
+        "provider_event_id": original["provider_event_id"],
         "player_id": crosswalk["canonical_player_id"],
         "canonical_player_name": player.get("canonical_player_name") or original["provider_player_name"],
         "team": player.get("canonical_team") or original["team"],
@@ -1148,7 +1184,7 @@ def _assembly_crosswalk_view(crosswalk: Mapping[str, object]) -> dict[str, objec
         "mapping_version": event["mapping_version"],
         "crosswalk_source_hashes": {
             "reviewed_mapping": rehearsal_source_hash(source_payload),
-            "crosswalk_join": rehearsal_source_hash(crosswalk),
+            "crosswalk_join": rehearsal_source_hash(source_payload),
         },
     }
 
@@ -1156,6 +1192,9 @@ def _assembly_crosswalk_view(crosswalk: Mapping[str, object]) -> dict[str, objec
 def _assembly_minutes_view(minutes: Mapping[str, object]) -> dict[str, object]:
     return {
         "canonical_event_id": minutes["canonical_event_id"],
+        "provider_event_id": minutes["provider_event_id"],
+        "source_manifest_id": minutes["source_manifest_id"],
+        "repository_commit_sha": minutes["repository_commit_sha"],
         "player_id": minutes["player_id"],
         "canonical_player_name": minutes["canonical_player_name"],
         "team": minutes["team"],
@@ -1721,15 +1760,7 @@ def _is_sha256(value: object) -> bool:
 
 
 def _contains_leakage(payload: object) -> bool:
-    if isinstance(payload, Mapping):
-        for key, value in payload.items():
-            if str(key) in _PREGAME_LEAKAGE_KEYS:
-                return True
-            if _contains_leakage(value):
-                return True
-    elif isinstance(payload, Sequence) and not isinstance(payload, (str, bytes)):
-        return any(_contains_leakage(item) for item in payload)
-    return False
+    return contains_target_game_outcome(payload)
 
 
 def _contains_key(

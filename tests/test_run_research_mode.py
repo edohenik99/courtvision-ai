@@ -20,14 +20,18 @@ from scripts.run_research_mode import (
 
 def _api_nba_body(target_date: str, game_id: int = 10403) -> dict[str, Any]:
     return {
+        "errors": [], "results": 1,
         "response": [
             {
                 "id": game_id,
                 "date": {"start": f"{target_date}T00:00:00+00:00"},
                 "teams": {
-                    "home": {"name": "Oklahoma City Thunder", "code": "OKC"},
-                    "visitors": {"name": "Indiana Pacers", "code": "IND"},
+                    "home": {"id": 1, "name": "Oklahoma City Thunder", "code": "OKC"},
+                    "visitors": {"id": 2, "name": "Indiana Pacers", "code": "IND"},
                 },
+                "status": {"long": "Finished", "short": "FT"},
+                "periods": {"total": 4},
+                "scores": {"home": {"points": 22}, "visitors": {"points": 0}},
             }
         ]
     }
@@ -41,7 +45,7 @@ def _stat(game_id: int = 10403, eligible_for_betting: bool = False) -> SimpleNam
         player_name="Jane Doe",
         team_id=1,
         team_abbreviation="OKC",
-        minutes=32.5,
+        minutes=48.0,
         points=22.0,
         rebounds=8.0,
         assists=6.0,
@@ -50,6 +54,19 @@ def _stat(game_id: int = 10403, eligible_for_betting: bool = False) -> SimpleNam
         blocks=1.0,
         eligible_for_betting=eligible_for_betting,
     )
+
+
+def _complete_stats(game_id: int = 10403, eligible_for_betting: bool = False) -> list[Any]:
+    rows = [_stat(game_id, eligible_for_betting)]
+    for index in range(1, 10):
+        row = _stat(game_id, eligible_for_betting)
+        row.player_id += index
+        row.player_name = f"Synthetic Player {index}"
+        row.team_id = 1 if index < 5 else 2
+        row.team_abbreviation = "OKC" if index < 5 else "IND"
+        row.points = 0
+        rows.append(row)
+    return rows
 
 
 def _write_manual_schedule(manual_dir: Path, target_date: str, game_id: str) -> None:
@@ -86,6 +103,16 @@ class FakeApiNbaClient:
         self._provider_status = {"provider": "api_nba", "provider_status": "unrequested"}
 
     def _request(self, endpoint: str, params: dict[str, Any]) -> dict[str, Any]:
+        if endpoint == "players/statistics":
+            rows = self.get_player_stats_for_game(params["game"], "2026-04-12")
+            return {"errors": [], "results": len(rows), "response": [
+                {"player": {"id": row.player_id, "name": row.player_name},
+                 "team": {"id": row.team_id, "code": row.team_abbreviation},
+                 "game": {"id": row.game_id, "date": row.game_date},
+                 "min": f"{int(row.minutes)}:00", "points": int(row.points),
+                 "totReb": int(row.rebounds), "assists": int(row.assists),
+                 "tpm": int(row.threes), "steals": int(row.steals), "blocks": int(row.blocks)}
+                for row in rows]}
         assert endpoint == "games"
         assert "date" in params
         self._provider_status = {
@@ -130,7 +157,7 @@ def test_regular_season_api_nba_stats_output(tmp_path: Path) -> None:
     target_date = "2026-04-12"
     client = FakeApiNbaClient(
         games_body=_api_nba_body(target_date),
-        stats_by_game={10403: [_stat(10403)]},
+        stats_by_game={10403: _complete_stats(10403)},
     )
 
     result, output_dir = _run(tmp_path, target_date, client)
@@ -138,10 +165,10 @@ def test_regular_season_api_nba_stats_output(tmp_path: Path) -> None:
     assert result.status == RESEARCH_OK
     assert client.player_stats_calls == [(10403, target_date)]
 
-    csv_path = output_dir / f"stat_projection_source_{target_date}.csv"
+    csv_path = output_dir / "nba" / "outcomes" / f"player_actual_stats_{target_date}.csv"
     rows = pd.read_csv(csv_path)
     assert rows.columns.tolist() == STAT_PROJECTION_COLUMNS
-    assert len(rows) == 1
+    assert len(rows) == 10
     row = rows.iloc[0].to_dict()
     assert row["game_date"] == target_date
     assert row["game_id"] == 10403
@@ -153,12 +180,12 @@ def test_regular_season_api_nba_stats_output(tmp_path: Path) -> None:
     assert row["mode"] == "research"
     assert row["eligible_for_betting"] is False
 
-    summary = (output_dir / f"research_mode_summary_{target_date}.txt").read_text(encoding="utf-8")
+    summary = result.summary_path.read_text(encoding="utf-8")
     assert "status: RESEARCH_OK" in summary
-    assert "player_stats_row_count: 1" in summary
+    assert "player_stats_row_count: 10" in summary
 
     diagnostics = json.loads(
-        (tmp_path / "outputs" / "runtime" / "diagnostics" / f"research_mode_{target_date}.json").read_text(
+        result.diagnostics_path.read_text(
             encoding="utf-8"
         )
     )
@@ -180,9 +207,10 @@ def test_manual_schedule_fake_game_id_does_not_call_player_stats_endpoint(tmp_pa
     assert result.status == RESEARCH_SCHEDULE_ONLY_API_GAME_ID_MISSING
     assert client.player_stats_calls == []
 
-    rows = pd.read_csv(output_dir / f"stat_projection_source_{target_date}.csv")
-    assert rows.columns.tolist() == STAT_PROJECTION_COLUMNS
-    assert rows.empty
+    assert not (output_dir / "nba" / "outcomes" / f"player_actual_stats_{target_date}.csv").exists()
+    assert result.stat_projection_path is None
+    assert result.diagnostics["canonical_outcome_published"] is False
+    assert result.diagnostics["player_stats_row_count"] == 0
     assert result.diagnostics["skipped_non_numeric_game_ids"] == ["manual_finals_001"]
 
 
@@ -190,13 +218,13 @@ def test_eligible_for_betting_is_always_false_even_if_source_object_is_true(tmp_
     target_date = "2026-04-12"
     client = FakeApiNbaClient(
         games_body=_api_nba_body(target_date),
-        stats_by_game={10403: [_stat(10403, eligible_for_betting=True)]},
+        stats_by_game={10403: _complete_stats(10403, eligible_for_betting=True)},
     )
 
     _result, output_dir = _run(tmp_path, target_date, client)
 
-    rows = pd.read_csv(output_dir / f"stat_projection_source_{target_date}.csv")
-    assert rows["eligible_for_betting"].tolist() == [False]
+    rows = pd.read_csv(output_dir / "nba" / "outcomes" / f"player_actual_stats_{target_date}.csv")
+    assert rows["eligible_for_betting"].tolist() == [False] * 10
 
 
 def test_no_marketprop_kelly_elite_or_operator_files_written(tmp_path: Path) -> None:

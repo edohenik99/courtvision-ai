@@ -7,12 +7,16 @@ operator betting boards.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+from uuid import uuid4
 
 import pandas as pd
 
@@ -21,6 +25,10 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from courtvision.clients.api_nba_client import ApiNbaClient
+from courtvision.sports.nba.artifact_domains import (
+    NBA_OUTCOME_EVIDENCE, NBA_STAT_ARTIFACT_SCHEMA, require_artifact_path, stat_artifact_path,
+)
+from courtvision.sports.nba.outcome_publication import qualify_completed_outcomes
 from courtvision.providers.research_schedule_resolver import (
     DEFAULT_MANUAL_SCHEDULE_DIR,
     SOURCE_API_NBA,
@@ -34,12 +42,15 @@ RESEARCH_NO_GAMES = "RESEARCH_NO_GAMES"
 RESEARCH_SCHEDULE_ONLY_API_GAME_ID_MISSING = "RESEARCH_SCHEDULE_ONLY_API_GAME_ID_MISSING"
 RESEARCH_PROVIDER_UNAVAILABLE = "RESEARCH_PROVIDER_UNAVAILABLE"
 RESEARCH_NO_PLAYER_STATS = "RESEARCH_NO_PLAYER_STATS"
+RESEARCH_OUTCOME_UNQUALIFIED = "RESEARCH_OUTCOME_UNQUALIFIED"
 
 DEFAULT_OUTPUT_DIR = Path("outputs/runtime/research")
 RESEARCH_MODE = "research"
 ELIGIBLE_FOR_BETTING = False
 
 STAT_PROJECTION_COLUMNS = [
+    "artifact_domain",
+    "artifact_schema_version",
     "game_date",
     "game_id",
     "player_id",
@@ -62,7 +73,7 @@ STAT_PROJECTION_COLUMNS = [
 @dataclass(slots=True)
 class ResearchModeResult:
     status: str
-    stat_projection_path: Path
+    stat_projection_path: Path | None
     summary_path: Path
     diagnostics_path: Path
     diagnostics: dict[str, Any]
@@ -84,13 +95,17 @@ def run_research_mode(
 
     output_dir_path = Path(output_dir)
     runtime_root = output_dir_path.parent
-    diagnostics_dir = runtime_root / "diagnostics"
-    stat_projection_path = output_dir_path / f"stat_projection_source_{target_date_text}.csv"
-    summary_path = output_dir_path / f"research_mode_summary_{target_date_text}.txt"
-    diagnostics_path = diagnostics_dir / f"research_mode_{target_date_text}.json"
+    diagnostics_dir = runtime_root / "diagnostics" / "nba" / "outcomes"
+    stat_projection_path = stat_artifact_path(output_dir_path, NBA_OUTCOME_EVIDENCE, target_date_text)
+    if stat_projection_path.exists():
+        raise FileExistsError("outcome artifact already exists; overwrite is prohibited")
+    attempt_id = uuid4().hex
+    attempt_dir = diagnostics_dir / target_date_text / attempt_id
+    summary_path = attempt_dir / "summary.txt"
+    diagnostics_path = attempt_dir / "diagnostics.json"
 
     output_dir_path.mkdir(parents=True, exist_ok=True)
-    diagnostics_dir.mkdir(parents=True, exist_ok=True)
+    attempt_dir.mkdir(parents=True, exist_ok=False)
 
     client = client_factory(
         runtime_root=runtime_root,
@@ -111,6 +126,8 @@ def run_research_mode(
     numeric_game_ids, skipped_game_ids = _partition_numeric_game_ids(schedule_rows)
     player_stats: list[Any] = []
     stats_provider_statuses: list[dict[str, Any]] = []
+    stats_bodies: dict[int, Any] = {}
+    statuses_by_game: dict[int, dict[str, Any]] = {}
 
     status = _initial_status(
         schedule_rows=schedule_rows,
@@ -121,8 +138,17 @@ def run_research_mode(
 
     if status is None:
         for game_id in numeric_game_ids:
-            rows = client.get_player_stats_for_game(game_id, game_date=target_date_text)
-            stats_provider_statuses.append(_provider_status(client))
+            # Retain the original envelope: mapped rows alone lose missing
+            # values, response counts and the evidence of incomplete coverage.
+            body = client._request("players/statistics", {"game": game_id})
+            stats_bodies[game_id] = body
+            provider_status = _provider_status(client)
+            statuses_by_game[game_id] = provider_status
+            stats_provider_statuses.append({"game_id": game_id, **provider_status})
+            raw_rows = body.get("response", []) if isinstance(body, dict) else []
+            rows = [ApiNbaClient._map_player_game_stats(
+                row, fallback_game_id=game_id, fallback_game_date=target_date_text,
+            ) for row in raw_rows if isinstance(row, dict)] if isinstance(raw_rows, list) else []
             player_stats.extend(rows)
 
         if player_stats:
@@ -133,7 +159,15 @@ def run_research_mode(
             status = RESEARCH_NO_PLAYER_STATS
 
     stat_rows = [_stat_row(stat, fallback_date=target_date_text) for stat in player_stats]
-    _write_stat_projection_csv(stat_projection_path, stat_rows)
+    qualification = qualify_completed_outcomes(
+        target_date=target_date_text, selected_source=schedule_result.selected_source,
+        schedule_game_ids=numeric_game_ids, skipped_game_ids=skipped_game_ids,
+        games_body=api_games_body, games_status=games_provider_status,
+        stats_bodies=stats_bodies, stats_statuses=statuses_by_game,
+    )
+    publication_allowed = qualification["canonical_publication_allowed"]
+    if status == RESEARCH_OK and not publication_allowed:
+        status = RESEARCH_OUTCOME_UNQUALIFIED
 
     diagnostics = _diagnostics_payload(
         target_date=target_date_text,
@@ -150,12 +184,25 @@ def run_research_mode(
         diagnostics_path=diagnostics_path,
         stat_rows=stat_rows,
     )
+    diagnostics.update(
+        artifact_kind="NBA_OUTCOME_COLLECTION_ATTEMPT", attempt_id=attempt_id,
+        outcome_qualification=qualification, canonical_outcome_published=False,
+    )
+    diagnostics["artifacts"]["stat_projection_source_csv"] = None
+    # Write the attempt record first. A failed/partial write never claims the
+    # completed CSV. Publication is atomic and create-once below.
     _write_summary(summary_path, diagnostics)
     diagnostics_path.write_text(json.dumps(diagnostics, indent=2, sort_keys=True), encoding="utf-8")
+    if publication_allowed:
+        _write_stat_projection_csv(stat_projection_path, stat_rows)
+        diagnostics["canonical_outcome_published"] = True
+        diagnostics["canonical_outcome_sha256"] = hashlib.sha256(stat_projection_path.read_bytes()).hexdigest()
+        diagnostics["artifacts"]["stat_projection_source_csv"] = str(stat_projection_path)
+        diagnostics_path.write_text(json.dumps(diagnostics, indent=2, sort_keys=True), encoding="utf-8")
 
     return ResearchModeResult(
         status=status,
-        stat_projection_path=stat_projection_path,
+        stat_projection_path=stat_projection_path if publication_allowed else None,
         summary_path=summary_path,
         diagnostics_path=diagnostics_path,
         diagnostics=diagnostics,
@@ -214,6 +261,8 @@ def _stat_row(stat: Any, *, fallback_date: str) -> dict[str, Any]:
     game_date = _clean_text(getattr(stat, "game_date", ""))[:10] or fallback_date
     return {
         "game_date": game_date,
+        "artifact_domain": NBA_OUTCOME_EVIDENCE,
+        "artifact_schema_version": NBA_STAT_ARTIFACT_SCHEMA,
         "game_id": getattr(stat, "game_id", ""),
         "player_id": getattr(stat, "player_id", ""),
         "player_name": getattr(stat, "player_name", ""),
@@ -233,7 +282,23 @@ def _stat_row(stat: Any, *, fallback_date: str) -> dict[str, Any]:
 
 
 def _write_stat_projection_csv(path: Path, rows: list[dict[str, Any]]) -> None:
-    pd.DataFrame(rows, columns=STAT_PROJECTION_COLUMNS).to_csv(path, index=False)
+    require_artifact_path(path, NBA_OUTCOME_EVIDENCE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # A hard link publishes fully flushed bytes without replacing an existing
+    # destination. Never expose a partially written canonical date artifact.
+    staged_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="",
+                                         dir=path.parent, prefix=".outcome-", suffix=".partial",
+                                         delete=False) as stream:
+            staged_path = Path(stream.name)
+            pd.DataFrame(rows, columns=STAT_PROJECTION_COLUMNS).to_csv(stream, index=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(staged_path, path)
+    finally:
+        if staged_path is not None:
+            staged_path.unlink()
 
 
 def _diagnostics_payload(
@@ -293,6 +358,8 @@ def _write_summary(path: Path, diagnostics: dict[str, Any]) -> None:
         f"numeric_api_game_ids: {len(diagnostics['numeric_api_game_ids'])}",
         f"skipped_non_numeric_game_ids: {len(diagnostics['skipped_non_numeric_game_ids'])}",
         f"player_stats_row_count: {diagnostics['player_stats_row_count']}",
+        f"canonical_publication_allowed: {diagnostics['outcome_qualification']['canonical_publication_allowed']}",
+        f"outcome_contract: {diagnostics['outcome_qualification']['contract']}",
         "eligible_for_betting: False",
         "market_prop_rows_created: 0",
         "elite_rows_created: 0",

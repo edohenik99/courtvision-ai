@@ -7,6 +7,8 @@ runtime, scoring, Kelly, grading, or operator-board side effects.
 
 from __future__ import annotations
 
+from courtvision.sports.nba.artifact_domains import LEGACY_MIXED_ARTIFACT, contains_target_game_outcome
+
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 import hashlib
@@ -37,6 +39,7 @@ UTC_TIMESTAMP_FIELDS: Final = (
 )
 
 NBA_PLAYER_POINTS_RESEARCH_ROW_FIELDS: Final = (
+    "artifact_domain",
     "schema_version",
     "prediction_id",
     "prediction_run_id",
@@ -567,6 +570,7 @@ class NBAPlayerPointsResearchRow:
 
     def _to_payload(self, include_artifact_hash: bool) -> dict[str, object]:
         payload = {
+            "artifact_domain": LEGACY_MIXED_ARTIFACT,
             "schema_version": self.schema_version,
             "prediction_id": self.prediction_id,
             "prediction_run_id": self.prediction_run_id,
@@ -687,6 +691,9 @@ def implied_probability_from_american(american_odds: object) -> float:
 
 def build_prediction_features(payload: Mapping[str, object]) -> NBAPlayerPointsPredictionFeatures:
     """Build feature evidence without aliasing legacy minutes fields."""
+
+    if contains_target_game_outcome(payload):
+        raise NBAPlayerPointsResearchSchemaError("target-game outcomes cannot supply prediction features")
 
     if "projected_minutes" not in payload:
         if "min_avg" in payload:
@@ -890,7 +897,11 @@ def build_research_prediction_row(
     provenance: Mapping[str, object],
     schema_version: str = NBA_PLAYER_POINTS_RESEARCH_SCHEMA_VERSION,
 ) -> NBAPlayerPointsResearchRow:
-    """Construct one complete schema row from explicit offline evidence."""
+    """Construct a legacy retrospective row using final stats for identity.
+
+    This compatibility path is LEGACY_MIXED_ARTIFACT, never prospective
+    qualification. Use canonical crosswalk/assembly for prospective research.
+    """
 
     validate_schema_version(schema_version)
     resolved_stats = resolve_final_stat_for_market(market, tuple(final_stats))

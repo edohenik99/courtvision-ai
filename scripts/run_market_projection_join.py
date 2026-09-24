@@ -25,6 +25,12 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from courtvision.sports.nba.artifact_domains import (
+    NBA_PROSPECTIVE_EVIDENCE, require_artifact_path, stat_artifact_path,
+    validate_prospective_stat_rows,
+    contains_target_game_outcome,
+)
+
 
 MARKET_PROJECTION_JOIN_OK = "MARKET_PROJECTION_JOIN_OK"
 MARKET_PROJECTION_JOIN_NO_MARKET_BOARD = "MARKET_PROJECTION_JOIN_NO_MARKET_BOARD"
@@ -79,24 +85,17 @@ MARKET_PROJECTION_ALIASES = {
     "player_points": [
         "projection_value",
         "model_projection",
-        "points",
-        "pts",
         "projected_points",
         "points_projection",
     ],
     "player_rebounds": [
         "projection_value",
         "model_projection",
-        "rebounds",
-        "reb",
-        "totReb",
         "projected_rebounds",
     ],
     "player_assists": [
         "projection_value",
         "model_projection",
-        "assists",
-        "ast",
         "projected_assists",
     ],
 }
@@ -150,6 +149,7 @@ RECENT_VALUE_ALIASES = {
 }
 
 CONTEXT_COLUMNS = [
+    "projected_minutes",
     "player_id",
     "team_id",
     "team_abbreviation",
@@ -258,6 +258,8 @@ def run_market_projection_join(
         return MarketProjectionJoinResult(status, output_path, summary_path, diagnostics_path, diagnostics)
 
     market_df = _read_csv(market_board_path, warnings=warnings, source_label="market board")
+    if contains_target_game_outcome(market_df.to_dict("records")):
+        raise ValueError("prospective market board contains target-game outcomes")
     schema_missing_columns = [
         column for column in MARKET_REQUIRED_COLUMNS if column not in market_df.columns
     ]
@@ -617,59 +619,24 @@ def _load_projection_source(
     projection_source: str | Path | None,
     warnings: list[str],
 ) -> tuple[Path | None, pd.DataFrame, bool, str]:
-    if projection_source:
-        path = Path(projection_source)
+    path = Path(projection_source) if projection_source else stat_artifact_path(
+        output_dir, NBA_PROSPECTIVE_EVIDENCE, target_date
+    )
+    try:
+        require_artifact_path(path, NBA_PROSPECTIVE_EVIDENCE)
+        if path.name.startswith("stat_projection_source_"):
+            raise ValueError("LEGACY_MIXED_ARTIFACT: historical shared path is audit-only")
         if not path.exists():
-            warnings.append(f"Projection source not found: {path}")
+            warnings.append("No qualified prospective projection source; legacy mixed/context fallback disabled.")
             return path, pd.DataFrame(), False, "unavailable"
-        return (
-            path,
-            _read_csv(path, warnings=warnings, source_label="projection source"),
-            True,
-            "explicit_projection_source",
-        )
-
-    stat_projection_path = output_dir / f"stat_projection_source_{target_date}.csv"
-    if stat_projection_path.exists():
-        return (
-            stat_projection_path,
-            _read_csv(
-                stat_projection_path,
-                warnings=warnings,
-                source_label="projection source",
-            ),
-            True,
-            "stat_projection_source",
-        )
-
-    cleaned_projection_path = output_dir / f"projection_context_clean_{target_date}.csv"
-    if cleaned_projection_path.exists():
-        return (
-            cleaned_projection_path,
-            _read_csv(
-                cleaned_projection_path,
-                warnings=warnings,
-                source_label="projection source",
-            ),
-            True,
-            "cleaned_projection_context",
-        )
-
-    baseline_path = output_dir.parent.parent / "model" / "player_baselines.csv"
-    if baseline_path.exists():
-        return (
-            baseline_path,
-            _read_csv(
-                baseline_path,
-                warnings=warnings,
-                source_label="projection source",
-            ),
-            True,
-            "raw_player_baselines",
-        )
-
-    warnings.append("No projection source available.")
-    return None, pd.DataFrame(), False, "unavailable"
+        frame = _read_csv(path, warnings=warnings, source_label="projection source")
+        validate_prospective_stat_rows(frame.to_dict("records"), target_date)
+        if "prospective_status" in frame and not frame["prospective_status"].eq("clock_qualified_diagnostic_only").all():
+            raise ValueError("prospective projection source is unqualified")
+    except ValueError as exc:
+        warnings.append(str(exc))
+        return path, pd.DataFrame(), False, "rejected_prospective_source"
+    return path, frame, True, "explicit_projection_source" if projection_source else "prospective_projection_source"
 
 
 def _diagnostics_payload(

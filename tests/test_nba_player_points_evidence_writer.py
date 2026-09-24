@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from nba_provenance_fixtures import assembly_fixture
+
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from dataclasses import replace
@@ -42,7 +44,7 @@ CONFIG = NBAPlayerPointsEvidenceWriterConfig()
 
 
 def _load_fixture() -> dict[str, object]:
-    return json.loads(ASSEMBLY_CASES_FIXTURE.read_text(encoding="utf-8"))
+    return assembly_fixture(json.loads(ASSEMBLY_CASES_FIXTURE.read_text(encoding="utf-8")))
 
 
 def _deep_merge(base: object, overrides: object) -> object:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from nba_provenance_fixtures import provider_fixture
+
 from collections.abc import Sequence
 from copy import deepcopy
 import hashlib
@@ -101,7 +103,7 @@ def _default_clean_repository_state(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _load_fixture() -> dict[str, object]:
-    return json.loads(PROVIDER_SHAPES_FIXTURE.read_text(encoding="utf-8"))
+    return provider_fixture(json.loads(PROVIDER_SHAPES_FIXTURE.read_text(encoding="utf-8")))
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -189,7 +191,10 @@ def _pregame_bundle(
 ) -> tuple[Path, dict[str, object], dict[str, Path]]:
     paths = _write_base_inputs(
         tmp_path,
-        projection_overrides=projection_overrides,
+        projection_overrides={
+            "projection_cutoff_timestamp_utc": feature_cutoff_timestamp_utc,
+            **(projection_overrides or {}),
+        },
         duplicate_projection=duplicate_projection,
     )
     projection_refs = ["projection_evidence.json"]
@@ -509,7 +514,7 @@ def test_feature_cutoff_and_prediction_timestamp_each_bind_approval_digest(
     changed_prediction = run_manual_bundle(bundle_path)
 
     assert baseline["plan"]["publishability"]["allowed"] is True
-    assert changed_cutoff["plan"]["publishability"]["allowed"] is True
+    assert changed_cutoff["plan"]["publishability"]["allowed"] is False
     assert changed_prediction["plan"]["publishability"]["allowed"] is True
     assert len(
         {

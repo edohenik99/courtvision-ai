@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from nba_provenance_fixtures import provider_fixture
+
 from copy import deepcopy
 import hashlib
 import json
@@ -69,7 +71,7 @@ REPOSITORY_COMMIT_SHA = "0123456789abcdef0123456789abcdef01234567"
 
 
 def _load_fixture() -> dict[str, Any]:
-    return json.loads(PROVIDER_SHAPES_FIXTURE.read_text(encoding="utf-8"))
+    return provider_fixture(json.loads(PROVIDER_SHAPES_FIXTURE.read_text(encoding="utf-8")))
 
 
 def _sha256(path: Path) -> str:
@@ -168,6 +170,7 @@ def _build_adapter_chain() -> dict[str, Any]:
         "market": market,
         "crosswalk": {
             "canonical_event_id": crosswalk_row["canonical_event_id"],
+            "provider_event_id": market["provider_event_id"],
             "player_id": crosswalk_row["canonical_player_id"],
             "canonical_player_name": crosswalk_row["player_identity"]["canonical_player_name"],
             "team": crosswalk_row["player_identity"]["team"],
