@@ -11,7 +11,7 @@ from scripts.build_stat_projection_source import (
     OUTPUT_COLUMNS,
     STAT_PROJECTION_INPUT_MISSING,
     STAT_PROJECTION_NO_OUTPUT_ROWS,
-    STAT_PROJECTION_OK,
+    STAT_PROJECTION_UNQUALIFIED,
     STAT_PROJECTION_SCHEMA_INVALID,
     build_stat_projection_source,
 )
@@ -74,7 +74,8 @@ def test_creates_stat_projection_source_and_computes_blend(tmp_path: Path) -> No
 
     result = _run(tmp_path)
 
-    assert result.status == STAT_PROJECTION_OK
+    assert result.status == STAT_PROJECTION_UNQUALIFIED
+    assert result.diagnostics["qualified_prospective_source"] is False
     output = pd.read_csv(result.output_path)
     assert output.columns.tolist() == OUTPUT_COLUMNS
     assert len(output.index) == 1

@@ -27,6 +27,7 @@ PROJECTION_AUDIT_DANGEROUS_DUPLICATES = "PROJECTION_AUDIT_DANGEROUS_DUPLICATES"
 DEFAULT_PROJECTION_SOURCE = Path("outputs/model/player_baselines.csv")
 DEFAULT_OUTPUT_DIR = Path("outputs/runtime/research")
 DEFAULT_DIAGNOSTICS_DIR = Path("outputs/runtime/diagnostics")
+PROVENANCE_CLOCKS = ("source_timestamp_utc", "evidence_cutoff_timestamp_utc", "commence_time_utc")
 
 NAME_COLUMNS = ("player_name", "name", "player", "athlete_name")
 PLAYER_ID_COLUMNS = ("player_id", "athlete_id")
@@ -472,6 +473,21 @@ def _write_outputs(
     cleaned: pd.DataFrame,
     diagnostics: dict[str, Any],
 ) -> None:
+    # Cleaning is a diagnostic operation, not a provenance producer. Preserve
+    # supplied clock bytes; never derive them from dates, mtimes or audit time.
+    default_legacy = Path(diagnostics["source_path"]).resolve() == DEFAULT_PROJECTION_SOURCE.resolve()
+    missing_clocks = [name for name in PROVENANCE_CLOCKS
+                      if name not in cleaned or cleaned[name].map(_is_missing).any()]
+    prior_legacy = ("projection_context_qualification" in cleaned
+                    and (cleaned["projection_context_qualification"] == "legacy_unqualified").any())
+    qualification = "legacy_unqualified" if default_legacy or prior_legacy or missing_clocks else "declared_clocks_diagnostic_only"
+    cleaned["projection_context_qualification"] = qualification
+    diagnostics["projection_context_qualification"] = qualification
+    diagnostics["missing_provenance_clocks"] = missing_clocks
+    diagnostics["qualified_prospective_source"] = False
+    diagnostics["warnings"].append(
+        "Cleaned context is diagnostic only; audit success does not establish prospective provenance."
+    )
     cleaned.to_csv(cleaned_path, index=False)
     audit_path.write_text(_audit_text(diagnostics), encoding="utf-8")
     diagnostics_path.write_text(
@@ -485,6 +501,7 @@ def _audit_text(diagnostics: dict[str, Any]) -> str:
         f"Projection Source Audit - {diagnostics['date']}",
         f"status: {diagnostics['status']}",
         f"source_path: {diagnostics['source_path']}",
+        f"projection_context_qualification: {diagnostics['projection_context_qualification']}",
         f"row_count: {diagnostics['row_count']}",
         (
             "unique_normalized_player_count: "

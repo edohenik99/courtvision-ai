@@ -70,6 +70,8 @@ def validate_prospective_stat_rows(rows: list[dict], operating_date: str) -> Non
     projections. Raw stat aliases are forbidden on this prospective boundary.
     """
     for row in rows:
+        if row.get("prospective_status") == "unqualified" or row.get("projection_context_qualification") == "legacy_unqualified":
+            raise ValueError("legacy/unqualified projection context cannot be promoted to prospective evidence")
         if row.get("artifact_domain") != NBA_PROSPECTIVE_EVIDENCE or row.get("artifact_schema_version") != NBA_STAT_ARTIFACT_SCHEMA:
             raise ValueError("LEGACY_MIXED_ARTIFACT: explicit prospective schema is required")
         if contains_target_game_outcome(row) or {"points", "pts", "minutes", "rebounds", "reb", "assists", "ast"}.intersection(str(key).casefold() for key in row):

@@ -24,6 +24,7 @@ from courtvision.sports.nba.artifact_domains import (
 
 
 STAT_PROJECTION_OK = "STAT_PROJECTION_OK"
+STAT_PROJECTION_UNQUALIFIED = "STAT_PROJECTION_UNQUALIFIED"
 STAT_PROJECTION_INPUT_MISSING = "STAT_PROJECTION_INPUT_MISSING"
 STAT_PROJECTION_SCHEMA_INVALID = "STAT_PROJECTION_SCHEMA_INVALID"
 STAT_PROJECTION_NO_OUTPUT_ROWS = "STAT_PROJECTION_NO_OUTPUT_ROWS"
@@ -38,6 +39,7 @@ LOW_MINUTES_THRESHOLD = 20.0
 
 OUTPUT_COLUMNS = [
     "artifact_domain", "artifact_schema_version", "prospective_status",
+    "projection_context_qualification",
     "operating_date", "source_timestamp_utc", "projection_timestamp_utc",
     "evidence_cutoff_timestamp_utc", "commence_time_utc",
     "player_id",
@@ -143,22 +145,29 @@ def build_stat_projection_source(
             output_df, build_warnings = _build_rows(source_df, columns)
             output_df["artifact_domain"] = NBA_PROSPECTIVE_EVIDENCE
             output_df["artifact_schema_version"] = NBA_STAT_ARTIFACT_SCHEMA
-            output_df["prospective_status"] = "unqualified"
+            output_df["prospective_status"] = "clock_qualified_diagnostic_only"
             output_df["operating_date"] = target_date_text
             output_df["projection_timestamp_utc"] = datetime.now(timezone.utc).isoformat()
+            input_rows = [row for row in source_df.to_dict("records")
+                          if normalize_player_name(_source_value(pd.Series(row), columns, INPUT_ALIASES["player_name"]))]
+            output_df["projection_context_qualification"] = [
+                row.get("projection_context_qualification", "declared_clocks_diagnostic_only")
+                for row in input_rows
+            ]
             # Preserve declared input clocks. Missing/late clocks stay diagnostic;
             # a newly calculated projection never inherits a backdated clock.
             for name in ("source_timestamp_utc", "evidence_cutoff_timestamp_utc", "commence_time_utc"):
-                output_df[name] = [row.get(name) for row in source_df.to_dict("records")
-                                   if normalize_player_name(_source_value(pd.Series(row), columns, INPUT_ALIASES["player_name"]))]
+                output_df[name] = [row.get(name) for row in input_rows]
             try:
                 validate_prospective_stat_rows(output_df.to_dict("records"), target_date_text)
                 output_df["prospective_status"] = "clock_qualified_diagnostic_only"
             except ValueError as exc:
+                output_df["prospective_status"] = "unqualified"
                 warnings.append(str(exc))
             warnings.extend(build_warnings)
             status = (
-                STAT_PROJECTION_OK
+                (STAT_PROJECTION_UNQUALIFIED if (output_df["prospective_status"] == "unqualified").any()
+                 else STAT_PROJECTION_OK)
                 if not output_df.empty
                 else STAT_PROJECTION_NO_OUTPUT_ROWS
             )
@@ -359,6 +368,8 @@ def _diagnostics_payload(
         "date": target_date,
         "target_date": target_date,
         "status": status,
+        "qualified_prospective_source": False,
+        "usage": "diagnostic_only_requires_independent_identity_and_provenance_qualification",
         "input_path": str(input_path),
         "output_path": str(output_path),
         "input_row_count": int(len(source_df.index)),
