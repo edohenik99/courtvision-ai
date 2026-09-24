@@ -10,12 +10,13 @@ from typing import Mapping
 from zoneinfo import ZoneInfo
 
 from courtvision.core.candidates import CandidateProvenance
-from courtvision.sports.mlb.ab_projection import assemble_acquired_batter_hits_features
+from courtvision.sports.mlb.ab_projection import AB_PROJECTION_V2_VERSION, assemble_sovereign_batter_hits_features
 from courtvision.sports.mlb.batter_hits import (
     MODEL_ID, MODEL_VERSION, assemble_batter_hits_candidate,
     batter_hits_source_evidence_from_market_record, compute_batter_hits_probability,
 )
-from courtvision.sports.mlb.hits_acquisition import AcquiredBatterHitsEvidence
+from courtvision.sports.mlb.hits_acquisition import AcquiredBatterHitsEvidence, SovereignBatterHitsEvidence
+from courtvision.sports.mlb.hits_season_ledger import CANONICAL_HITS_SEASON_SOURCE, HitsLedgerError
 from courtvision.sports.mlb.market_adapter import adapt_mlb_hr_prediction
 from courtvision.sports.mlb.market_data import MLBPlayerPropSourceRecord
 
@@ -88,6 +89,10 @@ class MLBResearchPreviewRow:
     season_at_bats: int | None = None
     projected_at_bats: float | None = None
     row_kind: str = "PLAYER"
+    season_source: str | None = None
+    season_aggregate_hash: str | None = None
+    distinct_batting_games: int | None = None
+    ab_projection_version: str | None = None
 
     def __post_init__(self) -> None:
         date.fromisoformat(self.operating_date)
@@ -120,6 +125,11 @@ class MLBResearchPreviewRow:
                     or self.event_status != "resolved" or self.lineup_status != "statsapi_batting_order_present"
                     or self.market_implied_probability is None or self.projected_at_bats is None):
                 raise ValueError("qualified Hits requires the complete evidence chain")
+            if self.season_source == CANONICAL_HITS_SEASON_SOURCE and (
+                self.ab_projection_version != AB_PROJECTION_V2_VERSION or not self.season_aggregate_hash
+                or type(self.distinct_batting_games) is not int or self.distinct_batting_games <= 0
+            ):
+                raise ValueError("qualified ledger Hits requires aggregate provenance and AB v2")
         if self.row_kind not in {"PLAYER", "SOURCE_STATUS"}:
             raise ValueError("invalid row kind")
         if self.row_kind == "SOURCE_STATUS" and (self.player_name or status != PredictionStatus.UNAVAILABLE):
@@ -138,6 +148,7 @@ def unavailable_row(day: str, market: str, reason: str, *, refs: tuple[str, ...]
         prediction_status="UNAVAILABLE", block_reason=reason, row_kind="SOURCE_STATUS",
         limitation_status=HITS_LIMITATION if hits else HR_LIMITATION,
         probability_market_independence="NOT_TESTED" if hits else "NO", source_refs=refs,
+        season_source=CANONICAL_HITS_SEASON_SOURCE if hits else None,
     )
 
 
@@ -152,6 +163,7 @@ def hits_source_row(source: MLBPlayerPropSourceRecord) -> MLBResearchPreviewRow:
         market_timestamp_utc=source.market_updated_at.isoformat(), source_refs=source.source_refs,
         prediction_status="BLOCKED", block_reason="EVENT_IDENTITY_UNRESOLVED",
         limitation_status=HITS_LIMITATION, model_id=MODEL_ID, model_version=MODEL_VERSION,
+        season_source=CANONICAL_HITS_SEASON_SOURCE,
     )
 
 
@@ -168,7 +180,7 @@ def hits_failure_reason(detail: str, default: str) -> str:
 def preview_hits_evidence(
     source: MLBPlayerPropSourceRecord, acquired: AcquiredBatterHitsEvidence, *, generated_at: datetime,
 ) -> MLBResearchPreviewRow:
-    """Run existing typed orchestration, without duplicating either calculation."""
+    """Canonical preview requires ledger season evidence; never falls back to v1."""
     base = hits_source_row(source)
     player = acquired.player_binding
     event = player.event_binding
@@ -179,13 +191,20 @@ def preview_hits_evidence(
         lineup_status=acquired.lineup_evidence.lineup_status, evidence_cutoff=acquired.evidence_cutoff.isoformat(),
         team=source.home_team if side == "home" else source.away_team if side == "away" else None,
         opponent=source.away_team if side == "home" else source.home_team if side == "away" else None,
-        season_hits=acquired.season_evidence.hits, season_at_bats=acquired.season_evidence.at_bats,
+    )
+    if type(acquired) is not SovereignBatterHitsEvidence:
+        return replace(base, block_reason="COURTVISION_LEDGER_MISSING",
+                       block_detail="CourtVision season ledger is required; provider season evidence is diagnostic only")
+    season = acquired.season_evidence
+    base = replace(base, season_hits=season.hits, season_at_bats=season.at_bats,
+        season_aggregate_hash=season.season_aggregate_hash, distinct_batting_games=season.distinct_batting_games,
+        ab_projection_version=AB_PROJECTION_V2_VERSION,
         source_refs=tuple(dict.fromkeys((*source.source_refs, *event.source_refs, *player.source_refs,
                                       *acquired.lineup_evidence.source_refs, *acquired.season_evidence.source_refs))),
     )
     stage = "AB_PROJECTION_UNAVAILABLE"
     try:
-        features = assemble_acquired_batter_hits_features(acquired, generated_at=generated_at)
+        features = assemble_sovereign_batter_hits_features(acquired, generated_at=generated_at)
         stage = "CANDIDATE_EVIDENCE_INVALID"
         probability = compute_batter_hits_probability(features, generated_at=generated_at)
         candidate = assemble_batter_hits_candidate(
@@ -195,6 +214,8 @@ def preview_hits_evidence(
             event_identity=event.event_identity,
             provenance=CandidateProvenance(source="mlb_research_preview", source_refs=base.source_refs),
         )
+    except HitsLedgerError as exc:
+        return replace(base, block_reason=exc.state, block_detail=str(exc))
     except ValueError as exc:
         return replace(base, block_reason=hits_failure_reason(str(exc), stage), block_detail=str(exc))
     return replace(
@@ -302,6 +323,8 @@ def preview_availability(rows: list[MLBResearchPreviewRow]) -> dict:
             loaded.append(f"{unavailable} UNAVAILABLE PLAYER ROWS")
         if reasons or not market_rows:
             loaded.append("SOURCE UNAVAILABLE")
+        if market == "batter_hits" and any(r.block_reason == "COURTVISION_LEDGER_MISSING" for r in market_rows):
+            loaded.append("SEASON_LEDGER_NOT_POPULATED")
         markets[market] = {
             "label": label, "status": " · ".join(loaded), "prediction_rows": len(players),
             "usable_rows": qualified + legacy, "blocked_rows": blocked,

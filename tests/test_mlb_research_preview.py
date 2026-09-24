@@ -19,6 +19,7 @@ from courtvision.sports.mlb.research_preview import (
 )
 from test_mlb_ab_projection import _acquired, _record, GENERATED, START
 from test_mlb_hits_acquisition import _season_payload
+from test_mlb_hits_sovereign import sovereign_acquired, local_sources
 
 
 @pytest.fixture(autouse=True)
@@ -29,8 +30,9 @@ def no_network(monkeypatch):
     monkeypatch.setattr(socket, "create_connection", fail)
 
 
-def _hits(**kwargs):
-    return preview_hits_evidence(_record(), _acquired(**kwargs), generated_at=GENERATED)
+def _hits(*, ledger_missing=False, **kwargs):
+    acquired = _acquired(**kwargs) if ledger_missing else sovereign_acquired(**kwargs)
+    return preview_hits_evidence(_record(), acquired, generated_at=GENERATED)
 
 
 def _hr():
@@ -51,8 +53,8 @@ def _hr():
 def test_qualified_hits_uses_existing_probability_and_evidence():
     row = _hits()
     assert row.prediction_status == "QUALIFIED_RESEARCH"
-    assert row.model_probability == pytest.approx(1 - (1 - 125 / 500) ** (500 / 130))
-    assert row.projected_at_bats == 500 / 130
+    assert row.model_probability == pytest.approx(1 - (1 - 3 / 12) ** 4)
+    assert row.projected_at_bats == 4
     assert row.probability_market_independence == "YES"
     assert row.limitation_status == HITS_LIMITATION
     assert row.canonical_event_id == "823184"
@@ -60,8 +62,8 @@ def test_qualified_hits_uses_existing_probability_and_evidence():
 
 
 @pytest.mark.parametrize(("kwargs", "reason", "detail"), [
-    ({"games_played": None}, "AB_PROJECTION_UNAVAILABLE", "cv_ab_projection_v1 requires positive season games_played evidence"),
-    ({"lineup_status": "unavailable", "batting_order_position": None}, "LINEUP_UNAVAILABLE", "cv_ab_projection_v1 requires confirmed batting-order presence"),
+    ({"ledger_missing": True}, "COURTVISION_LEDGER_MISSING", "CourtVision season ledger is required; provider season evidence is diagnostic only"),
+    ({"lineup_status": "unavailable", "batting_order_position": None}, "LINEUP_UNAVAILABLE", "cv_ab_projection_v2 requires confirmed batting-order presence"),
 ])
 def test_blocked_hits_preserves_reason_and_null_probability(kwargs, reason, detail):
     row = _hits(**kwargs)
@@ -72,7 +74,7 @@ def test_blocked_hits_preserves_reason_and_null_probability(kwargs, reason, deta
 
 
 def test_no_backdated_probability_from_historical_evidence():
-    row = preview_hits_evidence(_record(), _acquired(), generated_at=START + timedelta(seconds=1))
+    row = preview_hits_evidence(_record(), sovereign_acquired(), generated_at=START + timedelta(seconds=1))
     assert row.prediction_status == "BLOCKED"
     assert row.block_reason == "PREGAME_CUTOFF_FAILED"
     assert row.model_probability is None
@@ -93,57 +95,12 @@ def test_multiteam_season_is_rejected_by_unchanged_parser():
 
 
 @pytest.mark.parametrize("multiple_splits", [False, True])
-def test_local_hits_index_uses_existing_capture_parser_and_candidate(tmp_path, multiple_splits):
-    # Fixture manifests use the existing acquisition contract, including raw
-    # digests and the manifest digest. No collection or clock backdating occurs.
-    from test_mlb_ab_projection import _feed, _schedule, CUTOFF, OBSERVED
-    source = _record()
-    odds = {"id": source.provider_event_id, "sport_key": "baseball_mlb", "commence_time": START.isoformat(),
-            "home_team": source.home_team, "away_team": source.away_team, "bookmakers": [{
-                "key": source.bookmaker_key, "title": source.bookmaker_name, "markets": [{
-                    "key": "batter_hits", "last_update": OBSERVED.isoformat(), "outcomes": [{
-                        "name": "Over", "description": source.participant_name, "point": .5, "price": -150}]}]}]}
-    (tmp_path / "odds.json").write_text(json.dumps(odds))
-    event = _schedule()[0]
-    schedule = {"dates": [{"games": [{"gamePk": int(event.event_id), "officialDate": "2026-09-20",
-        "gameDate": START.isoformat(), "teams": {"home": {"team": {"id": int(event.home_team_id), "name": event.home_team}},
-        "away": {"team": {"id": int(event.away_team_id), "name": event.away_team}}},
-        "venue": {"id": int(event.venue_id), "name": event.venue_name}, "status": {"detailedState": "Scheduled"}}]}]}
-    season = json.loads(_season_payload())
-    if multiple_splits:
-        season["people"][0]["stats"][0]["splits"] *= 3
-
-    def capture(name, request_id, payload):
-        root = tmp_path / name
-        root.mkdir()
-        raw = json.dumps(payload).encode()
-        (root / "body.json").write_bytes(raw)
-        manifest = {"capture_id": name, "research_only": True, "predictions_enabled": False, "wagering_enabled": False,
-                    "sources": [{"request_id": request_id, "availability_status": "completed", "body_path": "body.json",
-                    "sha256": hashlib.sha256(raw).hexdigest(), "first_observed_at_utc": OBSERVED.isoformat(),
-                    "captured_at_utc": OBSERVED.isoformat(), "requested_as_of_utc": CUTOFF.isoformat()}]}
-        manifest["manifest_digest"] = hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(",", ":"),
-                                                               ensure_ascii=False, allow_nan=False).encode()).hexdigest()
-        path = root / "manifest.json"
-        path.write_text(json.dumps(manifest))
-        return str(path)
-
-    index = {"schema_version": "mlb-hits-preview-sources-v1", "operating_date": "2026-09-20",
-             "odds": {"path": "odds.json", "collected_at": CUTOFF.isoformat()},
-             "schedule": {"manifest": capture("schedule", "schedule", schedule), "request_id": "schedule"},
-             "game_feeds": {"823184": capture("feed", "hits-game-feed-823184", _feed())},
-             "seasons": {"700001": capture("season", "hits-season-2026-700001", season)}}
-    path = tmp_path / "sources.json"
-    path.write_text(json.dumps(index))
+def test_local_hits_index_uses_ledger_despite_legacy_provider_split_shape(tmp_path, multiple_splits):
+    path, _, _ = local_sources(tmp_path, provider_splits=3 if multiple_splits else 1)
     row = sources.load_hits_sources(path, "2026-09-20", generated_at=GENERATED)[0]
-    if multiple_splits:
-        assert row.prediction_status == "BLOCKED"
-        assert row.block_reason == "AMBIGUOUS_SEASON_SPLITS"
-        assert row.block_detail == "season evidence requires exactly one unambiguous split"
-        assert row.model_probability is None
-    else:
-        assert row.prediction_status == "QUALIFIED_RESEARCH", row.block_detail
-        assert row.model_probability == _hits().model_probability
+    assert row.prediction_status == "QUALIFIED_RESEARCH", row.block_detail
+    assert row.model_probability == _hits().model_probability
+    assert row.season_source == "COURTVISION_GAME_FACT_LEDGER"
 
 
 def test_hr_probability_is_copied_and_never_claims_sovereignty():
@@ -184,7 +141,7 @@ def test_contract_rejects_unsafe_rows(change):
 
 def test_mixed_board_sort_safety_roundtrip_and_read_only_loader(tmp_path):
     hr = preview_hr_prediction(_hr(), day="2026-09-20", source_ref="fixture:prediction")
-    rows = [_hits(), hr, _hits(games_played=None)]
+    rows = [_hits(), hr, _hits(ledger_missing=True)]
     assert sort_preview_rows(rows) == sort_preview_rows(list(reversed(rows)))
     for row in rows:
         assert row.research_only is True
@@ -212,7 +169,7 @@ def test_writer_never_overwrites_prior_run(tmp_path):
 
 
 def test_sort_order_breaks_ties_without_input_order():
-    first = _hits(games_played=None)
+    first = _hits(ledger_missing=True)
     second = replace(first, block_detail="different preserved diagnostic")
     assert sort_preview_rows([first, second]) == sort_preview_rows([second, first])
 
@@ -280,6 +237,7 @@ def test_preserved_rejection_displays_actual_reason_and_never_probability(tmp_pa
     }))
     row = sources.load_preserved_hits_rejection(path, "2026-09-20")
     assert row.block_reason == "AMBIGUOUS_SEASON_SPLITS"
+    assert row.season_source == "MLB_STATSAPI_SEASON_SPLITS"
     assert row.model_probability is None
     assert row.provider_event_id is None
     assert row.sportsbook is None
@@ -288,7 +246,7 @@ def test_preserved_rejection_displays_actual_reason_and_never_probability(tmp_pa
 def test_streamlit_renders_generated_board_without_modifying_predictions(tmp_path):
     from streamlit.testing.v1 import AppTest
     output = tmp_path / "outputs"
-    rows = [_hits(), _hits(games_played=None), preview_hr_prediction(_hr(), day="2026-09-20", source_ref="fixture:prediction")]
+    rows = [_hits(), _hits(ledger_missing=True), preview_hr_prediction(_hr(), day="2026-09-20", source_ref="fixture:prediction")]
     board, summary = sources.write_preview(rows, "2026-09-20", output / "runtime" / "mlb" / "research")
     before = board.read_bytes(), summary.read_bytes()
     app = AppTest.from_string(
@@ -320,7 +278,7 @@ def test_no_usable_market_means_overall_unavailable(blocked_player):
     rows = [unavailable_row("2026-09-20", market, "SOURCE_MISSING")
             for market in ("batter_hits", "batter_home_runs")]
     if blocked_player:
-        rows.append(_hits(games_played=None))
+        rows.append(_hits(ledger_missing=True))
     summary = preview_summary(rows, "2026-09-20")
     assert summary["status"] == "MLB_PREVIEW_SOURCE_DATA_UNAVAILABLE"
     assert summary["usable_prediction_rows"] == 0
@@ -391,7 +349,7 @@ def test_source_availability_is_separate_and_details_default_to_real_player(tmp_
 
 
 def test_blocked_real_player_is_still_visible_and_readable(tmp_path):
-    blocked = _hits(games_played=None)
+    blocked = _hits(ledger_missing=True)
     app = _preview_app(tmp_path, [blocked, unavailable_row("2026-09-20", "batter_home_runs", "HR_SOURCE_UNAVAILABLE")])
     assert not app.exception
     assert len(app.dataframe[0].value) == 1
@@ -405,7 +363,8 @@ def test_qualified_hits_details_show_baseline_inputs(tmp_path):
     app = _preview_app(tmp_path, [_hits()])
     assert not app.exception
     assert {"Season hits", "Season at-bats", "Projected at-bats"} <= {item.value for item in app.caption}
-    assert {"125", "500", str(500 / 130)} <= {item.value for item in app.text}
+    assert {"3", "12", "4.0"} <= {item.value for item in app.text}
+    assert {"COURTVISION_GAME_FACT_LEDGER", "cv_ab_projection_v2"} <= {item.value for item in app.text}
 
 
 def test_all_sources_unavailable_has_no_player_board_or_selected_detail(tmp_path):

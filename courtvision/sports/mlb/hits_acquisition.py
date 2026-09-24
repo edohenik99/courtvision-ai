@@ -40,6 +40,10 @@ from courtvision.sports.mlb.hits_identity import (
     validate_bound_game_feed,
 )
 from courtvision.sports.mlb.market_data import MLBPlayerPropSourceRecord
+from courtvision.sports.mlb.fact_ledger import MLBFactStore
+from courtvision.sports.mlb.hits_season_ledger import (
+    BatterLedgerCoverage, HitsLedgerError, LedgerBatterSeasonEvidence, load_ledger_season,
+)
 
 
 class HitsAcquisitionError(ValueError):
@@ -58,7 +62,7 @@ class CapturedHitsSource:
 
 @dataclass(frozen=True, slots=True)
 class AcquiredBatterHitsEvidence:
-    """Pregame baseball evidence available before opportunity projection."""
+    """Legacy/diagnostic pregame evidence; canonical Hits uses the sovereign subtype."""
 
     player_binding: MLBPlayerIdentityBinding
     season_evidence: BatterSeasonHittingEvidence
@@ -87,6 +91,29 @@ class AcquiredBatterHitsEvidence:
             self.lineup_evidence.evidence_cutoff,
         ) > cutoff:
             raise HitsAcquisitionError("feature evidence is newer than evidence_cutoff")
+
+
+@dataclass(frozen=True, slots=True)
+class SovereignBatterHitsEvidence(AcquiredBatterHitsEvidence):
+    season_evidence: LedgerBatterSeasonEvidence
+
+    def __post_init__(self) -> None:
+        if type(self.season_evidence) is not LedgerBatterSeasonEvidence:
+            raise HitsLedgerError("COURTVISION_LEDGER_MISSING", "canonical Hits requires CourtVision factual ledger evidence")
+        AcquiredBatterHitsEvidence.__post_init__(self)
+        season = self.season_evidence
+        season.__post_init__()
+        event = self.player_binding.event_binding
+        coverage = season.coverage
+        if event.identity_status is not IdentityStatus.RESOLVED:
+            raise HitsLedgerError("EVENT_IDENTITY_UNRESOLVED", "resolved target event required")
+        if (coverage.target_game_id != event.mlbam_game_id
+                or coverage.target_game_date != event.scheduled_event.operating_date):
+            raise HitsLedgerError("COURTVISION_LEDGER_CONFLICT", "season coverage belongs to another target game/date")
+        if self.evidence_cutoff >= min(event.provider_commence_time, event.official_commence_time):
+            raise HitsLedgerError("COURTVISION_LEDGER_INCOMPLETE", "sovereign evidence must be pregame")
+        if self.lineup_evidence.team_side != self.player_binding.team_side:
+            raise HitsLedgerError("LINEUP_UNAVAILABLE", "lineup must match the bound player team")
 
 
 def _resolved_event(event_binding: MLBEventIdentityBinding) -> None:
@@ -371,7 +398,7 @@ def materialize_acquired_hits_evidence(
     game_feed_capture: AcquisitionResult,
     season_capture: AcquisitionResult,
 ) -> AcquiredBatterHitsEvidence:
-    """Create typed season/lineup evidence from preserved responses, without projection."""
+    """Legacy diagnostic season/lineup materialization; never a sovereign fallback."""
     player_id = _resolved_player(player_binding)
     season = _season_value(season)
     feed = captured_hits_source(
@@ -417,6 +444,34 @@ def materialize_acquired_hits_evidence(
     )
 
 
+def materialize_sovereign_hits_evidence(
+    player_binding: MLBPlayerIdentityBinding, *, game_feed_capture: AcquisitionResult,
+    fact_store: MLBFactStore, coverage: BatterLedgerCoverage | None,
+) -> SovereignBatterHitsEvidence:
+    """Canonical local flow: preserved feed/lineup plus CourtVision fact ledger.
+
+    No provider season response/request is accepted or performed. Missing
+    coverage/facts are explicit ledger failures, never a request for fallback.
+    """
+    _resolved_player(player_binding)
+    event = player_binding.event_binding
+    if coverage is None:
+        raise HitsLedgerError("COURTVISION_LEDGER_MISSING", "CourtVision season ledger is not populated")
+    if (coverage.mlbam_player_id != player_binding.mlbam_player_id
+            or coverage.target_game_id != event.mlbam_game_id
+            or coverage.target_game_date != event.scheduled_event.operating_date):
+        raise HitsLedgerError("COURTVISION_LEDGER_CONFLICT", "ledger coverage does not match target player/event")
+    feed = captured_hits_source(game_feed_capture, request_id=hits_game_feed_request(event).request_id)
+    lineup = extract_batter_lineup_evidence(feed.body, event, player_binding,
+        observed_at=feed.first_observed_at_utc, evidence_cutoff=feed.evidence_cutoff,
+        source_refs=feed.source_refs)
+    season = load_ledger_season(fact_store, coverage,
+                               player_name=player_binding.participant_identity.canonical_participant_name)
+    return SovereignBatterHitsEvidence(player_binding=player_binding, season_evidence=season,
+        lineup_evidence=lineup, evidence_cutoff=max(feed.evidence_cutoff, season.evidence_cutoff,
+            event.observed_at, event.evidence_cutoff, player_binding.observed_at, player_binding.evidence_cutoff))
+
+
 __all__ = [
     "HitsAcquisitionError",
     "CapturedHitsSource",
@@ -429,4 +484,6 @@ __all__ = [
     "captured_hits_source",
     "resolve_hits_player_from_capture",
     "materialize_acquired_hits_evidence",
+    "SovereignBatterHitsEvidence",
+    "materialize_sovereign_hits_evidence",
 ]

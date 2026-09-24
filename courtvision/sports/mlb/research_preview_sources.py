@@ -18,8 +18,10 @@ from uuid import uuid4
 from courtvision.core.candidates import IdentityStatus
 from courtvision.sports.mlb.data.prospective_context_acquisition import AcquisitionResult, parse_mlb_schedule
 from courtvision.sports.mlb.hits_acquisition import (
-    captured_hits_source, materialize_acquired_hits_evidence, resolve_hits_player_from_capture,
+    captured_hits_source, materialize_sovereign_hits_evidence, resolve_hits_player_from_capture,
 )
+from courtvision.sports.mlb.fact_ledger import MLBFactStore
+from courtvision.sports.mlb.hits_season_ledger import LEGACY_HITS_SEASON_SOURCE, HitsLedgerError, coverage_from_bytes
 from courtvision.sports.mlb.hits_identity import bind_mlb_events
 from courtvision.sports.mlb.providers.the_odds_api_market_adapter import normalize_mlb_event_odds
 from courtvision.sports.mlb.research_preview import (
@@ -40,11 +42,12 @@ def _json(path: Path) -> dict:
     return value
 
 
-def _local_path(value: str, root: Path) -> Path:
+def _local_path(value: str, root: Path, *, resolve: bool = True) -> Path:
     path = Path(value)
     if path.drive.startswith("\\\\") or str(path).startswith(("//", "\\\\")) or "://" in value:
         raise ValueError("only local filesystem sources are supported")
-    return (path if path.is_absolute() else root / path).resolve()
+    local = path if path.is_absolute() else root / path
+    return local.resolve() if resolve else local.absolute()
 
 
 def _capture(path: Path) -> AcquisitionResult:
@@ -56,12 +59,13 @@ def load_hits_sources(path: Path, day: str, *, generated_at: datetime) -> list[M
     """Consume an index of preserved odds and existing acquisition manifests.
 
     Index: schema_version, operating_date, odds {path, collected_at}, schedule
-    {manifest, request_id}, game_feeds {gamePk: manifest}, seasons {playerId:
-    manifest}. All paths are local, relative to the index or absolute. The clock
+    {manifest, request_id}, game_feeds {gamePk: manifest}, ledger {root, coverage:
+    {gamePk: {playerId: coverage_manifest}}}. Legacy seasons entries are ignored.
+    All paths are local, relative to the index or absolute. The clock
     used for new probabilities is the actual run clock, never a replay override.
     """
     index = _json(path)
-    if index.get("schema_version") != "mlb-hits-preview-sources-v1" or index.get("operating_date") != day:
+    if index.get("schema_version") not in {"mlb-hits-preview-sources-v1", "mlb-hits-preview-sources-v2"} or index.get("operating_date") != day:
         raise ValueError("Hits sources index schema/date mismatch")
     odds = index["odds"]
     odds_path = _local_path(odds["path"], path.parent)
@@ -101,13 +105,29 @@ def load_hits_sources(path: Path, day: str, *, generated_at: datetime) -> list[M
                 rows.append(replace(base, block_reason=stage, identity_status=player.participant_identity.identity_status.value))
                 continue
             base = replace(base, player_id=player.mlbam_player_id, identity_status="resolved")
-            stage = "SEASON_EVIDENCE_UNAVAILABLE"
-            season = _capture(_local_path(index["seasons"][player.mlbam_player_id], path.parent))
-            acquired = materialize_acquired_hits_evidence(player, season=date.fromisoformat(day).year,
-                                                          game_feed_capture=feed, season_capture=season)
-            rows.append(preview_hits_evidence(source, acquired, generated_at=generated_at))
+            stage = "COURTVISION_LEDGER_MISSING"
+            ledger = index.get("ledger")
+            if not ledger:
+                raise HitsLedgerError(stage, "CourtVision season ledger is not populated")
+            manifest_path = _local_path(ledger["coverage"][event.mlbam_game_id][player.mlbam_player_id], path.parent)
+            if not manifest_path.is_file():
+                raise HitsLedgerError(stage, "CourtVision season coverage manifest is not populated")
+            stage = "COURTVISION_LEDGER_CONFLICT"
+            coverage = coverage_from_bytes(manifest_path.read_bytes())
+            store = MLBFactStore(_local_path(ledger["root"], path.parent, resolve=False))
+            acquired = materialize_sovereign_hits_evidence(player, game_feed_capture=feed,
+                fact_store=store, coverage=coverage)
+            row = preview_hits_evidence(source, acquired, generated_at=generated_at)
+            # Persist compact locators alongside content hashes so a saved row
+            # can reconstruct its aggregate without embedding every game fact.
+            rows.append(replace(row, source_refs=(*row.source_refs,
+                f"cv-ledger-coverage-manifest:{manifest_path}", f"cv-ledger-store:{store.root}",
+                f"hits-source-index:{path.absolute()}")))
+        except HitsLedgerError as exc:
+            rows.append(replace(base, block_reason=exc.state, block_detail=str(exc)))
         except (ValueError, KeyError, OSError, TypeError) as exc:
-            rows.append(replace(base, block_reason=hits_failure_reason(str(exc), stage), block_detail=str(exc)))
+            reason = stage if stage.startswith("COURTVISION_LEDGER_") else hits_failure_reason(str(exc), stage)
+            rows.append(replace(base, block_reason=reason, block_detail=str(exc)))
     return rows
 
 
@@ -139,6 +159,7 @@ def load_preserved_hits_rejection(path: Path, day: str) -> MLBResearchPreviewRow
         model_id=MODEL_ID, model_version=MODEL_VERSION, evidence_cutoff=manifest["evidence_cutoff"],
         source_refs=(str(path),), identity_status="resolved", event_status="resolved",
         lineup_status=lineup["lineup_status"], limitation_status=HITS_LIMITATION,
+        season_source=LEGACY_HITS_SEASON_SOURCE,
     )
 
 
@@ -187,21 +208,13 @@ def build_local_preview(
     hits_path = hits_sources or repository_root / "outputs" / "research" / "mlb_hits" / day / "sources.json"
     try:
         if hits_path.is_file():
-            payload = _json(hits_path)
-            if payload.get("schema_version") == "cv-oct3a-r4-qualification-manifest-v1":
-                rows.append(load_preserved_hits_rejection(hits_path, day))
-            else:
-                rows.extend(load_hits_sources(hits_path, day, generated_at=now))
+            rows.extend(load_hits_sources(hits_path, day, generated_at=now))
         elif hits_sources is not None:
             rows.append(unavailable_row(day, "batter_hits", "HITS_SOURCE_NOT_FOUND", refs=(str(hits_path),)))
         else:
-            matches = []
-            for path in sorted(qualification_root.glob("CV-OCT.3A-R4/*/manifests/02_qualification_manifest.json")):
-                if _json(path).get("operating_date") == day:
-                    matches.append(path)
-            rows.extend(load_preserved_hits_rejection(p, day) for p in matches)
-            if not matches:
-                rows.append(unavailable_row(day, "batter_hits", "HITS_SOURCES_UNAVAILABLE", refs=(str(hits_path),)))
+            # Old provider-split rejections remain explicitly readable through
+            # load_preserved_hits_rejection, but cannot be a canonical fallback.
+            rows.append(unavailable_row(day, "batter_hits", "COURTVISION_LEDGER_MISSING", refs=(str(hits_path),)))
     except (ValueError, KeyError, TypeError, OSError) as exc:
         rows.append(replace(unavailable_row(day, "batter_hits", "HITS_SOURCE_INVALID", refs=(str(hits_path),)),
                             block_detail=str(exc)))
@@ -267,8 +280,8 @@ def load_preview_board(output_root: Path, day: str) -> tuple[list[MLBResearchPre
         for key in ("line", "market_implied_probability", "model_probability", "projected_at_bats"):
             if data[key] is not None:
                 data[key] = float(data[key])
-        for key in ("american_odds", "season_hits", "season_at_bats"):
-            if data[key] is not None:
+        for key in ("american_odds", "season_hits", "season_at_bats", "distinct_batting_games"):
+            if data.get(key) is not None:
                 data[key] = int(data[key])
         data["source_refs"] = tuple(json.loads(data["source_refs"]))
         rows.append(MLBResearchPreviewRow(**data))

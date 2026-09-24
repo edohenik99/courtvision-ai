@@ -44,6 +44,9 @@ def render_prediction_details(row: MLBResearchPreviewRow) -> None:
             _detail_field("Prediction status", STATUS_LABELS[row.prediction_status])
             _detail_field("Market independence", row.probability_market_independence)
         _detail_field("Limitation status", row.limitation_status)
+        if row.market_type == "batter_hits":
+            _detail_field("Hits season source", row.season_source)
+            _detail_field("AB projection version", row.ab_projection_version)
         left, right = st.columns(2)
         with left:
             _detail_field("Identity status", row.identity_status.replace("_", " ").capitalize())
