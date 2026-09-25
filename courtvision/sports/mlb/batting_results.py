@@ -203,10 +203,16 @@ def validate_boxscore_binding(
             # with the caller's explicit status; it does not classify that
             # partial provider object as FINAL. Acquisition must separately
             # establish corroborated finality from schedule/feed evidence.
+            finality_fields = {
+                key: embedded_status[key]
+                for key in ("abstractGameState", "detailedState", "codedGameState",
+                            "statusCode", "abstractGameCode")
+                if key in embedded_status
+            }
             partial_final_text = (
-                set(embedded_status) in ({"abstractGameState"}, {"detailedState"})
-                and isinstance(next(iter(embedded_status.values())), str)
-                and next(iter(embedded_status.values())).strip().casefold() == "final"
+                set(finality_fields) in ({"abstractGameState"}, {"detailedState"})
+                and isinstance(next(iter(finality_fields.values())), str)
+                and next(iter(finality_fields.values())).strip().casefold() == "final"
             )
             if partial_final_text and status == "final":
                 return status

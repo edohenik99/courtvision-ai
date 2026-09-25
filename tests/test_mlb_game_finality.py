@@ -62,8 +62,9 @@ def test_missing_unknown_conflicting_and_code_corroboration(status, state):
 
 
 @pytest.mark.parametrize("key", ["abstractGameState", "detailedState"])
-def test_partial_literal_final_only_checks_existing_caller_bound_status(key):
-    status = {key: "Final"}
+@pytest.mark.parametrize("metadata", [{}, {"startTimeTBD": False}, {"reason": "Rain", "startTimeTBD": False}])
+def test_partial_literal_final_only_checks_existing_caller_bound_status(key, metadata):
+    status = {**metadata, key: "Final"}
     event = EventIdentity("824295", "fixture", IdentityStatus.RESOLVED, "824295")
     assert classify_game_finality(status).canonical_state == "AMBIGUOUS"
     assert validate_boxscore_binding({"status": status}, event, "final") == "final"
@@ -73,9 +74,22 @@ def test_partial_literal_final_only_checks_existing_caller_bound_status(key):
         validate_boxscore_binding({"status": {key: "Completed Early"}}, event, "final")
 
 
-def test_partial_abstract_final_never_qualifies_provider_acquisition(tmp_path):
+@pytest.mark.parametrize("key", ["abstractGameState", "detailedState"])
+@pytest.mark.parametrize("extra", [
+    {"codedGameState": "I"}, {"statusCode": "FX"}, {"abstractGameCode": None},
+])
+def test_partial_final_with_metadata_does_not_ignore_finality_fields(key, extra):
+    status = {"startTimeTBD": False, key: "Final", **extra}
+    event = EventIdentity("824295", "fixture", IdentityStatus.RESOLVED, "824295")
+    assert not classify_game_finality(status).is_final
+    with pytest.raises(ValueError, match="conflicts"):
+        validate_boxscore_binding({"status": status}, event, "final")
+
+
+@pytest.mark.parametrize("metadata", [{}, {"startTimeTBD": False, "reason": "Rain"}])
+def test_partial_abstract_final_never_qualifies_provider_acquisition(tmp_path, metadata):
     row = early_game()
-    row["status"] = {"abstractGameState": "Final"}
+    row["status"] = {"abstractGameState": "Final", **metadata}
     provider = Provider([row])
     result, _ = job(tmp_path, fetch=False, materialize=False)
     with pytest.raises(BackfillError, match="unresolved finality"):
