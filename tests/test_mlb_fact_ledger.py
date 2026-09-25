@@ -136,6 +136,7 @@ def test_identity_cannot_escape_store(tmp_path, role, game_id, player_id):
 
 def test_reparse_point_detected_before_write(tmp_path, monkeypatch):
     store = MLBFactStore(tmp_path)
+    monkeypatch.setattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", 0xA0000003, raising=False)
     original = Path.lstat
     def junction_stat(path, *args, **kwargs):
         if path.name == "batter":
@@ -155,6 +156,13 @@ def test_store_does_not_require_path_is_junction(tmp_path, monkeypatch):
     path = store.publish(batter())
     assert store.read("BATTER", "823100", "700001") == batter()
     assert store.publish(batter()) == path
+
+
+def test_store_without_windows_reparse_tag_constant(tmp_path, monkeypatch):
+    monkeypatch.delattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", raising=False)
+    store = MLBFactStore(tmp_path / "new-store")
+    store.publish(batter())
+    assert store.read("BATTER", "823100", "700001") == batter()
 
 
 def test_junction_inspection_permission_error_fails_closed(tmp_path, monkeypatch):

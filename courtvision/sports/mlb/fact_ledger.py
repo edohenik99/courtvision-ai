@@ -26,8 +26,10 @@ class FactLedgerConflict(ValueError):
 def _is_junction(path: Path) -> bool:
     # Path.is_junction is unavailable on supported Python 3.11. lstat exposes
     # the Windows mount-point tag without following the junction itself.
+    mount_point_tag = getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", None)
     try:
-        return getattr(path.lstat(), "st_reparse_tag", None) == stat.IO_REPARSE_TAG_MOUNT_POINT
+        result = path.lstat()
+        return mount_point_tag is not None and getattr(result, "st_reparse_tag", None) == mount_point_tag
     except (FileNotFoundError, NotADirectoryError):
         return False
 
