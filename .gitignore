@@ -54,6 +54,9 @@ test_outputs/
 # CourtVision local manual MLB scratch data
 data/manual/
 
+# Canonical MLB factual ledgers (generated locally, never source code)
+/data/mlb/facts/
+
 # The Odds API live MLB HR collector artifacts
 data/theoddsapi/live_hr_snapshots/automation_logs/
 data/theoddsapi/live_hr_snapshots/final_automation_logs/

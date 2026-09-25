@@ -13,17 +13,21 @@ import hashlib
 import io
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 from courtvision.core.candidates import IdentityStatus
 from courtvision.sports.mlb.data.prospective_context_acquisition import AcquisitionResult, parse_mlb_schedule
 from courtvision.sports.mlb.hits_acquisition import (
-    captured_hits_source, materialize_acquired_hits_evidence, resolve_hits_player_from_capture,
+    captured_hits_source, materialize_sovereign_hits_evidence, resolve_hits_player_from_capture,
 )
+from courtvision.sports.mlb.fact_ledger import MLBFactStore
+from courtvision.sports.mlb.hits_season_ledger import LEGACY_HITS_SEASON_SOURCE, HitsLedgerError, coverage_from_bytes
 from courtvision.sports.mlb.hits_identity import bind_mlb_events
 from courtvision.sports.mlb.providers.the_odds_api_market_adapter import normalize_mlb_event_odds
 from courtvision.sports.mlb.research_preview import (
     HITS_LIMITATION, MODEL_ID, MODEL_VERSION, OPERATING_TIMEZONE,
+    LEGACY_HITS_PROVENANCE_UNQUALIFIED, LEGACY_PREVIEW_SCHEMA_VERSION, PREVIEW_SCHEMA_VERSION,
     MLBResearchPreviewRow, hits_failure_reason, hits_source_row, preview_hits_evidence,
     preview_availability, preview_hr_prediction, preview_summary, sort_preview_rows, timestamp, unavailable_row,
 )
@@ -40,11 +44,12 @@ def _json(path: Path) -> dict:
     return value
 
 
-def _local_path(value: str, root: Path) -> Path:
+def _local_path(value: str, root: Path, *, resolve: bool = True) -> Path:
     path = Path(value)
     if path.drive.startswith("\\\\") or str(path).startswith(("//", "\\\\")) or "://" in value:
         raise ValueError("only local filesystem sources are supported")
-    return (path if path.is_absolute() else root / path).resolve()
+    local = path if path.is_absolute() else root / path
+    return local.resolve() if resolve else local.absolute()
 
 
 def _capture(path: Path) -> AcquisitionResult:
@@ -56,12 +61,13 @@ def load_hits_sources(path: Path, day: str, *, generated_at: datetime) -> list[M
     """Consume an index of preserved odds and existing acquisition manifests.
 
     Index: schema_version, operating_date, odds {path, collected_at}, schedule
-    {manifest, request_id}, game_feeds {gamePk: manifest}, seasons {playerId:
-    manifest}. All paths are local, relative to the index or absolute. The clock
+    {manifest, request_id}, game_feeds {gamePk: manifest}, ledger {root, coverage:
+    {gamePk: {playerId: coverage_manifest}}}. Legacy seasons entries are ignored.
+    All paths are local, relative to the index or absolute. The clock
     used for new probabilities is the actual run clock, never a replay override.
     """
     index = _json(path)
-    if index.get("schema_version") != "mlb-hits-preview-sources-v1" or index.get("operating_date") != day:
+    if index.get("schema_version") not in {"mlb-hits-preview-sources-v1", "mlb-hits-preview-sources-v2"} or index.get("operating_date") != day:
         raise ValueError("Hits sources index schema/date mismatch")
     odds = index["odds"]
     odds_path = _local_path(odds["path"], path.parent)
@@ -101,13 +107,29 @@ def load_hits_sources(path: Path, day: str, *, generated_at: datetime) -> list[M
                 rows.append(replace(base, block_reason=stage, identity_status=player.participant_identity.identity_status.value))
                 continue
             base = replace(base, player_id=player.mlbam_player_id, identity_status="resolved")
-            stage = "SEASON_EVIDENCE_UNAVAILABLE"
-            season = _capture(_local_path(index["seasons"][player.mlbam_player_id], path.parent))
-            acquired = materialize_acquired_hits_evidence(player, season=date.fromisoformat(day).year,
-                                                          game_feed_capture=feed, season_capture=season)
-            rows.append(preview_hits_evidence(source, acquired, generated_at=generated_at))
+            stage = "COURTVISION_LEDGER_MISSING"
+            ledger = index.get("ledger")
+            if not ledger:
+                raise HitsLedgerError(stage, "CourtVision season ledger is not populated")
+            manifest_path = _local_path(ledger["coverage"][event.mlbam_game_id][player.mlbam_player_id], path.parent)
+            if not manifest_path.is_file():
+                raise HitsLedgerError(stage, "CourtVision season coverage manifest is not populated")
+            stage = "COURTVISION_LEDGER_CONFLICT"
+            coverage = coverage_from_bytes(manifest_path.read_bytes())
+            store = MLBFactStore(_local_path(ledger["root"], path.parent, resolve=False))
+            acquired = materialize_sovereign_hits_evidence(player, game_feed_capture=feed,
+                fact_store=store, coverage=coverage)
+            row = preview_hits_evidence(source, acquired, generated_at=generated_at)
+            # Persist compact locators alongside content hashes so a saved row
+            # can reconstruct its aggregate without embedding every game fact.
+            rows.append(replace(row, source_refs=(*row.source_refs,
+                f"cv-ledger-coverage-manifest:{manifest_path}", f"cv-ledger-store:{store.root}",
+                f"hits-source-index:{path.absolute()}")))
+        except HitsLedgerError as exc:
+            rows.append(replace(base, block_reason=exc.state, block_detail=str(exc)))
         except (ValueError, KeyError, OSError, TypeError) as exc:
-            rows.append(replace(base, block_reason=hits_failure_reason(str(exc), stage), block_detail=str(exc)))
+            reason = stage if stage.startswith("COURTVISION_LEDGER_") else hits_failure_reason(str(exc), stage)
+            rows.append(replace(base, block_reason=reason, block_detail=str(exc)))
     return rows
 
 
@@ -139,6 +161,7 @@ def load_preserved_hits_rejection(path: Path, day: str) -> MLBResearchPreviewRow
         model_id=MODEL_ID, model_version=MODEL_VERSION, evidence_cutoff=manifest["evidence_cutoff"],
         source_refs=(str(path),), identity_status="resolved", event_status="resolved",
         lineup_status=lineup["lineup_status"], limitation_status=HITS_LIMITATION,
+        season_source=LEGACY_HITS_SEASON_SOURCE,
     )
 
 
@@ -187,21 +210,13 @@ def build_local_preview(
     hits_path = hits_sources or repository_root / "outputs" / "research" / "mlb_hits" / day / "sources.json"
     try:
         if hits_path.is_file():
-            payload = _json(hits_path)
-            if payload.get("schema_version") == "cv-oct3a-r4-qualification-manifest-v1":
-                rows.append(load_preserved_hits_rejection(hits_path, day))
-            else:
-                rows.extend(load_hits_sources(hits_path, day, generated_at=now))
+            rows.extend(load_hits_sources(hits_path, day, generated_at=now))
         elif hits_sources is not None:
             rows.append(unavailable_row(day, "batter_hits", "HITS_SOURCE_NOT_FOUND", refs=(str(hits_path),)))
         else:
-            matches = []
-            for path in sorted(qualification_root.glob("CV-OCT.3A-R4/*/manifests/02_qualification_manifest.json")):
-                if _json(path).get("operating_date") == day:
-                    matches.append(path)
-            rows.extend(load_preserved_hits_rejection(p, day) for p in matches)
-            if not matches:
-                rows.append(unavailable_row(day, "batter_hits", "HITS_SOURCES_UNAVAILABLE", refs=(str(hits_path),)))
+            # Old provider-split rejections remain explicitly readable through
+            # load_preserved_hits_rejection, but cannot be a canonical fallback.
+            rows.append(unavailable_row(day, "batter_hits", "COURTVISION_LEDGER_MISSING", refs=(str(hits_path),)))
     except (ValueError, KeyError, TypeError, OSError) as exc:
         rows.append(replace(unavailable_row(day, "batter_hits", "HITS_SOURCE_INVALID", refs=(str(hits_path),)),
                             block_detail=str(exc)))
@@ -220,6 +235,11 @@ def build_local_preview(
 
 def write_preview(rows: list[MLBResearchPreviewRow], day: str, output_root: Path) -> tuple[Path, Path]:
     """Publish a new run. The summary is the completion marker; no overwrite."""
+    # Revalidate before creating files, including frozen objects changed outside
+    # their supported API. New publication never labels old rows as schema v2.
+    rows = [MLBResearchPreviewRow(**row.to_dict()) for row in rows]
+    if any(row.preview_schema_version != PREVIEW_SCHEMA_VERSION for row in rows):
+        raise ValueError("new preview publication requires the current schema")
     summary = preview_summary(rows, day)
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + "-" + uuid4().hex[:8]
     root = output_root.resolve() / day / run_id
@@ -250,6 +270,9 @@ def load_preview_board(output_root: Path, day: str) -> tuple[list[MLBResearchPre
         return rows, preview_summary(rows, day)
     summary_path = summaries[-1]
     summary = _json(summary_path)
+    schema = summary.get("preview_schema_version")
+    if schema not in {PREVIEW_SCHEMA_VERSION, LEGACY_PREVIEW_SCHEMA_VERSION}:
+        raise ValueError("unsupported persisted preview schema")
     expected_name = f"mlb_research_board_{day}.csv"
     if summary.get("board_filename") != expected_name or summary.get("operating_date") != day:
         raise ValueError("preview summary date/path mismatch")
@@ -257,9 +280,14 @@ def load_preview_board(output_root: Path, day: str) -> tuple[list[MLBResearchPre
     raw = board.read_bytes()
     if hashlib.sha256(raw).hexdigest() != summary.get("board_sha256"):
         raise ValueError("preview board integrity mismatch")
-    rows = []
-    for raw_row in csv.DictReader(io.StringIO(raw.decode("utf-8"))):
+    rows, original_views = [], []
+    reader = csv.DictReader(io.StringIO(raw.decode("utf-8")))
+    if not reader.fieldnames or len(reader.fieldnames) != len(set(reader.fieldnames)):
+        raise ValueError("invalid preview CSV header")
+    for raw_row in reader:
         data = {key: value if value != "" else None for key, value in raw_row.items()}
+        if data.get("preview_schema_version") != schema:
+            raise ValueError("preview row/summary schema mismatch")
         for key in ("research_only", "eligible_for_betting", "kelly_eligible"):
             if data[key] not in {"True", "False"}:
                 raise ValueError("invalid preview safety flag")
@@ -267,22 +295,41 @@ def load_preview_board(output_root: Path, day: str) -> tuple[list[MLBResearchPre
         for key in ("line", "market_implied_probability", "model_probability", "projected_at_bats"):
             if data[key] is not None:
                 data[key] = float(data[key])
-        for key in ("american_odds", "season_hits", "season_at_bats"):
-            if data[key] is not None:
+        for key in ("american_odds", "season_hits", "season_at_bats", "distinct_batting_games"):
+            if data.get(key) is not None:
                 data[key] = int(data[key])
-        data["source_refs"] = tuple(json.loads(data["source_refs"]))
-        rows.append(MLBResearchPreviewRow(**data))
-    recomputed = preview_summary(rows, day)
-    expected = recomputed
-    if "availability_schema_version" not in summary:
-        # Verify the original summary semantics before presenting the new view.
-        # Existing immutable artifacts are never rewritten or trusted unchecked.
-        expected = {key: value for key, value in recomputed.items() if key not in preview_availability(rows)}
+        refs = json.loads(data["source_refs"])
+        if not isinstance(refs, list):
+            raise ValueError("preview source refs must be a JSON array")
+        data["source_refs"] = tuple(refs)
+        presented = dict(data)
+        if (schema == LEGACY_PREVIEW_SCHEMA_VERSION and data["market_type"] == "batter_hits"
+                and data["prediction_status"] == "QUALIFIED_RESEARCH"):
+            # Historical qualification is not current sovereign qualification.
+            # Preserve bytes and declared metadata; never invent missing lineage.
+            probability = data.get("model_probability")
+            if probability is None or not 0 <= probability <= 1:
+                raise ValueError("invalid legacy preview probability")
+            presented.update(prediction_status="BLOCKED", model_probability=None,
+                probability_market_independence="NOT_TESTED",
+                block_reason=LEGACY_HITS_PROVENANCE_UNQUALIFIED,
+                block_detail="Legacy Hits provenance is not sovereign; saved v1 qualification is diagnostic only.")
+        row = MLBResearchPreviewRow(**presented)
+        rows.append(row)
+        # Private summary-only view, never a qualified MLBResearchPreviewRow.
+        # Defaults come from the validated presentation, original values from
+        # the parsed artifact. Verify its original counts before adapting them.
+        original_views.append(SimpleNamespace(**{**row.to_dict(), **data}))
+    expected = preview_summary(original_views, day)
+    expected["preview_schema_version"] = schema
+    if schema == LEGACY_PREVIEW_SCHEMA_VERSION and "availability_schema_version" not in summary:
+        expected = {key: value for key, value in expected.items() if key not in preview_availability(original_views)}
         expected["status"] = "MLB_PREVIEW_SOURCE_DATA_UNAVAILABLE" if any(
-            row.prediction_status == "UNAVAILABLE" for row in rows) else "MLB_PREVIEW_RESEARCH_ONLY"
+            row.prediction_status == "UNAVAILABLE" for row in original_views) else "MLB_PREVIEW_RESEARCH_ONLY"
     if any(summary.get(key) != value for key, value in expected.items()):
         raise ValueError("preview summary content mismatch")
-    return rows, {**summary, **recomputed, "board_path": str(board), "summary_path": str(summary_path)}
+    return rows, {**summary, **preview_summary(rows, day), "source_preview_schema_version": schema,
+                  "board_path": str(board), "summary_path": str(summary_path)}
 
 
 def main(argv: list[str] | None = None) -> int:

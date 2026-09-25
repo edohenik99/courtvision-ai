@@ -57,6 +57,15 @@ class BatterBattingResult:
     at_bats: int | None
     hits: int | None
     normalized_player_name: str = field(init=False)
+    plate_appearances: int | None = None
+    doubles: int | None = None
+    triples: int | None = None
+    home_runs: int | None = None
+    walks: int | None = None
+    strikeouts: int | None = None
+    runs: int | None = None
+    rbi: int | None = None
+    has_batting_stats: bool = False
 
     def __post_init__(self) -> None:
         if self.mlb_player_id is not None and _mlb_id(self.mlb_player_id) != self.mlb_player_id:
@@ -67,7 +76,8 @@ class BatterBattingResult:
             raise ValueError("player_name must have a normalized comparison key")
         if self.side not in {None, "home", "away"}:
             raise ValueError("side must be home, away, or unavailable")
-        for key in ("at_bats", "hits"):
+        for key in ("at_bats", "hits", "plate_appearances", "doubles", "triples",
+                    "home_runs", "walks", "strikeouts", "runs", "rbi"):
             value = getattr(self, key)
             if value is not None and _count(value) is None:
                 raise ValueError(f"{key} must be a nonnegative integer or unavailable")
@@ -75,6 +85,16 @@ class BatterBattingResult:
             raise ValueError("hits cannot exceed at_bats")
         object.__setattr__(self, "player_name", name)
         object.__setattr__(self, "normalized_player_name", normalized)
+        if type(self.has_batting_stats) is not bool:
+            raise ValueError("has_batting_stats must be bool")
+
+    @property
+    def singles(self) -> int | None:
+        components = (self.hits, self.doubles, self.triples, self.home_runs)
+        if any(value is None for value in components):
+            return None
+        value = self.hits - self.doubles - self.triples - self.home_runs
+        return value if value >= 0 else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,17 +174,10 @@ class BatterHitsResultEvidence:
         return None if self.actual_hits is None else self.actual_hits >= 1
 
 
-def extract_batting_results(
-    payload: Mapping[str, object], *, event_identity: EventIdentity,
-    game_status: str, observed_at: datetime, source_refs: tuple[str, ...],
-) -> BattingBoxscoreEvidence:
-    """Extract supplied StatsAPI-like ``teams/{side}/players`` roster evidence.
-
-    The caller must explicitly bind the source event to ``event_identity``. If
-    ``gamePk`` is present, a matching canonical event ID is required; the raw ID
-    is never treated as a cross-provider event mapping. Conflicting embedded
-    status cannot override the supplied finality evidence.
-    """
+def validate_boxscore_binding(
+    payload: Mapping[str, object], event_identity: EventIdentity, game_status: str,
+) -> str:
+    """Share the existing explicit game identity/finality checks with fact adapters."""
     payload = _mapping(payload)
     if not isinstance(event_identity, EventIdentity):
         raise TypeError("event_identity must be EventIdentity")
@@ -193,6 +206,20 @@ def extract_batting_results(
             if any(embedded_status[key] != "F" for key in ("codedGameState", "statusCode")
                    if key in embedded_status):
                 raise ValueError("embedded status code conflicts with supplied finality")
+    return status
+
+
+def extract_batting_results(
+    payload: Mapping[str, object], *, event_identity: EventIdentity,
+    game_status: str, observed_at: datetime, source_refs: tuple[str, ...],
+) -> BattingBoxscoreEvidence:
+    """Extract supplied StatsAPI-like roster evidence, never infer event or finality.
+
+    Missing/invalid counts remain unavailable. Additional counts do not change
+    the existing hits resolution policy. Roster-only rows remain inspectable.
+    """
+    payload = _mapping(payload)
+    status = validate_boxscore_binding(payload, event_identity, game_status)
     batters = []
     teams = _mapping(payload.get("teams"))
     for side in ("away", "home"):
@@ -206,7 +233,15 @@ def extract_batting_results(
             at_bats, hits = _count(batting.get("atBats")), _count(batting.get("hits"))
             if at_bats is not None and hits is not None and hits > at_bats:
                 hits = None
-            batters.append(BatterBattingResult(_mlb_id(person.get("id")), name, side, at_bats, hits))
+            extra = {target: _count(batting.get(source)) for target, source in (
+                ("plate_appearances", "plateAppearances"), ("doubles", "doubles"),
+                ("triples", "triples"), ("home_runs", "homeRuns"), ("walks", "baseOnBalls"),
+                ("strikeouts", "strikeOuts"), ("runs", "runs"), ("rbi", "rbi"),
+            )}
+            batters.append(BatterBattingResult(
+                _mlb_id(person.get("id")), name, side, at_bats, hits,
+                **extra, has_batting_stats=bool(batting),
+            ))
     return BattingBoxscoreEvidence(event_identity, status, observed_at, source_refs, tuple(batters))
 
 
@@ -279,4 +314,5 @@ def resolve_batter_hits_result(
 __all__ = [
     "BatterBattingResult", "BattingBoxscoreEvidence", "BattingResolutionState",
     "BatterHitsResultEvidence", "extract_batting_results", "resolve_batter_hits_result",
+    "validate_boxscore_binding",
 ]
