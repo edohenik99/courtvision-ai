@@ -206,6 +206,100 @@ def test_resume_conflict_stops_before_provider_calls(tmp_path):
     assert len(provider.calls) == before
 
 
+@pytest.mark.parametrize("operation", ["fetch", "resume"])
+@pytest.mark.parametrize("conflict_index", [0, 1], ids=["first-game", "second-game"])
+@pytest.mark.parametrize("role,change", [
+    ("GAME", {"final_home_runs": 10}),
+    ("BATTER", {"hits": 2}),
+    ("PITCHER", {"strikeouts": 4}),
+])
+def test_acquisition_conflict_checkpoints_before_stopping_requests(
+    tmp_path, operation, conflict_index, role, change,
+):
+    rows = [game(), game(823102), game(823103)]
+    provider = Provider(rows)
+    result, _ = job(tmp_path / "acquisition", provider=provider, fetch=False, materialize=False)
+    # The schedule is already preserved, so this execution counts game requests only.
+    result.journal.capture(result._request(), provider)
+    result.reconcile_inventory()
+    before = len(provider.calls)
+    assert provider.calls == ["regular-season-inventory"]
+    preserved = {p: p.read_bytes() for p in result.journal.root.rglob("*") if p.is_file()}
+
+    seed, _ = job(tmp_path / "existing", provider=Provider([rows[conflict_index]]), materialize=False)
+    seed_facts = seed._expected(seed.inventory()["games"][0], seed.journal.records())
+    conflicting = replace(next(f for f in seed_facts if f.role == role), **change)
+    fact_path = result.store.publish(conflicting)
+    original_fact = fact_path.read_bytes()
+    conflict_id = str(rows[conflict_index]["gamePk"])
+    request_ids = [f'final-feed-{r["gamePk"]}' for r in rows]
+
+    with pytest.raises(FactLedgerConflict):
+        getattr(result, operation)(provider)
+
+    # Read disk before invoking verify: the exception must follow durable publication.
+    checkpoint = read_document(sorted((result.root / "manifests").glob("*.json"))[-1])
+    assert checkpoint["status"] == "CONFLICT"
+    assert checkpoint["conflict_count"] == 1
+    assert checkpoint["failed_game_pks"] == [conflict_id]
+    assert checkpoint["errors"] == {conflict_id: "FactLedgerConflict"}
+    assert provider.calls[before:] == request_ids[:conflict_index + 1]
+    assert len(provider.calls) - before == conflict_index + 1
+    assert checkpoint["provider_request_count"] == len(provider.calls)
+    assert fact_path.read_bytes() == original_fact
+    assert all(p.read_bytes() == raw for p, raw in preserved.items())
+
+    records = result.journal.records()
+    assert [r["claim"]["request_id"] for r in records] == provider.calls
+    assert all(r["response"] is not None for r in records)
+    for record in records:
+        body = result.journal.root / f'{record["claim"]["sequence"]:06d}' / "body.bin"
+        assert hashlib.sha256(body.read_bytes()).hexdigest() == record["response"]["sha256"]
+    conflict_record = result._successful(records, conflict_id)
+    conflict_body = result.journal.root / f'{conflict_record["claim"]["sequence"]:06d}' / "body.bin"
+    assert conflict_body.read_bytes() == json.dumps(provider.values[f"final-feed-{conflict_id}"], indent=2).encode()
+    for row in rows[conflict_index + 1:]:
+        game_id = str(row["gamePk"])
+        assert result._successful(records, game_id) is None
+        assert game_id in checkpoint["expected_final_game_pks"]
+        assert game_id not in checkpoint["completed_game_pks"] + checkpoint["failed_game_pks"]
+
+    # Fresh instances must reject the persisted conflict at both entry gates.
+    calls_at_conflict = list(provider.calls)
+    raw_at_conflict = {p: p.read_bytes() for p in result.journal.root.rglob("*") if p.is_file()}
+    for restart_operation in ("fetch", "resume"):
+        fresh = MLBFactBackfill(result.store.root, result.plan.backfill_id)
+        with pytest.raises(FactLedgerConflict):
+            getattr(fresh, restart_operation)(provider)
+        assert provider.calls == calls_at_conflict
+        assert fresh.verify()["status"] == "CONFLICT"
+    with pytest.raises(FactLedgerConflict):
+        result.materialize()
+    assert {p: p.read_bytes() for p in result.journal.root.rglob("*") if p.is_file()} == raw_at_conflict
+    assert fact_path.read_bytes() == original_fact
+
+
+def test_acquisition_identical_facts_skip_and_missing_games_continue(tmp_path):
+    provider = Provider([game(), game(823102), game(823103)])
+    result, _ = job(tmp_path, provider=provider, fetch=False, materialize=False)
+    result.journal.capture(result._request(), provider)
+    result.reconcile_inventory()
+    result.journal.capture(result._request("823100"), provider)
+    assert result.materialize()["status"] == "PARTIAL"
+    first_facts = {p: p.read_bytes() for role in ("game", "batter", "pitcher")
+                   for p in (result.store.root / role).rglob("*.json")}
+    before = len(provider.calls)
+    state = result.resume(provider)
+    assert provider.calls[before:] == ["final-feed-823102", "final-feed-823103"]
+    assert state["status"] == "COMPLETE" and state["conflict_count"] == 0
+    assert (state["game_fact_count"], state["batter_fact_count"], state["pitcher_fact_count"]) == (3, 6, 6)
+    assert all(p.read_bytes() == raw for p, raw in first_facts.items())
+    assert len(provider.calls) == result.plan.max_provider_requests == 4
+    fresh = MLBFactBackfill(result.store.root, result.plan.backfill_id)
+    assert fresh.resume(provider)["status"] == "COMPLETE"
+    assert len(provider.calls) == 4
+
+
 def test_resume_missing_facts_uses_preserved_evidence(tmp_path):
     result, provider = job(tmp_path, materialize=False)
     row = result.inventory()["games"][0]
