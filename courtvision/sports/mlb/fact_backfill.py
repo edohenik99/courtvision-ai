@@ -16,6 +16,7 @@ from pathlib import Path
 import re
 
 from courtvision.core.candidates import EventIdentity, IdentityStatus
+from courtvision.sports.mlb.batting_results import validate_boxscore_binding
 from courtvision.sports.mlb.data.prospective_context_acquisition import EvidenceRequest, ProviderResponse
 from courtvision.sports.mlb.fact_backfill_evidence import (
     BASE, SCHEMA, BackfillError, EvidenceJournal, StatsAPIProvider, digest,
@@ -26,6 +27,7 @@ from courtvision.sports.mlb.game_facts import (
     MLBBatterGameFact, canonical_json, extract_game_fact, extract_player_game_facts,
 )
 from courtvision.sports.mlb.hits_season_ledger import BatterFactReference, BatterLedgerCoverage
+from courtvision.sports.mlb.game_finality import classify_game_finality
 from courtvision.sports.mlb.schedule_revisions import (
     SCHEDULE_REVISION_POLICY_VERSION, resolve_schedule_responses, selected_schedule_game_payload,
 )
@@ -38,10 +40,12 @@ def provider_id(value: object) -> str:
 
 
 def is_final(status: dict) -> bool:
-    return (status.get("abstractGameState") == "Final"
-        and status.get("detailedState") == "Final"
-        and status.get("codedGameState") == "F"
-        and status.get("statusCode", "F") == "F")
+    return classify_game_finality(status).is_final
+
+
+def eligible_final(row: dict) -> bool:
+    """Revalidate provider evidence; a persisted eligibility hint is not authority."""
+    return row["canonical_final"] and is_final(row["status"])
 
 
 @dataclass(frozen=True)
@@ -110,7 +114,7 @@ def schedule_inventory(
             "home_team_id": home, "away_team_id": away,
             "status": game["status"], "in_requested_window": in_window,
             "canonical_final": in_window and selected["is_final"],
-            "eligible_final": in_window and selected["is_final"] and is_final(game["status"]),
+            "eligible_final": in_window and selected["is_final"],
             "source_game": game, "reconciliation": resolution,
             "selected_source_response_hash": selected["source_response_digest"]})
     return {"schema_version": SCHEMA, "window_start": start, "window_end": end,
@@ -121,11 +125,13 @@ def schedule_inventory(
 
 def facts_from_feed(row: dict, feed: dict, schedule_record: dict, feed_record: dict):
     """Bind both provider finalities and identities before calling core extraction."""
-    if not row["eligible_final"] or not is_final(row["status"]):
+    if not eligible_final(row):
         raise BackfillError("non-final schedule game cannot be materialized")
     game_id = row["gamePk"]
     if provider_id(feed.get("gamePk")) != game_id:
         raise BackfillError("feed game identity mismatch")
+    event = EventIdentity(game_id, "mlb_statsapi_final", IdentityStatus.RESOLVED, game_id)
+    validate_boxscore_binding(feed, event, "final")
     data = feed["gameData"]
     if not is_final(data["status"]):
         raise BackfillError("feed is not explicitly final")
@@ -161,7 +167,7 @@ def facts_from_feed(row: dict, feed: dict, schedule_record: dict, feed_record: d
     refs = (source_ref(schedule_record), source_ref(feed_record),
             f"cv-schedule-reconciliation:{SCHEDULE_REVISION_POLICY_VERSION}:sha256:{digest(row['reconciliation'])}")
     game = extract_game_fact(row["source_game"],
-        event_identity=EventIdentity(game_id, "mlb_statsapi_final", IdentityStatus.RESOLVED, game_id),
+        event_identity=event,
         game_date=date.fromisoformat(row["officialDate"]), game_status="final",
         observed_at=observed, source_refs=refs)
     players = extract_player_game_facts(box, game=game, observed_at=observed, source_refs=refs)
@@ -295,7 +301,20 @@ class MLBFactBackfill:
             raise BackfillError("inventory has no successful provider schedule")
         derived = self._inventory_document(record)
         if saved != derived:
-            raise BackfillError("inventory differs from preserved schedule")
+            # 01A inventories retained a stricter, now superseded eligibility
+            # hint. Permit only false -> proven true; verify every other byte of
+            # their logical content against the same preserved provider source.
+            # Return the original document so manifests/fact provenance keep
+            # their immutable hashes. All consumers reclassify status evidence.
+            comparable = dict(derived)
+            comparable["games"] = [dict(row) for row in derived["games"]]
+            if len(saved.get("games", [])) != len(comparable["games"]):
+                raise BackfillError("inventory differs from preserved schedule")
+            for old, current in zip(saved["games"], comparable["games"]):
+                if old.get("eligible_final") is False and current["eligible_final"] is True:
+                    current["eligible_final"] = False
+            if saved != comparable:
+                raise BackfillError("inventory differs from preserved schedule")
         return saved
 
     def _inventory_document(self, record):
@@ -335,6 +354,11 @@ class MLBFactBackfill:
         rows = self._pilot_rows(inv) if inv is not None else []
         final = [r for r in rows if r["canonical_final"]]
         completed, failed, conflicts, errors = [], [], 0, {}
+        for row in rows:
+            finality = classify_game_finality(row["status"])
+            if finality.canonical_state in {"AMBIGUOUS", "CONFLICT"}:
+                failed.append(row["gamePk"])
+                errors[row["gamePk"]] = "FINALITY_" + finality.canonical_state
         counts = {"GAME": 0, "BATTER": 0, "PITCHER": 0}
         if inv is None:
             schedule = self._successful(records, None)
@@ -345,7 +369,7 @@ class MLBFactBackfill:
                     errors["schedule_inventory"] = (
                         str(exc) if isinstance(exc, BackfillError) else type(exc).__name__)
         for row in final:
-            if not row["eligible_final"]:
+            if not eligible_final(row):
                 failed.append(row["gamePk"])
                 errors[row["gamePk"]] = "CANONICAL_FACT_FINALITY_UNSUPPORTED"
                 continue
@@ -406,7 +430,8 @@ class MLBFactBackfill:
             schedule = self._successful(self.journal.records(), None)
             if schedule is None:
                 raise BackfillError("reconciliation requires preserved schedule evidence")
-            publish_document(self.root / "inventory.json", self._inventory_document(schedule))
+            if self.inventory() is None:
+                publish_document(self.root / "inventory.json", self._inventory_document(schedule))
             return self._checkpoint()
 
     def fetch(self, provider):
@@ -424,15 +449,19 @@ class MLBFactBackfill:
                     self._checkpoint()
                     raise
             try:
-                publish_document(self.root / "inventory.json", self._inventory_document(schedule))
+                if self.inventory() is None:
+                    publish_document(self.root / "inventory.json", self._inventory_document(schedule))
             except (ValueError, TypeError, KeyError):
                 self._checkpoint()
                 raise
             self._checkpoint()
-            if any(r["canonical_final"] and not r["eligible_final"] for r in self._pilot_rows(self.inventory())):
+            if any(classify_game_finality(r["status"]).canonical_state in {"AMBIGUOUS", "CONFLICT"}
+                   for r in self._pilot_rows(self.inventory())):
+                raise BackfillError("pilot contains unresolved finality")
+            if any(r["canonical_final"] and not eligible_final(r) for r in self._pilot_rows(self.inventory())):
                 raise BackfillError("pilot contains unsupported canonical fact finality")
             for row in self._pilot_rows(self.inventory()):
-                if not row["eligible_final"]:
+                if not eligible_final(row):
                     continue
                 records = self.journal.records()
                 if self._successful(records, row["gamePk"]) is not None:
@@ -463,7 +492,7 @@ class MLBFactBackfill:
             # Preflight the whole available batch before any record is published.
             batch = []
             for row in self._pilot_rows(inv):
-                if row["eligible_final"]:
+                if eligible_final(row):
                     facts = self._expected(row, records)
                     if facts is not None:
                         for fact in facts:
@@ -493,6 +522,8 @@ class MLBFactBackfill:
         if inv is None or not self.plan.inventory_start <= through <= self.plan.inventory_end:
             raise BackfillError("coverage date is outside the preserved inventory")
         rows = [r for r in inv["games"] if r["canonical_final"] and r["officialDate"] <= through]
+        unresolved = [r["gamePk"] for r in inv["games"] if r["officialDate"] <= through
+                      and classify_game_finality(r["status"]).canonical_state in {"AMBIGUOUS", "CONFLICT"}]
         records, players, unknown, invalid, missing = self.journal.records(), {}, [], [], []
         for row in rows:
             facts = self._expected(row, records)
@@ -510,12 +541,13 @@ class MLBFactBackfill:
                 players.setdefault(fact.mlbam_player_id, []).append({
                     "gamePk": fact.mlbam_game_id, "factual_record_hash": fact.factual_record_hash,
                     "valid_ab_h": valid, "ledger_match": self._matches(fact)})
-        complete = (not unknown and not invalid and not missing and bool(rows)
+        complete = (not unresolved and not unknown and not invalid and not missing and bool(rows)
                     and all(r["ledger_match"] for refs in players.values() for r in refs))
         return {"schema_version": SCHEMA, "scope": "PRIOR_DATE_INVENTORY",
             "inventory_hash": digest(inv), "inventory_start": self.plan.inventory_start,
             "coverage_through": through, "expected_final_game_pks": [r["gamePk"] for r in rows],
             "unknown_participation_game_pks": unknown, "invalid_ab_h_records": invalid,
+            "unresolved_finality_game_pks": unresolved,
             "missing_ledger_game_pks": missing,
             "players": dict(sorted(players.items())), "complete": complete,
             "research_only": True, "full_season_hits_qualification": False}
@@ -588,7 +620,11 @@ class MLBFactBackfill:
             "full_backfill_estimated_requests": len(missing_feeds),
             "estimate_basis": "one feed per missing game; preserved schedule reused; no retries",
             "nonfinal_game_pks": [r["gamePk"] for r in inv["games"] if not r["canonical_final"]],
-            "unsupported_fact_finality_game_pks": [r["gamePk"] for r in rows if not r["eligible_final"]],
+            "unsupported_fact_finality_game_pks": [r["gamePk"] for r in rows if not eligible_final(r)],
+            "ambiguous_finality_game_pks": [r["gamePk"] for r in inv["games"]
+                if classify_game_finality(r["status"]).canonical_state == "AMBIGUOUS"],
+            "finality_conflict_game_pks": [r["gamePk"] for r in inv["games"]
+                if classify_game_finality(r["status"]).canonical_state == "CONFLICT"],
             "full_season_hits_qualification": False}
 
 

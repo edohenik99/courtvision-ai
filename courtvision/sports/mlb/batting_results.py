@@ -16,6 +16,7 @@ from enum import Enum
 from courtvision.core.candidates import EventIdentity, IdentityStatus, MarketCandidate
 from courtvision.core.probability import ThresholdDirection
 from courtvision.sports.mlb.player_name_normalization import normalize_mlb_player_name
+from courtvision.sports.mlb.game_finality import classify_game_finality
 
 
 def _text(value: object, name: str) -> str:
@@ -189,23 +190,30 @@ def validate_boxscore_binding(
         raise ValueError("payload gamePk requires matching canonical event identity")
     embedded_status = payload.get("status")
     if embedded_status is not None:
-        statuses = (
-            [embedded_status] if isinstance(embedded_status, str)
-            else [value for key, value in _mapping(embedded_status).items()
-                  if key in {"abstractGameState", "detailedState"}]
-        )
-        if not statuses:
-            raise ValueError("embedded status requires an explicit supported text status")
-        if any((_text(value, "embedded status").casefold() == "final") != (status == "final")
-               for value in statuses):
-            raise ValueError("embedded status conflicts with supplied finality")
-        # Codes never establish finality. When supplied alongside final text,
-        # only the explicit final code corroborates it; unknown or non-final
-        # codes must not be silently discarded as contradictory evidence.
-        if isinstance(embedded_status, Mapping) and status == "final":
-            if any(embedded_status[key] != "F" for key in ("codedGameState", "statusCode")
-                   if key in embedded_status):
-                raise ValueError("embedded status code conflicts with supplied finality")
+        if isinstance(embedded_status, str):
+            if (_text(embedded_status, "embedded status").casefold() == "final") != (status == "final"):
+                raise ValueError("embedded status conflicts with supplied finality")
+        else:
+            embedded_status = _mapping(embedded_status)
+            if not any(key in embedded_status for key in ("abstractGameState", "detailedState")):
+                raise ValueError("embedded status requires an explicit supported text status")
+            finality = classify_game_finality(embedded_status)
+            # Legacy caller-bound boxscores may contain just one literal Final
+            # text field, like the string form above. This checks consistency
+            # with the caller's explicit status; it does not classify that
+            # partial provider object as FINAL. Acquisition must separately
+            # establish corroborated finality from schedule/feed evidence.
+            partial_final_text = (
+                set(embedded_status) in ({"abstractGameState"}, {"detailedState"})
+                and isinstance(next(iter(embedded_status.values())), str)
+                and next(iter(embedded_status.values())).strip().casefold() == "final"
+            )
+            if partial_final_text and status == "final":
+                return status
+            if (finality.canonical_state in {"AMBIGUOUS", "CONFLICT"}
+                    or finality.is_final != (status == "final")):
+                raise ValueError("embedded status code conflicts with supplied finality: "
+                                 + finality.decision_reason)
     return status
 
 

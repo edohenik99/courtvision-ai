@@ -102,11 +102,35 @@ resolve to 2,385 canonical final games, with 29 revisions, zero exact duplicate
 states, and zero immutable conflicts. The original raw response and rejected
 manifest snapshots remain preserved; reconciliation adds a new snapshot.
 
-Two full-window games have `Completed Early` / `FR` final states accepted by
-the historical schedule policy but unsupported by the existing factual-core
-finality contract. They remain in expected coverage and request estimates;
-they are never silently treated as nonfinal or omitted to claim completeness.
-They block full-season readiness until separately resolved. No factual-core
-finality rule is loosened here. The March 25 pilot contains one supported
-Final/F game and remains bounded by the original three-game/four-request plan.
-Full-season acquisition requires a separate checkpoint regardless of pilot success.
+Follow-up 01B unifies schedule, historical Statcast, feed, and boxscore binding
+through `game_finality.classify_game_finality`. Its immutable result retains
+raw abstract/detailed/coded/status fields, a decision reason, and one of FINAL,
+NON_FINAL, AMBIGUOUS, or CONFLICT. Abstract Final must have recognized terminal
+detail (Final, Game Over, Completed Early) or an explicit F code. Contradictory,
+malformed, and unknown supplied fields fail closed; scores, innings, dates,
+and player stats never establish finality.
+
+The existing caller-bound bare boxscore API still accepts a string Final or a
+single literal Final text field as a consistency check against an explicit
+caller-supplied final status. The shared provider classifier keeps that partial
+mapping AMBIGUOUS; it cannot qualify schedule/feed acquisition. Completed Early
+text alone does not receive this compatibility treatment.
+
+Preserved games 824295 and 824807 both have abstractGameState=Final,
+detailedState=Completed Early, codedGameState=F, statusCode=FR. The detail and
+coded state corroborate abstract finality. FR is accepted only as the observed
+companion of this tuple, never as an independent terminal code or an acronym
+with an inferred meaning. Normalized facts still require game_status="final";
+raw status remains in hash-bound source/reconciliation provenance.
+
+Existing immutable inventories retain their original eligibility hints and
+hashes. A saved false hint may differ from newly proven true eligibility only
+when every other inventory field matches preserved source reconstruction.
+All operational consumers revalidate the status with the shared classifier;
+saved flags cannot grant admission. Changed identities, raw status, canonical
+selection, and true-to-false discrepancies still reject the inventory. Existing
+pilot fact hashes are unchanged. Ambiguous/conflicting selected states block
+pilot acquisition/materialization and remain explicit coverage/gap diagnostics.
+
+The March 25 pilot remains bounded by its original three-game/four-request plan.
+Full-season acquisition requires a separate checkpoint regardless of readiness.

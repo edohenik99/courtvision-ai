@@ -145,7 +145,7 @@ def test_conflicting_equal_state_scores_fail_closed():
         inventory(first, second)
 
 
-def test_unsupported_finality_is_not_omitted_from_expected_coverage(tmp_path):
+def test_completed_early_is_not_omitted_from_expected_coverage(tmp_path):
     early = game(823102, "2026-03-26")
     early["status"].update(detailedState="Completed Early", statusCode="FR")
     provider = Provider([game(), early])
@@ -153,19 +153,20 @@ def test_unsupported_finality_is_not_omitted_from_expected_coverage(tmp_path):
     gap = result.gap_report()
     assert gap["total_expected_final_games"] == 2
     assert gap["full_backfill_estimated_requests"] == 1
-    assert gap["unsupported_fact_finality_game_pks"] == ["823102"]
+    assert gap["unsupported_fact_finality_game_pks"] == []
     index = result.coverage_index(through="2026-03-26")
     assert not index["complete"]
     assert index["unknown_participation_game_pks"] == ["823102"]
 
 
-def test_unsupported_finality_in_pilot_blocks_before_game_feed(tmp_path):
+def test_completed_early_in_pilot_materializes_with_corroboration(tmp_path):
     early = game()
     early["status"].update(detailedState="Completed Early", statusCode="FR")
     provider = Provider([early])
     result, _ = job(tmp_path, fetch=False, materialize=False)
-    with pytest.raises(BackfillError, match="unsupported canonical fact finality"):
-        result.fetch(provider)
-    assert provider.calls == ["regular-season-inventory"]
+    result.fetch(provider)
+    result.materialize()
+    assert provider.calls == ["regular-season-inventory", "final-feed-823100"]
     assert result.verify()["expected_final_game_pks"] == ["823100"]
-    assert result.verify()["missing_count"] == 1
+    assert result.verify()["missing_count"] == 0
+    assert result.store.read("GAME", "823100").game_status == "final"

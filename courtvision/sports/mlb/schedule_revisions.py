@@ -9,32 +9,18 @@ from __future__ import annotations
 
 from datetime import date
 import json
-from typing import Final, Mapping, Sequence, TypeAlias
+from typing import Mapping, Sequence, TypeAlias
 from urllib.parse import parse_qs, urlparse
 
 from courtvision.sports.mlb.data.prospective_context_acquisition import (
     EvidenceRequest, ProviderResponse, ProspectiveAcquisitionError, parse_utc, utc_text,
 )
 from courtvision.sports.mlb.game_facts import canonical_json as _canonical_json, _digest as _value_digest
+from courtvision.sports.mlb.game_finality import classify_game_finality
 
 ScheduleObservation: TypeAlias = dict[str, object]
 ResolvedScheduleGame: TypeAlias = dict[str, object]
 SCHEDULE_REVISION_POLICY_VERSION = "cv_mlb_schedule_revisions_v1"
-
-_FINAL_DETAILED_STATES: Final = frozenset(
-    {"completed early", "final", "game over"}
-)
-_AMBIGUOUS_DETAILED_STATES: Final = frozenset(
-    {
-        "delayed",
-        "in progress",
-        "manager challenge",
-        "postponed",
-        "scheduled",
-        "suspended",
-        "warmup",
-    }
-)
 
 
 def _mlbam_id(value: object, field_name: str) -> str:
@@ -68,15 +54,13 @@ def _schedule_query_context(request: EvidenceRequest) -> dict[str, str | None]:
 
 
 def is_final_schedule_state(state: Mapping[str, object]) -> bool:
-    detailed = str(state.get("detailed_state") or "").strip().casefold()
-    abstract = str(state.get("abstract_state") or "").strip().casefold()
-    coded = str(state.get("coded_state") or "").strip().casefold()
-    status_code = str(state.get("status_code") or "").strip().casefold()
-    if detailed in _AMBIGUOUS_DETAILED_STATES:
-        return False
-    return abstract == "final" and (
-        detailed in _FINAL_DETAILED_STATES or coded == "f" or status_code == "f"
-    )
+    status = state.get("status_payload")
+    if status is None:
+        status = {provider: state[key] for key, provider in (
+            ("abstract_state", "abstractGameState"), ("detailed_state", "detailedState"),
+            ("coded_state", "codedGameState"), ("status_code", "statusCode"),
+        ) if state.get(key) not in (None, "")}
+    return classify_game_finality(status).is_final
 
 
 def schedule_state_rank(state: Mapping[str, object]) -> int:
