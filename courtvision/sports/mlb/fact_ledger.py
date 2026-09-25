@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import stat
 import tempfile
 
 from courtvision.sports.mlb.game_facts import (
@@ -22,9 +23,18 @@ class FactLedgerConflict(ValueError):
     """Existing identity has different content or fails integrity validation."""
 
 
+def _is_junction(path: Path) -> bool:
+    # Path.is_junction is unavailable on supported Python 3.11. lstat exposes
+    # the Windows mount-point tag without following the junction itself.
+    try:
+        return getattr(path.lstat(), "st_reparse_tag", None) == stat.IO_REPARSE_TAG_MOUNT_POINT
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+
+
 def _plain_path(path: Path) -> None:
     for part in (path, *path.parents):
-        if part.is_symlink() or part.is_junction():
+        if part.is_symlink() or _is_junction(part):
             raise ValueError("fact store does not accept symlinks or junctions")
 
 

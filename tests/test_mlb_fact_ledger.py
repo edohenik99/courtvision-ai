@@ -4,7 +4,9 @@ from dataclasses import replace
 import json
 import os
 from pathlib import Path
+import stat
 from threading import Barrier
+from types import SimpleNamespace
 
 import pytest
 
@@ -134,11 +136,54 @@ def test_identity_cannot_escape_store(tmp_path, role, game_id, player_id):
 
 def test_reparse_point_detected_before_write(tmp_path, monkeypatch):
     store = MLBFactStore(tmp_path)
-    original = Path.is_junction
-    monkeypatch.setattr(Path, "is_junction", lambda p: p.name == "batter" or original(p))
+    original = Path.lstat
+    def junction_stat(path, *args, **kwargs):
+        if path.name == "batter":
+            return SimpleNamespace(st_mode=stat.S_IFDIR, st_reparse_tag=stat.IO_REPARSE_TAG_MOUNT_POINT)
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "lstat", junction_stat)
     with pytest.raises(ValueError, match="symlinks or junctions"):
         store.publish(batter())
     assert not list(tmp_path.iterdir())
+
+
+def test_store_does_not_require_path_is_junction(tmp_path, monkeypatch):
+    def unavailable(*args, **kwargs):
+        raise AttributeError("Path.is_junction is unavailable on Python 3.11")
+    monkeypatch.setattr(Path, "is_junction", unavailable, raising=False)
+    store = MLBFactStore(tmp_path / "new-store")
+    path = store.publish(batter())
+    assert store.read("BATTER", "823100", "700001") == batter()
+    assert store.publish(batter()) == path
+
+
+def test_junction_inspection_permission_error_fails_closed(tmp_path, monkeypatch):
+    original = Path.lstat
+    def denied(path, *args, **kwargs):
+        if path == tmp_path:
+            raise PermissionError("junction inspection denied")
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "lstat", denied)
+    with pytest.raises(PermissionError, match="junction inspection denied"):
+        MLBFactStore(tmp_path)
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction containment")
+def test_real_windows_junction_is_rejected_without_writing_target(tmp_path):
+    import _winapi
+    target = tmp_path / "target"
+    target.mkdir()
+    alias = tmp_path / "junction"
+    _winapi.CreateJunction(str(target), str(alias))
+    with pytest.raises(ValueError, match="symlinks or junctions"):
+        MLBFactStore(alias / "nested")
+    store_root = tmp_path / "store"
+    store_root.mkdir()
+    _winapi.CreateJunction(str(target), str(store_root / "batter"))
+    with pytest.raises(ValueError, match="symlinks or junctions"):
+        MLBFactStore(store_root).publish(batter())
+    assert not list(target.iterdir())
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows extended path identity")
