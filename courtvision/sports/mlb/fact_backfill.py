@@ -415,12 +415,15 @@ class MLBFactBackfill:
             "research_only": True, "betting_enabled": False,
             "kelly_enabled": False, "official_pick_enabled": False}
 
-    def _checkpoint(self):
+    def _checkpoint(self, *, stop_on_conflict=False):
         history = self._history()
         state = self.verify()
         state.update(plan_hash=digest(self.plan_document),
                      previous_manifest_hash=digest(history[-1]) if history else None)
         publish_document(self.root / "manifests" / f"{len(history)+1:06d}.json", state)
+        # Acquisition must stop, but only after the conflict is durable.
+        if stop_on_conflict and state["conflict_count"]:
+            raise FactLedgerConflict("fetch stopped by canonical fact conflict")
         return state
 
     def reconcile_inventory(self):
@@ -435,7 +438,7 @@ class MLBFactBackfill:
             return self._checkpoint()
 
     def fetch(self, provider):
-        """Only missing captures; stop on the first provider error, never retry here."""
+        """Only missing captures; stop on provider errors or conflicts, never retry here."""
         with operation_lock(self.root):
             state = self.verify()
             if state["conflict_count"]:
@@ -454,7 +457,7 @@ class MLBFactBackfill:
             except (ValueError, TypeError, KeyError):
                 self._checkpoint()
                 raise
-            self._checkpoint()
+            self._checkpoint(stop_on_conflict=True)
             if any(classify_game_finality(r["status"]).canonical_state in {"AMBIGUOUS", "CONFLICT"}
                    for r in self._pilot_rows(self.inventory())):
                 raise BackfillError("pilot contains unresolved finality")
@@ -473,8 +476,8 @@ class MLBFactBackfill:
                 except (ValueError, TypeError, KeyError):
                     self._checkpoint()
                     raise
-                self._checkpoint()
-            return self._checkpoint()
+                self._checkpoint(stop_on_conflict=True)
+            return self._checkpoint(stop_on_conflict=True)
 
     def materialize(self):
         with operation_lock(self.root):
