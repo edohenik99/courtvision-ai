@@ -29,12 +29,25 @@ class MLBGameFinality:
         return self.canonical_state == "FINAL"
 
 
+def _detailed_state_parts(value: str) -> tuple[str, str | None]:
+    """Separate only the preserved Completed Early colon-space representation.
+
+    The qualifier is descriptive metadata, never a finality witness. Other
+    delimiter styles and empty qualifiers remain unrecognized.
+    """
+    base, separator, qualifier = value.strip().partition(": ")
+    if base.casefold() == "completed early" and separator and qualifier.strip():
+        return "completed early", qualifier.strip()
+    return value.strip().casefold(), None
+
+
 def classify_game_finality(status: Mapping[str, object]) -> MLBGameFinality:
     """Classify raw StatsAPI fields, retaining supplied values without rewriting.
 
     Abstract Final needs a recognized detailed terminal state or explicit F code.
     Every supplied field must be compatible. FR is only a retained companion of
     the preserved Final / Completed Early / F tuple, never a finality witness.
+    Reason-qualified Completed Early additionally requires codedGameState=F.
     Missing fields differ from explicitly malformed/blank fields.
     """
     if not isinstance(status, Mapping):
@@ -50,6 +63,7 @@ def classify_game_finality(status: Mapping[str, object]) -> MLBGameFinality:
         return result("AMBIGUOUS", "malformed_or_blank_status_field")
     abstract, detailed, coded, code, abstract_code = (
         value.strip().casefold() if isinstance(value, str) else "" for value in raw)
+    detailed, qualifier = _detailed_state_parts(raw[1] if isinstance(raw[1], str) else "")
     positive = (abstract == "final" or detailed in FINAL_DETAILED_STATES
                 or coded == "f" or code == "f" or abstract_code == "f")
     negative = (abstract in NONFINAL_DETAILED_STATES or detailed in NONFINAL_DETAILED_STATES
@@ -70,6 +84,8 @@ def classify_game_finality(status: Mapping[str, object]) -> MLBGameFinality:
         return result("AMBIGUOUS", "unrecognized_or_uncorroborated_status_code")
     if abstract != "final":
         return result("AMBIGUOUS", "abstract_final_required")
+    if qualifier is not None and coded != "f":
+        return result("AMBIGUOUS", "qualified_completed_early_requires_coded_final")
     witnesses = []
     if detailed in FINAL_DETAILED_STATES:
         witnesses.append("recognized_detailed_state")

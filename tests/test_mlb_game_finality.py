@@ -7,11 +7,11 @@ import pytest
 from courtvision.core.candidates import EventIdentity, IdentityStatus
 from courtvision.sports.mlb.batting_results import validate_boxscore_binding
 from courtvision.sports.mlb.data import prospective_statcast_history as history
-from courtvision.sports.mlb.fact_backfill import BackfillError
+from courtvision.sports.mlb.fact_backfill import BackfillError, facts_from_feed
 from courtvision.sports.mlb.fact_backfill_evidence import digest, publish_document
 from courtvision.sports.mlb.game_finality import classify_game_finality
 from courtvision.sports.mlb.schedule_revisions import is_final_schedule_state
-from test_mlb_fact_backfill import Provider, game, job, no_network, schedule, schedule_inventory
+from test_mlb_fact_backfill import Provider, feed, game, job, no_network, schedule, schedule_inventory
 
 
 # Verbatim statuses in preserved response d4f73550...4e7730c, captured
@@ -19,6 +19,13 @@ from test_mlb_fact_backfill import Provider, game, job, no_network, schedule, sc
 OBSERVED_STATUS = {
     "abstractGameState": "Final", "codedGameState": "F",
     "detailedState": "Completed Early", "statusCode": "FR",
+    "startTimeTBD": False, "reason": "Rain", "abstractGameCode": "F",
+}
+# Exact gameData.status from preserved final-feed-824295, journal sequence 119,
+# raw SHA-256 b4451223647424b0698668476148094e1d105bf113c674e19ec98efc3e51eee5.
+OBSERVED_QUALIFIED_STATUS = {
+    "abstractGameState": "Final", "codedGameState": "F",
+    "detailedState": "Completed Early: Rain", "statusCode": "FR",
     "startTimeTBD": False, "reason": "Rain", "abstractGameCode": "F",
 }
 OBSERVED_GAMES = [
@@ -31,6 +38,102 @@ def early_game():
     row = game()
     row["status"] = deepcopy(OBSERVED_STATUS)
     return row
+
+
+def test_exact_reason_qualified_status_preserves_raw_provider_values():
+    raw = deepcopy(OBSERVED_QUALIFIED_STATUS)
+    before = deepcopy(raw)
+    result = classify_game_finality(raw)
+    assert result.canonical_state == "FINAL"
+    assert result.detailed_state == "Completed Early: Rain"
+    assert result.status_code == "FR" and result.coded_state == "F"
+    assert "codedGameState=F" in result.decision_reason
+    assert "Rain" not in result.decision_reason and "statusCode=FR" not in result.decision_reason
+    assert raw == before
+
+
+@pytest.mark.parametrize("status", [
+    {"detailedState": "Completed Early: Rain"},
+    {"detailedState": "Completed Early: Rain", "codedGameState": "F"},
+    {"abstractGameState": "Final", "detailedState": "Completed Early: Rain"},
+    {"abstractGameState": "Final", "detailedState": "Completed Early: Rain", "statusCode": "F"},
+    {"abstractGameState": "Final", "detailedState": "Completed Early: Rain", "statusCode": "FR"},
+    {"abstractGameState": "Final", "detailedState": "Completed Early: Rain", "abstractGameCode": "F"},
+    {"statusCode": "FR", "reason": "Rain"},
+])
+def test_qualified_completed_early_requires_abstract_final_and_coded_f(status):
+    assert classify_game_finality(status).canonical_state == "AMBIGUOUS"
+
+
+def test_qualifier_and_separate_reason_are_not_finality_witnesses():
+    # Synthetic description within the observed syntax; not a new provider observation.
+    status = {"abstractGameState": "Final", "detailedState": "Completed Early: Fixture reason",
+              "codedGameState": "F"}
+    assert classify_game_finality(status).is_final
+    del status["codedGameState"]
+    assert not classify_game_finality(status).is_final
+    assert not classify_game_finality({"abstractGameState": "Final", "reason": "Rain"}).is_final
+
+
+@pytest.mark.parametrize("detailed", [
+    "Completed Early:", "Completed Early: ", "Completed Early:   ",
+    "Completed Early Rain", "Completed Early - Rain", "Completed Early (7)",
+    "Completed Early:Rain", "Completed Early : Rain", "Completed Earlyish: Rain",
+    "Unknown: Completed Early: Rain", "Final: Rain", "Game Over: Rain",
+])
+def test_empty_qualifier_and_unobserved_terminal_forms_remain_ambiguous(detailed):
+    status = {**OBSERVED_QUALIFIED_STATUS, "detailedState": detailed}
+    assert classify_game_finality(status).canonical_state == "AMBIGUOUS"
+
+
+@pytest.mark.parametrize("field,value", [
+    ("abstractGameState", "Live"), ("codedGameState", "I"),
+    ("statusCode", "I"), ("statusCode", "DR"), ("abstractGameCode", "I"),
+    ("detailedState", "Suspended"), ("detailedState", "Postponed"),
+    ("detailedState", "Cancelled"), ("detailedState", "Canceled"),
+    ("detailedState", "In Progress"), ("detailedState", "Delayed"),
+    ("detailedState", "Scheduled"), ("detailedState", "Warmup"),
+    ("detailedState", "Pre-Game"), ("detailedState", "Preview"),
+])
+def test_qualified_status_contradictions_remain_conflicts(field, value):
+    assert classify_game_finality({**OBSERVED_QUALIFIED_STATUS, field: value}).canonical_state == "CONFLICT"
+
+
+@pytest.mark.parametrize("change", [
+    {}, {"abstractGameState": "Live"}, {"codedGameState": "I"},
+    {"abstractGameCode": "I"}, {"statusCode": "DR"}, {"statusCode": "FX"},
+    {"codedGameState": None}, {"detailedState": "Completed Early Rain"},
+])
+@pytest.mark.parametrize("surface", ["root", "gameData", "boxscore", "schedule"])
+def test_reason_qualified_schedule_feed_compatibility_and_binding(change, surface):
+    # Exact observed identity/status with explicitly synthetic scores and player stats.
+    row = game(824295, "2026-04-04")
+    row["teams"]["home"]["team"]["id"] = 116
+    row["teams"]["away"]["team"]["id"] = 138
+    row["status"] = deepcopy(OBSERVED_STATUS)
+    inv = schedule_inventory(schedule(row), "2026-01-01", "2026-09-24")
+    selected = inv["games"][0]
+    payload = feed(row)
+    payload["gameData"]["status"] = deepcopy(OBSERVED_QUALIFIED_STATUS)
+    target = {"root": payload, "gameData": payload["gameData"],
+              "boxscore": payload["liveData"]["boxscore"], "schedule": selected}[surface]
+    target["status"] = {**OBSERVED_QUALIFIED_STATUS, **change}
+    original = deepcopy(payload)
+    event = EventIdentity("824295", "fixture", IdentityStatus.RESOLVED, "824295")
+    record = {"claim": {"request_id": "fixture"},
+              "response": {"responded_at": "2026-09-25T01:00:00+00:00", "sha256": "a" * 64}}
+    if change:
+        with pytest.raises(ValueError, match="conflicts"):
+            validate_boxscore_binding(target, event, "final")
+        with pytest.raises(ValueError):
+            facts_from_feed(selected, payload, record, record)
+    else:
+        assert validate_boxscore_binding(target, event, "final") == "final"
+        facts = facts_from_feed(selected, payload, record, record)
+        assert {f.role for f in facts} == {"GAME", "BATTER", "PITCHER"}
+        assert all(f.game_status == "final" and f.mlbam_game_id == "824295" for f in facts)
+        assert payload["gameData"]["status"] == OBSERVED_QUALIFIED_STATUS
+    assert payload == original
 
 
 @pytest.mark.parametrize("detailed", ["Final", "Game Over", "Completed Early"])
