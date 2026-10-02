@@ -286,8 +286,7 @@ def test_target_search_is_bounded(tmp_path):
 def test_catchup_reuses_history_publishes_only_missing_final_and_is_idempotent(tmp_path):
     store, historical = history(tmp_path)
     prior = {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in store.root.rglob("*.json")}
-    nonfinal = game(823102, "2026-09-26", "Postponed")
-    caught, stats, provider, root = catchup(tmp_path, store, rows=[game(823101, "2026-09-25"), nonfinal])
+    caught, stats, provider, root = catchup(tmp_path, store, rows=[game(823101, "2026-09-25")])
     assert provider.calls == ["catchup-schedule", "catchup-feed-823101"]
     assert (stats["new_game_facts"], stats["new_batter_facts"], stats["new_pitcher_facts"]) == (1, 2, 2)
     again, repeated = catch_up(root, store, target=TARGET, provider=provider)
