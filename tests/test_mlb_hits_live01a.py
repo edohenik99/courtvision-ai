@@ -383,3 +383,60 @@ def test_damaged_or_wrong_window_schedule_never_refreshes(tmp_path, damage):
     with pytest.raises(BackfillError, match="raw evidence hash mismatch"):
         module.catch_up(root, store, target=TARGET, provider=provider)
     assert provider.calls == ["catchup-schedule"]
+
+
+@pytest.mark.parametrize("published_count", [0, 1, 2, 4])
+def test_interrupted_publication_with_pending_game_remains_yellow(tmp_path, monkeypatch, published_count):
+    from courtvision.sports.mlb.data.prospective_context_acquisition import EvidenceRequest
+    from courtvision.sports.mlb.fact_backfill import facts_from_feed
+    prior = game(823101, "2026-09-25")
+    unfinished = pending()
+    root = tmp_path / "data/mlb/prospective/hits/catchup" / TARGET.isoformat()
+    inv, journal = inventory(root, prior, unfinished)
+    seed = BaseballProvider({"seed-final": full_feed(prior)})
+    record = journal.capture(EvidenceRequest(request_id="seed-final", evidence_class="stable_history",
+        source_name="fixture", provider="mlb_statsapi", event_id="823101",
+        url="https://statsapi.mlb.com/api/v1.1/game/823101/feed/live"), seed)
+    row = next(r for r in inv["games"] if r["gamePk"] == "823101")
+    facts = facts_from_feed(row, journal.payload(record), journal.records()[0], record)
+    store = MLBFactStore(tmp_path / "data/mlb/facts")
+    for fact in facts[:published_count]:
+        store.publish(fact)
+    before = {p: p.read_bytes() for p in store.root.rglob("*.json")}
+    monkeypatch.setattr(live01, "canonical_main", lambda _: SHA)
+    monkeypatch.setattr(live01, "historical_inventory", lambda *args: {"complete": True})
+    def denied(*args, **kwargs):
+        raise AssertionError("pending coverage must not publish facts or generate predictions/market")
+    for name in ("generate_cohort", "freeze_predictions", "capture_market"):
+        monkeypatch.setattr(live01, name, denied)
+    monkeypatch.setattr(MLBFactStore, "publish", denied)
+    provider = RevisionProvider({"target-schedule-2026-10-01": schedule(target_game()),
+        "catchup-schedule-000003": schedule(prior, unfinished)})
+    result = live01.execute_live01(tmp_path, run_id="partial-publication", provider=provider, clock=lambda: NOW)
+    assert result["status"] == "YELLOW" and result["reason"] == "PRIOR_DATE_COVERAGE_NOT_READY"
+    assert result["frozen_prediction_rows"] == result["odds_provider_calls"] == 0
+    assert result["catchup"]["new_game_feeds"] == 0
+    coverage = read_document(root / "coverage/000003.json")
+    assert not coverage["complete"] and len(coverage["expected_records"]) == len(facts)
+    assert len(coverage["missing_expected_records"]) == len(facts) - published_count
+    assert before == {p: p.read_bytes() for p in store.root.rglob("*.json")}
+    assert provider.calls == ["target-schedule-2026-10-01", "catchup-schedule-000003"]
+    assert not (tmp_path / "data/mlb/prospective/hits/runs/partial-publication/failure.json").exists()
+
+
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_pending_missing_records_never_hide_later_conflicts(duplicate):
+    from types import SimpleNamespace
+    refs = [{"role": "GAME", "gamePk": "823100", "player_id": None, "factual_record_hash": "a" * 64},
+            {"role": "GAME", "gamePk": "823101", "player_id": None, "factual_record_hash": "b" * 64}]
+    class Store:
+        def read(self, role, game_id, player_id):
+            if game_id == "823100":
+                raise FileNotFoundError("interrupted publication")
+            return SimpleNamespace(factual_record_hash="c" * 64)
+    if duplicate:
+        refs[1] = refs[0]
+    with pytest.raises(FactLedgerConflict):
+        module.verify_expected(Store(), refs, allow_missing=True)
+    with pytest.raises(FileNotFoundError):
+        module.verify_expected(Store(), refs)

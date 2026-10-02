@@ -200,17 +200,24 @@ def _fact_reference(fact):
             "factual_record_hash": fact.factual_record_hash}
 
 
-def verify_expected(store: MLBFactStore, expected: list[dict]) -> None:
+def verify_expected(store: MLBFactStore, expected: list[dict], *, allow_missing: bool = False) -> list[dict]:
     """Read an independently declared universe; directory contents are never authority."""
-    identities = set()
+    identities, missing = set(), []
     for ref in expected:
         key = (ref["role"], ref["gamePk"], ref["player_id"])
         if key in identities:
             raise FactLedgerConflict("duplicate expected fact identity")
         identities.add(key)
-        fact = store.read(*key)
+        try:
+            fact = store.read(*key)
+        except FileNotFoundError:
+            if not allow_missing:
+                raise
+            missing.append(ref)
+            continue
         if fact.factual_record_hash != ref["factual_record_hash"]:
             raise FactLedgerConflict("ledger differs from independent participation inventory")
+    return missing
 
 
 def _missing_facts(store, facts):
@@ -274,12 +281,13 @@ def participation_inventory(inventory: dict, journal: EvidenceJournal,
                 players.setdefault(fact.mlbam_player_id, []).append({
                     "gamePk": fact.mlbam_game_id,
                     "factual_record_hash": fact.factual_record_hash})
-    verify_expected(store, expected)
+    missing_records = verify_expected(store, expected, allow_missing=pending)
     return {"schema_version": COVERAGE_SCHEMA, "start": start.isoformat(), "through": end.isoformat(),
             "inventory_hash": digest(inventory),
             "source_refs": inventory.get("source_refs", [inventory["source_ref"]]),
             "observed_game_types": sorted(types), "games": sorted(games, key=int),
             "expected_records": expected, "players": dict(sorted(players.items())),
+            **({"missing_expected_records": missing_records} if missing_records else {}),
             **readiness, "missing_final_game_pks": sorted(missing, key=int),
             "complete": not pending}
 
