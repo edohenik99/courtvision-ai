@@ -60,9 +60,15 @@ def full_feed(row, *, pregame=False):
     result["gameData"]["datetime"]["dateTime"] = row["gameDate"]
     result["gameData"]["venue"] = row["venue"]
     if pregame:
-        for side in ("home", "away"):
+        for side, first in (("home", 710000), ("away", 720000)):
             team = result["liveData"]["boxscore"]["teams"][side]
-            team["battingOrder"] = team["batters"]
+            # Complete orders include players without qualified historical facts;
+            # only the original two batters have sovereign H/AB evidence.
+            additional = list(range(first, first + 8))
+            team["battingOrder"] = team["batters"] + additional
+            for player in additional:
+                team["players"][f"ID{player}"] = {
+                    "person": {"id": player, "fullName": f"Fixture Player {player}"}}
         result["liveData"]["boxscore"]["teams"]["home"]["players"]["ID700003"] = {
             "person": {"id": 700003, "fullName": "Fixture Bench Player"}}
     return result
@@ -168,7 +174,8 @@ class MarketProvider:
 def test_market_independent_identity_entire_eligible_cohort(tmp_path):
     (rows, sources, exclusions, counts), provider, index, selection = cohort(tmp_path)
     assert {r["mlbam_player_id"] for r in rows} == {"700001", "700002"}
-    assert counts["confirmed_batters"] == counts["ledger_qualified_batters"] == 2
+    assert counts["confirmed_batters"] == 18
+    assert counts["ledger_qualified_batters"] == 2
     assert any(e.get("player_id") == "700003" and e["reason"] == "NOT_IN_CONFIRMED_BATTING_ORDER"
                for e in exclusions)
     assert provider.calls == ["target-schedule-2026-10-01", "pregame-feed-900001"]
@@ -185,8 +192,12 @@ def test_market_independent_identity_entire_eligible_cohort(tmp_path):
         assert not {"sportsbook", "odds", "line", "edge", "result", "profit"} & set(row)
 
 
-def test_unconfirmed_orders_have_durable_zero_row_run(tmp_path):
+@pytest.mark.parametrize("missing_boxscore", [False, True])
+def test_unconfirmed_orders_have_durable_zero_row_run(tmp_path, missing_boxscore):
     def remove(current):
+        if missing_boxscore:
+            current["liveData"].pop("boxscore")
+            return
         for team in current["liveData"]["boxscore"]["teams"].values():
             team.pop("battingOrder", None)
     root, (rows, _, exclusions, counts) = frozen(tmp_path, change_feed=remove)
@@ -196,6 +207,41 @@ def test_unconfirmed_orders_have_durable_zero_row_run(tmp_path):
     assert (root / "exclusions.json").exists()
     assert counts["games_without_confirmed_lineups"] == 1
     assert any(e["reason"] == "LINEUP_NOT_CONFIRMED" for e in exclusions)
+
+
+@pytest.mark.parametrize("side", ["away", "home"])
+@pytest.mark.parametrize("order_size", [None, 0, 1, 8])
+def test_partial_lineup_cannot_claim_the_date_or_generate_predictions(tmp_path, monkeypatch, side, order_size):
+    def partial(current):
+        team = current["liveData"]["boxscore"]["teams"][side]
+        if order_size is None:
+            team.pop("battingOrder")
+        else:
+            team["battingOrder"] = team["battingOrder"][:order_size]
+    def forbidden(*args, **kwargs):
+        raise AssertionError("incomplete game lineup must stop before model generation")
+    with monkeypatch.context() as patch:
+        patch.setattr(live01, "prediction_row", forbidden)
+        root, (rows, _, exclusions, counts) = frozen(tmp_path, change_feed=partial)
+    before = (root / "manifest.json").read_bytes()
+    assert rows == verify_freeze(root)[1] == []
+    assert counts["games_with_confirmed_lineups"] == 0
+    assert counts["games_without_confirmed_lineups"] == 1
+    assert any(e.get("detail") == "INCOMPLETE_BATTING_ORDERS" and e["team_sides"] == [side]
+               for e in exclusions)
+    fake = MarketProvider(root)
+    assert capture_market(root, config=odds_config(), api_key="synthetic-key", transport=fake)[
+        "odds_provider_calls"] == 0
+    assert fake.calls == []
+    (complete, sources, excluded, stages), _, _, _ = cohort(tmp_path / "later")
+    for row in complete:
+        row["prediction_run_id"] = "complete-lineups"
+        row["prediction_payload_sha256"] = row_hash(row)
+    later = freeze_predictions(root.parent, run_id="complete-lineups", operating_date=TARGET,
+        repository_sha=SHA, rows=complete, sources=sources, exclusions=excluded, stage_counts=stages,
+        clock=lambda: NOW + timedelta(seconds=4))
+    assert len(verify_freeze(later)[1]) == 2
+    assert (root / "manifest.json").read_bytes() == before
 
 
 @pytest.mark.parametrize("game_type", ["F", "D", "L", "W"])
@@ -554,6 +600,41 @@ def test_corrupt_market_evidence_fails_closed_after_freeze(tmp_path):
                        clock=lambda: NOW + timedelta(seconds=3))
     assert fake.calls == 1
     assert not (root / "market/observations.json").exists()
+    assert len(verify_freeze(root)[1]) == 2
+
+
+@pytest.mark.parametrize("failure", ["stage", "publish"])
+def test_market_evidence_persistence_failure_cannot_publish_quotes(tmp_path, monkeypatch, failure):
+    from courtvision.sports.mlb.providers import the_odds_api_live as odds_live
+    root, _ = frozen(tmp_path)
+    before = (root / "predictions.csv").read_bytes()
+    fake = MarketProvider(root)
+    original = odds_live.execute_ingestion
+    observed = []
+    def inspect_result(*args, **kwargs):
+        result = original(*args, **kwargs)
+        assert result.market_batches  # Valid normalized quotes exist in memory.
+        observed.append(result.transport_failures)
+        return result
+    def fail_publish(*args, **kwargs):
+        raise OSError("synthetic durable publication failure")
+    if failure == "stage":
+        stage = odds_live.stage_ingestion_exchange
+        def fail_event_stage(claim, exchange):
+            if len(fake.calls) == 2:
+                raise OSError("synthetic event response staging failure")
+            return stage(claim, exchange)
+        monkeypatch.setattr(odds_live, "stage_ingestion_exchange", fail_event_stage)
+    else:
+        monkeypatch.setattr(odds_live, "write_ingestion_evidence", fail_publish)
+    monkeypatch.setattr("courtvision.sports.mlb.live01_market.execute_ingestion", inspect_result)
+    with pytest.raises(BackfillError, match="integrity"):
+        capture_market(root, config=odds_config(), api_key="synthetic-key", transport=fake,
+                       clock=lambda: NOW + timedelta(seconds=3))
+    assert fake.calls == ["discovery", "event_odds"] and len(observed) == 1
+    assert not (root / "market/observations.json").exists()
+    assert not (root / "market/research-board.csv").exists()
+    assert (root / "predictions.csv").read_bytes() == before
     assert len(verify_freeze(root)[1]) == 2
 
 

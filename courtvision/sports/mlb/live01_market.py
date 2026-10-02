@@ -158,7 +158,7 @@ def capture_market(freeze_root: Path, *, config: MLBOddsIngestionConfig | None,
             raise gate_errors[0]
         corrupt = {"INVALID_JSON", "INVALID_RESPONSE_SHAPE", "CONFLICTING_DUPLICATE",
                    "SECRET_REDACTED", "CLOCK_FAILURE", "ACCOUNTING_CONFLICT",
-                   "EXECUTION_PERMIT_REQUIRED"}
+                   "EXECUTION_PERMIT_REQUIRED", "EVIDENCE_STAGING_FAILED", "EVIDENCE_WRITE_FAILED"}
         if corrupt.intersection(result.transport_failures):
             raise BackfillError("market provider evidence failed integrity validation")
         state = result.status

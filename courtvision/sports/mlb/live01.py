@@ -140,6 +140,15 @@ def generate_cohort(inventory: dict, schedule_record: dict, journal: EvidenceJou
                                        evidence_cutoff=observed, source_refs=refs[:1])
         players = bind_statsapi_roster_players(feed, binding, observed_at=observed,
                                                evidence_cutoff=observed, source_refs=refs)
+        teams = feed.get("liveData", {}).get("boxscore", {}).get("teams", {})
+        incomplete = [side for side in ("away", "home")
+                      if len(teams.get(side, {}).get("battingOrder") or []) != 9]
+        if incomplete:
+            exclusions.append({"gamePk": event.event_id, "reason": "LINEUP_NOT_CONFIRMED",
+                "detail": "INCOMPLETE_BATTING_ORDERS", "team_sides": incomplete})
+            counts["games_without_confirmed_lineups"] += 1
+            counts["excluded_batters"] += len(players)
+            continue
         roster = [asdict(p.roster_player) for p in players]
         confirmed = 0
         for player in players:
