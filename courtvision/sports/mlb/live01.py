@@ -190,6 +190,18 @@ def generate_cohort(inventory: dict, schedule_record: dict, journal: EvidenceJou
     return predictions, sources, exclusions, counts
 
 
+def prior_date_not_ready(selection: dict, coverage: dict, stats: dict | None = None) -> dict:
+    if coverage["unresolved_game_pks"] or not coverage["pending_prior_date_game_pks"]:
+        raise BackfillError("incomplete prior-date coverage is not a qualified readiness state")
+    return {**selection, "status": "YELLOW",
+        "target_day_hits_qualification": "PRIOR_DATE_COVERAGE_NOT_READY",
+        "reason": "PRIOR_DATE_COVERAGE_NOT_READY",
+        "prior_date_coverage_complete": False, "catchup": stats,
+        "pending_prior_date_game_pks": coverage["pending_prior_date_game_pks"],
+        "frozen_prediction_rows": 0, "odds_provider_calls": 0,
+        "prediction_freeze_verified": False, "research_only": True}
+
+
 def execute_live01(repository: Path, *, run_id: str, provider, clock=utc_now,
                    odds_config_path: Path | None = None,
                    odds_credential_file: Path | None = None) -> dict:
@@ -227,7 +239,16 @@ def execute_live01(repository: Path, *, run_id: str, provider, clock=utc_now,
         # Each component is independently derived from preserved provider evidence.
         history = historical_inventory(store.root, "cv-mlb-fact-backfill-02-20260925")
         publish_document(run_root / "historical-coverage.json", history)
+        if not history["complete"]:
+            result = prior_date_not_ready(selection, history)
+            publish_document(run_root / "disposition.json", result)
+            return result
         catchup, stats = catch_up(base / "catchup" / target.isoformat(), store, target=target, provider=provider)
+        publish_document(run_root / "catchup-coverage.json", catchup)
+        if not catchup["complete"]:
+            result = prior_date_not_ready(selection, catchup, stats)
+            publish_document(run_root / "disposition.json", result)
+            return result
         index = compose_coverage(history, catchup, target=target, store=store)
         publish_document(run_root / "composed-coverage.json", index)
         if canonical_main(repository) != sha:
