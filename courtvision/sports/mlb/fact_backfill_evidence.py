@@ -105,7 +105,7 @@ def operation_lock(root: Path):
 
 def validate_url(url: str) -> None:
     schedule = re.fullmatch(
-        re.escape(BASE) + r"/api/v1/schedule\?sportId=1&gameTypes=R"
+        re.escape(BASE) + r"/api/v1/schedule\?sportId=1(?:&gameTypes=R)?"
         r"&startDate=\d{4}-\d{2}-\d{2}&endDate=\d{4}-\d{2}-\d{2}", url)
     feed = re.fullmatch(re.escape(BASE) + r"/api/v1\.1/game/[1-9]\d*/feed/live", url)
     if not (schedule or feed):

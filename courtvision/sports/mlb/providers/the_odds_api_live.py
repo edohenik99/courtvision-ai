@@ -89,6 +89,7 @@ class MLBOddsIngestionConfig:
     provider: str = "the_odds_api"
     sport_key: str = "baseball_mlb"
     odds_format: str = "american"
+    target_event_keys: tuple[tuple[str, str, str], ...] | None = None
 
     def __post_init__(self) -> None:
         if type(self.operating_date) is not date:
@@ -112,6 +113,16 @@ class MLBOddsIngestionConfig:
                 raise ValueError("DISCOVERY_ZERO_COST_NOT_VERIFIED")
         _positive_timeout(self.timeout_seconds)
         _integer(self.max_response_bytes, minimum=1, maximum=16 * 1024 * 1024)
+        if self.target_event_keys is not None:
+            if (not isinstance(self.target_event_keys, tuple) or not self.target_event_keys
+                    or any(not isinstance(key, tuple) or len(key) != 3
+                           or any(not isinstance(value, str) or not value for value in key)
+                           for key in self.target_event_keys)):
+                raise ValueError("INVALID_TARGET_EVENT_SCOPE")
+            for home, away, start in self.target_event_keys:
+                if home == away:
+                    raise ValueError("INVALID_TARGET_EVENT_SCOPE")
+                _aware(datetime.fromisoformat(start))
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,6 +217,13 @@ def _event(value: object) -> MLBOddsEvent:
     return MLBOddsEvent(event_id, start, home, away)
 
 
+def _in_target_scope(item: MLBOddsEvent, config: MLBOddsIngestionConfig) -> bool:
+    return config.target_event_keys is None or any(
+        item.home_team == home and item.away_team == away
+        and abs((item.commence_time - datetime.fromisoformat(start)).total_seconds()) <= 120
+        for home, away, start in config.target_event_keys)
+
+
 def _select_events(events: object, config: MLBOddsIngestionConfig, captured_at: datetime) -> tuple[MLBOddsEvent, ...]:
     if not isinstance(events, (list, tuple)):
         raise ValueError("INVALID_RESPONSE_SHAPE")
@@ -219,7 +237,8 @@ def _select_events(events: object, config: MLBOddsIngestionConfig, captured_at: 
             raise ValueError("CONFLICTING_DUPLICATE")
         seen[item.event_id] = item
     eligible = tuple(sorted((item for item in seen.values()
-        if item.commence_time.astimezone(toronto).date() == config.operating_date
+        if _in_target_scope(item, config)
+        and item.commence_time.astimezone(toronto).date() == config.operating_date
         and (item.commence_time - capture).total_seconds() >= config.minimum_pregame_lead_seconds),
         key=lambda item: (item.commence_time, item.event_id)))
     if len(eligible) > config.maximum_events:
@@ -265,7 +284,7 @@ def _validated_plan(plan: MLBOddsRequestPlan) -> MLBOddsRequestPlan:
             raise ValueError("INVALID_PLAN")
         validated = _event({"id": item.event_id, "commence_time": _aware(item.commence_time).isoformat(),
                             "sport_key": "baseball_mlb", "home_team": item.home_team, "away_team": item.away_team})
-        if validated != item or item.event_id in events:
+        if validated != item or item.event_id in events or not _in_target_scope(item, config):
             raise ValueError("INVALID_PLAN")
         if item.commence_time.astimezone(ZoneInfo("America/Toronto")).date() != config.operating_date:
             raise ValueError("INVALID_PLAN")

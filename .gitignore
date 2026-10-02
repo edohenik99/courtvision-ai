@@ -56,6 +56,7 @@ data/manual/
 
 # Canonical MLB factual ledgers (generated locally, never source code)
 /data/mlb/facts/
+/data/mlb/prospective/hits/
 
 # The Odds API live MLB HR collector artifacts
 data/theoddsapi/live_hr_snapshots/automation_logs/

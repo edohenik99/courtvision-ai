@@ -500,8 +500,48 @@ def resolve_mlb_batter_identity(
                                     tuple(dict.fromkeys((*source.source_refs, *source_refs))))
 
 
+def bind_statsapi_event(
+    event: ScheduledEvent, *, observed_at: datetime, evidence_cutoff: datetime,
+    source_refs: tuple[str, ...],
+) -> MLBEventIdentityBinding:
+    """Bind an authoritative schedule directly, without any market record.
+
+    The existing binding's provider fields describe StatsAPI in this path.
+    No sportsbook reference, name, availability, or price is manufactured.
+    """
+    _schedule_event(event)
+    return MLBEventIdentityBinding(
+        provider="mlb_statsapi", provider_event_id=event.event_id,
+        provider_commence_time=event.scheduled_start_utc,
+        provider_home_team=event.home_team, provider_away_team=event.away_team,
+        identity_status=IdentityStatus.RESOLVED,
+        identity_method="authoritative_statsapi_schedule_gamepk",
+        scheduled_event=event, observed_at=observed_at,
+        evidence_cutoff=evidence_cutoff, source_refs=source_refs,
+    )
+
+
+def bind_statsapi_roster_players(
+    game_feed: bytes | Mapping[str, object], event: MLBEventIdentityBinding, *,
+    observed_at: datetime, evidence_cutoff: datetime, source_refs: tuple[str, ...],
+) -> tuple[MLBPlayerIdentityBinding, ...]:
+    """Enumerate canonical feed identities; lineup eligibility is checked later."""
+    if event.provider != "mlb_statsapi" or event.provider_event_id != event.mlbam_game_id:
+        raise ValueError("prospective enumeration requires a StatsAPI schedule binding")
+    return tuple(MLBPlayerIdentityBinding(
+        ParticipantIdentity(
+            participant_name=player.player_name,
+            identity_method="authoritative_statsapi_game_roster_mlbam_id",
+            identity_status=IdentityStatus.RESOLVED,
+            canonical_participant_id=player.mlbam_player_id,
+            canonical_participant_name=player.player_name,
+        ), event, player, observed_at, evidence_cutoff, source_refs,
+    ) for player in event_roster_players(game_feed, event))
+
+
 __all__ = [
     "MATCH_TOLERANCE_SECONDS", "MLBEventIdentityBinding", "MLBEventRosterPlayer",
     "MLBPlayerIdentityBinding", "bind_mlb_event", "bind_mlb_events",
     "event_roster_players", "resolve_mlb_batter_identity", "validate_bound_game_feed",
+    "bind_statsapi_event", "bind_statsapi_roster_players",
 ]

@@ -73,6 +73,7 @@ class BackfillPlan:
 def schedule_inventory(
     payload: dict, start: str, end: str, *, request: EvidenceRequest,
     source_digest: str, captured_at: str, source_response_path: str,
+    allowed_game_types: tuple[str, ...] = ("R",),
 ) -> dict:
     """Reconcile every preserved occurrence before counting logical final games."""
     candidates = {}
@@ -100,7 +101,7 @@ def schedule_inventory(
     rows = []
     for game_id, resolution in resolved.items():
         identity = resolution["identity"]
-        if (identity["sport_id"] != "1" or identity["game_type"] != "R"
+        if (identity["sport_id"] != "1" or identity["game_type"] not in allowed_game_types
                 or identity["season"] != start[:4]):
             raise BackfillError("schedule game is outside regular-season query scope")
         game = selected_schedule_game_payload(candidates[game_id], resolution)
@@ -123,7 +124,8 @@ def schedule_inventory(
             "games": sorted(rows, key=lambda row: (row["officialDate"], int(row["gamePk"])))}
 
 
-def facts_from_feed(row: dict, feed: dict, schedule_record: dict, feed_record: dict):
+def facts_from_feed(row: dict, feed: dict, schedule_record: dict, feed_record: dict,
+                    *, allowed_game_types: tuple[str, ...] = ("R",)):
     """Bind both provider finalities and identities before calling core extraction."""
     if not eligible_final(row):
         raise BackfillError("non-final schedule game cannot be materialized")
@@ -137,7 +139,9 @@ def facts_from_feed(row: dict, feed: dict, schedule_record: dict, feed_record: d
         raise BackfillError("feed is not explicitly final")
     if data["datetime"]["officialDate"] != row["officialDate"]:
         raise BackfillError("feed official date mismatch")
-    if data["game"]["type"] != "R" or str(data["game"]["season"]) != row["officialDate"][:4]:
+    if (data["game"]["type"] not in allowed_game_types
+            or data["game"]["type"] != row["source_game"]["gameType"]
+            or str(data["game"]["season"]) != row["officialDate"][:4]):
         raise BackfillError("feed game type/season mismatch")
     box = feed["liveData"]["boxscore"]
     for side in ("away", "home"):
