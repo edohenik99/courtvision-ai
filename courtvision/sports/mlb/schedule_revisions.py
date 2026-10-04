@@ -61,6 +61,29 @@ def _placeholder_candidates(team: Mapping[str, object]) -> tuple[str, ...] | Non
     return tuple(sorted(_CONCRETE_CLUBS[token][0] for token in tokens))
 
 
+
+def _participant_query_matches(
+    query: Mapping[str, list[str]], identity: Mapping[str, object],
+) -> bool:
+    """Require an explicit MLB query whose scope agrees with this row."""
+    if query.get("sportId") != ["1"]:
+        return False
+    if "gameTypes" in query:
+        values = query["gameTypes"]
+        if len(values) != 1:
+            return False
+        types = values[0].split(",")
+        if (len(set(types)) != len(types)
+                or not set(types) <= (_POSTSEASON_TYPES | {"R"})
+                or identity["game_type"] not in types):
+            return False
+    if "leagueId" in query:
+        values = query["leagueId"]
+        if (len(values) != 1 or not values[0].isdigit() or int(values[0]) <= 0
+                or identity["league_id"] != values[0]):
+            return False
+    return True
+
 def _observation_ref(observation: ScheduleObservation) -> dict[str, object]:
     return {key: observation[key] for key in (
         "captured_at_utc", "source_request_id", "source_response_digest", "source_response_path")}
@@ -242,6 +265,7 @@ def resolve_schedule_responses(
             raise ProspectiveAcquisitionError("completed-game schedule dates are missing")
         context = _schedule_query_context(request)
         url = urlparse(request.url)
+        query = parse_qs(url.query, keep_blank_values=True)
         provider_valid = (request.provider == "mlb_statsapi" and url.scheme == "https"
                           and url.netloc == "statsapi.mlb.com" and url.path == "/api/v1/schedule")
         source_digest = str(record.get("sha256") or "")
@@ -335,7 +359,8 @@ def resolve_schedule_responses(
                 }
                 observations_by_game.setdefault(game_id, []).append(observation)
                 participant_entries.setdefault(game_id, []).append(
-                    (observation, {"away": dict(away_team), "home": dict(home_team)}, provider_valid))
+                    (observation, {"away": dict(away_team), "home": dict(home_team)},
+                     provider_valid and _participant_query_matches(query, observation["identity"])))
 
     resolved: dict[str, dict[str, object]] = {}
     identity_conflicts: list[dict[str, object]] = []

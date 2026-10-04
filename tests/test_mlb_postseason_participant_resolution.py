@@ -255,3 +255,39 @@ def test_concrete_equal_state_content_ambiguity_still_fails_closed():
     logical = resolve_schedule_responses([source(old, 0), source(new, 1), source(conflict, 2)])[0]["849828"]
     with pytest.raises(ValueError, match="ambiguous source content"):
         selected_schedule_game_payload([(r["officialDate"], r) for r in (old, new, conflict)], logical)
+
+
+@pytest.mark.parametrize("query", [
+    "sportId=2", "sportId=1&sportId=2", "sportId=1&sportId=1",
+    "sportId=", "", "sportId=1&gameTypes=R", "sportId=1&gameTypes=L",
+    "sportId=1&gameTypes=D&gameTypes=R", "sportId=1&gameTypes=",
+    "sportId=1&gameTypes=D,", "sportId=1&gameTypes=D,UNKNOWN",
+    "sportId=1&leagueId=104", "sportId=1&leagueId=",
+    "sportId=1&leagueId=103&leagueId=104",
+])
+def test_row_context_cannot_override_incompatible_or_ambiguous_query(query):
+    old = postseason_row()
+    old.update(sport={"id": 1}, league={"id": 103})
+    new = resolved_row(old)
+    url = "https://statsapi.mlb.com/api/v1/schedule?" + query
+    resolved, summary = resolve_schedule_responses([
+        source(old, 0, url=url), source(new, 1, url=url)])
+    assert not resolved
+    assert summary["identity_conflict_count"] == 1
+    assert not summary.get("participant_resolution_count", 0)
+
+
+@pytest.mark.parametrize("query", [
+    "sportId=1", "sportId=1&gameTypes=D", "sportId=1&gameTypes=D,L",
+    "sportId=1&gameTypes=R,D", "sportId=1&leagueId=103",
+])
+def test_compatible_explicit_query_still_qualifies_the_resolution(query):
+    old = postseason_row()
+    old.update(sport={"id": 1}, league={"id": 103})
+    new = resolved_row(old)
+    url = "https://statsapi.mlb.com/api/v1/schedule?" + query
+    resolved, summary = resolve_schedule_responses([
+        source(old, 0, url=url), source(new, 1, url=url)])
+    assert resolved["849828"]["identity"]["away_team_id"] == "144"
+    assert summary["identity_conflict_count"] == 0
+    assert summary["participant_resolution_count"] == 1
