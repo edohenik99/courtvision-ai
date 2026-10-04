@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import date
 import json
+import re
 from typing import Mapping, Sequence, TypeAlias
 from urllib.parse import parse_qs, urlparse
 
@@ -17,10 +18,126 @@ from courtvision.sports.mlb.data.prospective_context_acquisition import (
 )
 from courtvision.sports.mlb.game_facts import canonical_json as _canonical_json, _digest as _value_digest
 from courtvision.sports.mlb.game_finality import classify_game_finality
+from courtvision.sports.mlb.data.crosswalk_validation import MLB_TEAM_ABBREVIATIONS
 
 ScheduleObservation: TypeAlias = dict[str, object]
 ResolvedScheduleGame: TypeAlias = dict[str, object]
 SCHEDULE_REVISION_POLICY_VERSION = "cv_mlb_schedule_revisions_v1"
+PARTICIPANT_RESOLUTION_POLICY = "postseason-two-club-placeholder-monotonic-v1"
+_POSTSEASON_TYPES = frozenset({"F", "D", "L", "W"})
+# IDs/names are corroborated by all 30 clubs in preserved LIVE-01 schedules.
+# Only this explicit concrete-club crosswalk can resolve a candidate token.
+_CONCRETE_CLUBS = {
+    "LAA": ("108", "Los Angeles Angels"), "ARI": ("109", "Arizona Diamondbacks"),
+    "BAL": ("110", "Baltimore Orioles"), "BOS": ("111", "Boston Red Sox"),
+    "CHC": ("112", "Chicago Cubs"), "CIN": ("113", "Cincinnati Reds"),
+    "CLE": ("114", "Cleveland Guardians"), "COL": ("115", "Colorado Rockies"),
+    "DET": ("116", "Detroit Tigers"), "HOU": ("117", "Houston Astros"),
+    "KC": ("118", "Kansas City Royals"), "LAD": ("119", "Los Angeles Dodgers"),
+    "WSH": ("120", "Washington Nationals"), "NYM": ("121", "New York Mets"),
+    "ATH": ("133", "Athletics"), "PIT": ("134", "Pittsburgh Pirates"),
+    "SD": ("135", "San Diego Padres"), "SEA": ("136", "Seattle Mariners"),
+    "SF": ("137", "San Francisco Giants"), "STL": ("138", "St. Louis Cardinals"),
+    "TB": ("139", "Tampa Bay Rays"), "TEX": ("140", "Texas Rangers"),
+    "TOR": ("141", "Toronto Blue Jays"), "MIN": ("142", "Minnesota Twins"),
+    "PHI": ("143", "Philadelphia Phillies"), "ATL": ("144", "Atlanta Braves"),
+    "CWS": ("145", "Chicago White Sox"), "MIA": ("146", "Miami Marlins"),
+    "NYY": ("147", "New York Yankees"), "MIL": ("158", "Milwaukee Brewers"),
+}
+_CONCRETE_IDS = frozenset(team_id for team_id, _ in _CONCRETE_CLUBS.values())
+
+
+def _placeholder_candidates(team: Mapping[str, object]) -> tuple[str, ...] | None:
+    """Recognize only the observed provider object/schema and two-club syntax."""
+    team_id, name = str(team.get("id", "")), team.get("name")
+    if (set(team) != {"id", "name", "link"} or team_id in _CONCRETE_IDS
+            or team.get("link") != f"/api/v1/teams/{team_id}"
+            or not isinstance(name, str) or re.fullmatch(r"[A-Z]{2,3}/[A-Z]{2,3}", name) is None):
+        return None
+    tokens = name.split("/")
+    if (len(set(tokens)) != 2 or not set(tokens) <= MLB_TEAM_ABBREVIATIONS
+            or not set(tokens) <= _CONCRETE_CLUBS.keys()):
+        return None
+    return tuple(sorted(_CONCRETE_CLUBS[token][0] for token in tokens))
+
+
+
+def _participant_query_matches(
+    query: Mapping[str, list[str]], identity: Mapping[str, object],
+    observed_sport: Mapping[str, object],
+    observed_league: Mapping[str, object],
+) -> bool:
+    """Require request scope corroborated by raw response identity."""
+    if (query.get("sportId") != ["1"]
+            or str(observed_sport.get("id") or "").strip() != "1"):
+        return False
+    if "gameTypes" in query:
+        values = query["gameTypes"]
+        if len(values) != 1:
+            return False
+        types = values[0].split(",")
+        if (len(set(types)) != len(types)
+                or not set(types) <= (_POSTSEASON_TYPES | {"R"})
+                or identity["game_type"] not in types):
+            return False
+    if "leagueId" in query:
+        values = query["leagueId"]
+        if (len(values) != 1 or not values[0].isdigit() or int(values[0]) <= 0
+                or str(observed_league.get("id") or "").strip() != values[0]):
+            return False
+    return True
+
+def _observation_ref(observation: ScheduleObservation) -> dict[str, object]:
+    return {key: observation[key] for key in (
+        "captured_at_utc", "source_request_id", "source_response_digest", "source_response_path")}
+
+
+def _resolve_participant_slot(
+    entries: Sequence[tuple[ScheduleObservation, dict[str, dict[str, object]], bool, bool]], side: str,
+) -> dict[str, object] | None:
+    """Prove a chronological placeholder prefix followed by one concrete club.
+
+    Equal capture times cannot establish a transition. Provider/name/link and
+    candidate membership must agree; unknown forms remain ordinary conflicts.
+    """
+    ordered = sorted(entries, key=lambda entry: (
+        parse_utc(entry[0]["captured_at_utc"], "schedule observation captured_at_utc"),
+        _canonical_json(entry[0]), _canonical_json(entry[1])))
+    first, teams, _, _ = ordered[0]
+    placeholder = teams[side]
+    candidates = _placeholder_candidates(placeholder)
+    if candidates is None:
+        return None
+    resolved_team = None
+    resolved_observation = None
+    last_placeholder_time = None
+    for observation, teams, provider_valid, _ in ordered:
+        identity = observation["identity"]
+        if (not provider_valid or identity["game_type"] not in _POSTSEASON_TYPES
+                or identity["sport_id"] != "1"):
+            return None
+        team = teams[side]
+        captured = parse_utc(observation["captured_at_utc"], "schedule observation captured_at_utc")
+        if _placeholder_candidates(team) is not None:
+            if resolved_team is not None or team != placeholder:
+                return None
+            last_placeholder_time = captured
+            continue
+        team_id = str(team.get("id", ""))
+        if (team_id not in candidates or team.get("link") != f"/api/v1/teams/{team_id}"
+                or (team_id, team.get("name")) not in _CONCRETE_CLUBS.values()
+                or set(team) != {"id", "name", "link"}
+                or last_placeholder_time is None or captured <= last_placeholder_time):
+            return None
+        if resolved_team is not None and team != resolved_team:
+            return None
+        if resolved_team is None:
+            resolved_team, resolved_observation = team, observation
+    if resolved_team is None:
+        return None
+    return {"side": side, "placeholder_team": placeholder, "resolved_team": resolved_team,
+            "first_placeholder_observation": _observation_ref(first),
+            "concrete_resolution_observation": _observation_ref(resolved_observation)}
 
 
 def _mlbam_id(value: object, field_name: str) -> str:
@@ -113,6 +230,7 @@ def selected_schedule_game_payload(
 
     Identical full payloads may repeat. Different facts for an otherwise equal
     selected state are ambiguous, so publication callers must fail closed.
+    A proven participant resolution also binds the concrete canonical slots.
     No score/content field is used to choose between conflicting observations.
     """
     selected = schedule_state_payload(game["selected_canonical_state"])
@@ -120,6 +238,9 @@ def selected_schedule_game_payload(
         _value_digest(raw): dict(raw) for bucket, raw in candidates
         if _mlbam_id(raw.get("gamePk"), "historical game") == game["game_id"]
         and schedule_state_from_game(bucket, raw) == selected
+        and (not game.get("participant_resolution_count") or all(
+            str(raw["teams"][side]["team"]["id"]) == game["identity"][side + "_team_id"]
+            for side in ("away", "home")))
     }
     if len(matches) != 1:
         raise ProspectiveAcquisitionError("selected schedule state has ambiguous source content")
@@ -134,6 +255,7 @@ def resolve_schedule_responses(
     """Resolve versioned schedule state while retaining every raw observation."""
 
     observations_by_game: dict[str, list[dict[str, object]]] = {}
+    participant_entries: dict[str, list[tuple[ScheduleObservation, dict[str, dict[str, object]], bool, bool]]] = {}
     schedule_row_count = 0
     for request, record, response in sources:
         try:
@@ -145,6 +267,10 @@ def resolve_schedule_responses(
         if not isinstance(payload, Mapping) or not isinstance(payload.get("dates"), list):
             raise ProspectiveAcquisitionError("completed-game schedule dates are missing")
         context = _schedule_query_context(request)
+        url = urlparse(request.url)
+        query = parse_qs(url.query, keep_blank_values=True)
+        provider_valid = (request.provider == "mlb_statsapi" and url.scheme == "https"
+                          and url.netloc == "statsapi.mlb.com" and url.path == "/api/v1/schedule")
         source_digest = str(record.get("sha256") or "")
         captured_at = str(record.get("captured_at_utc") or "")
         if not source_digest or not captured_at:
@@ -235,12 +361,17 @@ def resolve_schedule_responses(
                     "captured_at_utc": captured_at,
                 }
                 observations_by_game.setdefault(game_id, []).append(observation)
+                participant_entries.setdefault(game_id, []).append(
+                    (observation, {"away": dict(away_team), "home": dict(home_team)},
+                     provider_valid and _participant_query_matches(query, observation["identity"], sport, league),
+                     provider_valid))
 
     resolved: dict[str, dict[str, object]] = {}
     identity_conflicts: list[dict[str, object]] = []
     revision_count = 0
     reconciled_game_count = 0
     duplicate_observation_count = 0
+    participant_resolution_count = 0
     identity_fields = (
         "game_guid",
         "away_team_id",
@@ -255,6 +386,7 @@ def resolve_schedule_responses(
     for game_id in sorted(observations_by_game, key=int):
         observations = observations_by_game[game_id]
         conflicts: dict[str, list[str]] = {}
+        participant_resolutions = []
         for field in identity_fields:
             values = sorted(
                 {
@@ -264,7 +396,32 @@ def resolve_schedule_responses(
                 }
             )
             if len(values) > 1:
+                if field in {"away_team_id", "home_team_id"}:
+                    resolution = _resolve_participant_slot(participant_entries[game_id], field.split("_")[0])
+                    if resolution is not None:
+                        participant_resolutions.append(resolution)
+                        continue
                 conflicts[field] = values
+        # Placeholder names encode candidate identity, unlike descriptive club
+        # names. A stable opaque ID cannot hide a changed candidate set/object,
+        # even when its first-party observations cannot qualify a resolution.
+        for side in ("away", "home"):
+            entries = participant_entries[game_id]
+            teams = [entry[1][side] for entry in entries]
+            if (len({str(team["id"]) for team in teams}) == 1
+                    and any(first_party and observation["identity"]["game_type"] in _POSTSEASON_TYPES
+                            and observation["identity"]["sport_id"] == "1"
+                            and _placeholder_candidates(team[side]) is not None
+                            for observation, team, _, first_party in entries)
+                    and len({_canonical_json(team) for team in teams}) != 1):
+                conflicts[side + "_placeholder_identity"] = sorted(
+                    {_canonical_json(team).decode() for team in teams})
+        canonical_participants = {
+            side: next((str(r["resolved_team"]["id"]) for r in participant_resolutions if r["side"] == side),
+                       str(observations[0]["identity"][side + "_team_id"]))
+            for side in ("away", "home")}
+        if participant_resolutions and canonical_participants["away"] == canonical_participants["home"]:
+            conflicts["participant_slots"] = [canonical_participants["away"]]
         if conflicts:
             identity_conflicts.append(
                 {"game_id": game_id, "conflicting_fields": conflicts}
@@ -307,6 +464,10 @@ def resolve_schedule_responses(
                 }
             )
             canonical_identity[field] = values[0] if values else None
+        for resolution in participant_resolutions:
+            side = resolution["side"]
+            canonical_identity[side + "_team_id"] = str(resolution["resolved_team"]["id"])
+            canonical_identity[side + "_team_name"] = resolution["resolved_team"]["name"]
         canonical_identity["away_team_names"] = sorted(
             {
                 str(observation["identity"].get("away_team_name"))
@@ -349,6 +510,14 @@ def resolve_schedule_responses(
                 "and response digest"
             ),
         }
+        if participant_resolutions:
+            participant_resolutions.sort(key=lambda resolution: resolution["side"])
+            resolved[game_id].update({
+                "participant_resolution_policy": PARTICIPANT_RESOLUTION_POLICY,
+                "participant_resolution_count": len(participant_resolutions),
+                "participant_resolutions": participant_resolutions,
+            })
+            participant_resolution_count += len(participant_resolutions)
     return resolved, {
         "schedule_row_count": schedule_row_count,
         "unique_game_count": len(observations_by_game),
@@ -357,4 +526,7 @@ def resolve_schedule_responses(
         "duplicate_observation_count": duplicate_observation_count,
         "identity_conflict_count": len(identity_conflicts),
         "identity_conflicts": identity_conflicts,
+        # Keep ordinary/historical reconciliation hashes unchanged.
+        **({"participant_resolution_count": participant_resolution_count}
+           if participant_resolution_count else {}),
     }
