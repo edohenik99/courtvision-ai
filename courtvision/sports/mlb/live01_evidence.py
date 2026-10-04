@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+import hashlib
 from pathlib import Path
 from typing import Literal
 
@@ -13,7 +14,7 @@ from courtvision.sports.mlb.fact_backfill_evidence import (
     BASE, BackfillError, EvidenceJournal, digest, operation_lock,
     publish_document, read_document, source_ref,
 )
-from courtvision.sports.mlb.fact_ledger import FactLedgerConflict, MLBFactStore
+from courtvision.sports.mlb.fact_ledger import FactLedgerConflict, MLBFactStore, _plain_path
 from courtvision.sports.mlb.game_finality import classify_game_finality
 from courtvision.sports.mlb.hits_season_ledger import BatterFactReference, BatterLedgerCoverage
 from courtvision.sports.mlb.game_facts import canonical_json
@@ -302,16 +303,195 @@ def historical_inventory(fact_root: Path, backfill_id: str) -> dict:
         start=date(2026, 1, 1), end=HISTORY_THROUGH)
 
 
-def catch_up(root: Path, store: MLBFactStore, *, target: date, provider,
-             max_requests: int = 225) -> tuple[dict, dict]:
-    """Append-only catch-up; provider=None replays preserved readiness offline."""
+def _prefix_reference(catchup_root: Path, path: Path, coverage: dict) -> dict:
+    _plain_path(path)
+    return {"coverage_path": path.resolve().relative_to(catchup_root.resolve()).as_posix(),
+            "coverage_sha256": digest(coverage),
+            "artifact_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "through": coverage["through"]}
+
+
+def _bound_prefix(catchup_root: Path, reference: dict, store: MLBFactStore,
+                  visiting: frozenset[Path] = frozenset()) -> dict:
+    path = catchup_root / reference["coverage_path"]
+    _plain_path(path)
+    if not path.resolve().is_relative_to(catchup_root.resolve()):
+        raise BackfillError("prefix evidence reference escapes catch-up root")
+    prefix = _verify_catchup_prefix(catchup_root, path, store, visiting)
+    if prefix["reference"] != reference:
+        raise BackfillError("qualified prefix hash/identity binding differs")
+    return prefix
+
+
+def _qualified_coverage(coverage: dict) -> bool:
+    return (coverage.get("schema_version") == COVERAGE_SCHEMA
+            and coverage.get("start") == CATCHUP_START.isoformat()
+            and coverage.get("complete") is True
+            and all(coverage.get(key) == [] for key in (
+                "pending_prior_date_game_pks", "unresolved_game_pks", "missing_final_game_pks"))
+            and not coverage.get("missing_expected_records"))
+
+
+def _source_coverage(root: Path, revision: str, store: MLBFactStore) -> dict:
+    """Verify the original journal in place; never checkpoint, copy, or fetch."""
+    plan = read_document(root / "plan.json")
+    start, end = date.fromisoformat(plan["start"]), date.fromisoformat(plan["through"])
+    if (plan["fact_root"] != str(store.root) or start < CATCHUP_START
+            or end < start or end.year != CATCHUP_START.year):
+        raise BackfillError("prefix source plan differs from declared custody/window")
+    if (root / "conflict.json").exists():
+        raise FactLedgerConflict("qualified prefix period has a persisted conflict")
+    if (root / ".operation.lock").exists():
+        raise BackfillError("prefix source operation is still claimed")
+    journal = EvidenceJournal(root / "raw", plan["max_requests"])
+    records = journal.records()
+    if any(r["response"] is None or r["response"]["http_status"] != 200 for r in records):
+        raise BackfillError("prefix source contains interrupted/failed evidence")
+    schedules = [r for r in records if r["claim"]["gamePk"] is None]
+    if not schedules or revision != f'{schedules[-1]["claim"]["sequence"]:06d}.json':
+        raise BackfillError("prefix coverage does not bind its source revision")
+    inventory = inventory_from_captures(journal, schedules, start, end)
+    if inventory != read_document(root / "inventories" / revision):
+        raise BackfillError("prefix inventory differs from independent source evidence")
+    final_ids = set(schedule_coverage(inventory, start=start, end=end)["factual_final_game_pks"])
+    for record in records:
+        game_id = record["claim"]["gamePk"]
+        if game_id is not None and (game_id not in final_ids or record["claim"]["url"] !=
+                f"{BASE}/api/v1.1/game/{game_id}/feed/live"):
+            raise BackfillError("prefix feed is outside its qualified participation inventory")
+    return participation_inventory(inventory, journal, store, start=start, end=end)
+
+
+def _verify_catchup_prefix(catchup_root: Path, path: Path, store: MLBFactStore,
+                           visiting: frozenset[Path] = frozenset()) -> dict:
+    _plain_path(path)
+    identity = path.resolve()
+    if (not identity.is_relative_to(catchup_root.resolve()) or identity in visiting
+            or path.parent.name != "coverage"):
+        raise BackfillError("invalid/cyclic qualified prefix reference")
+    coverage = read_document(path)
+    if not _qualified_coverage(coverage):
+        raise BackfillError("referenced catch-up prefix is not qualified")
+    root = path.parent.parent
+    plan = read_document(root / "plan.json")
+    delta = _source_coverage(root, path.name, store)
+    if "prefix" in plan:
+        prefix = _bound_prefix(catchup_root, plan["prefix"], store, visiting | {identity})
+        if delta != read_document(root / "delta-coverage" / path.name):
+            raise BackfillError("prefix delta differs from independent source evidence")
+        derived = compose_catchup_coverage(prefix, delta, store=store)
+    else:
+        derived = delta
+    if derived != coverage:
+        raise BackfillError("prefix coverage differs from independently derived participation")
+    verify_expected(store, coverage["expected_records"])
+    return {"coverage": coverage, "reference": _prefix_reference(catchup_root, path, coverage)}
+
+
+def load_latest_qualified_catchup_prefix(catchup_root: Path, *, required_before: date,
+                                        store: MLBFactStore) -> dict | None:
+    """Select by verified coverage date, never filesystem recency or ledger scans."""
+    _plain_path(catchup_root)
+    candidates = []
+    for path in sorted(catchup_root.glob("*/coverage/*.json")):
+        coverage = read_document(path)
+        if coverage.get("complete") is True and coverage.get("schema_version") != COVERAGE_SCHEMA:
+            raise BackfillError("unsupported qualified catch-up coverage schema")
+        if not _qualified_coverage(coverage):
+            continue
+        through = date.fromisoformat(coverage["through"])
+        if CATCHUP_START <= through <= required_before:
+            candidates.append(_verify_catchup_prefix(catchup_root, path, store))
+    if not candidates:
+        return None
+    latest = max(p["coverage"]["through"] for p in candidates)
+    finalists = [p for p in candidates if p["coverage"]["through"] == latest]
+    if len({p["reference"]["coverage_sha256"] for p in finalists}) != 1:
+        raise BackfillError("conflicting qualified prefixes claim the same through date")
+    return finalists[0]
+
+
+def plan_catch_up(root: Path, store: MLBFactStore, *, target: date,
+                  max_requests: int = 225) -> tuple[dict, dict | None]:
+    """Read-only daily rehearsal and immutable restart binding, before acquisition."""
     end = target - timedelta(days=1)
     if target.year != 2026 or end < CATCHUP_START:
         raise BackfillError("LIVE-01 catch-up window is outside the declared season")
-    root.mkdir(parents=True, exist_ok=True)
-    plan = {"start": CATCHUP_START.isoformat(), "through": end.isoformat(),
-            "max_requests": max_requests, "fact_root": str(store.root)}
-    publish_document(root / "plan.json", plan)
+    _plain_path(root)
+    prefix = None
+    if (root / "plan.json").exists():
+        plan = read_document(root / "plan.json")
+        if "prefix" in plan:
+            prefix = _bound_prefix(root.parent, plan["prefix"], store)
+    else:
+        prefix = load_latest_qualified_catchup_prefix(root.parent, required_before=end, store=store)
+        start = (date.fromisoformat(prefix["coverage"]["through"]) + timedelta(days=1)
+                 if prefix else CATCHUP_START)
+        plan = {"start": start.isoformat(), "through": end.isoformat(),
+                "max_requests": max_requests, "fact_root": str(store.root)}
+        if prefix:
+            plan["prefix"] = prefix["reference"]
+    expected_start = (date.fromisoformat(prefix["coverage"]["through"]) + timedelta(days=1)
+                      if prefix else CATCHUP_START)
+    if (plan["start"] != expected_start.isoformat() or plan["through"] != end.isoformat()
+            or plan["fact_root"] != str(store.root) or plan["max_requests"] != max_requests
+            or expected_start > end + timedelta(days=1)):
+        raise BackfillError("catch-up plan differs from immutable prefix/delta window")
+    return plan, prefix
+
+
+def compose_catchup_coverage(prefix: dict, delta: dict, *, store: MLBFactStore) -> dict:
+    """Join adjacent independently verified periods and recheck their fact union."""
+    coverage, reference = prefix["coverage"], prefix["reference"]
+    if (not _qualified_coverage(coverage) or digest(coverage) != reference["coverage_sha256"]
+            or coverage["through"] != reference["through"]
+            or delta.get("schema_version") != COVERAGE_SCHEMA or delta.get("complete") is not True
+            or delta["start"] != (date.fromisoformat(coverage["through"]) + timedelta(days=1)).isoformat()
+            or delta["through"] < delta["start"]
+            or any(delta.get(key) != [] for key in (
+                "pending_prior_date_game_pks", "unresolved_game_pks", "missing_final_game_pks"))
+            or delta.get("missing_expected_records")):
+        raise BackfillError("qualified catch-up prefix/delta windows do not compose")
+    def participation_ids(part):
+        factual, administrative = part["factual_final_game_pks"], part["administrative_no_participation_game_pks"]
+        exclusions = [row["gamePk"] for row in part["administrative_exclusions"]]
+        game_records = [row["gamePk"] for row in part["expected_records"] if row["role"] == "GAME"]
+        if (len(set(factual + administrative)) != len(factual + administrative)
+                or sorted(part["games"], key=int) != sorted(factual, key=int)
+                or sorted(exclusions, key=int) != sorted(administrative, key=int)
+                or sorted(game_records, key=int) != sorted(factual, key=int)
+                or any(row["gamePk"] not in factual for row in part["expected_records"])):
+            raise FactLedgerConflict("conflicting prefix/delta participation declarations")
+        return set(factual + administrative)
+
+    if participation_ids(coverage) & participation_ids(delta):
+        raise FactLedgerConflict("overlapping prefix/delta participation identities")
+    expected = coverage["expected_records"] + delta["expected_records"]
+    verify_expected(store, expected)
+    players = {}
+    for ref in expected:
+        if ref["role"] == "BATTER":
+            players.setdefault(ref["player_id"], []).append({
+                "gamePk": ref["gamePk"], "factual_record_hash": ref["factual_record_hash"]})
+    return {"schema_version": COVERAGE_SCHEMA, "start": CATCHUP_START.isoformat(),
+            "through": delta["through"], "complete": True, "prefix": reference,
+            "delta": {"start": delta["start"], "through": delta["through"],
+                      "coverage_sha256": digest(delta), "inventory_hash": delta["inventory_hash"]},
+            "source_refs": [f'cv-live01-catchup-prefix:sha256:{reference["coverage_sha256"]}',
+                            f"cv-live01-catchup-delta:sha256:{digest(delta)}"],
+            "observed_game_types": sorted(set(coverage["observed_game_types"]) | set(delta["observed_game_types"])),
+            **{key: sorted(coverage[key] + delta[key], key=int) for key in (
+                "games", "factual_final_game_pks", "administrative_no_participation_game_pks",
+                "pending_prior_date_game_pks", "unresolved_game_pks", "missing_final_game_pks")},
+            "administrative_exclusions": coverage["administrative_exclusions"] + delta["administrative_exclusions"],
+            "expected_records": expected, "players": dict(sorted(players.items()))}
+
+
+def catch_up(root: Path, store: MLBFactStore, *, target: date, provider,
+             max_requests: int = 225) -> tuple[dict, dict]:
+    """Append-only catch-up; provider=None replays preserved readiness offline."""
+    plan, prefix = plan_catch_up(root, store, target=target, max_requests=max_requests)
+    start, end = date.fromisoformat(plan["start"]), date.fromisoformat(plan["through"])
     if (root / "conflict.json").exists():
         raise FactLedgerConflict("catch-up has a persisted conflict; zero requests allowed")
     journal = EvidenceJournal(root / "raw", max_requests)
@@ -319,6 +499,13 @@ def catch_up(root: Path, store: MLBFactStore, *, target: date, provider,
              "new_game_facts": 0, "new_batter_facts": 0, "new_pitcher_facts": 0,
              "fact_conflicts": 0, "schedule_refreshes": 0,
              "valid_preserved_feeds_refetched": 0}
+    if prefix:
+        stats.update(prefix=prefix["reference"], delta_start=plan["start"], delta_through=plan["through"])
+    if start > end:
+        # Exact already-qualified coverage needs no journal or provider request.
+        return prefix["coverage"], stats
+    root.mkdir(parents=True, exist_ok=True)
+    publish_document(root / "plan.json", plan)
     with operation_lock(root):
         try:
             records = journal.records()
@@ -330,8 +517,8 @@ def catch_up(root: Path, store: MLBFactStore, *, target: date, provider,
                 if provider is None:
                     raise BackfillError("offline catch-up requires preserved schedule evidence")
                 schedules.append(journal.capture(
-                    schedule_request(CATCHUP_START, end, "catchup-schedule"), provider))
-            inventory = inventory_from_captures(journal, schedules, CATCHUP_START, end)
+                    schedule_request(start, end, "catchup-schedule"), provider))
+            inventory = inventory_from_captures(journal, schedules, start, end)
             # Inspect every preserved game's existing facts before any new feed.
             # A later inventory row can already contain a conflict on restart.
             preserved = {}
@@ -348,20 +535,20 @@ def catch_up(root: Path, store: MLBFactStore, *, target: date, provider,
                     if game_id not in by_game:
                         raise BackfillError("preserved feed is absent from schedule inventory")
                     facts = _preserved_facts(by_game[game_id], record, schedules, journal,
-                                             start=CATCHUP_START, end=end)
+                                             start=start, end=end)
                     _missing_facts(store, facts)
 
             inspect_preserved()
-            readiness = schedule_coverage(inventory, start=CATCHUP_START, end=end)
+            readiness = schedule_coverage(inventory, start=start, end=end)
             if (resuming and readiness["pending_prior_date_game_pks"]
                     and not readiness["unresolved_game_pks"] and provider is not None):
                 sequence = len(records) + 1
-                schedules.append(journal.capture(schedule_request(CATCHUP_START, end,
+                schedules.append(journal.capture(schedule_request(start, end,
                     f"catchup-schedule-{sequence:06d}"), provider))
                 stats["schedule_refreshes"] += 1
-                inventory = inventory_from_captures(journal, schedules, CATCHUP_START, end)
+                inventory = inventory_from_captures(journal, schedules, start, end)
                 inspect_preserved()
-                readiness = schedule_coverage(inventory, start=CATCHUP_START, end=end)
+                readiness = schedule_coverage(inventory, start=start, end=end)
             revision = f'{schedules[-1]["claim"]["sequence"]:06d}.json'
             publish_document(root / "inventories" / revision, inventory)
             stats["expected_final_games"] = len(readiness["factual_final_game_pks"])
@@ -370,7 +557,7 @@ def catch_up(root: Path, store: MLBFactStore, *, target: date, provider,
                     **readiness, "complete": False, "inventory_hash": digest(inventory)})
                 raise BackfillError("unresolved catch-up finality")
             if readiness["pending_prior_date_game_pks"]:
-                coverage = participation_inventory(inventory, journal, store, start=CATCHUP_START, end=end)
+                coverage = participation_inventory(inventory, journal, store, start=start, end=end)
                 publish_document(root / "coverage" / revision, coverage)
                 return coverage, stats
             rows = [r for r in inventory["games"] if r["canonical_final"]]
@@ -396,7 +583,7 @@ def catch_up(root: Path, store: MLBFactStore, *, target: date, provider,
                         url=f'{BASE}/api/v1.1/game/{row["gamePk"]}/feed/live')
                     record = journal.capture(request, provider)
                     stats["new_game_feeds"] += 1
-                facts = _preserved_facts(row, record, schedules, journal, start=CATCHUP_START, end=end)
+                facts = _preserved_facts(row, record, schedules, journal, start=start, end=end)
                 # Check the entire game's existing logical identities before publication.
                 missing = _missing_facts(store, facts)
                 if not missing:
@@ -404,7 +591,10 @@ def catch_up(root: Path, store: MLBFactStore, *, target: date, provider,
                 for fact in missing:
                     store.publish(fact)
                     stats["new_" + fact.role.lower() + "_facts"] += 1
-            coverage = participation_inventory(inventory, journal, store, start=CATCHUP_START, end=end)
+            coverage = participation_inventory(inventory, journal, store, start=start, end=end)
+            if prefix:
+                publish_document(root / "delta-coverage" / revision, coverage)
+                coverage = compose_catchup_coverage(prefix, coverage, store=store)
             publish_document(root / "coverage" / revision, coverage)
             return coverage, stats
         except FactLedgerConflict as exc:

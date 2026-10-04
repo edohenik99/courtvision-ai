@@ -30,7 +30,7 @@ from courtvision.sports.mlb.hits_identity import bind_statsapi_event, bind_stats
 from courtvision.sports.mlb.hits_season_ledger import HitsLedgerError, load_ledger_season
 from courtvision.sports.mlb.live01_evidence import (
     CATCHUP_START, batter_coverage, catch_up, compose_coverage, historical_inventory,
-    inventory_from_capture, schedule_request,
+    inventory_from_capture, load_latest_qualified_catchup_prefix, schedule_request,
 )
 from courtvision.sports.mlb.live01_freeze import freeze_predictions, prediction_row, verify_freeze
 from courtvision.sports.mlb.live01_market import capture_market
@@ -220,6 +220,11 @@ def execute_live01(repository: Path, *, run_id: str, provider, clock=utc_now,
         "maximum_search_days": 7, "maximum_target_requests": 67, "maximum_catchup_requests": 225,
         "started_at": clock().isoformat(), "research_only": True})
     try:
+        store = MLBFactStore(repository / "data/mlb/facts")
+        # Reusable custody must pass before target discovery's first request.
+        search_start = max(NOT_BEFORE, clock().astimezone(ZoneInfo("America/Toronto")).date())
+        load_latest_qualified_catchup_prefix(base / "catchup",
+            required_before=search_start + timedelta(days=5), store=store)
         journal = EvidenceJournal(run_root / "raw", 67)
         target, inventory, record, selection = select_target(journal, provider, now=clock(), clock=clock)
         publish_document(run_root / "selection.json", selection)
@@ -235,7 +240,6 @@ def execute_live01(repository: Path, *, run_id: str, provider, clock=utc_now,
             publish_document(run_root / "disposition.json", result)
             return result
         publish_document(run_root / "target-inventory.json", inventory)
-        store = MLBFactStore(repository / "data/mlb/facts")
         # Each component is independently derived from preserved provider evidence.
         history = historical_inventory(store.root, "cv-mlb-fact-backfill-02-20260925")
         publish_document(run_root / "historical-coverage.json", history)
