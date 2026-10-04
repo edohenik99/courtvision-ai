@@ -301,7 +301,7 @@ def test_existing_fact_without_independent_capture_never_refetched(tmp_path):
     caught, _, _, _ = catchup(tmp_path, store)
     provider = BaseballProvider({"catchup-schedule": schedule(game(823101, "2026-09-25"))})
     with pytest.raises(BackfillError, match="never refetch"):
-        catch_up(tmp_path / "different-journal", store, target=TARGET, provider=provider)
+        catch_up(tmp_path / "separate-custody" / "different-journal", store, target=TARGET, provider=provider)
     assert provider.calls == ["catchup-schedule"]
 
 
