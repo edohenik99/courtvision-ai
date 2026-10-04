@@ -21,6 +21,8 @@ def participant(team_id, name):
 
 def postseason_row(side="away"):
     row = game(849828, "2026-10-03", "Scheduled")
+    # Synthetic independent sport qualification; preserved raw rows are untouched.
+    row["sport"] = {"id": 1}
     row.update(gameType="D", season="2026", gameGuid="621a974a-b250-4410-992f-37cb6c829743",
                gameDate="2026-10-03T20:00:00Z", venue={"id": 22, "name": "UNIQLO Field at Dodger Stadium"})
     row["status"] = {"abstractGameState": "Preview", "codedGameState": "S",
@@ -54,7 +56,7 @@ def assert_conflict(*rows):
     assert not summary.get("participant_resolution_count", 0)
 
 
-def test_preserved_849828_participant_objects_and_identity():
+def test_independently_qualified_849828_participant_objects_and_identity():
     old = postseason_row()
     new = resolved_row(old)
     resolved, summary = resolve_schedule_responses([source(old, 0), source(new, 4), source(new, 17)])
@@ -291,3 +293,38 @@ def test_compatible_explicit_query_still_qualifies_the_resolution(query):
     assert resolved["849828"]["identity"]["away_team_id"] == "144"
     assert summary["identity_conflict_count"] == 0
     assert summary["participant_resolution_count"] == 1
+
+
+@pytest.mark.parametrize("requested_league_id", ["103", "999"])
+def test_requested_league_is_not_independent_observed_league_evidence(requested_league_id):
+    old = postseason_row()
+    assert "league" not in old
+    url = ("https://statsapi.mlb.com/api/v1/schedule?sportId=1&leagueId="
+           + requested_league_id)
+    resolved, summary = resolve_schedule_responses([
+        source(old, 0, url=url), source(resolved_row(old), 1, url=url)])
+    assert not resolved
+    assert summary["identity_conflict_count"] == 1
+    assert not summary.get("participant_resolution_count", 0)
+
+
+@pytest.mark.parametrize("observed_sport", [None, {}, {"id": 2}])
+def test_requested_sport_is_not_independent_observed_sport_evidence(observed_sport):
+    old = postseason_row()
+    if observed_sport is None:
+        del old["sport"]
+    else:
+        old["sport"] = observed_sport
+    resolved, summary = resolve_schedule_responses([
+        source(old, 0), source(resolved_row(old), 1)])
+    assert not resolved
+    assert summary["identity_conflict_count"] == 1
+    assert not summary.get("participant_resolution_count", 0)
+
+
+def test_missing_observed_sport_cannot_hide_changed_placeholder_candidates():
+    old = postseason_row()
+    del old["sport"]
+    changed = deepcopy(old)
+    changed["teams"]["away"]["team"]["name"] = "NYM/MIL"
+    assert_conflict(old, changed)

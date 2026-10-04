@@ -64,9 +64,12 @@ def _placeholder_candidates(team: Mapping[str, object]) -> tuple[str, ...] | Non
 
 def _participant_query_matches(
     query: Mapping[str, list[str]], identity: Mapping[str, object],
+    observed_sport: Mapping[str, object],
+    observed_league: Mapping[str, object],
 ) -> bool:
-    """Require an explicit MLB query whose scope agrees with this row."""
-    if query.get("sportId") != ["1"]:
+    """Require request scope corroborated by raw response identity."""
+    if (query.get("sportId") != ["1"]
+            or str(observed_sport.get("id") or "").strip() != "1"):
         return False
     if "gameTypes" in query:
         values = query["gameTypes"]
@@ -80,7 +83,7 @@ def _participant_query_matches(
     if "leagueId" in query:
         values = query["leagueId"]
         if (len(values) != 1 or not values[0].isdigit() or int(values[0]) <= 0
-                or identity["league_id"] != values[0]):
+                or str(observed_league.get("id") or "").strip() != values[0]):
             return False
     return True
 
@@ -90,7 +93,7 @@ def _observation_ref(observation: ScheduleObservation) -> dict[str, object]:
 
 
 def _resolve_participant_slot(
-    entries: Sequence[tuple[ScheduleObservation, dict[str, dict[str, object]], bool]], side: str,
+    entries: Sequence[tuple[ScheduleObservation, dict[str, dict[str, object]], bool, bool]], side: str,
 ) -> dict[str, object] | None:
     """Prove a chronological placeholder prefix followed by one concrete club.
 
@@ -100,7 +103,7 @@ def _resolve_participant_slot(
     ordered = sorted(entries, key=lambda entry: (
         parse_utc(entry[0]["captured_at_utc"], "schedule observation captured_at_utc"),
         _canonical_json(entry[0]), _canonical_json(entry[1])))
-    first, teams, _ = ordered[0]
+    first, teams, _, _ = ordered[0]
     placeholder = teams[side]
     candidates = _placeholder_candidates(placeholder)
     if candidates is None:
@@ -108,7 +111,7 @@ def _resolve_participant_slot(
     resolved_team = None
     resolved_observation = None
     last_placeholder_time = None
-    for observation, teams, provider_valid in ordered:
+    for observation, teams, provider_valid, _ in ordered:
         identity = observation["identity"]
         if (not provider_valid or identity["game_type"] not in _POSTSEASON_TYPES
                 or identity["sport_id"] != "1"):
@@ -252,7 +255,7 @@ def resolve_schedule_responses(
     """Resolve versioned schedule state while retaining every raw observation."""
 
     observations_by_game: dict[str, list[dict[str, object]]] = {}
-    participant_entries: dict[str, list[tuple[ScheduleObservation, dict[str, dict[str, object]], bool]]] = {}
+    participant_entries: dict[str, list[tuple[ScheduleObservation, dict[str, dict[str, object]], bool, bool]]] = {}
     schedule_row_count = 0
     for request, record, response in sources:
         try:
@@ -360,7 +363,8 @@ def resolve_schedule_responses(
                 observations_by_game.setdefault(game_id, []).append(observation)
                 participant_entries.setdefault(game_id, []).append(
                     (observation, {"away": dict(away_team), "home": dict(home_team)},
-                     provider_valid and _participant_query_matches(query, observation["identity"])))
+                     provider_valid and _participant_query_matches(query, observation["identity"], sport, league),
+                     provider_valid))
 
     resolved: dict[str, dict[str, object]] = {}
     identity_conflicts: list[dict[str, object]] = []
@@ -399,15 +403,16 @@ def resolve_schedule_responses(
                         continue
                 conflicts[field] = values
         # Placeholder names encode candidate identity, unlike descriptive club
-        # names. A stable opaque ID cannot hide a changed candidate set/object.
+        # names. A stable opaque ID cannot hide a changed candidate set/object,
+        # even when its first-party observations cannot qualify a resolution.
         for side in ("away", "home"):
             entries = participant_entries[game_id]
             teams = [entry[1][side] for entry in entries]
             if (len({str(team["id"]) for team in teams}) == 1
-                    and any(valid and observation["identity"]["game_type"] in _POSTSEASON_TYPES
+                    and any(first_party and observation["identity"]["game_type"] in _POSTSEASON_TYPES
                             and observation["identity"]["sport_id"] == "1"
                             and _placeholder_candidates(team[side]) is not None
-                            for observation, team, valid in entries)
+                            for observation, team, _, first_party in entries)
                     and len({_canonical_json(team) for team in teams}) != 1):
                 conflicts[side + "_placeholder_identity"] = sorted(
                     {_canonical_json(team).decode() for team in teams})
