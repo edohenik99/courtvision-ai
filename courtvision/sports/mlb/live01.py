@@ -59,6 +59,47 @@ def unstarted(status: dict, *, start: datetime, observed: datetime) -> bool:
             and status.get("abstractGameCode", "P") == "P")
 
 
+def _pregame_advisory(play: object) -> bool:
+    """Recognize only the observed non-pitch, zero-progress Pre-Game advisory."""
+    def zero_fields(value, fields):
+        return (isinstance(value, dict)
+                and all(type(value.get(field)) is int and value[field] == 0 for field in fields))
+
+    def advisory(value):
+        return (isinstance(value, dict) and value.get("eventType") == "game_advisory"
+                and value.get("event") == "Game Advisory"
+                and value.get("description") == "Status Change - Pre-Game"
+                and value.get("isOut") is False
+                and zero_fields(value, ("homeScore", "awayScore")))
+
+    if not isinstance(play, dict):
+        return False
+    about, result, events = play.get("about"), play.get("result"), play.get("playEvents")
+    return (isinstance(about, dict)
+            and all(about.get(field) is False for field in ("isComplete", "hasOut", "isScoringPlay"))
+            and zero_fields(about, ("atBatIndex",)) and zero_fields(play, ("atBatIndex",))
+            and type(about.get("inning")) is int and about["inning"] == 1
+            and about.get("halfInning") == "top" and about.get("isTopInning") is True
+            and play.get("pitchIndex") == [] and play.get("runnerIndex") == []
+            and play.get("runners") == [] and zero_fields(play.get("count"), ("balls", "strikes", "outs"))
+            and advisory(result) and result.get("type") == "atBat" and zero_fields(result, ("rbi",))
+            and isinstance(events, list) and bool(events)
+            and all(isinstance(event, dict) and event.get("type") == "action"
+                    and event.get("isPitch") is False and "pitchData" not in event and "hitData" not in event
+                    and zero_fields(event.get("count"), ("balls", "strikes", "outs"))
+                    and advisory(event.get("details")) and event["details"].get("isScoringPlay") is False
+                    for event in events))
+
+
+def _has_game_start_play(plays: object) -> bool:
+    """Unknown plays fail closed; a pregame advisory alone is not game action."""
+    if not isinstance(plays, dict) or not isinstance(plays.get("allPlays", []), list):
+        return True
+    current = plays.get("currentPlay")
+    return (any(not _pregame_advisory(play) for play in plays.get("allPlays", []))
+            or (current is not None and current != {} and not _pregame_advisory(current)))
+
+
 def select_target(journal: EvidenceJournal, provider, *, now: datetime, clock=utc_now):
     candidate = max(NOT_BEFORE, now.astimezone(ZoneInfo("America/Toronto")).date())
     for offset in range(7):
@@ -121,7 +162,7 @@ def generate_cohort(inventory: dict, schedule_record: dict, journal: EvidenceJou
         data = feed["gameData"]
         captured_lead = (event.scheduled_start_utc - observed).total_seconds() / 60
         if (not unstarted(data["status"], start=event.scheduled_start_utc, observed=max(observed, clock()))
-                or feed.get("liveData", {}).get("plays", {}).get("allPlays")
+                or _has_game_start_play(feed.get("liveData", {}).get("plays", {}))
                 or data["datetime"].get("firstPitch")):
             exclusions.append({"gamePk": event.event_id, "reason": "GAME_STARTED"})
             continue
