@@ -60,22 +60,24 @@ def unstarted(status: dict, *, start: datetime, observed: datetime) -> bool:
 
 
 def _pregame_advisory(play: object) -> bool:
-    """Recognize only the observed non-pitch, zero-progress Pre-Game advisory."""
+    """Recognize the observed non-pitch, zero-progress administrative structure."""
     def zero_fields(value, fields):
         return (isinstance(value, dict)
                 and all(type(value.get(field)) is int and value[field] == 0 for field in fields))
 
     def advisory(value):
         return (isinstance(value, dict) and value.get("eventType") == "game_advisory"
-                and value.get("event") == "Game Advisory"
-                and value.get("description") == "Status Change - Pre-Game"
+                and "pitchData" not in value and "hitData" not in value
                 and value.get("isOut") is False
+                and value.get("isScoringPlay", False) is False
+                and all(value.get(field, False) is False for field in ("isInPlay", "isBall", "isStrike"))
                 and zero_fields(value, ("homeScore", "awayScore")))
 
     if not isinstance(play, dict):
         return False
     about, result, events = play.get("about"), play.get("result"), play.get("playEvents")
-    return (isinstance(about, dict)
+    return ("pitchData" not in play and "hitData" not in play
+            and play.get("isPitch", False) is False and isinstance(about, dict)
             and all(about.get(field) is False for field in ("isComplete", "hasOut", "isScoringPlay"))
             and zero_fields(about, ("atBatIndex",)) and zero_fields(play, ("atBatIndex",))
             and type(about.get("inning")) is int and about["inning"] == 1
@@ -84,20 +86,118 @@ def _pregame_advisory(play: object) -> bool:
             and play.get("runners") == [] and zero_fields(play.get("count"), ("balls", "strikes", "outs"))
             and advisory(result) and result.get("type") == "atBat" and zero_fields(result, ("rbi",))
             and isinstance(events, list) and bool(events)
+            and ("actionIndex" not in play or
+                 (isinstance(play["actionIndex"], list)
+                  and all(type(index) is int for index in play["actionIndex"])
+                  and play["actionIndex"] == list(range(len(events)))))
             and all(isinstance(event, dict) and event.get("type") == "action"
                     and event.get("isPitch") is False and "pitchData" not in event and "hitData" not in event
+                    and ("index" not in event or
+                         (type(event["index"]) is int and event["index"] == index))
                     and zero_fields(event.get("count"), ("balls", "strikes", "outs"))
                     and advisory(event.get("details")) and event["details"].get("isScoringPlay") is False
-                    for event in events))
+                    for index, event in enumerate(events)))
+
+
+def _actual_gameplay(play: object) -> bool:
+    """Positive pitch or completed non-administrative at-bat evidence."""
+    if not isinstance(play, dict):
+        return False
+    events, about, result = play.get("playEvents"), play.get("about"), play.get("result")
+    return ((isinstance(events, list) and any(
+                isinstance(event, dict) and event.get("type") == "pitch" and event.get("isPitch") is True
+                for event in events))
+            or (isinstance(about, dict) and about.get("isComplete") is True
+                and isinstance(result, dict) and result.get("type") == "atBat"
+                and isinstance(result.get("eventType"), str)
+                and bool(result["eventType"]) and result["eventType"] != "game_advisory"))
+
+
+def _classify_game_start_plays(plays: object) -> str:
+    """Interpret scoring references before permitting any pregame qualification."""
+    ambiguous = "AMBIGUOUS_OR_CONTRADICTORY_PLAY_EVIDENCE"
+    if not isinstance(plays, dict) or not isinstance(plays.get("allPlays", []), list):
+        return ambiguous
+    all_plays, scoring = plays.get("allPlays", []), plays.get("scoringPlays", [])
+    if not isinstance(scoring, list):
+        return ambiguous
+
+    def referenced(index):
+        # Preserved full feeds corroborate array position with both atBatIndex fields.
+        if type(index) is not int or not 0 <= index < len(all_plays):
+            return None
+        play = all_plays[index]
+        if (not isinstance(play, dict) or type(play.get("atBatIndex")) is not int
+                or play["atBatIndex"] != index or not isinstance(play.get("about"), dict)
+                or type(play["about"].get("atBatIndex")) is not int
+                or play["about"]["atBatIndex"] != index):
+            return None
+        return play
+
+    seen = set()
+    for index in scoring:
+        play = referenced(index)
+        if play is None or index in seen:
+            return ambiguous
+        seen.add(index)
+        result = play.get("result")
+        if (play["about"].get("isScoringPlay") is not True or not _actual_gameplay(play)
+                or not isinstance(result, dict) or result.get("type") != "atBat"
+                or not isinstance(result.get("eventType"), str) or not result["eventType"]
+                or result["eventType"] == "game_advisory"
+                or result.get("isScoringPlay", True) is not True
+                or type(result.get("isOut")) is not bool
+                or any(type(result.get(field)) is not int or result[field] < 0
+                       for field in ("homeScore", "awayScore", "rbi"))
+                or result["homeScore"] + result["awayScore"] == 0):
+            return ambiguous
+        previous = referenced(index - 1) if index else None
+        prior_result = previous.get("result") if previous is not None else (
+            {"homeScore": 0, "awayScore": 0} if index == 0 else None)
+        if (not isinstance(prior_result, dict)
+                or any(type(prior_result.get(field)) is not int or prior_result[field] < 0
+                       or result[field] < prior_result[field] for field in ("homeScore", "awayScore"))
+                or result["homeScore"] + result["awayScore"] <=
+                   prior_result["homeScore"] + prior_result["awayScore"]):
+            return ambiguous
+
+    current = plays.get("currentPlay")
+    candidates = all_plays + ([current] if current is not None and current != {} else [])
+    actual = any(_actual_gameplay(play) for play in candidates)
+    if any(not _pregame_advisory(play) and not _actual_gameplay(play) for play in candidates):
+        return ambiguous
+    # The other observed play index must not conceal unresolvable references or batted-ball data.
+    innings = plays.get("playsByInning", [])
+    if not isinstance(innings, list):
+        return ambiguous
+    for inning in innings:
+        if not isinstance(inning, dict):
+            return ambiguous
+        for side in ("top", "bottom"):
+            indexes = inning.get(side, [])
+            if not isinstance(indexes, list) or any(referenced(index) is None for index in indexes):
+                return ambiguous
+            if any(referenced(index)["about"].get("halfInning") != side
+                   or referenced(index)["about"].get("isTopInning") is not (side == "top")
+                   for index in indexes):
+                return ambiguous
+        for field in ("startIndex", "endIndex"):
+            if field in inning and referenced(inning[field]) is None:
+                return ambiguous
+        hits = inning.get("hits", {})
+        if (not isinstance(hits, dict)
+                or any(not isinstance(hits.get(side, []), list) for side in ("away", "home"))
+                or (not actual and any(hits.get(side) for side in ("away", "home")))):
+            return ambiguous
+    if actual:
+        return "ACTUAL_GAMEPLAY_EVIDENCE"
+    return "ADMINISTRATIVE_PREGAME_ONLY" if candidates else "NO_GAMEPLAY_EVIDENCE"
 
 
 def _has_game_start_play(plays: object) -> bool:
-    """Unknown plays fail closed; a pregame advisory alone is not game action."""
-    if not isinstance(plays, dict) or not isinstance(plays.get("allPlays", []), list):
-        return True
-    current = plays.get("currentPlay")
-    return (any(not _pregame_advisory(play) for play in plays.get("allPlays", []))
-            or (current is not None and current != {} and not _pregame_advisory(current)))
+    """Actual gameplay and ambiguous evidence both reject pregame qualification."""
+    return _classify_game_start_plays(plays) not in {
+        "NO_GAMEPLAY_EVIDENCE", "ADMINISTRATIVE_PREGAME_ONLY"}
 
 
 def select_target(journal: EvidenceJournal, provider, *, now: datetime, clock=utc_now):
