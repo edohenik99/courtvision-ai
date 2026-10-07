@@ -98,6 +98,129 @@ def test_request_identity_deterministic_secret_independent(tmp_path):
     assert saved.manifest["request_identity_sha256"] == digest(a)
 
 
+CREDENTIAL_HEADERS = ["Authorization", "authorization", "Proxy-Authorization", "X-API-Key", "API-Key",
+    "X-Api-Key", "x-apisports-key", "X-APISPORTS-KEY", "Cookie", "Set-Cookie", "X-Session-Token", "Client-Secret"]
+
+
+def header_parameters(name, secret, form, nested=False):
+    pairs = [("Accept", "application/json"), (name, secret), ("X-Trace-ID", "trace-1")]
+    if form == "mapping":
+        headers = dict(pairs)
+    elif form == "pairs":
+        headers = [list(pair) for pair in pairs]
+    elif form == "tuples":
+        headers = tuple(pairs)
+    else:
+        headers = [{form: key, "value": value} for key, value in pairs]
+    params = {"requestHeaders": headers}
+    return {"context": [{"transport": params}]} if nested else params
+
+
+@pytest.mark.parametrize("name", CREDENTIAL_HEADERS)
+@pytest.mark.parametrize("form", ["mapping", "pairs", "tuples", "name", "key", "header"])
+@pytest.mark.parametrize("nested", [False, True])
+def test_header_credentials_never_enter_request_or_capture_identity(tmp_path, name, form, nested):
+    first = request(parameters=header_parameters(name, "hidden-a", form, nested))
+    rotated = request(parameters=header_parameters(name, "hidden-b", form, nested))
+    assert first == rotated and digest(first) == digest(rotated)
+    assert b"hidden" not in canonical_bytes(first)
+    assert b"hidden" not in repr(first).encode()
+    saved = capture(tmp_path, first)
+    path = tmp_path / "journal" / EVIDENCE_SCHEMA / "stats-1" / "manifest.json"
+    before = path.read_bytes()
+    assert b"hidden" not in before and b"hidden" not in repr(saved).encode()
+    assert capture(tmp_path, rotated) == saved == verify_capture(tmp_path / "journal", "stats-1")
+    assert path.read_bytes() == before
+    assert saved.manifest["request_identity_sha256"] == digest(rotated)
+    assert saved.manifest["raw_body_sha256"] == digest_body(saved.raw_body)
+
+
+def digest_body(raw):
+    import hashlib
+    return hashlib.sha256(raw).hexdigest()
+
+
+def test_header_forms_normalize_to_same_nonsecret_identity():
+    forms = [request(parameters=header_parameters("X-API-Key", "hidden", form))
+        for form in ("mapping", "pairs", "tuples", "name", "key", "header")]
+    assert all(item == forms[0] and digest(item) == digest(forms[0]) for item in forms)
+    assert forms[0]["parameters"] == {"requestHeaders": {"accept": "application/json", "x-trace-id": "trace-1"}}
+    changed = request(parameters={"requestHeaders": {"X-Trace-ID": "trace-2", "Accept": "application/json"}})
+    assert digest(changed) != digest(forms[0])
+    same = request(parameters={"requestHeaders": {"x-trace-id": "trace-1", "ACCEPT": "application/json"}})
+    assert same == forms[0]
+
+
+@pytest.mark.parametrize("headers", [["X-API-Key", "hidden"], ("X-API-Key", "hidden"),
+    {"name": "X-API-Key", "value": "hidden"}, {"KEY": "X-API-Key", "VALUE": "hidden"}])
+def test_single_header_pairs_and_records_are_sanitized(headers):
+    assert request(parameters={"headers": headers})["parameters"] == {"headers": {}}
+
+
+@pytest.mark.parametrize("headers", [None, "X-API-Key: hidden", [["X-API-Key"]],
+    [["X-API-Key", "hidden", "extra"]], [[42, "hidden"]], [["Accept", None]],
+    [["Accept", "safe\r\ninjected"]], [["", "hidden"]], [["X API Key", "hidden"]],
+    [["Accept", "safe"], "ambiguous"], [["Accept", "safe"], ["accept", "other"]],
+    {"Accept": ["safe"]}, {"nested": {"X-API-Key": "hidden"}}, [[["X-API-Key", "hidden"]]],
+    [{"name": "X-API-Key", "value": "hidden", "extra": "ambiguous"}],
+    [{"name": "X-API-Key", "Name": "Accept", "value": "hidden"}],
+    [{"header_name": "X-API-Key", "header_value": "hidden"}], [{"X-API-Key": "hidden"}],
+    [["Authorization", None]], [["X-API-Key", {"ambiguous": "hidden"}]]])
+def test_malformed_or_ambiguous_header_structures_fail_closed(headers):
+    with pytest.raises(ProspectiveEvidenceError) as caught:
+        request(parameters={"nested": {"headers": headers}})
+    assert "hidden" not in str(caught.value)
+
+
+@pytest.mark.parametrize("params", [{"metadata": [["Authorization", "hidden"]]},
+    {"metadata": ("X-API-Key", "hidden")}, {"metadata": {"name": "Cookie", "value": "hidden"}},
+    {"metadata": {"header": "x-apisports-key", "value": "hidden"}},
+    {"metadata": [{"NAME": "X-Session-Token", "VALUE": "hidden"}]},
+    {"metadata": {"header_name": "Authorization", "header_value": "hidden"}},
+    {"metadata": [{"headerName": "X-API-Key", "headerValue": "hidden"}]}])
+def test_credential_pairs_outside_header_containers_fail_closed(params):
+    with pytest.raises(ProspectiveEvidenceError, match="credential"):
+        request(parameters=params)
+
+
+@pytest.mark.parametrize("name", CREDENTIAL_HEADERS)
+@pytest.mark.parametrize("form", ["mapping", "pairs", "name"])
+def test_verifier_rejects_resigned_credential_header_metadata(tmp_path, name, form):
+    capture(tmp_path)
+    params = header_parameters(name, "hidden", form, nested=True)
+    req = request()
+    req["parameters"] = params
+    def inject(manifest):
+        manifest["parameters"] = params
+        manifest["request_identity_sha256"] = digest(req)
+        manifest["capture_sha256"] = digest({key: value for key, value in manifest.items() if key != "capture_sha256"})
+    mutate_json(tmp_path / "journal" / EVIDENCE_SCHEMA / "stats-1" / "manifest.json", inject)
+    with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+        verify_capture(tmp_path / "journal", "stats-1")
+    assert "hidden" not in str(caught.value)
+    with pytest.raises(ProspectiveEvidenceError, match="credential"):
+        source_manifest(tmp_path / "journal", ["stats-1"])
+
+
+@pytest.mark.parametrize("headers", [{"Authorization": "hidden"}, [["X-API-Key", "hidden"]],
+    [{"name": "Cookie", "value": "hidden"}], [["Accept", "safe", "ambiguous"]]])
+def test_capture_rejects_unsanitized_header_metadata_before_writes(tmp_path, headers):
+    req = request()
+    req["parameters"] = {"headers": headers}
+    with pytest.raises(ProspectiveEvidenceError) as caught:
+        capture(tmp_path, req)
+    assert "hidden" not in str(caught.value)
+    assert not (tmp_path / "journal").exists()
+
+
+def test_request_header_sanitization_does_not_rewrite_response_body(tmp_path):
+    body = b'{ "headers": [["Accept", "application/json"]], "response": [] }\n'
+    saved = capture(tmp_path, request(parameters={"headers": [["X-API-Key", "hidden"]]}), raw_body=body)
+    assert saved.raw_body == body
+    assert (tmp_path / "journal" / EVIDENCE_SCHEMA / "stats-1" / "body.bin").read_bytes() == body
+    assert saved.manifest["raw_body_sha256"] == digest_body(body)
+
+
 def test_raw_capture_exact_replay_and_immutable_nested_metadata(tmp_path):
     saved = capture(tmp_path)
     replay = verify_capture(tmp_path / "journal", "stats-1")

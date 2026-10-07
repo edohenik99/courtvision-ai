@@ -29,7 +29,7 @@ _CAPTURE_FIELDS = _REQUEST_FIELDS | {"schema_version", "capture_mode", "request_
 _SECRET_NAMES = frozenset({"apikey", "key", "authorization", "proxyauthorization", "cookie",
     "cookies", "setcookie", "token", "accesstoken", "refreshtoken", "password", "secret",
     "clientsecret", "credentials", "xapikey", "xrapidapikey", "theoddsapikey", "auth",
-    "authentication", "signature", "sessionid"})
+    "authentication", "signature", "sessionid", "xapisportskey"})
 _SAFE_RESPONSE_METADATA = frozenset({"content-type", "content-length", "x-ratelimit-remaining",
     "x-ratelimit-limit", "x-requests-used", "x-requests-remaining", "x-requests-last"})
 
@@ -98,8 +98,54 @@ def _safe_text(value: str) -> None:
         raise ProspectiveEvidenceError("credential-bearing text is prohibited")
 
 
-def _safe_json(value: object, *, strip_secrets: bool = False) -> object:
+def _safe_headers(value: object, *, strip_secrets: bool) -> dict:
+    """Normalize supported header forms before any request identity is constructed."""
     if isinstance(value, Mapping):
+        labels = {key.casefold() for key in value if isinstance(key, str)}
+        entries = [value] if "value" in labels and labels & {"name", "key", "header"} else list(value.items())
+    elif isinstance(value, (list, tuple)):
+        entries = [value] if value and isinstance(value[0], str) else value
+    else:
+        raise ProspectiveEvidenceError("unsupported header container")
+    result = {}
+    for entry in entries:
+        if isinstance(entry, Mapping):
+            if any(not isinstance(key, str) for key in entry):
+                raise ProspectiveEvidenceError("malformed header record")
+            fields = {key.casefold(): item for key, item in entry.items()}
+            names = set(fields) & {"name", "key", "header"}
+            if len(fields) != len(entry) or len(names) != 1 or set(fields) != names | {"value"}:
+                raise ProspectiveEvidenceError("malformed header record")
+            name, item = fields[names.pop()], fields["value"]
+        elif isinstance(entry, (list, tuple)) and len(entry) == 2:
+            name, item = entry
+        else:
+            raise ProspectiveEvidenceError("malformed header pair")
+        if not isinstance(name, str) or re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", name) is None:
+            raise ProspectiveEvidenceError("invalid header name")
+        if not isinstance(item, str) or any(char in item for char in "\r\n\0"):
+            raise ProspectiveEvidenceError("invalid header value")
+        if _secret_key(name):
+            if strip_secrets:
+                continue
+            raise ProspectiveEvidenceError("credential field is prohibited")
+        _safe_text(item)
+        name = name.casefold()
+        if name in result:
+            raise ProspectiveEvidenceError("ambiguous duplicate header")
+        result[name] = item
+    return result
+
+
+def _safe_json(value: object, *, strip_secrets: bool = False, screen_headers: bool = False) -> object:
+    if isinstance(value, Mapping):
+        # Header records outside a supported container cannot hide credential pairs.
+        if screen_headers and any(isinstance(key, str) and re.sub(r"[^a-z0-9]", "", key.casefold())
+                                  in {"value", "headervalue"} for key in value):
+            if any(isinstance(key, str) and re.sub(r"[^a-z0-9]", "", key.casefold())
+                   in {"name", "key", "header", "headername"}
+                   and isinstance(item, str) and _secret_key(item) for key, item in value.items()):
+                raise ProspectiveEvidenceError("credential field is prohibited")
         result = {}
         for key, item in value.items():
             if not isinstance(key, str):
@@ -109,10 +155,15 @@ def _safe_json(value: object, *, strip_secrets: bool = False) -> object:
                     continue
                 raise ProspectiveEvidenceError("credential field is prohibited")
             _safe_text(key)
-            result[key] = _safe_json(item, strip_secrets=strip_secrets)
+            if screen_headers and re.sub(r"[^a-z0-9]", "", key.casefold()).endswith(("header", "headers")):
+                result[key] = _safe_headers(item, strip_secrets=strip_secrets)
+            else:
+                result[key] = _safe_json(item, strip_secrets=strip_secrets, screen_headers=screen_headers)
         return result
     if isinstance(value, (list, tuple)):
-        return [_safe_json(item, strip_secrets=strip_secrets) for item in value]
+        if screen_headers and value and isinstance(value[0], str) and _secret_key(value[0]):
+            raise ProspectiveEvidenceError("credential field is prohibited")
+        return [_safe_json(item, strip_secrets=strip_secrets, screen_headers=screen_headers) for item in value]
     if isinstance(value, str):
         _safe_text(value)
     elif value is not None and type(value) not in (bool, int, float):
@@ -205,7 +256,8 @@ def normalized_request(*, request_id: str, provider: str, source_role: str, endp
                        operating_date: str | None = None, canonical_event_id: str | None = None,
                        provider_event_id: str | None = None) -> dict:
     request = dict(request_id=require_id(request_id), provider=require_id(provider),
-        source_role=source_role, endpoint=endpoint, parameters=_safe_json(parameters, strip_secrets=True),
+        source_role=source_role, endpoint=endpoint,
+        parameters=_safe_json(parameters, strip_secrets=True, screen_headers=True),
         repository_commit_sha=require_hash(repository_commit_sha, 40), operating_date=operating_date,
         canonical_event_id=canonical_event_id, provider_event_id=provider_event_id)
     _validate_request(request)
@@ -231,7 +283,7 @@ def _validate_request(request: dict) -> None:
     for key in ("canonical_event_id", "provider_event_id"):
         if request[key] is not None:
             require_id(request[key])
-    _safe_json(request)
+    _safe_json(request, screen_headers=True)
 
 
 def _validate_capture(manifest: dict) -> None:
