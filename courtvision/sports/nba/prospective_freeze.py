@@ -15,7 +15,7 @@ from pathlib import Path
 
 from courtvision.sports.nba.artifact_domains import NBA_PROSPECTIVE_EVIDENCE, TARGET_OUTCOME_FIELDS
 from courtvision.sports.nba.prospective_evidence import (
-    ProspectiveEvidenceError, _PARAMETER_DESCRIPTORS, _safe_json, _semantic_key, canonical_bytes,
+    ProspectiveEvidenceError, _PARAMETER_DESCRIPTORS, _safe_json, _semantic_key, _subject_offsets, canonical_bytes,
     digest, immutable, plain_path,
     read_document, require_date, require_hash, require_id, source_manifest, utc_clock,
     verify_capture, write_once,
@@ -39,9 +39,13 @@ _POINTS_TOTAL_FIELDS = frozenset({"points_total", "total_points"})
 _TOTAL_MARKET_FIELDS = (frozenset(f"{subject}_total" for subject in
     ("consensus", "book", "vegas", "sportsbook", "bookmaker", "market", "opening", "closing"))
     | {"over_under"})
+_SPREAD_MARKET_FIELDS = frozenset({"moneyline", "moneylines", "money_line", "money_lines",
+    "spread", "spreads", "point_spread", "points_spread", "handicap", "handicaps", "asian_handicap",
+    "point_handicap", "points_handicap"})
 _POINTS_TOTAL_PREFIXES = tuple(name.replace("_", "") for name in _POINTS_TOTAL_FIELDS)
 _SCIENTIFIC_TOTAL_QUALIFIERS = ("historical", "projected")
 _MARKET_FIELDS = (_PROHIBITED | _PROBABILITY_MARKET_FIELDS | _POINTS_TOTAL_FIELDS | _TOTAL_MARKET_FIELDS
+    | _SPREAD_MARKET_FIELDS
     | {"points_line", "p_over", "p_under", "price", "consensus_price", "book_price"})
 _MARKET_PRICE_PREFIXES = ("bookprice", "consensusprice", "pricevalue", "pricevalues",
     "priceamount", "pricequote", "pricequotes", "pricetimestamp")
@@ -79,9 +83,11 @@ _STAT_OUTCOME_FIELDS = frozenset(f"{qualifier}_{stat}" for qualifier in ("actual
         "fgm", "fga", "fg3m", "fg3a", "ftm", "fta"))
 _SCORED_OUTCOME_FIELDS = frozenset(name for stat in ("points", "pts")
     for name in (f"{stat}_scored", f"scored_{stat}"))
-_SCORED_OUTCOME_PREFIXES = tuple(name.replace("_", "") for name in _SCORED_OUTCOME_FIELDS)
+_PLAYED_OUTCOME_FIELDS = frozenset({"minutes_played", "played_minutes"})
+_QUALIFIED_OUTCOME_FIELDS = _SCORED_OUTCOME_FIELDS | _PLAYED_OUTCOME_FIELDS
+_SCORED_OUTCOME_PREFIXES = tuple(name.replace("_", "") for name in _QUALIFIED_OUTCOME_FIELDS)
 _SCIENTIFIC_SCORED_QUALIFIERS = ("historical", "season", "recent", "lastgame", "projected", "predicted")
-_MODEL_OUTCOME_FIELDS = (TARGET_OUTCOME_FIELDS | _STAT_OUTCOME_FIELDS | _SCORED_OUTCOME_FIELDS
+_MODEL_OUTCOME_FIELDS = (TARGET_OUTCOME_FIELDS | _STAT_OUTCOME_FIELDS | _QUALIFIED_OUTCOME_FIELDS
     | {"_".join(name.split("_")[1:] + name.split("_")[:1]) for name in _STAT_OUTCOME_FIELDS}
     | {"final_result", "final_results", "final_grade", "final_grading"})
 _PROHIBITED_COMPACT = frozenset(name.replace("_", "") for name in _MARKET_FIELDS)
@@ -175,55 +181,50 @@ def _reject_model_field(key: str, item: object) -> None:
     def contains_pattern(pattern: tuple[str, ...]) -> bool:
         return any(tokens[index:index + len(pattern)] == pattern
                    for index in range(len(tokens) - len(pattern) + 1))
-    def without_subject(value: str, prefixes: tuple[str, ...]) -> str:
-        while True:
-            prefix = next((p for p in prefixes if value.startswith(p)), None)
-            if prefix is None:
-                return value
-            value = value[len(prefix):]
     def subject_forms(value: str, prefixes: tuple[str, ...]) -> tuple[str, ...]:
-        forms = [value]
-        while True:
-            prefix = next((p for p in prefixes if value.startswith(p)), None)
-            if prefix is None:
-                return tuple(forms)
-            value = value[len(prefix):]
-            forms.append(value)
+        return tuple(value[offset:] for offset in _subject_offsets(value, prefixes))
+    def reject_qualified_tails(forms: tuple[str, ...], stems: tuple[str, ...]) -> None:
+        for form in forms:
+            stem = next((stem for stem in stems if form.startswith(stem)), None)
+            if stem is None:
+                continue
+            remainder = form[len(stem):]
+            pending, seen = [0], {0}
+            while pending:
+                offset = pending.pop()
+                if offset == len(remainder):
+                    continue
+                # A qualified statistic cannot conceal a market or outcome tail.
+                _reject_model_field(remainder[offset:], item)
+                for descriptor in _FIELD_DESCRIPTOR_ORDER:
+                    if not remainder.startswith(descriptor, offset):
+                        continue
+                    following = offset + len(descriptor)
+                    if (descriptor in _SHORT_FIELD_DESCRIPTORS and following < len(remainder)
+                            and not remainder.startswith(_FIELD_DESCRIPTORS, following)):
+                        continue
+                    if following not in seen:
+                        seen.add(following)
+                        pending.append(following)
     market_forms = subject_forms(compact, _MARKET_SUBJECT_PREFIXES)
-    market_name = market_forms[-1]
-    outcome_name = market_name
-    total_qualifier = next((prefix for prefix in _SCIENTIFIC_TOTAL_QUALIFIERS
-                            if market_name.startswith(prefix)), None)
-    scientific_total = (total_qualifier is not None
-        and without_subject(market_name[len(total_qualifier):], _MARKET_SUBJECT_PREFIXES)
-            .startswith(_POINTS_TOTAL_PREFIXES))
-    scored_qualifier = next((prefix for prefix in _SCIENTIFIC_SCORED_QUALIFIERS
-                             if market_name.startswith(prefix)), None)
-    scored_forms = (subject_forms(market_name[len(scored_qualifier):], _MARKET_SUBJECT_PREFIXES)
-                    if scored_qualifier is not None else ())
+    total_forms = tuple(dict.fromkeys(tail
+        for form in market_forms for qualifier in _SCIENTIFIC_TOTAL_QUALIFIERS
+        if form.startswith(qualifier)
+        for tail in subject_forms(form[len(qualifier):], _MARKET_SUBJECT_PREFIXES)))
+    scientific_total = any(form.startswith(_POINTS_TOTAL_PREFIXES) for form in total_forms)
+    if scientific_total:
+        reject_qualified_tails(total_forms, _POINTS_TOTAL_PREFIXES)
+    scored_forms = tuple(dict.fromkeys(tail
+        for form in market_forms for qualifier in _SCIENTIFIC_SCORED_QUALIFIERS
+        if form.startswith(qualifier)
+        for tail in subject_forms(form[len(qualifier):], _MARKET_SUBJECT_PREFIXES)))
     scientific_scored = (any(form.startswith(_SCORED_OUTCOME_PREFIXES) for form in scored_forms)
         and not any(form.startswith("targetgame") for form in market_forms + scored_forms)
         and "final" not in tokens
         and not any(form.startswith(tuple(stem + qualifier for stem in _SCORED_OUTCOME_PREFIXES
             for qualifier in ("actual", "final", "settlement", "targetgame"))) for form in scored_forms))
     if scientific_scored:
-        for form in scored_forms:
-            stem = next((stem for stem in _SCORED_OUTCOME_PREFIXES if form.startswith(stem)), None)
-            if stem is None:
-                continue
-            remainder = form[len(stem):]
-            while remainder:
-                # Keep each descriptor stage in its field role; a qualified
-                # score cannot hide a declared market or target-outcome tail.
-                _reject_model_field(remainder, item)
-                descriptor = next((descriptor for descriptor in _FIELD_DESCRIPTOR_ORDER
-                                   if remainder.startswith(descriptor)), None)
-                if descriptor is None:
-                    break
-                tail = remainder[len(descriptor):]
-                if descriptor in _SHORT_FIELD_DESCRIPTORS and tail and not tail.startswith(_FIELD_DESCRIPTORS):
-                    break
-                remainder = tail
+        reject_qualified_tails(scored_forms, _SCORED_OUTCOME_PREFIXES)
     if (any((form in _OUTCOME_COMPACT or form.startswith(
             _STAT_OUTCOME_PREFIXES + _OUTCOME_PREFIXES + _OUTCOME_COMPOUND_PREFIXES)
             ) and not (scientific_scored and form in scored_forms
@@ -231,24 +232,34 @@ def _reject_model_field(key: str, item: object) -> None:
             for form in market_forms + scored_forms)
             or _OUTCOME_WORDS.intersection(tokens)
             or any(contains_pattern(pattern) for pattern in _OUTCOME_PATTERNS
-                   if not scientific_scored or "_".join(pattern) not in _SCORED_OUTCOME_FIELDS)
-            or outcome_name == "artifactdomain" and item != NBA_PROSPECTIVE_EVIDENCE):
+                   if not scientific_scored or "_".join(pattern) not in _QUALIFIED_OUTCOME_FIELDS)
+            or "artifactdomain" in market_forms and item != NBA_PROSPECTIVE_EVIDENCE):
         raise ProspectiveEvidenceError("target-game outcome is prohibited in model state")
-    economic_name, wrapped = market_name, False
-    while True:
-        economic_name = without_subject(economic_name, _MARKET_SUBJECT_PREFIXES)
-        wrapper = next((prefix for prefix in _BOOLEAN_WRAPPERS if economic_name.startswith(prefix)), None)
-        if wrapper is None:
-            break
-        economic_name, wrapped = economic_name[len(wrapper):], True
-    if wrapped and economic_name not in _ECONOMIC_FLAGS:
-        economic_name = without_subject(economic_name, _PERMISSION_ACTIONS + _MARKET_SUBJECT_PREFIXES)
-    if economic_name in _ECONOMIC_FLAGS or wrapped and economic_name in _ECONOMIC_ROUTE_COMPACT:
+    economic_states = {(offset, False) for offset in _subject_offsets(compact, _MARKET_SUBJECT_PREFIXES)}
+    pending = list(economic_states)
+    while pending:
+        offset, wrapped = pending.pop()
+        following = set()
+        for wrapper in _BOOLEAN_WRAPPERS:
+            if compact.startswith(wrapper, offset):
+                following.update((tail, True) for tail in _subject_offsets(
+                    compact, _MARKET_SUBJECT_PREFIXES, offset + len(wrapper)))
+        if wrapped and compact[offset:] not in _ECONOMIC_FLAGS:
+            following.update((tail, True) for tail in _subject_offsets(
+                compact, _PERMISSION_ACTIONS + _MARKET_SUBJECT_PREFIXES, offset))
+        for state in following - economic_states:
+            economic_states.add(state)
+            pending.append(state)
+    if any(compact[offset:] in _ECONOMIC_FLAGS
+           or wrapped and compact[offset:] in _ECONOMIC_ROUTE_COMPACT
+           for offset, wrapped in economic_states):
         if item is not False:
             raise ProspectiveEvidenceError("model state cannot enable an economic route")
         return
-    if (any(route in economic_name for route in _ECONOMIC_COMPOUNDS)
-            or economic_name in _SHORT_BET_COMPOUNDS or economic_name.startswith(_SHORT_BET_PREFIXES)
+    if (any(any(route in compact[offset:] for route in _ECONOMIC_COMPOUNDS)
+            or compact[offset:] in _SHORT_BET_COMPOUNDS
+            or compact[offset:].startswith(_SHORT_BET_PREFIXES)
+            for offset, _ in economic_states)
             or any(contains_pattern(tuple(route.split("_"))) for route in _ECONOMIC_ROUTES)):
         raise ProspectiveEvidenceError("unrecognized economic route field is prohibited")
     if (any(form in _PROHIBITED_COMPACT or form.startswith(
@@ -258,9 +269,9 @@ def _reject_model_field(key: str, item: object) -> None:
                    form[len(stem):].startswith(_FIELD_DESCRIPTORS)
                    for stem in _MARKET_SHORT_DESCRIPTOR_STEMS)
             for form in market_forms)
-            or market_name.startswith(_MARKET_PREFIXES + _MARKET_PRICE_PREFIXES)
-            or market_name.startswith(_MARKET_PROBABILITY_PREFIXES)
-            or not scientific_total and market_name.startswith(_POINTS_TOTAL_PREFIXES)
+            or any(form.startswith(_MARKET_PREFIXES + _MARKET_PRICE_PREFIXES
+                                   + _MARKET_PROBABILITY_PREFIXES) for form in market_forms)
+            or not scientific_total and any(form.startswith(_POINTS_TOTAL_PREFIXES) for form in market_forms)
             or any(contains_pattern(pattern) for pattern in _MARKET_PATTERNS
                    if not scientific_total or "_".join(pattern) not in _POINTS_TOTAL_FIELDS)):
         raise ProspectiveEvidenceError("observed market/economic field is prohibited in model state")

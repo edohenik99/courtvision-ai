@@ -27,18 +27,33 @@ _REQUEST_FIELDS = frozenset({"request_id", "provider", "source_role", "endpoint"
 _CAPTURE_FIELDS = _REQUEST_FIELDS | {"schema_version", "capture_mode", "request_identity_sha256",
     "requested_at_utc", "responded_at_utc", "http_status", "response_metadata",
     "raw_body_byte_length", "raw_body_sha256", "capture_sha256"}
-_SECRET_NAMES = frozenset({"apikey", "key", "authorization", "proxyauthorization", "cookie",
+_CREDENTIAL_KEY_ROOTS = frozenset(subject + "key" + plural
+    for subject in ("api", "private", "signing", "secret", "access", "auth", "authentication",
+                    "authorization", "session", "encryption", "decryption", "subscription")
+    for plural in ("", "s"))
+_SECRET_NAMES = (frozenset({"apikey", "key", "keys", "authorization", "proxyauthorization", "cookie",
     "cookies", "setcookie", "token", "accesstoken", "refreshtoken", "password", "secret",
     "clientsecret", "credentials", "xapikey", "xrapidapikey", "theoddsapikey", "auth",
     "authentication", "signature", "sessionid", "xapisportskey", "apitoken",
     "subscriptionkey", "ocpapimsubscriptionkey", "session", "xsession", "requestsession",
-    "privatekey", "signingkey"})
-_SECRET_SUFFIXES = ("apikey", "authorization", "password", "secret", "credential",
-    "credentials", "token", "cookie", "subscriptionkey", "privatekey", "signingkey")
+    "privatekey", "signingkey", "signatures", "sessionids", "sessions", "xsessions", "requestsessions",
+    "xsessionkey", "xsessionkeys", "requestsessionkey", "requestsessionkeys"})
+    | _CREDENTIAL_KEY_ROOTS)
+_SECRET_BASE_SUFFIXES = ("apikey", "authorization", "password", "secret", "credential",
+    "token", "cookie", "subscriptionkey", "privatekey", "signingkey")
+_SECRET_SUFFIXES = (tuple(suffix + plural for suffix in _SECRET_BASE_SUFFIXES for plural in ("", "s"))
+    + tuple(root for root in _CREDENTIAL_KEY_ROOTS if root not in {"sessionkey", "sessionkeys"}))
+_SUBJECT_SECRET_ROOTS = _SECRET_NAMES - {"key", "keys"}
+_SUBJECT_SECRET_ROOT_LENGTHS = frozenset(map(len, _SUBJECT_SECRET_ROOTS))
+_CREDENTIAL_SUBJECTS = ("targetgame", "player", "provider", "opponent", "event", "game",
+    "team", "home", "away", "model", "sources", "source", "provenance", "request",
+    "response", "headers", "header", "client", "proxy", "x", "consensus", "observed", "selected")
 _PARAMETER_DESCRIPTORS = ("parameters", "parameter", "params", "param", "arguments",
     "argument", "args", "arg")
 _SECRET_DESCRIPTORS = (tuple("query_" + item for item in _PARAMETER_DESCRIPTORS)
-    + _PARAMETER_DESCRIPTORS + ("values", "value", "headers", "header", "query"))
+    + _PARAMETER_DESCRIPTORS + ("values", "value", "headers", "header", "query",
+        "identities", "identity", "ids", "id", "hashes", "hash", "sha512", "sha256", "sha1",
+        "fingerprints", "fingerprint", "digests", "digest", "checksums", "checksum"))
 _FIELD_LABELS = frozenset({"name", "key", "header", "headername", "field", "fieldname",
     "feature", "featurename"})
 _FIELD_VALUES = frozenset({"value", "headervalue", "fieldvalue", "featurevalue"})
@@ -126,13 +141,37 @@ def _decoded_field_label(key: str) -> str:
     return key
 
 
+def _subject_offsets(name: str, subjects: tuple[str, ...], start: int = 0) -> tuple[int, ...]:
+    """Retain every declared prefix branch, including source/sources ambiguity."""
+    pending, seen = [start], {start}
+    while pending:
+        offset = pending.pop()
+        for subject in subjects:
+            if name.startswith(subject, offset):
+                following = offset + len(subject)
+                if following not in seen:
+                    seen.add(following)
+                    pending.append(following)
+    return tuple(sorted(seen))
+
+
+def _subject_secret_key(name: str) -> bool:
+    """Match specific credential roles without classifying scientific source keys."""
+    return any(len(name) - offset in _SUBJECT_SECRET_ROOT_LENGTHS
+               and name[offset:] in _SUBJECT_SECRET_ROOTS
+               for offset in _subject_offsets(name, _CREDENTIAL_SUBJECTS))
+
+
 def _secret_key(key: str) -> bool:
     key = _decoded_field_label(key)
     name = re.sub(r"[^a-z0-9]", "", key.casefold())
     tokens = _semantic_key(key).split("_")
     while name:
         if (name in _SECRET_NAMES or any(name.endswith(x) for x in _SECRET_SUFFIXES)
-                or tokens[-1:] == ["session"]):
+                or _subject_secret_key(name)
+                or tokens[-1:] in (["session"], ["sessions"])
+                # Session key labels need a word boundary: possession_key is scientific.
+                or tokens[-2:] in (["session", "key"], ["session", "keys"])):
             return True
         descriptor = next((item for item in _SECRET_DESCRIPTORS
                            if name.endswith(item.replace("_", ""))), None)
