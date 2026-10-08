@@ -1439,3 +1439,199 @@ def test_normalized_economic_aliases_allow_only_literal_false_model_state(tmp_pa
     assert saved.rows[0]["measurement_metadata"]["eligible_for_betting"] is False
     assert saved.rows[0]["measurement_metadata"]["kelly_eligible"] is False
     assert saved.rows[0]["measurement_metadata"]["eligible_for_official_pick"] is False
+
+
+SUFFIX_FINAL_OUTCOME_FIELDS = ["player_points_final", "player_minutes_final", "target_game_points_final",
+    "playerPointsFinal", "playerMinutesFinal", "PLAYERPOINTSFINAL", "PLAYERMINUTESFINAL",
+    "TARGETGAMEPOINTSFINAL", "points_final", "PLAYERMINUTESACTUAL", "OBSERVEDPLAYERPOINTSFINAL",
+    "SELECTEDPLAYERMINUTESFINAL", "CONSENSUSPLAYERPOINTSFINAL", "points_final_stats"]
+
+
+def semantic_alias_inputs(field, value, form):
+    if form == "encoded":
+        return {"encoded_features": json.dumps({"features": [[field, value]]})}
+    return model_credential_payload(field, value, form)
+
+
+@pytest.mark.parametrize("field", SUFFIX_FINAL_OUTCOME_FIELDS)
+@pytest.mark.parametrize("form", ["mapping", "pair", "feature_name", "encoded"])
+def test_suffix_final_outcome_labels_cannot_enter_model_identity(tmp_path, field, form):
+    capture(tmp_path)
+    with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+        snapshot(tmp_path, projection_inputs=semantic_alias_inputs(field, 12, form))
+    assert not (tmp_path / "articles").exists()
+
+
+@pytest.mark.parametrize("field", SUFFIX_FINAL_OUTCOME_FIELDS)
+@pytest.mark.parametrize("form", ["mapping", "pair", "feature_name", "encoded"])
+def test_resigned_suffix_final_outcome_labels_fail_disk_verification(tmp_path, field, form):
+    root = freeze(tmp_path)
+    path = root / "model_snapshots.jsonl"
+    row = json.loads(path.read_bytes())
+    row["projection_inputs"] = semantic_alias_inputs(field, 12, form)
+    resign_model_row(row)
+    path.write_bytes(canonical_bytes(row) + b"\n")
+    resign_freeze_artifact_hashes(root)
+    with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+        verify(tmp_path, root)
+
+
+WRAPPED_ECONOMIC_FLAGS = [("is_eligible_for_betting", "mapping"), ("can_bet", "pair"),
+    ("betting_eligible", "feature_name"), ("isEligibleForBetting", "encoded"),
+    ("BETTINGELIGIBLE", "mapping"), ("is_eligible_for_official_pick", "pair"),
+    ("official_pick_eligible", "feature_name"), ("isKellyEligible", "encoded"),
+    ("real_money_eligible", "mapping"), ("is_real_money_eligible", "pair"),
+    ("REALMONEYELIGIBLE", "encoded"), ("real_kelly_eligible", "feature_name"),
+    ("isRealKellyEligible", "mapping"), ("CANUSEKELLY", "pair"), ("can_use_kelly", "encoded")]
+
+
+@pytest.mark.parametrize("field,form", WRAPPED_ECONOMIC_FLAGS)
+@pytest.mark.parametrize("value", [True, 1])
+@pytest.mark.parametrize("boundary", ["constructor", "disk"])
+def test_wrapped_or_reversed_economic_flags_cannot_enable_model_eligibility(tmp_path, field, form, value, boundary):
+    inputs = semantic_alias_inputs(field, value, form)
+    if boundary == "constructor":
+        capture(tmp_path)
+        with pytest.raises(ProspectiveEvidenceError, match="economic"):
+            snapshot(tmp_path, projection_inputs=inputs)
+        assert not (tmp_path / "articles").exists()
+    else:
+        root = freeze(tmp_path)
+        path = root / "model_snapshots.jsonl"
+        row = json.loads(path.read_bytes())
+        row["projection_inputs"] = inputs
+        resign_model_row(row)
+        path.write_bytes(canonical_bytes(row) + b"\n")
+        resign_freeze_artifact_hashes(root)
+        with pytest.raises(ProspectiveEvidenceError, match="economic"):
+            verify(tmp_path, root)
+
+
+@pytest.mark.parametrize("field,form", WRAPPED_ECONOMIC_FLAGS)
+def test_wrapped_or_reversed_economic_flags_preserve_literal_false_model_state(tmp_path, field, form):
+    root = freeze(tmp_path)
+    inputs = semantic_alias_inputs(field, False, form)
+    expected = snapshot(tmp_path, projection_inputs=inputs)
+    assert expected["projection_inputs"] == inputs
+    path = root / "model_snapshots.jsonl"
+    row = json.loads(path.read_bytes())
+    row["projection_inputs"] = inputs
+    resign_model_row(row)
+    assert row == expected
+    path.write_bytes(canonical_bytes(row) + b"\n")
+    resign_freeze_artifact_hashes(root)
+    saved = verify(tmp_path, root)
+    assert saved.rows[0]["model_snapshot_id"] == expected["model_snapshot_id"]
+    assert saved.rows[0]["measurement_metadata"]["eligible_for_betting"] is False
+    assert saved.rows[0]["measurement_metadata"]["kelly_eligible"] is False
+    assert saved.rows[0]["measurement_metadata"]["eligible_for_official_pick"] is False
+
+
+@pytest.mark.parametrize("field,form", [("WAGERAMOUNT", "mapping"), ("wager_amount", "pair"),
+    ("wagerAmount", "feature_name"), ("WAGER_AMOUNT", "encoded")])
+@pytest.mark.parametrize("value", [True, 1, False])
+@pytest.mark.parametrize("boundary", ["constructor", "disk"])
+def test_wager_amount_aliases_are_prohibited_even_when_false(tmp_path, field, form, value, boundary):
+    inputs = semantic_alias_inputs(field, value, form)
+    if boundary == "constructor":
+        capture(tmp_path)
+        with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+            snapshot(tmp_path, projection_inputs=inputs)
+        assert not (tmp_path / "articles").exists()
+    else:
+        root = freeze(tmp_path)
+        path = root / "model_snapshots.jsonl"
+        row = json.loads(path.read_bytes())
+        row["projection_inputs"] = inputs
+        resign_model_row(row)
+        path.write_bytes(canonical_bytes(row) + b"\n")
+        resign_freeze_artifact_hashes(root)
+        with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+            verify(tmp_path, root)
+
+
+def test_beta_distribution_and_better_estimate_preserve_safe_scientific_state(tmp_path):
+    inputs = {"beta": 0.4, "beta_distribution": {"alpha": 2, "beta": 3},
+        "beta_parameters": {"alpha": 2, "beta": 3}, "better_estimate": 13, "alphabet": 26}
+    body = canonical_bytes({"response": [inputs]})
+    saved = capture(tmp_path, request(parameters={"player_id": "player-1", "season": "2025", "context": inputs}), raw_body=body)
+    ref = {"request_id": "stats-1", "raw_body_sha256": saved.manifest["raw_body_sha256"]}
+    row = snapshot(tmp_path, projection_inputs=inputs, distribution_model_id="synthetic-beta",
+        distribution_evidence_ref=ref, distribution_parameters=inputs)
+    root = freeze(tmp_path, rows=[row])
+    frozen = verify(tmp_path, root)
+    assert frozen.rows[0]["projection_inputs"] == inputs
+    assert frozen.rows[0]["distribution_parameters"] == inputs
+    assert source_manifest(tmp_path / "journal", ["stats-1"])["stats-1"]["parameters"]["context"] == inputs
+    assert verify_capture(tmp_path / "journal", "stats-1").raw_body == body
+
+
+@pytest.mark.parametrize("field,form", [("final_score", "mapping"), ("player_rebounds_final", "pair"),
+    ("PLAYERASSISTSFINAL", "feature_name"), ("final_fta", "encoded"),
+    ("final_fgm", "mapping"), ("FG3MFINAL", "pair")])
+@pytest.mark.parametrize("boundary", ["constructor", "disk"])
+def test_canonical_nba_stat_outcome_aliases_are_prohibited(tmp_path, field, form, boundary):
+    inputs = semantic_alias_inputs(field, 12, form)
+    if boundary == "constructor":
+        capture(tmp_path)
+        with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+            snapshot(tmp_path, projection_inputs=inputs)
+        assert not (tmp_path / "articles").exists()
+    else:
+        root = freeze(tmp_path)
+        path = root / "model_snapshots.jsonl"
+        row = json.loads(path.read_bytes())
+        row["projection_inputs"] = inputs
+        resign_model_row(row)
+        path.write_bytes(canonical_bytes(row) + b"\n")
+        resign_freeze_artifact_hashes(root)
+        with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+            verify(tmp_path, root)
+
+
+def test_raw_historical_nba_stat_aliases_preserve_exact_provider_body(tmp_path):
+    body = b'{ "response": [{"game_id":"historical-game-1","score":100,"rebounds":8,"assists":5,"fta":4,"fgm":6,"fg3m":2,"final_score":100}] }\n'
+    saved = capture(tmp_path, raw_body=body)
+    row = snapshot(tmp_path, projection_inputs={"final_projected_minutes": 18, "counterfactual_points": 13})
+    root = freeze(tmp_path, rows=[row])
+    assert verify(tmp_path, root).rows[0]["model_snapshot_id"] == row["model_snapshot_id"]
+    assert saved.raw_body == body == verify_capture(tmp_path / "journal", "stats-1").raw_body
+    assert saved.manifest["raw_body_sha256"] == digest_body(body)
+
+
+@pytest.mark.parametrize("field,form", [("over_probability", "mapping"),
+    ("PROBABILITYUNDER", "pair"), ("player_p_over", "encoded"),
+    ("OVERPROBABILITYVALUES", "feature_name"), ("MODELUNDERPROBABILITYVALUE", "encoded")])
+@pytest.mark.parametrize("boundary", ["constructor", "disk"])
+def test_line_specific_probability_aliases_cannot_enter_model_freezes(tmp_path, field, form, boundary):
+    inputs = semantic_alias_inputs(field, 0.6, form)
+    if boundary == "constructor":
+        capture(tmp_path)
+        with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+            snapshot(tmp_path, projection_inputs=inputs)
+        assert not (tmp_path / "articles").exists()
+    else:
+        root = freeze(tmp_path)
+        path = root / "model_snapshots.jsonl"
+        row = json.loads(path.read_bytes())
+        row["projection_inputs"] = inputs
+        resign_model_row(row)
+        path.write_bytes(canonical_bytes(row) + b"\n")
+        resign_freeze_artifact_hashes(root)
+        with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+            verify(tmp_path, root)
+
+
+def test_market_independent_pmf_and_cdf_parameters_preserve_model_freezes(tmp_path):
+    saved = capture(tmp_path)
+    parameters = {"pmf": {"support": [0, 1, 2], "probabilities": [0.2, 0.3, 0.5]},
+        "cdf": {"support": [0, 1, 2], "values": [0.2, 0.5, 1.0]}}
+    ref = {"request_id": "stats-1", "raw_body_sha256": saved.manifest["raw_body_sha256"]}
+    row = snapshot(tmp_path, distribution_model_id="synthetic-discrete-points",
+        distribution_evidence_ref=ref, distribution_parameters=parameters)
+    root = freeze(tmp_path, rows=[row])
+    frozen = verify(tmp_path, root)
+    assert frozen.rows[0]["model_snapshot_id"] == row["model_snapshot_id"]
+    assert frozen.rows[0]["distribution_parameters"]["pmf"]["probabilities"] == (0.2, 0.3, 0.5)
+    assert frozen.rows[0]["distribution_parameters"]["cdf"]["values"] == (0.2, 0.5, 1.0)
+    assert frozen.rows[0]["distribution_parameters"]["pmf"]["support"] == (0, 1, 2)

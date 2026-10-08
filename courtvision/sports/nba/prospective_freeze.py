@@ -31,10 +31,24 @@ _PROHIBITED = frozenset("""sportsbook bookmaker vendor line observed_line market
     implied_probability market_timestamp_utc selected_side edge model_edge probability_based_edge
     closing_line closing_odds clv stake kelly bankroll result settlement actual_points actual_minutes
     final_points final_stats box_score points pts minutes model_over_probability model_under_probability""".split())
-_MARKET_FIELDS = _PROHIBITED | {"points_line"}
-_MODEL_OUTCOME_FIELDS = TARGET_OUTCOME_FIELDS | {"final_minutes"}
+_PROBABILITY_MARKET_FIELDS = frozenset({"model_over_probability", "model_under_probability",
+    "over_probability", "under_probability", "probability_over", "probability_under",
+    "line_specific_probability", "implied_probability", "probability_based_edge"})
+_MARKET_FIELDS = _PROHIBITED | _PROBABILITY_MARKET_FIELDS | {"points_line", "p_over", "p_under"}
+_MARKET_PROBABILITY_PREFIXES = (tuple(name.replace("_", "") for name in _PROBABILITY_MARKET_FIELDS)
+    + tuple(stem + descriptor for stem in ("pover", "punder")
+            for descriptor in ("value", "values", "probability", "estimate", "estimates")))
+_STAT_OUTCOME_FIELDS = frozenset(f"{qualifier}_{stat}" for qualifier in ("actual", "final")
+    for stat in ("points", "pts", "minutes", "stats", "score", "scores", "rebounds", "assists",
+        "steals", "blocks", "turnovers", "fouls", "reb", "ast", "stl", "blk", "tov",
+        "fgm", "fga", "fg3m", "fg3a", "ftm", "fta"))
+_MODEL_OUTCOME_FIELDS = (TARGET_OUTCOME_FIELDS | _STAT_OUTCOME_FIELDS
+    | {"_".join(name.split("_")[1:] + name.split("_")[:1]) for name in _STAT_OUTCOME_FIELDS}
+    | {"final_result", "final_results", "final_grade", "final_grading"})
 _PROHIBITED_COMPACT = frozenset(name.replace("_", "") for name in _MARKET_FIELDS)
 _OUTCOME_COMPACT = frozenset(name.replace("_", "") for name in _MODEL_OUTCOME_FIELDS)
+_STAT_OUTCOME_PREFIXES = tuple(name.replace("_", "") for name in _STAT_OUTCOME_FIELDS
+    | {"_".join(name.split("_")[1:] + name.split("_")[:1]) for name in _STAT_OUTCOME_FIELDS})
 _OUTCOME_PREFIXES = ("actual", "targetgameactual", "targetgamefinal", "settlement",
     "grading", "result", "grade")
 _MARKET_PREFIXES = ("sportsbook", "bookmaker", "kelly", "closing", "settlement", "market")
@@ -44,6 +58,22 @@ _MARKET_PATTERNS = tuple(tuple(name.split("_")) for name in _MARKET_FIELDS
     if name not in {"points", "pts", "minutes", "kelly"})
 _SUBJECT_PREFIXES = ("targetgame", "player", "provider", "opponent", "event", "game", "team", "home", "away")
 _MARKET_SUBJECT_PREFIXES = _SUBJECT_PREFIXES + ("consensus", "observed", "selected")
+_ECONOMIC_ROUTES = ("bet", "betting", "wager", "wagering", "kelly", "official_pick",
+    "real_money", "real_kelly")
+_ECONOMIC_ROUTE_COMPACT = frozenset(route.replace("_", "") for route in _ECONOMIC_ROUTES)
+_ECONOMIC_GATES = ("eligible", "eligibility", "enabled", "allowed", "permitted", "authorized")
+_ECONOMIC_FLAGS = (frozenset(route + gate for route in _ECONOMIC_ROUTE_COMPACT for gate in _ECONOMIC_GATES)
+    | frozenset(gate + route for route in _ECONOMIC_ROUTE_COMPACT
+                for gate in (*_ECONOMIC_GATES, "eligiblefor")))
+_BOOLEAN_WRAPPERS = ("is", "can", "may", "has", "should", "will", "would")
+_PERMISSION_ACTIONS = ("use", "place", "enable", "allow", "authorize", "permit")
+# Short permission roots are token/exact-grammar matches: `beta` is scientific data.
+_ECONOMIC_COMPOUNDS = tuple(route for route in _ECONOMIC_ROUTE_COMPACT if route != "bet")
+_BET_DESCRIPTORS = ("amount", "budget", "stake", "size", "sizing", "permission", "approval",
+    "enabled", "eligibility", "eligible", "allowed", "authorized", "permitted", "route")
+_SHORT_BET_COMPOUNDS = frozenset(action + "bet" for action in _PERMISSION_ACTIONS)
+_SHORT_BET_PREFIXES = tuple(prefix + "bet" + descriptor
+    for prefix in ("", *_PERMISSION_ACTIONS) for descriptor in _BET_DESCRIPTORS)
 _STATE_FIELDS = frozenset({"canonical_event_id", "provider_event_ids", "player_id",
     "canonical_player_name", "team", "opponent", "commence_time_utc", "model_id", "model_version",
     "minutes_evidence_ref", "projected_minutes", "minutes_uncertainty", "projection_evidence_ref",
@@ -109,18 +139,34 @@ def _reject_model_field(key: str, item: object) -> None:
             if prefix is None:
                 return value
             value = value[len(prefix):]
-    outcome_name = without_subject(compact, _SUBJECT_PREFIXES)
+    outcome_name = without_subject(compact, _MARKET_SUBJECT_PREFIXES)
     market_name = without_subject(compact, _MARKET_SUBJECT_PREFIXES)
-    if (outcome_name in _OUTCOME_COMPACT or outcome_name.startswith(_OUTCOME_PREFIXES)
+    if (outcome_name in _OUTCOME_COMPACT or outcome_name.startswith(_STAT_OUTCOME_PREFIXES)
+            or outcome_name.startswith(_OUTCOME_PREFIXES)
             or _OUTCOME_WORDS.intersection(tokens)
             or any(contains_pattern(pattern) for pattern in _OUTCOME_PATTERNS)
             or outcome_name == "artifactdomain" and item != NBA_PROSPECTIVE_EVIDENCE):
         raise ProspectiveEvidenceError("target-game outcome is prohibited in model state")
-    if market_name in {"kellyeligible", "eligibleforbetting", "eligibleforofficialpick"} and item is not False:
-        raise ProspectiveEvidenceError("model state cannot enable an economic route")
+    economic_name, wrapped = market_name, False
+    while True:
+        economic_name = without_subject(economic_name, _MARKET_SUBJECT_PREFIXES)
+        wrapper = next((prefix for prefix in _BOOLEAN_WRAPPERS if economic_name.startswith(prefix)), None)
+        if wrapper is None:
+            break
+        economic_name, wrapped = economic_name[len(wrapper):], True
+    if wrapped and economic_name not in _ECONOMIC_FLAGS:
+        economic_name = without_subject(economic_name, _PERMISSION_ACTIONS + _MARKET_SUBJECT_PREFIXES)
+    if economic_name in _ECONOMIC_FLAGS or wrapped and economic_name in _ECONOMIC_ROUTE_COMPACT:
+        if item is not False:
+            raise ProspectiveEvidenceError("model state cannot enable an economic route")
+        return
+    if (any(route in economic_name for route in _ECONOMIC_COMPOUNDS)
+            or economic_name in _SHORT_BET_COMPOUNDS or economic_name.startswith(_SHORT_BET_PREFIXES)
+            or any(contains_pattern(tuple(route.split("_"))) for route in _ECONOMIC_ROUTES)):
+        raise ProspectiveEvidenceError("unrecognized economic route field is prohibited")
     if (market_name in _PROHIBITED_COMPACT or market_name.startswith(_MARKET_PREFIXES)
-            and market_name != "kellyeligible"
-            or market_name != "kellyeligible" and any(contains_pattern(pattern) for pattern in _MARKET_PATTERNS)):
+            or market_name.startswith(_MARKET_PROBABILITY_PREFIXES)
+            or any(contains_pattern(pattern) for pattern in _MARKET_PATTERNS)):
         raise ProspectiveEvidenceError("observed market/economic field is prohibited in model state")
 
 
