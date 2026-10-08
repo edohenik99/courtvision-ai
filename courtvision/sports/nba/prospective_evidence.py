@@ -31,7 +31,7 @@ _CAPTURE_FIELDS = _REQUEST_FIELDS | {"schema_version", "capture_mode", "request_
 _CREDENTIAL_KEY_ROOTS = frozenset(subject + "key" + plural
     for subject in ("api", "private", "signing", "secret", "access", "auth", "authentication",
                     "authorization", "session", "encryption", "decryption", "subscription",
-                    "hmac", "master", "ssh", "client")
+                    "hmac", "master", "ssh", "client", "app", "application", "consumer", "developer")
     for plural in ("", "s"))
 _SECRET_NAMES = (frozenset({"apikey", "key", "keys", "authorization", "proxyauthorization", "cookie",
     "cookies", "setcookie", "token", "accesstoken", "refreshtoken", "password", "passwd",

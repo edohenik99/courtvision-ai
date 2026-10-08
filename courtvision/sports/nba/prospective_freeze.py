@@ -35,7 +35,9 @@ _PROHIBITED = frozenset("""sportsbook bookmaker vendor line observed_line market
 _PROBABILITY_MARKET_FIELDS = frozenset({"model_over_probability", "model_under_probability",
     "over_probability", "under_probability", "probability_over", "probability_under",
     "line_specific_probability", "implied_probability", "probability_based_edge"})
-_POINTS_TOTAL_FIELDS = frozenset({"points_total", "total_points"})
+_TOTAL_ROOTS = ("totals", "total")
+_POINTS_TOTAL_FIELDS = frozenset(name for root in _TOTAL_ROOTS
+    for name in (f"points_{root}", f"{root}_points"))
 _TOTAL_MARKET_FIELDS = (frozenset(f"{subject}_total" for subject in
     ("consensus", "book", "vegas", "sportsbook", "bookmaker", "market", "opening", "closing"))
     | {"over_under"})
@@ -49,7 +51,8 @@ _PRICING_MARKET_FIELDS = (_PRICING_ROOTS
         for qualifier in ("adjustment", "adjustments", "adjusted", "included", "removed",
                           "removal", "removals", "rate", "rates")))
 _POINTS_TOTAL_PREFIXES = tuple(name.replace("_", "") for name in _POINTS_TOTAL_FIELDS)
-_SCIENTIFIC_TOTAL_PREFIXES = _POINTS_TOTAL_PREFIXES + ("total",)
+_SCIENTIFIC_TOTAL_PREFIXES = tuple(sorted(_POINTS_TOTAL_PREFIXES + _TOTAL_ROOTS,
+    key=len, reverse=True))
 _SCIENTIFIC_TOTAL_QUALIFIERS = ("historical", "projected")
 _MARKET_FIELDS = (_PROHIBITED | _PROBABILITY_MARKET_FIELDS | _POINTS_TOTAL_FIELDS | _TOTAL_MARKET_FIELDS
     | _SPREAD_MARKET_FIELDS | _PRICING_MARKET_FIELDS
@@ -227,8 +230,10 @@ def _reject_model_field(key: str, item: object) -> None:
                     following.add((offset + len(qualifier), True, total, points))
             # Keep both existing points_total/total_points root orders intact,
             # including a declared role between their two parts.
-            if not total and value.startswith("total", offset):
-                following.add((offset + len("total"), role, True, points))
+            if not total:
+                for root in _TOTAL_ROOTS:
+                    if value.startswith(root, offset):
+                        following.add((offset + len(root), role, True, points))
             if not points and value.startswith("points", offset):
                 following.add((offset + len("points"), role, total, True))
             for state in following - seen:
@@ -253,29 +258,31 @@ def _reject_model_field(key: str, item: object) -> None:
                     if tail == len(compact) or compact.startswith(_FIELD_DESCRIPTORS, tail):
                         return True
         return False
-    def reject_qualified_tails(forms: tuple[str, ...], stems: tuple[str, ...]) -> None:
+    def reject_qualified_tails(forms: tuple[str, ...], stems: tuple[str, ...],
+                               fallback_stems: tuple[str, ...] = ()) -> None:
         for form in forms:
-            stem = next((stem for stem in stems if form.startswith(stem)), None)
-            if stem is None:
-                continue
-            remainder = form[len(stem):]
-            pending, seen = [0], {0}
-            while pending:
-                offset = pending.pop()
-                if offset == len(remainder):
-                    continue
-                # A qualified statistic cannot conceal a market or outcome tail.
-                _reject_model_field(remainder[offset:], item)
-                for descriptor in _FIELD_DESCRIPTOR_ORDER:
-                    if not remainder.startswith(descriptor, offset):
+            matching_stems = tuple(stem for stem in stems if form.startswith(stem))
+            if not matching_stems:
+                matching_stems = tuple(stem for stem in fallback_stems if form.startswith(stem))
+            for stem in matching_stems:
+                remainder = form[len(stem):]
+                pending, seen = [0], {0}
+                while pending:
+                    offset = pending.pop()
+                    if offset == len(remainder):
                         continue
-                    following = offset + len(descriptor)
-                    if (descriptor in _SHORT_FIELD_DESCRIPTORS and following < len(remainder)
-                            and not remainder.startswith(_FIELD_DESCRIPTORS, following)):
-                        continue
-                    if following not in seen:
-                        seen.add(following)
-                        pending.append(following)
+                    # A qualified statistic cannot conceal a market or outcome tail.
+                    _reject_model_field(remainder[offset:], item)
+                    for descriptor in _FIELD_DESCRIPTOR_ORDER:
+                        if not remainder.startswith(descriptor, offset):
+                            continue
+                        following = offset + len(descriptor)
+                        if (descriptor in _SHORT_FIELD_DESCRIPTORS and following < len(remainder)
+                                and not remainder.startswith(_FIELD_DESCRIPTORS, following)):
+                            continue
+                        if following not in seen:
+                            seen.add(following)
+                            pending.append(following)
     market_forms = subject_forms(compact, _MARKET_SUBJECT_PREFIXES)
     market_role_forms = subject_forms(compact, _MARKET_SUBJECT_PREFIXES + _MARKET_QUALIFIERS)
     # Timing/market roles expose postgame statistics only, preserving current
@@ -288,7 +295,9 @@ def _reject_model_field(key: str, item: object) -> None:
         for tail in subject_forms(form[len(qualifier):], _MARKET_SUBJECT_PREFIXES)))
     scientific_total = any(form.startswith(_SCIENTIFIC_TOTAL_PREFIXES) for form in total_forms)
     if scientific_total:
-        reject_qualified_tails(total_forms, _SCIENTIFIC_TOTAL_PREFIXES)
+        # Complete points-total roots own their statistic; generic total/totals
+        # remain alternate fallback paths so the plural cannot hide an S-tail.
+        reject_qualified_tails(total_forms, _POINTS_TOTAL_PREFIXES, _TOTAL_ROOTS)
     scored_forms = tuple(dict.fromkeys(tail
         for form in market_forms for qualifier in _SCIENTIFIC_SCORED_QUALIFIERS
         if form.startswith(qualifier)
