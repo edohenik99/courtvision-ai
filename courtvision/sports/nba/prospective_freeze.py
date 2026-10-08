@@ -64,13 +64,17 @@ _SHORT_FIELD_DESCRIPTORS = frozenset({"param", "params", "arg", "args"})
 _FIELD_DESCRIPTOR_ORDER = tuple(sorted(_FIELD_DESCRIPTORS, key=len, reverse=True))
 _FIELD_PREFIX_DESCRIPTORS = tuple(descriptor for descriptor in _FIELD_DESCRIPTORS
     if descriptor not in _SHORT_FIELD_DESCRIPTORS)
+_MARKET_QUALIFIERS = ("opening", "closing", "current", "live", "prop", "observed", "market",
+    "sportsbook", "bookmaker", "consensus", "book", "vegas")
+_MARKET_DESCRIPTORS = _FIELD_DESCRIPTORS + _MARKET_QUALIFIERS
+_MARKET_PREFIX_DESCRIPTORS = _FIELD_PREFIX_DESCRIPTORS + _MARKET_QUALIFIERS
 # `points_linear` is scientific data; the short `line` root needs a boundary.
 _MARKET_COMPOUND_PREFIXES = (tuple(name.replace("_", "") for name in _MARKET_FIELDS
     if "_" in name and name not in {"points_line", "p_over", "p_under"})
-    + tuple("pointsline" + descriptor for descriptor in _FIELD_PREFIX_DESCRIPTORS))
+    + tuple("pointsline" + descriptor for descriptor in _MARKET_PREFIX_DESCRIPTORS))
 _MARKET_SINGLE_PREFIXES = tuple(root + descriptor for root in _MARKET_FIELDS
     if "_" not in root and root not in {"points", "pts", "minutes", "kelly"}
-    for descriptor in _FIELD_PREFIX_DESCRIPTORS)
+    for descriptor in _MARKET_PREFIX_DESCRIPTORS)
 _MARKET_SHORT_DESCRIPTOR_STEMS = tuple(root + descriptor
     for root in (*tuple(root for root in _MARKET_FIELDS
         if "_" not in root and root not in {"points", "pts", "minutes", "kelly"}),
@@ -82,7 +86,7 @@ _STAT_VALUE_PREFIXES = tuple(root + descriptor for root in _MARKET_FIELDS
                        "observations", "count", "amount", "amounts"))
 _MARKET_PROBABILITY_PREFIXES = (tuple(name.replace("_", "") for name in _PROBABILITY_MARKET_FIELDS)
     + tuple(stem + descriptor for stem in ("pover", "punder")
-            for descriptor in _FIELD_PREFIX_DESCRIPTORS))
+            for descriptor in _MARKET_PREFIX_DESCRIPTORS))
 _STAT_OUTCOME_FIELDS = frozenset(f"{qualifier}_{stat}" for qualifier in ("actual", "final")
     for stat in ("points", "pts", "minutes", "stats", "score", "scores", "rebounds", "assists",
         "steals", "blocks", "turnovers", "fouls", "reb", "ast", "stl", "blk", "tov",
@@ -92,7 +96,13 @@ _SCORED_OUTCOME_FIELDS = frozenset(name for stat in ("points", "pts")
 _PLAYED_OUTCOME_FIELDS = frozenset({"minutes_played", "played_minutes"})
 _RECORDED_OUTCOME_FIELDS = frozenset(name for stat in ("points", "pts", "minutes")
     for verb in ("recorded", "logged") for name in (f"{stat}_{verb}", f"{verb}_{stat}"))
-_QUALIFIED_OUTCOME_FIELDS = _SCORED_OUTCOME_FIELDS | _PLAYED_OUTCOME_FIELDS | _RECORDED_OUTCOME_FIELDS
+_POSTGAME_OUTCOME_FIELDS = frozenset(name
+    for stat in {field.partition("_")[2] for field in _STAT_OUTCOME_FIELDS}
+    for qualifier in ("postgame", "post_game")
+    for name in (f"{qualifier}_{stat}", f"{stat}_{qualifier}"))
+_POSTGAME_OUTCOME_PREFIXES = tuple(name.replace("_", "") for name in _POSTGAME_OUTCOME_FIELDS)
+_QUALIFIED_OUTCOME_FIELDS = (_SCORED_OUTCOME_FIELDS | _PLAYED_OUTCOME_FIELDS
+    | _RECORDED_OUTCOME_FIELDS | _POSTGAME_OUTCOME_FIELDS)
 _SCORED_OUTCOME_PREFIXES = tuple(name.replace("_", "") for name in _QUALIFIED_OUTCOME_FIELDS)
 _SCIENTIFIC_SCORED_QUALIFIERS = ("historical", "season", "recent", "lastgame", "projected", "predicted")
 _MODEL_OUTCOME_FIELDS = (TARGET_OUTCOME_FIELDS | _STAT_OUTCOME_FIELDS | _QUALIFIED_OUTCOME_FIELDS
@@ -234,6 +244,11 @@ def _reject_model_field(key: str, item: object) -> None:
                         seen.add(following)
                         pending.append(following)
     market_forms = subject_forms(compact, _MARKET_SUBJECT_PREFIXES)
+    market_role_forms = subject_forms(compact, _MARKET_SUBJECT_PREFIXES + _MARKET_QUALIFIERS)
+    # Timing/market roles expose postgame statistics only, preserving current
+    # projection, lineup, and scientific-stat namespaces.
+    postgame_forms = tuple(form for form in market_role_forms
+        if form.startswith(_POSTGAME_OUTCOME_PREFIXES))
     total_forms = tuple(dict.fromkeys(tail
         for form in market_forms for qualifier in _SCIENTIFIC_TOTAL_QUALIFIERS
         if form.startswith(qualifier)
@@ -245,8 +260,16 @@ def _reject_model_field(key: str, item: object) -> None:
         for form in market_forms for qualifier in _SCIENTIFIC_SCORED_QUALIFIERS
         if form.startswith(qualifier)
         for tail in subject_forms(form[len(qualifier):], _MARKET_SUBJECT_PREFIXES)))
+    postgame_scientific_groups = (subject_forms(form[len(qualifier):],
+            _MARKET_SUBJECT_PREFIXES + _MARKET_QUALIFIERS)
+        for form in market_role_forms for qualifier in _SCIENTIFIC_SCORED_QUALIFIERS
+        if form.startswith(qualifier))
+    scored_forms = tuple(dict.fromkeys((*scored_forms, *(tail
+        for group in postgame_scientific_groups
+        if any(form.startswith(_POSTGAME_OUTCOME_PREFIXES) for form in group)
+        for tail in group))))
     scientific_scored = (any(form.startswith(_SCORED_OUTCOME_PREFIXES) for form in scored_forms)
-        and not any(form.startswith("targetgame") for form in market_forms + scored_forms)
+        and not any(form.startswith("targetgame") for form in market_role_forms + scored_forms)
         and "final" not in tokens
         and not any(form.startswith(tuple(stem + qualifier for stem in _SCORED_OUTCOME_PREFIXES
             for qualifier in ("actual", "final", "settlement", "targetgame"))) for form in scored_forms))
@@ -256,7 +279,7 @@ def _reject_model_field(key: str, item: object) -> None:
             _STAT_OUTCOME_PREFIXES + _OUTCOME_PREFIXES + _OUTCOME_COMPOUND_PREFIXES)
             ) and not (scientific_scored and form in scored_forms
                        and form.startswith(_SCORED_OUTCOME_PREFIXES))
-            for form in market_forms + scored_forms)
+            for form in market_forms + postgame_forms + scored_forms)
             or _OUTCOME_WORDS.intersection(tokens)
             or any(contains_pattern(pattern) for pattern in _OUTCOME_PATTERNS
                    if not scientific_scored or "_".join(pattern) not in _QUALIFIED_OUTCOME_FIELDS)
@@ -290,16 +313,18 @@ def _reject_model_field(key: str, item: object) -> None:
             for offset, _ in economic_states)
             or any(contains_pattern(tuple(route.split("_"))) for route in _ECONOMIC_ROUTES)):
         raise ProspectiveEvidenceError("unrecognized economic route field is prohibited")
-    if (any(form in _PROHIBITED_COMPACT or form.startswith(
-            _MARKET_COMPOUND_PREFIXES + _MARKET_SINGLE_PREFIXES + _STAT_VALUE_PREFIXES)
+    if (any(form in _PROHIBITED_COMPACT and
+                (form in market_forms or form not in {"points", "pts", "minutes"})
+            or form.startswith(_MARKET_COMPOUND_PREFIXES + _MARKET_SINGLE_PREFIXES)
+            or form in market_forms and form.startswith(_STAT_VALUE_PREFIXES)
             # `linearg` is a field; `linear_gradient` is not an argument label.
             or any(form == stem or form.startswith(stem) and
-                   form[len(stem):].startswith(_FIELD_DESCRIPTORS)
+                   form[len(stem):].startswith(_MARKET_DESCRIPTORS)
                    for stem in _MARKET_SHORT_DESCRIPTOR_STEMS)
-            for form in market_forms)
+            for form in market_role_forms)
             or any(form.startswith(_MARKET_PREFIXES + _MARKET_PRICE_PREFIXES
-                                   + _MARKET_PROBABILITY_PREFIXES) for form in market_forms)
-            or not scientific_total and any(form.startswith(_POINTS_TOTAL_PREFIXES) for form in market_forms)
+                                   + _MARKET_PROBABILITY_PREFIXES) for form in market_role_forms)
+            or not scientific_total and any(form.startswith(_POINTS_TOTAL_PREFIXES) for form in market_role_forms)
             or any(contains_pattern(pattern) for pattern in _MARKET_PATTERNS
                    if not scientific_total or "_".join(pattern) not in _POINTS_TOTAL_FIELDS)):
         raise ProspectiveEvidenceError("observed market/economic field is prohibited in model state")

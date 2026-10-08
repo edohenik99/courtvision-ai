@@ -13,7 +13,7 @@ from courtvision.sports.nba.prospective_evidence import (
 from courtvision.sports.nba.artifact_domains import TARGET_OUTCOME_FIELDS
 from courtvision.sports.nba.prospective_freeze import (
     FREEZE_SCHEMA, MARKET_SCHEMA, PreseasonMeasurement, bind_market_observation,
-    _STATE_FIELDS, freeze_models, model_snapshot, verify_model_freeze,
+    _STATE_FIELDS, freeze_models, model_snapshot, reject_market_outcomes, verify_model_freeze,
 )
 
 SHA = "ef5ab02ad3d28f6298c87a23a853e1289750a427"
@@ -4353,6 +4353,110 @@ def test_passphrase_policy_preserves_scientific_phrase_count_length_and_public_k
         "public_key_name": "synthetic-public-key", "source_key_metadata": "scientific-id",
         "source_manifest_sha256": "b" * 64, "raw_body_sha256": digest_body(body),
         "token_count": 3, "request_latency_ms": 42, "possession_key_hash": "c" * 64}
+    parameters = {"player_id": "player-1", "context": inputs}
+    req = request(parameters=parameters)
+    assert req["parameters"] == parameters
+    saved = capture(tmp_path, req, raw_body=body)
+    ref = {"request_id": "stats-1", "raw_body_sha256": saved.manifest["raw_body_sha256"]}
+    row = snapshot(tmp_path, projection_inputs=inputs, distribution_model_id="synthetic-scientific",
+        distribution_evidence_ref=ref, distribution_parameters=inputs)
+    root = freeze(tmp_path, rows=[row])
+    frozen = verify(tmp_path, root).rows[0]
+    assert frozen["projection_inputs"] == inputs and frozen["distribution_parameters"] == inputs
+    assert frozen["model_snapshot_id"] == row["model_snapshot_id"]
+    assert source_manifest(tmp_path / "journal", ["stats-1"])["stats-1"]["parameters"] == parameters
+    assert saved.raw_body == body == verify_capture(tmp_path / "journal", "stats-1").raw_body
+    assert saved.manifest["raw_body_sha256"] == digest_body(body)
+
+
+@pytest.mark.parametrize("field,value,form", [("postgame_points", 12, "mapping"),
+    ("player_postgame_points", 12, "pair"), ("target_game_postgame_points", 12, "feature_name"),
+    ("postgame_minutes", 18, "encoded"), ("OPENINGLINE", 15, "mapping"),
+    ("CURRENTLINE", 15, "pair"), ("CURRENTODDS", 1.8, "field_name"),
+    ("LIVEODDS", 1.8, "encoded"), ("PROPLINE", 15, "nested_pair")])
+@pytest.mark.parametrize("boundary", ["constructor", "disk"])
+def test_postgame_outcomes_and_qualified_market_fields_cannot_enter_model_or_resigned_freeze(tmp_path, field, value, form, boundary):
+    inputs = semantic_alias_inputs(field, value, form)
+    if boundary == "constructor":
+        capture(tmp_path)
+        with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+            snapshot(tmp_path, projection_inputs=inputs)
+        assert not (tmp_path / "articles").exists()
+    else:
+        root = freeze(tmp_path)
+        path = root / "model_snapshots.jsonl"
+        row = json.loads(path.read_bytes())
+        row["projection_inputs"] = inputs
+        resign_model_row(row)
+        path.write_bytes(canonical_bytes(row) + b"\n")
+        resign_freeze_artifact_hashes(root)
+        with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+            verify(tmp_path, root)
+
+
+# This contract is literal test data, independent of production grammar constants.
+QUALIFIED_MARKET_ROOT_CONTRACT = ("line", "odds", "price", "points_line", "american_odds",
+    "decimal_odds", "moneyline", "spread", "handicap", "over_under", "points_total", "vig")
+QUALIFIED_MARKET_PARITY_TABLE = [("opening", QUALIFIED_MARKET_ROOT_CONTRACT),
+    ("closing", QUALIFIED_MARKET_ROOT_CONTRACT), ("current", QUALIFIED_MARKET_ROOT_CONTRACT),
+    ("live", QUALIFIED_MARKET_ROOT_CONTRACT), ("prop", QUALIFIED_MARKET_ROOT_CONTRACT),
+    ("observed", QUALIFIED_MARKET_ROOT_CONTRACT), ("market", QUALIFIED_MARKET_ROOT_CONTRACT),
+    ("sportsbook", QUALIFIED_MARKET_ROOT_CONTRACT), ("bookmaker", QUALIFIED_MARKET_ROOT_CONTRACT),
+    ("consensus", QUALIFIED_MARKET_ROOT_CONTRACT), ("book", QUALIFIED_MARKET_ROOT_CONTRACT),
+    ("vegas", QUALIFIED_MARKET_ROOT_CONTRACT)]
+
+
+@pytest.mark.parametrize("qualifier,roots", QUALIFIED_MARKET_PARITY_TABLE)
+def test_independent_market_qualifier_root_table_rejects_both_orders_and_normalized_spellings(qualifier, roots):
+    for root in roots:
+        for name in (qualifier + "_" + root, root + "_" + qualifier):
+            parts = name.split("_")
+            aliases = (name, parts[0] + "".join(part.title() for part in parts[1:]),
+                       "".join(parts).upper())
+            for field in aliases:
+                try:
+                    reject_market_outcomes({field: 15})
+                except ProspectiveEvidenceError as error:
+                    assert "prohibited" in str(error), field
+                else:
+                    pytest.fail("accepted declared market field: " + field)
+
+
+POSTGAME_ORDER_SUBJECT_CONTRACT = [("current", ("points", "minutes")),
+    ("player", ("points", "minutes")), ("target_game", ("points", "minutes"))]
+
+
+@pytest.mark.parametrize("subject,stats", POSTGAME_ORDER_SUBJECT_CONTRACT)
+def test_independent_postgame_subject_stat_order_contract_rejects_compact_and_split_aliases(subject, stats):
+    for stat in stats:
+        for postgame in ("postgame", "post_game"):
+            for name in (subject + "_" + postgame + "_" + stat,
+                         subject + "_" + stat + "_" + postgame):
+                parts = name.split("_")
+                aliases = (name, parts[0] + "".join(part.title() for part in parts[1:]),
+                           "".join(parts).upper())
+                for field in aliases:
+                    try:
+                        reject_market_outcomes({field: 12})
+                    except ProspectiveEvidenceError as error:
+                        assert "prohibited" in str(error), field
+                    else:
+                        pytest.fail("accepted declared postgame field: " + field)
+
+
+def test_postgame_and_market_qualifier_policy_preserves_qualified_history_forecasts_and_linearity(tmp_path):
+    body = b'{ "response": [{"historical_game_id":"prior-game","postgame_points":12,"postgame_minutes":18,"OPENINGLINE":15,"CURRENTODDS":1.8}] }\n'
+    inputs = {"historical_points": 12, "historical_minutes": 18, "season_minutes": 20,
+        "recent_minutes": 19, "last_game_minutes": 17, "historical_postgame_points": 12,
+        "historical_points_postgame": 12, "projected_postgame_minutes": 19,
+        "predicted_minutes_postgame": 19, "projected_points": 13, "projected_minutes": 19,
+        "forecast_points": 13, "forecast_minutes": 19, "final_projected_minutes": 19,
+        "current_pace_adjustment": 1.02, "live_feature_count": 3, "prop_feature_count": 2,
+        "current_projection": 13, "current_linear_gradient": 1.02,
+        "opening_linearity": 0.4, "live_lineup": "confirmed", "propensity": 0.4,
+        "points_linear": 13, "lineup_status": "confirmed", "baseline": 12,
+        "public_key_name": "synthetic-public-key", "source_manifest_sha256": "b" * 64,
+        "raw_body_sha256": digest_body(body), "token_count": 3, "request_latency_ms": 42}
     parameters = {"player_id": "player-1", "context": inputs}
     req = request(parameters=parameters)
     assert req["parameters"] == parameters
