@@ -16,6 +16,7 @@ from pathlib import Path
 import re
 import stat
 from types import MappingProxyType
+from typing import Callable
 
 from courtvision.sports.nba.artifact_domains import NBA_PROSPECTIVE_EVIDENCE, require_artifact_path
 
@@ -29,7 +30,10 @@ _CAPTURE_FIELDS = _REQUEST_FIELDS | {"schema_version", "capture_mode", "request_
 _SECRET_NAMES = frozenset({"apikey", "key", "authorization", "proxyauthorization", "cookie",
     "cookies", "setcookie", "token", "accesstoken", "refreshtoken", "password", "secret",
     "clientsecret", "credentials", "xapikey", "xrapidapikey", "theoddsapikey", "auth",
-    "authentication", "signature", "sessionid", "xapisportskey"})
+    "authentication", "signature", "sessionid", "xapisportskey", "apitoken"})
+_FIELD_LABELS = frozenset({"name", "key", "header", "headername", "field", "fieldname",
+    "feature", "featurename"})
+_FIELD_VALUES = frozenset({"value", "headervalue", "fieldvalue", "featurevalue"})
 _SAFE_RESPONSE_METADATA = frozenset({"content-type", "content-length", "x-ratelimit-remaining",
     "x-ratelimit-limit", "x-requests-used", "x-requests-remaining", "x-requests-last"})
 
@@ -93,6 +97,29 @@ def _secret_key(key: str) -> bool:
         ("apikey", "authorization", "password", "secret", "credential", "credentials", "token"))
 
 
+def _semantic_key(key: str) -> str:
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key)
+    return re.sub(r"[^a-z0-9]+", "_", text.casefold()).strip("_")
+
+
+def _field_record(value: Mapping) -> tuple[str, str] | None:
+    """Recognize a named field without mistaking its structural `key` for a secret."""
+    labels, values = [], []
+    for key in value:
+        if not isinstance(key, str):
+            raise ProspectiveEvidenceError("JSON keys must be strings")
+        compact = _semantic_key(key).replace("_", "")
+        if compact in _FIELD_LABELS:
+            labels.append(key)
+        if compact in _FIELD_VALUES:
+            values.append(key)
+    if not labels or not values:
+        return None
+    if len(labels) != 1 or len(values) != 1 or not isinstance(value[labels[0]], str):
+        raise ProspectiveEvidenceError("ambiguous semantic field record")
+    return labels[0], values[0]
+
+
 def _safe_text(value: str) -> None:
     if re.search(r"(?i)\b(?:bearer|basic)\s+\S+|(?:api[_-]?key|authorization|password|cookie|secret|token)[\"']?\s*[=:]\s*\S+", value):
         raise ProspectiveEvidenceError("credential-bearing text is prohibited")
@@ -129,7 +156,7 @@ def _safe_headers(value: object, *, strip_secrets: bool) -> dict:
             if strip_secrets:
                 continue
             raise ProspectiveEvidenceError("credential field is prohibited")
-        _safe_text(item)
+        _safe_json(item, semantic_fields=True)
         name = name.casefold()
         if name in result:
             raise ProspectiveEvidenceError("ambiguous duplicate header")
@@ -137,35 +164,73 @@ def _safe_headers(value: object, *, strip_secrets: bool) -> dict:
     return result
 
 
-def _safe_json(value: object, *, strip_secrets: bool = False, screen_headers: bool = False) -> object:
+def _safe_json(value: object, *, strip_secrets: bool = False, screen_headers: bool = False,
+               semantic_fields: bool = False,
+               field_policy: Callable[[str, object], None] | None = None) -> object:
+    """Validate JSON with one optional mapping/pair/record semantic traversal.
+
+    Requests alone may strip credential mapping/header fields. Model state and
+    parsed raw responses reject them; response callers retain the original bytes.
+    A caller's field policy never applies to provider bodies unless requested.
+    """
+    def check_text(text: str) -> None:
+        _safe_text(text)
+        if (semantic_fields or screen_headers) and text.lstrip().startswith(("{", "[", '"')):
+            # Retain the caller's exact string, but do not let serialized JSON
+            # bypass the same policy. Inspection is reject-only: stripping a
+            # parsed secret would leave it in the retained original string.
+            try:
+                encoded = text.encode("utf-8")
+            except UnicodeError as exc:
+                raise ProspectiveEvidenceError("serialized JSON cannot be encoded") from exc
+            try:
+                decoded = _decode_json(encoded)
+            except ProspectiveEvidenceError:
+                if text.lstrip().startswith('"'):
+                    # An ordinary quoted nickname is not declared container JSON.
+                    return
+                raise
+            _safe_json(decoded, screen_headers=screen_headers, semantic_fields=True,
+                       field_policy=field_policy)
+
+    def check_field(name: str, item: object) -> None:
+        if _secret_key(name):
+            raise ProspectiveEvidenceError("credential field is prohibited")
+        check_text(name)
+        if field_policy is not None:
+            field_policy(name, item)
+
+    def descend(item: object) -> object:
+        return _safe_json(item, strip_secrets=strip_secrets, screen_headers=screen_headers,
+                          semantic_fields=semantic_fields, field_policy=field_policy)
+
     if isinstance(value, Mapping):
-        # Header records outside a supported container cannot hide credential pairs.
-        if screen_headers and any(isinstance(key, str) and re.sub(r"[^a-z0-9]", "", key.casefold())
-                                  in {"value", "headervalue"} for key in value):
-            if any(isinstance(key, str) and re.sub(r"[^a-z0-9]", "", key.casefold())
-                   in {"name", "key", "header", "headername"}
-                   and isinstance(item, str) and _secret_key(item) for key, item in value.items()):
-                raise ProspectiveEvidenceError("credential field is prohibited")
+        record = _field_record(value) if semantic_fields or screen_headers else None
+        if record is not None:
+            check_field(value[record[0]], value[record[1]])
         result = {}
         for key, item in value.items():
             if not isinstance(key, str):
                 raise ProspectiveEvidenceError("JSON keys must be strings")
-            if _secret_key(key):
-                if strip_secrets:
+            if record is None or key not in record:
+                if _secret_key(key) and strip_secrets:
                     continue
-                raise ProspectiveEvidenceError("credential field is prohibited")
-            _safe_text(key)
-            if screen_headers and re.sub(r"[^a-z0-9]", "", key.casefold()).endswith(("header", "headers")):
+                check_field(key, item)
+            check_text(key)
+            if (screen_headers and (record is None or key not in record)
+                    and re.sub(r"[^a-z0-9]", "", key.casefold()).endswith(("header", "headers"))):
                 result[key] = _safe_headers(item, strip_secrets=strip_secrets)
             else:
-                result[key] = _safe_json(item, strip_secrets=strip_secrets, screen_headers=screen_headers)
+                result[key] = descend(item)
         return result
     if isinstance(value, (list, tuple)):
-        if screen_headers and value and isinstance(value[0], str) and _secret_key(value[0]):
-            raise ProspectiveEvidenceError("credential field is prohibited")
-        return [_safe_json(item, strip_secrets=strip_secrets, screen_headers=screen_headers) for item in value]
+        if (semantic_fields or screen_headers) and value and isinstance(value[0], str):
+            if _secret_key(value[0]):
+                raise ProspectiveEvidenceError("credential field is prohibited")
+            check_field(value[0], value[1] if len(value) > 1 else None)
+        return [descend(item) for item in value]
     if isinstance(value, str):
-        _safe_text(value)
+        check_text(value)
     elif value is not None and type(value) not in (bool, int, float):
         raise ProspectiveEvidenceError("unsupported JSON value")
     canonical_bytes(value)
@@ -199,8 +264,14 @@ def _check_body(raw: bytes) -> None:
     except UnicodeError as exc:
         raise ProspectiveEvidenceError("v1 requires inspectable UTF-8 response bytes") from exc
     _safe_text(text)
-    if text.lstrip().startswith(("{", "[")):
-        _safe_json(_decode_json(raw))
+    if text.lstrip().startswith(("{", "[", '"')):
+        try:
+            decoded = _decode_json(raw)
+        except ProspectiveEvidenceError:
+            if text.lstrip().startswith('"'):
+                return
+            raise
+        _safe_json(decoded, semantic_fields=True)
 
 
 def immutable(value: object) -> object:
@@ -303,7 +374,7 @@ def _validate_capture(manifest: dict) -> None:
     if (not isinstance(metadata, dict) or not set(metadata) <= _SAFE_RESPONSE_METADATA
             or any(not isinstance(v, str) for v in metadata.values())):
         raise ProspectiveEvidenceError("response metadata is not allowlisted")
-    _safe_json(manifest)
+    _safe_json(manifest, semantic_fields=True)
     require_hash(manifest["raw_body_sha256"])
     if digest({k: v for k, v in manifest.items() if k != "capture_sha256"}) != manifest["capture_sha256"]:
         raise ProspectiveEvidenceError("capture hash mismatch")
@@ -371,5 +442,5 @@ def source_manifest(journal_root: str | Path, request_ids: list[str]) -> dict:
         if capture.manifest["source_role"] != "factual":
             raise ProspectiveEvidenceError("market evidence cannot enter model sources")
         # Return exactly the verified metadata, without an unverified second read.
-        result[request_id] = _safe_json(capture.manifest)
+        result[request_id] = _safe_json(capture.manifest, semantic_fields=True)
     return result

@@ -739,3 +739,435 @@ def test_source_evidence_change_changes_model_identity(tmp_path):
     changed = model_snapshot(metadata(), source_manifest_sha256=digest(sources), **state)
     assert changed["model_snapshot_id"] != original["model_snapshot_id"]
     assert changed["row_sha256"] != original["row_sha256"]
+
+
+# Model state is rejected, never sanitized: a secret must not become a feature.
+MODEL_CREDENTIAL_FIELDS = ["authorization", "proxy-authorization", "x-api-key", "api-key",
+    "x-apisports-key", "cookie", "set-cookie", "token", "access-token", "api-token", "secret",
+    "password", "key", "cookies", "refresh-token", "client-secret", "credentials", "credential",
+    "x-rapidapi-key", "the-odds-api-key", "auth", "authentication", "signature", "session-id",
+    "X-Session-Token", "CustomApiKey", "AUTHORIZATION", "ProxyAuthorization", "X.API.KEY",
+    "ApiToken", "access_token", "CLIENTSECRET"]
+MODEL_CREDENTIAL_FORMS = ["mapping", "pair", "tuple", "nested_pair", "name", "key",
+    "header", "header_name", "field_name", "feature_name"]
+
+
+def model_credential_payload(field, secret, form):
+    if form == "mapping":
+        return {"context": [{field: secret}]}
+    if form in {"pair", "tuple"}:
+        pair = [field, secret] if form == "pair" else (field, secret)
+        return {"features": [pair]}
+    if form == "nested_pair":
+        return {"context": [{"requestHeaders": [["X-Trace-ID", "trace-1"], [field, secret]]}]}
+    value_label = {"header_name": "header_value", "field_name": "field_value",
+        "feature_name": "feature_value"}.get(form, "value")
+    return {"context": [{form: field, value_label: secret}]}
+
+
+@pytest.mark.parametrize("field", MODEL_CREDENTIAL_FIELDS)
+@pytest.mark.parametrize("form", MODEL_CREDENTIAL_FORMS)
+def test_model_state_credentials_rejected_in_every_semantic_representation(tmp_path, field, form):
+    capture(tmp_path)
+    secret = "SYNTHETIC-CREDENTIAL-A"
+    with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+        snapshot(tmp_path, projection_inputs=model_credential_payload(field, secret, form))
+    assert secret not in str(caught.value)
+    assert not (tmp_path / "articles").exists()
+
+
+@pytest.mark.parametrize("form", MODEL_CREDENTIAL_FORMS)
+def test_model_credentials_cannot_reach_freeze_or_change_existing_hashes(tmp_path, form):
+    root = freeze(tmp_path)
+    before = {path.name: path.read_bytes() for path in root.iterdir()}
+    original = verify(tmp_path, root)
+    for secret in ("SYNTHETIC-CREDENTIAL-A", "SYNTHETIC-CREDENTIAL-B"):
+        payload = model_credential_payload("X-API-Key", secret, form)
+        with pytest.raises(ProspectiveEvidenceError, match="credential"):
+            snapshot(tmp_path, projection_inputs=payload)
+        row = snapshot(tmp_path)
+        row["projection_inputs"] = payload
+        resign_model_row(row)
+        with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+            freeze(tmp_path, rows=[row])
+        assert secret not in str(caught.value)
+        assert before == {path.name: path.read_bytes() for path in root.iterdir()}
+    after = verify(tmp_path, root)
+    for key in ("model_snapshot_id", "row_sha256", "source_manifest_sha256"):
+        assert after.rows[0][key] == original.rows[0][key]
+    assert after.manifest["manifest_sha256"] == original.manifest["manifest_sha256"]
+    assert b"SYNTHETIC-CREDENTIAL" not in b"".join(before.values())
+
+
+def resign_freeze_artifact_hashes(root):
+    """Give hostile artifacts correct checksums so only semantic policy can reject them."""
+    def resign_manifest(manifest):
+        manifest["snapshot_file_sha256"] = digest_body((root / "model_snapshots.jsonl").read_bytes())
+        manifest["exclusion_file_sha256"] = digest_body((root / "exclusions.json").read_bytes())
+        manifest["source_manifest_sha256"] = digest(json.loads((root / "sources.json").read_bytes()))
+        manifest["manifest_sha256"] = digest({key: value for key, value in manifest.items() if key != "manifest_sha256"})
+    mutate_json(root / "manifest.json", resign_manifest)
+    manifest = json.loads((root / "manifest.json").read_bytes())
+    def resign_receipt(receipt):
+        receipt["manifest_sha256"] = manifest["manifest_sha256"]
+        receipt["receipt_sha256"] = digest({key: value for key, value in receipt.items() if key != "receipt_sha256"})
+    mutate_json(root / "freeze.json", resign_receipt)
+
+
+@pytest.mark.parametrize("field,form", [("Authorization", "mapping"), ("proxy-authorization", "pair"),
+    ("X-API-Key", "nested_pair"), ("api-token", "key"), ("X-APISPORTS-KEY", "header_name"),
+    ("Cookie", "name"), ("ClientSecret", "field_name"), ("Password", "feature_name")])
+@pytest.mark.parametrize("location", ["projection_inputs", "distribution_parameters", "exclusions"])
+def test_disk_verifier_rejects_fully_resigned_nested_model_credentials(tmp_path, field, form, location):
+    root = freeze(tmp_path)
+    payload = model_credential_payload(field, "SYNTHETIC-CREDENTIAL-A", form)
+    if location == "exclusions":
+        mutate_json(root / "exclusions.json", lambda item: item.update(rows=[{"reason": "synthetic", "context": payload}]))
+    else:
+        path = root / "model_snapshots.jsonl"
+        row = json.loads(path.read_bytes())
+        row[location] = payload
+        if location == "distribution_parameters":
+            row["distribution_model_id"] = "synthetic-distribution"
+            row["distribution_evidence_ref"] = dict(row["projection_evidence_ref"])
+        resign_model_row(row)
+        path.write_bytes(canonical_bytes(row) + b"\n")
+    resign_freeze_artifact_hashes(root)
+    with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+        verify(tmp_path, root)
+    assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+
+
+@pytest.mark.parametrize("form", ["pair", "header_name", "feature_name"])
+def test_resigned_source_credentials_cannot_become_model_provenance(tmp_path, form):
+    root = freeze(tmp_path)
+    capture_path = tmp_path / "journal" / EVIDENCE_SCHEMA / "stats-1" / "manifest.json"
+    manifest = json.loads(capture_path.read_bytes())
+    manifest["parameters"]["context"] = model_credential_payload("api-token", "SYNTHETIC-CREDENTIAL-A", form)
+    identity = {key: manifest[key] for key in request()}
+    manifest["request_identity_sha256"] = digest(identity)
+    manifest["capture_sha256"] = digest({key: value for key, value in manifest.items() if key != "capture_sha256"})
+    capture_path.write_bytes(canonical_bytes(manifest) + b"\n")
+    sources = {"stats-1": manifest}
+    (root / "sources.json").write_bytes(canonical_bytes(sources) + b"\n")
+    row = json.loads((root / "model_snapshots.jsonl").read_bytes())
+    row["source_manifest_sha256"] = digest(sources)
+    resign_model_row(row)
+    (root / "model_snapshots.jsonl").write_bytes(canonical_bytes(row) + b"\n")
+    resign_freeze_artifact_hashes(root)
+    with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+        verify(tmp_path, root)
+    assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+
+
+def test_distribution_and_zero_row_exclusions_reject_credentials_before_publication(tmp_path):
+    saved = capture(tmp_path)
+    payload = model_credential_payload("api-token", "SYNTHETIC-CREDENTIAL-A", "feature_name")
+    ref = {"request_id": "stats-1", "raw_body_sha256": saved.manifest["raw_body_sha256"]}
+    with pytest.raises(ProspectiveEvidenceError, match="credential"):
+        snapshot(tmp_path, distribution_model_id="synthetic-distribution", distribution_evidence_ref=ref,
+            distribution_parameters=payload)
+    with pytest.raises(ProspectiveEvidenceError, match="credential"):
+        freeze(tmp_path, rows=[], exclusions=[{"reason": "MODEL_STATE_INCOMPLETE", "context": payload}])
+    assert not (tmp_path / "articles").exists()
+
+
+@pytest.mark.parametrize("record", [{"key": "pace_adjustment", "value": 1.02},
+    {"headerName": "X-Trace-ID", "headerValue": "trace-1"},
+    {"featureName": "projected_points", "featureValue": 23.8},
+    {"field_name": "lineup_status", "field_value": "available"}])
+def test_safe_model_structures_are_not_mistaken_for_credentials(tmp_path, record):
+    capture(tmp_path)
+    inputs = {"token_count": 3, "request_latency_ms": 42,
+        "features": [["projected_points", 23.8], ["pace_adjustment", 1.02]],
+        "weights": [0.4, 0.6], "lineup_status": "available", "metadata": record}
+    row = snapshot(tmp_path, projection_inputs=inputs)
+    assert snapshot(tmp_path, projection_inputs=inputs) == row
+    saved = verify(tmp_path, freeze(tmp_path, rows=[row]))
+    assert saved.rows[0]["model_snapshot_id"] == row["model_snapshot_id"]
+    assert saved.rows[0]["projection_inputs"]["token_count"] == 3
+    assert saved.rows[0]["projection_inputs"]["request_latency_ms"] == 42
+    assert saved.rows[0]["projection_inputs"]["weights"] == (0.4, 0.6)
+
+
+@pytest.mark.parametrize("record", [{"key": "pace_adjustment", "value": 1.02, "name": "Authorization"},
+    {"headerName": "X-Trace-ID", "headerValue": "trace-1", "value": "ambiguous"},
+    {"featureName": 42, "featureValue": 1.02}])
+def test_ambiguous_semantic_records_cannot_hide_model_credentials(tmp_path, record):
+    capture(tmp_path)
+    with pytest.raises(ProspectiveEvidenceError, match="ambiguous"):
+        snapshot(tmp_path, projection_inputs={"metadata": record})
+
+
+BODY_CREDENTIAL_CASES = [("X-API-Key", "mapping"), ("Authorization", "pair"),
+    ("Cookie", "nested_pair"), ("access-token", "name"), ("api-token", "key"),
+    ("X-APISPORTS-KEY", "header_name"), ("Secret", "field_name"), ("Password", "feature_name")]
+
+
+@pytest.mark.parametrize("field,form", BODY_CREDENTIAL_CASES)
+def test_raw_response_credentials_in_pairs_and_records_fail_before_capture(tmp_path, field, form):
+    body = canonical_bytes({"response": [{"player_id": "player-1", "historical_points": 12,
+        "context": model_credential_payload(field, "SYNTHETIC-CREDENTIAL-A", form)}]})
+    with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+        capture(tmp_path, raw_body=body)
+    assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+    assert not (tmp_path / "journal").exists()
+
+
+@pytest.mark.parametrize("field,form", BODY_CREDENTIAL_CASES)
+def test_resigned_raw_capture_cannot_accept_credential_pairs_or_records(tmp_path, field, form):
+    capture(tmp_path)
+    root = tmp_path / "journal" / EVIDENCE_SCHEMA / "stats-1"
+    body = canonical_bytes({"response": [{"context": model_credential_payload(field,
+        "SYNTHETIC-CREDENTIAL-A", form)}]})
+    (root / "body.bin").write_bytes(body)
+    def resign_capture(manifest):
+        manifest["raw_body_sha256"] = digest_body(body)
+        manifest["raw_body_byte_length"] = len(body)
+        manifest["capture_sha256"] = digest({key: value for key, value in manifest.items() if key != "capture_sha256"})
+    mutate_json(root / "manifest.json", resign_capture)
+    for read in (lambda: verify_capture(tmp_path / "journal", "stats-1"),
+                 lambda: source_manifest(tmp_path / "journal", ["stats-1"])):
+        with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+            read()
+        assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+
+
+def test_raw_provider_json_keeps_historical_statistics_and_safe_structures_exact(tmp_path):
+    # Model outcome policy cannot reinterpret preserved historical provider statistics.
+    body = b'{ "response": [{"points":12,"minutes":18,"actual_minutes":18}], "token_count":3, "request_latency_ms":42, "headers":[["X-Trace-ID","trace-1"]], "metadata":{"key":"pace_adjustment","value":1.02} }\n'
+    saved = capture(tmp_path, raw_body=body)
+    assert saved.raw_body == body
+    assert verify_capture(tmp_path / "journal", "stats-1").raw_body == body
+    assert (tmp_path / "journal" / EVIDENCE_SCHEMA / "stats-1" / "body.bin").read_bytes() == body
+    assert saved.manifest["raw_body_sha256"] == digest_body(body)
+
+
+def test_market_binding_rejects_resigned_capture_credentials_without_changing_freeze(tmp_path):
+    root = freeze(tmp_path)
+    before = {path.name: path.read_bytes() for path in root.iterdir()}
+    observation = market(tmp_path, root)
+    capture_path = tmp_path / "journal" / EVIDENCE_SCHEMA / "market-1" / "manifest.json"
+    def inject_and_resign(manifest):
+        manifest["parameters"]["context"] = model_credential_payload("X-API-Key", "SYNTHETIC-CREDENTIAL-A", "nested_pair")
+        manifest["request_identity_sha256"] = digest({key: manifest[key] for key in request()})
+        manifest["capture_sha256"] = digest({key: value for key, value in manifest.items() if key != "capture_sha256"})
+    mutate_json(capture_path, inject_and_resign)
+    with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+        bind(tmp_path, root, observation)
+    assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+    assert before == {path.name: path.read_bytes() for path in root.iterdir()}
+    assert verify(tmp_path, root).manifest["manifest_sha256"] == json.loads(before["manifest.json"])["manifest_sha256"]
+
+
+@pytest.mark.parametrize("field", ["BOOKMAKERNAME", "SPORTSBOOKPRICE", "CLOSINGTIMESTAMP", "KELLYFRACTION"])
+@pytest.mark.parametrize("form", ["mapping", "pair", "feature_name"])
+def test_compact_market_prefix_fields_cannot_enter_model_identity(tmp_path, field, form):
+    capture(tmp_path)
+    with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+        snapshot(tmp_path, projection_inputs=model_credential_payload(field, None, form))
+    assert not (tmp_path / "articles").exists()
+
+
+@pytest.mark.parametrize("field", ["BOOKMAKERNAME", "SPORTSBOOKPRICE", "CLOSINGTIMESTAMP", "KELLYFRACTION"])
+@pytest.mark.parametrize("form", ["mapping", "pair", "feature_name"])
+def test_resigned_compact_market_prefix_fields_fail_disk_verification(tmp_path, field, form):
+    root = freeze(tmp_path)
+    path = root / "model_snapshots.jsonl"
+    row = json.loads(path.read_bytes())
+    row["projection_inputs"] = model_credential_payload(field, None, form)
+    resign_model_row(row)
+    path.write_bytes(canonical_bytes(row) + b"\n")
+    resign_freeze_artifact_hashes(root)
+    with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+        verify(tmp_path, root)
+
+
+def test_safe_descriptor_request_metadata_preserves_custody_and_freeze(tmp_path):
+    parameters = {"player_id": "player-1", "season": "2025", "token_count": 3,
+        "request_latency_ms": 42, "metadata": {"key": "pace_adjustment", "value": 1.02}}
+    req = request(parameters=parameters)
+    assert req["parameters"] == parameters
+    saved = capture(tmp_path, req)
+    assert capture(tmp_path, req) == saved == verify_capture(tmp_path / "journal", "stats-1")
+    sources = source_manifest(tmp_path / "journal", ["stats-1"])
+    assert sources["stats-1"]["parameters"] == parameters
+    assert sources["stats-1"]["request_identity_sha256"] == digest(req)
+    row = snapshot(tmp_path)
+    root = freeze(tmp_path, rows=[row])
+    frozen = verify(tmp_path, root)
+    assert frozen.rows[0]["source_manifest_sha256"] == digest(sources)
+    assert frozen.manifest["source_manifest_sha256"] == digest(sources)
+    assert json.loads((root / "sources.json").read_bytes())["stats-1"]["parameters"] == parameters
+
+
+@pytest.mark.parametrize("field", ["line", "actual_points", "BOOKMAKERNAME", "model_over_probability", "actualMinutes"])
+@pytest.mark.parametrize("arity", [1, 3, 4])
+def test_decorated_or_incomplete_prohibited_field_sequences_fail_closed(tmp_path, field, arity):
+    capture(tmp_path)
+    sequence = [field, 24.5, "synthetic-units", {"detail": "synthetic"}][:arity]
+    with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+        snapshot(tmp_path, projection_inputs={"features": [sequence]})
+    assert not (tmp_path / "articles").exists()
+
+
+@pytest.mark.parametrize("field", ["line", "actual_points"])
+@pytest.mark.parametrize("arity", [1, 3, 4])
+def test_resigned_decorated_prohibited_field_sequences_fail_disk_verification(tmp_path, field, arity):
+    root = freeze(tmp_path)
+    path = root / "model_snapshots.jsonl"
+    row = json.loads(path.read_bytes())
+    row["projection_inputs"] = {"features": [[field, 24.5, "synthetic-units", {"detail": "synthetic"}][:arity]]}
+    resign_model_row(row)
+    path.write_bytes(canonical_bytes(row) + b"\n")
+    resign_freeze_artifact_hashes(root)
+    with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+        verify(tmp_path, root)
+
+
+def test_safe_first_label_collections_and_numeric_vectors_remain_valid(tmp_path):
+    capture(tmp_path)
+    inputs = {"features": [["pace_adjustment"], ["lineup_status", "available", "synthetic"],
+        ["projected_points", 23.8, "synthetic-units", {"detail": "synthetic"}]], "weights": [0.4, 0.6]}
+    row = snapshot(tmp_path, projection_inputs=inputs)
+    saved = verify(tmp_path, freeze(tmp_path, rows=[row]))
+    assert saved.rows[0]["projection_inputs"]["weights"] == (0.4, 0.6)
+    assert saved.rows[0]["projection_inputs"]["features"][0] == ("pace_adjustment",)
+    assert saved.rows[0]["projection_inputs"]["features"][1] == ("lineup_status", "available", "synthetic")
+    assert saved.rows[0]["model_snapshot_id"] == row["model_snapshot_id"]
+
+
+ENCODED_UNSAFE_FIELDS = [{"headers": [["X-API-Key", "SYNTHETIC-CREDENTIAL-A"]]},
+    {"context": [{"featureName": "api-token", "featureValue": "SYNTHETIC-CREDENTIAL-A"}]},
+    {"features": [["line", 24.5]]}, {"features": [{"name": "actual_points", "value": 12}]},
+    {"nested": [["model_over_probability", 0.6]]}]
+
+
+def encoded_model_inputs(payload, location):
+    encoded = json.dumps(payload, separators=(",", ":"))
+    if location == "mapping_key":
+        return {encoded: "synthetic"}
+    if location == "record_label":
+        return {"metadata": {"name": encoded, "value": "synthetic"}}
+    return {"serialized_request": encoded}
+
+
+@pytest.mark.parametrize("payload", ENCODED_UNSAFE_FIELDS)
+@pytest.mark.parametrize("location", ["value", "mapping_key", "record_label"])
+def test_encoded_model_containers_cannot_hide_credentials_market_or_outcome_fields(tmp_path, payload, location):
+    capture(tmp_path)
+    with pytest.raises(ProspectiveEvidenceError, match="credential|prohibited") as caught:
+        snapshot(tmp_path, projection_inputs=encoded_model_inputs(payload, location))
+    assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+    assert not (tmp_path / "articles").exists()
+
+
+@pytest.mark.parametrize("payload", ENCODED_UNSAFE_FIELDS)
+@pytest.mark.parametrize("location", ["value", "mapping_key", "record_label"])
+def test_resigned_encoded_model_containers_fail_semantic_disk_verification(tmp_path, payload, location):
+    root = freeze(tmp_path)
+    path = root / "model_snapshots.jsonl"
+    row = json.loads(path.read_bytes())
+    row["projection_inputs"] = encoded_model_inputs(payload, location)
+    resign_model_row(row)
+    path.write_bytes(canonical_bytes(row) + b"\n")
+    resign_freeze_artifact_hashes(root)
+    with pytest.raises(ProspectiveEvidenceError, match="credential|prohibited") as caught:
+        verify(tmp_path, root)
+    assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+
+
+@pytest.mark.parametrize("boundary", ["constructor", "disk"])
+def test_double_encoded_credentials_cannot_hide_in_model_strings(tmp_path, boundary):
+    inputs = {"serialized_request": json.dumps(json.dumps(ENCODED_UNSAFE_FIELDS[0]))}
+    if boundary == "constructor":
+        capture(tmp_path)
+        with pytest.raises(ProspectiveEvidenceError, match="credential"):
+            snapshot(tmp_path, projection_inputs=inputs)
+        assert not (tmp_path / "articles").exists()
+    else:
+        root = freeze(tmp_path)
+        path = root / "model_snapshots.jsonl"
+        row = json.loads(path.read_bytes())
+        row["projection_inputs"] = inputs
+        resign_model_row(row)
+        path.write_bytes(canonical_bytes(row) + b"\n")
+        resign_freeze_artifact_hashes(root)
+        with pytest.raises(ProspectiveEvidenceError, match="credential"):
+            verify(tmp_path, root)
+
+
+ENCODED_CREDENTIAL_CASES = [ENCODED_UNSAFE_FIELDS[0], ENCODED_UNSAFE_FIELDS[1],
+    {"api_key": "SYNTHETIC-CREDENTIAL-A"}]
+
+
+@pytest.mark.parametrize("payload", ENCODED_CREDENTIAL_CASES)
+@pytest.mark.parametrize("double_encoded", [False, True])
+def test_encoded_request_parameters_reject_credentials_instead_of_sanitizing_strings(payload, double_encoded):
+    encoded = json.dumps(payload)
+    if double_encoded:
+        encoded = json.dumps(encoded)
+    with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+        request(parameters={"player_id": "player-1", "serialized_request": encoded})
+    assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+
+
+@pytest.mark.parametrize("payload", ENCODED_CREDENTIAL_CASES)
+@pytest.mark.parametrize("location", ["embedded", "top_level_string"])
+def test_encoded_raw_body_credentials_fail_capture_and_resigned_readback(tmp_path, payload, location):
+    encoded = json.dumps(payload)
+    body = canonical_bytes({"serialized_response": encoded} if location == "embedded" else encoded)
+    with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+        capture(tmp_path, raw_body=body)
+    assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+    assert not (tmp_path / "journal").exists()
+    capture(tmp_path)
+    root = tmp_path / "journal" / EVIDENCE_SCHEMA / "stats-1"
+    (root / "body.bin").write_bytes(body)
+    def resign_capture(manifest):
+        manifest["raw_body_sha256"] = digest_body(body)
+        manifest["raw_body_byte_length"] = len(body)
+        manifest["capture_sha256"] = digest({key: value for key, value in manifest.items() if key != "capture_sha256"})
+    mutate_json(root / "manifest.json", resign_capture)
+    with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+        verify_capture(tmp_path / "journal", "stats-1")
+    assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+
+
+@pytest.mark.parametrize("encoded", ['{"headers":[', '[["line",24.5]', '{"x":1,"x":2}',
+    '[NaN]', '{"bad":"\\ud800"}'])
+def test_malformed_or_noncanonical_encoded_model_containers_fail_closed(tmp_path, encoded):
+    capture(tmp_path)
+    with pytest.raises(ProspectiveEvidenceError):
+        snapshot(tmp_path, projection_inputs={"serialized_context": encoded})
+    assert not (tmp_path / "articles").exists()
+
+
+def test_safe_encoded_model_and_request_structures_preserve_exact_strings(tmp_path):
+    encoded_features = ' { "features": [["projected_points",23.8],["pace_adjustment",1.02]], "token_count":3 } '
+    inputs = {"serialized_features": encoded_features, "serialized_weights": "[0.4, 0.6]",
+        "quoted_nickname": '"Air" Jordan', "plain_description": "Synthetic Player A"}
+    parameters = {"player_id": "player-1", "season": "2025", "context": inputs}
+    req = request(parameters=parameters)
+    assert req["parameters"] == parameters
+    capture(tmp_path, req)
+    row = snapshot(tmp_path, projection_inputs=inputs)
+    assert row["projection_inputs"] == inputs
+    root = freeze(tmp_path, rows=[row])
+    assert verify(tmp_path, root).rows[0]["projection_inputs"] == inputs
+    assert source_manifest(tmp_path / "journal", ["stats-1"])["stats-1"]["parameters"] == parameters
+
+
+@pytest.mark.parametrize("body", [b'{ "response": "{\\"points\\":12,\\"minutes\\":18}", "weights": "[0.4, 0.6]" }\n',
+    b'"Air" Jordan', b'"Synthetic Player A"'])
+def test_safe_encoded_or_quoted_provider_text_keeps_raw_body_bytes(tmp_path, body):
+    saved = capture(tmp_path, raw_body=body)
+    assert saved.raw_body == body == verify_capture(tmp_path / "journal", "stats-1").raw_body
+    assert saved.manifest["raw_body_sha256"] == digest_body(body)
+
+
+def test_invalid_unicode_model_text_is_a_domain_error_before_publication(tmp_path):
+    capture(tmp_path)
+    with pytest.raises(ProspectiveEvidenceError):
+        snapshot(tmp_path, projection_inputs={"description": "\ud800"})
+    assert not (tmp_path / "articles").exists()

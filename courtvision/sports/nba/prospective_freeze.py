@@ -12,11 +12,10 @@ from datetime import datetime, timezone
 import hashlib
 import math
 from pathlib import Path
-import re
 
-from courtvision.sports.nba.artifact_domains import contains_target_game_outcome
+from courtvision.sports.nba.artifact_domains import NBA_PROSPECTIVE_EVIDENCE, TARGET_OUTCOME_FIELDS
 from courtvision.sports.nba.prospective_evidence import (
-    ProspectiveEvidenceError, _safe_json, canonical_bytes, digest, immutable, plain_path,
+    ProspectiveEvidenceError, _safe_json, _semantic_key, canonical_bytes, digest, immutable, plain_path,
     read_document, require_date, require_hash, require_id, source_manifest, utc_clock,
     verify_capture, write_once,
 )
@@ -33,6 +32,10 @@ _PROHIBITED = frozenset("""sportsbook bookmaker vendor line observed_line market
     closing_line closing_odds clv stake kelly bankroll result settlement actual_points actual_minutes
     final_points final_stats box_score points pts minutes model_over_probability model_under_probability""".split())
 _PROHIBITED_COMPACT = frozenset(name.replace("_", "") for name in _PROHIBITED)
+_OUTCOME_COMPACT = frozenset(name.replace("_", "") for name in TARGET_OUTCOME_FIELDS)
+_OUTCOME_PREFIXES = ("actual", "targetgameactual", "targetgamefinal", "settlement",
+    "grading", "result", "grade")
+_MARKET_PREFIXES = ("sportsbook", "bookmaker", "kelly", "closing", "settlement", "market")
 _STATE_FIELDS = frozenset({"canonical_event_id", "provider_event_ids", "player_id",
     "canonical_player_name", "team", "opponent", "commence_time_utc", "model_id", "model_version",
     "minutes_evidence_ref", "projected_minutes", "minutes_uncertainty", "projection_evidence_ref",
@@ -85,39 +88,22 @@ def _measurement(value: dict) -> PreseasonMeasurement:
         raise ProspectiveEvidenceError("invalid measurement metadata") from exc
 
 
-def _semantic_key(key: object) -> str:
-    text = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", str(key))
-    return re.sub(r"[^a-z0-9]+", "_", text.casefold()).strip("_")
+def _reject_model_field(key: str, item: object) -> None:
+    name = _semantic_key(key)
+    compact = name.replace("_", "")
+    if (compact in _OUTCOME_COMPACT or compact.startswith(_OUTCOME_PREFIXES)
+            or compact == "artifactdomain" and item != NBA_PROSPECTIVE_EVIDENCE):
+        raise ProspectiveEvidenceError("target-game outcome is prohibited in model state")
+    if compact in {"kellyeligible", "eligibleforbetting", "eligibleforofficialpick"} and item is not False:
+        raise ProspectiveEvidenceError("model state cannot enable an economic route")
+    if (compact in _PROHIBITED_COMPACT or compact.startswith(_MARKET_PREFIXES)
+            and compact != "kellyeligible"):
+        raise ProspectiveEvidenceError("observed market/economic field is prohibited in model state")
 
 
 def reject_market_outcomes(value: object) -> None:
-    """Apply one field policy to mappings, string-key pairs, and field records."""
-    if contains_target_game_outcome(value):
-        raise ProspectiveEvidenceError("target-game outcome is prohibited in model state")
-    if isinstance(value, Mapping):
-        labels = [item for key, item in value.items() if _semantic_key(key).replace("_", "")
-                  in {"name", "key", "field", "fieldname", "feature", "featurename"}]
-        values = [item for key, item in value.items() if _semantic_key(key).replace("_", "")
-                  in {"value", "fieldvalue", "featurevalue"}]
-        if labels and values:
-            if len(labels) != 1 or len(values) != 1 or not isinstance(labels[0], str):
-                raise ProspectiveEvidenceError("ambiguous model field record")
-            reject_market_outcomes({labels[0]: values[0]})
-        for key, item in value.items():
-            name = _semantic_key(key)
-            compact = name.replace("_", "")
-            if compact in {"kellyeligible", "eligibleforbetting", "eligibleforofficialpick"} and item is not False:
-                raise ProspectiveEvidenceError("model state cannot enable an economic route")
-            if (compact in _PROHIBITED_COMPACT or name.startswith(("sportsbook_", "bookmaker_", "kelly_",
-                    "closing_", "settlement_", "market_")) and compact != "kellyeligible"):
-                raise ProspectiveEvidenceError("observed market/economic field is prohibited in model state")
-            reject_market_outcomes(item)
-    elif isinstance(value, (list, tuple)):
-        if len(value) == 2 and isinstance(value[0], str):
-            reject_market_outcomes({value[0]: value[1]})
-        else:
-            for item in value:
-                reject_market_outcomes(item)
+    """Use the credential traversal for model market/outcome policy as well."""
+    _safe_json(value, semantic_fields=True, field_policy=_reject_model_field)
 
 
 def _nonnegative(value: object, name: str) -> None:
@@ -129,7 +115,6 @@ def _validate_row(row: dict) -> None:
     if set(row) != _ROW_FIELDS or row["schema_version"] != MODEL_SCHEMA:
         raise ProspectiveEvidenceError("model snapshot fields/schema differ")
     reject_market_outcomes(row)
-    _safe_json(row)
     metadata = _measurement(row["measurement_metadata"])
     for key in ("prediction_run_id", "operating_date", "repository_commit_sha"):
         if row[key] != getattr(metadata, key):
@@ -271,7 +256,6 @@ def _read_artifacts(root: Path, expected_repository_sha: str, evidence_root: Pat
             or any(not isinstance(r, dict) for r in exclusions["rows"])):
         raise ProspectiveEvidenceError("invalid exclusion evidence")
     reject_market_outcomes(exclusions)
-    _safe_json(exclusions)
     for capture in sources.values():
         if utc_clock(capture["responded_at_utc"]) > created:
             raise ProspectiveEvidenceError("source capture follows freeze creation")
@@ -343,7 +327,6 @@ def freeze_models(freeze_root: str | Path, *, metadata: PreseasonMeasurement, ro
     rows = sorted(json_clone(rows), key=lambda r: (r["canonical_event_id"], r["player_id"]))
     exclusions_payload = json_clone({"rows": exclusions})
     reject_market_outcomes(exclusions_payload)
-    _safe_json(exclusions_payload)
     if not isinstance(exclusions, list) or any(not isinstance(r, dict) for r in exclusions):
         raise ProspectiveEvidenceError("exclusions must be a list of evidence objects")
     root = plain_path(Path(freeze_root) / FREEZE_SCHEMA / metadata.prediction_run_id)
@@ -409,7 +392,7 @@ def bind_market_observation(root: str | Path, *, expected_repository_sha: str,
         "player_id", "bookmaker", "line", "decimal_odds", "observed_at_utc", "raw_market_evidence_ref"}
     if not isinstance(observation, dict) or set(observation) != fields or observation["schema_version"] != MARKET_SCHEMA:
         raise ProspectiveEvidenceError("market observation schema/fields differ")
-    _safe_json(observation)
+    _safe_json(observation, semantic_fields=True)
     freeze = verify_model_freeze(root, expected_repository_sha=expected_repository_sha, evidence_root=evidence_root)
     if observation["freeze_manifest_sha256"] != freeze.manifest["manifest_sha256"]:
         raise ProspectiveEvidenceError("market observation references another freeze")
