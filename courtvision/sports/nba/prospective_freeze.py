@@ -27,7 +27,8 @@ FREEZE_SCHEMA = "nba-prospective-model-freeze-v1"
 MEASUREMENT_SCHEMA = "nba-preseason-measurement-v1"
 MARKET_SCHEMA = "nba-prospective-market-observation-v1"
 ASSESSMENT_VERSION = "nba-frozen-model-market-binding-v1"
-_PROHIBITED = frozenset("""sportsbook bookmaker vendor line observed_line american_odds decimal_odds
+_PROHIBITED = frozenset("""sportsbook bookmaker vendor line observed_line market_line sportsbook_line line_value
+    american_odds decimal_odds odds over_odds under_odds
     implied_probability market_timestamp_utc selected_side edge model_edge probability_based_edge
     closing_line closing_odds clv stake kelly bankroll result settlement actual_points actual_minutes
     final_points final_stats box_score points pts minutes model_over_probability model_under_probability""".split())
@@ -84,22 +85,39 @@ def _measurement(value: dict) -> PreseasonMeasurement:
         raise ProspectiveEvidenceError("invalid measurement metadata") from exc
 
 
+def _semantic_key(key: object) -> str:
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", str(key))
+    return re.sub(r"[^a-z0-9]+", "_", text.casefold()).strip("_")
+
+
 def reject_market_outcomes(value: object) -> None:
+    """Apply one field policy to mappings, string-key pairs, and field records."""
     if contains_target_game_outcome(value):
         raise ProspectiveEvidenceError("target-game outcome is prohibited in model state")
     if isinstance(value, Mapping):
+        labels = [item for key, item in value.items() if _semantic_key(key).replace("_", "")
+                  in {"name", "key", "field", "fieldname", "feature", "featurename"}]
+        values = [item for key, item in value.items() if _semantic_key(key).replace("_", "")
+                  in {"value", "fieldvalue", "featurevalue"}]
+        if labels and values:
+            if len(labels) != 1 or len(values) != 1 or not isinstance(labels[0], str):
+                raise ProspectiveEvidenceError("ambiguous model field record")
+            reject_market_outcomes({labels[0]: values[0]})
         for key, item in value.items():
-            text = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", str(key))
-            name = re.sub(r"[^a-z0-9]+", "_", text.casefold()).strip("_")
-            if name in {"kelly_eligible", "eligible_for_betting", "eligible_for_official_pick"} and item is not False:
+            name = _semantic_key(key)
+            compact = name.replace("_", "")
+            if compact in {"kellyeligible", "eligibleforbetting", "eligibleforofficialpick"} and item is not False:
                 raise ProspectiveEvidenceError("model state cannot enable an economic route")
-            if (name.replace("_", "") in _PROHIBITED_COMPACT or name.startswith(("sportsbook_", "bookmaker_", "kelly_",
-                    "closing_", "settlement_", "market_")) and name != "kelly_eligible"):
+            if (compact in _PROHIBITED_COMPACT or name.startswith(("sportsbook_", "bookmaker_", "kelly_",
+                    "closing_", "settlement_", "market_")) and compact != "kellyeligible"):
                 raise ProspectiveEvidenceError("observed market/economic field is prohibited in model state")
             reject_market_outcomes(item)
     elif isinstance(value, (list, tuple)):
-        for item in value:
-            reject_market_outcomes(item)
+        if len(value) == 2 and isinstance(value[0], str):
+            reject_market_outcomes({value[0]: value[1]})
+        else:
+            for item in value:
+                reject_market_outcomes(item)
 
 
 def _nonnegative(value: object, name: str) -> None:

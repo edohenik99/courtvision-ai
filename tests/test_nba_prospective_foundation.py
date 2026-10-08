@@ -10,6 +10,7 @@ from courtvision.sports.nba.prospective_evidence import (
     EVIDENCE_SCHEMA, ProspectiveEvidenceError, canonical_bytes, capture_response,
     digest, normalized_request, source_manifest, verify_capture,
 )
+from courtvision.sports.nba.artifact_domains import TARGET_OUTCOME_FIELDS
 from courtvision.sports.nba.prospective_freeze import (
     FREEZE_SCHEMA, MARKET_SCHEMA, PreseasonMeasurement, bind_market_observation,
     _STATE_FIELDS, freeze_models, model_snapshot, verify_model_freeze,
@@ -301,7 +302,8 @@ def test_preseason_metadata_immutable():
         m.season_phase = "REGULAR_SEASON"
 
 
-PROHIBITED = """sportsbook bookmaker vendor line american_odds decimal_odds implied_probability market_timestamp_utc
+PROHIBITED = """sportsbook bookmaker vendor line market_line sportsbook_line line_value
+american_odds decimal_odds odds over_odds under_odds implied_probability market_timestamp_utc
 selected_side edge model_edge probability_based_edge closing_line closing_odds CLV stake kelly bankroll
 result settlement actual_points actual_minutes final_points final_stats box_score model_over_probability model_under_probability""".split()
 
@@ -313,6 +315,131 @@ def test_model_rejects_market_and_outcome_fields_even_null(tmp_path, field, nest
     capture(tmp_path)
     with pytest.raises(ProspectiveEvidenceError):
         snapshot(tmp_path, **({"projection_inputs": {"nested": [{field: None}]}} if nested else {field: None}))
+
+
+SEMANTIC_PROHIBITED = sorted(set(PROHIBITED) | TARGET_OUTCOME_FIELDS | {"observed_line"})
+
+
+@pytest.mark.parametrize("field", SEMANTIC_PROHIBITED)
+@pytest.mark.parametrize("form", [list, tuple])
+def test_model_rejects_nested_prohibited_field_pairs_even_null(tmp_path, field, form):
+    capture(tmp_path)
+    pair = form((field, None))
+    with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+        snapshot(tmp_path, projection_inputs={"nested": [{"features": [[("safe_feature", 1), pair]]}]})
+
+
+@pytest.mark.parametrize("field", ["LINE", "Line", "marketLine", "MARKETLINE", "sportsbook-line",
+    "LineValue", "AMERICANODDS", "american-odds", "MarketTimestampUtc", "MODEL_EDGE", "ACTUALPOINTS"])
+def test_model_pair_semantic_key_normalization(tmp_path, field):
+    capture(tmp_path)
+    with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+        snapshot(tmp_path, projection_inputs={"features": [[field, 24.5]]})
+
+
+@pytest.mark.parametrize("field", ["kelly_eligible", "eligible_for_betting", "eligible_for_official_pick", "KELLYELIGIBLE"])
+def test_pair_economic_flags_cannot_promote_model_state(tmp_path, field):
+    capture(tmp_path)
+    with pytest.raises(ProspectiveEvidenceError, match="economic"):
+        snapshot(tmp_path, projection_inputs={"features": [[field, True]]})
+    assert snapshot(tmp_path, projection_inputs={"features": [[field, False]]})["measurement_metadata"]["research_only"] is True
+
+
+@pytest.mark.parametrize("label", ["name", "field", "field_name", "feature", "featureName"])
+@pytest.mark.parametrize("field", ["line", "bookmaker", "american_odds", "actual_points", "actual_minutes"])
+def test_model_rejects_prohibited_field_records(tmp_path, label, field):
+    capture(tmp_path)
+    with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+        snapshot(tmp_path, projection_inputs={"features": [{label: field, "value": None, "units": "synthetic"}]})
+
+
+@pytest.mark.parametrize("line", [24.5, 25.5])
+def test_exact_pair_line_reproduction_cannot_construct_snapshots(tmp_path, line):
+    capture(tmp_path)
+    with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+        snapshot(tmp_path, projection_inputs={"features": [["line", line]]})
+    assert not (tmp_path / "articles").exists()
+
+
+def resign_model_row(row):
+    payload = {key: value for key, value in row.items() if key not in {"model_snapshot_id", "row_sha256"}}
+    row["model_snapshot_id"] = digest(payload)
+    row["row_sha256"] = digest({**payload, "model_snapshot_id": row["model_snapshot_id"]})
+
+
+@pytest.mark.parametrize("field", ["line", "sportsbook", "bookmaker", "american_odds", "market_timestamp_utc",
+    "edge", "model_edge", "actual_points", "actual_minutes"])
+def test_pair_market_and_outcome_fields_cannot_reach_freeze(tmp_path, field):
+    capture(tmp_path)
+    row = snapshot(tmp_path)
+    row["projection_inputs"] = {"features": [[field, None]]}
+    resign_model_row(row)
+    with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+        freeze(tmp_path, rows=[row])
+    assert not (tmp_path / "articles").exists()
+
+
+@pytest.mark.parametrize("field", SEMANTIC_PROHIBITED)
+@pytest.mark.parametrize("form", ["mapping", "pair", "record"])
+def test_disk_verifier_rejects_resigned_prohibited_model_fields(tmp_path, field, form):
+    root = freeze(tmp_path)
+    path = root / "model_snapshots.jsonl"
+    row = json.loads(path.read_bytes())
+    if form == "mapping":
+        inputs = {field: None}
+    elif form == "pair":
+        inputs = {"nested": [[field, None]]}
+    else:
+        inputs = {"nested": [{"name": field, "value": None}]}
+    row["projection_inputs"] = inputs
+    resign_model_row(row)
+    path.write_bytes(canonical_bytes(row) + b"\n")
+    def resign_manifest(manifest):
+        manifest["snapshot_file_sha256"] = digest_body(path.read_bytes())
+        manifest["manifest_sha256"] = digest({key: value for key, value in manifest.items() if key != "manifest_sha256"})
+    mutate_json(root / "manifest.json", resign_manifest)
+    manifest = json.loads((root / "manifest.json").read_bytes())
+    def resign_receipt(receipt):
+        receipt["manifest_sha256"] = manifest["manifest_sha256"]
+        receipt["receipt_sha256"] = digest({key: value for key, value in receipt.items() if key != "receipt_sha256"})
+    mutate_json(root / "freeze.json", resign_receipt)
+    with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+        verify(tmp_path, root)
+
+
+def test_pair_market_fields_rejected_in_distribution_sources_and_exclusions(tmp_path):
+    saved = capture(tmp_path)
+    ref = {"request_id": "stats-1", "raw_body_sha256": saved.manifest["raw_body_sha256"]}
+    with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+        snapshot(tmp_path, distribution_model_id="synthetic-distribution", distribution_evidence_ref=ref,
+            distribution_parameters={"metadata": [["bookmaker", "synthetic-book"]]})
+    with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+        freeze(tmp_path, rows=[], exclusions=[{"reason": "synthetic", "metadata": [["line", 24.5]]}])
+    capture(tmp_path, request("stats-2", parameters={"player_id": "player-1", "features": [["line", 24.5]]}))
+    with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+        freeze(tmp_path, rows=[], request_ids=["stats-2"])
+    assert not (tmp_path / "articles").exists()
+
+
+def test_safe_pairs_vectors_and_lineup_status_preserve_model_identity_contract(tmp_path):
+    capture(tmp_path)
+    inputs = {"features": [["projected_points", 23.8], ("pace_adjustment", 1.02), ["lineup_status", "available"]],
+        "weights": [0.4, 0.6], "bounds": [23.1, 25.7], "lineup_status": "available",
+        "metadata": {"name": "pace_adjustment", "value": 1.02}}
+    row = snapshot(tmp_path, projection_inputs=inputs)
+    assert snapshot(tmp_path, projection_inputs=inputs) == row
+    changed = snapshot(tmp_path, projection_inputs={**inputs, "features": [["pace_adjustment", 1.03]]})
+    assert changed["model_snapshot_id"] != row["model_snapshot_id"]
+    assert changed["row_sha256"] != row["row_sha256"]
+    assert verify(tmp_path, freeze(tmp_path, rows=[row])).rows[0]["projection_inputs"]["weights"] == (0.4, 0.6)
+
+
+@pytest.mark.parametrize("record", [{"name": "pace_adjustment", "field": "safe", "value": 1},
+    {"name": 42, "value": 1}, {"name": "safe", "value": 1, "field_value": 2}])
+def test_ambiguous_model_field_records_fail_closed(tmp_path, record):
+    capture(tmp_path)
+    with pytest.raises(ProspectiveEvidenceError, match="ambiguous"):
+        snapshot(tmp_path, projection_inputs={"metadata": record})
 
 
 def test_model_hash_inputs_metadata_and_versions(tmp_path):
@@ -413,12 +540,13 @@ def bind(tmp_path, root, observation):
     return bind_market_observation(root, expected_repository_sha=SHA, evidence_root=tmp_path / "journal", observation=observation)
 
 
-def test_market_changes_assessment_only_without_mutating_freeze(tmp_path):
+@pytest.mark.parametrize("update", [{"line": 13.5}, {"bookmaker": "synthetic-book-2"}, {"decimal_odds": 2.0}])
+def test_market_changes_assessment_only_without_mutating_freeze(tmp_path, update):
     root = freeze(tmp_path)
     before = {p.name: p.read_bytes() for p in root.iterdir()}
     observation = market(tmp_path, root)
     first = bind(tmp_path, root, observation)
-    second = bind(tmp_path, root, {**observation, "line":13.5})
+    second = bind(tmp_path, root, {**observation, **update})
     assert first["assessment_id"] != second["assessment_id"]
     for key in ("model_snapshot_id", "row_sha256", "freeze_manifest_sha256"):
         assert first[key] == second[key]
