@@ -16,6 +16,7 @@ import re
 import stat
 from types import MappingProxyType
 from typing import Callable
+from urllib.parse import parse_qsl, unquote_plus, urlsplit
 
 from courtvision.sports.nba.artifact_domains import NBA_PROSPECTIVE_EVIDENCE, require_artifact_path
 from courtvision.sports.nba.prospective_io import ArtifactConfinementError, create_once_bytes
@@ -63,6 +64,13 @@ _FIELD_LABELS = frozenset({"name", "key", "header", "headername", "field", "fiel
 _FIELD_VALUES = frozenset({"value", "headervalue", "fieldvalue", "featurevalue"})
 _SAFE_RESPONSE_METADATA = frozenset({"content-type", "content-length", "x-ratelimit-remaining",
     "x-ratelimit-limit", "x-requests-used", "x-requests-remaining", "x-requests-last"})
+_TEXT_INSPECTION_LAYERS = 32
+_FORM_INSPECTION_FIELDS = 256
+_PERCENT_ESCAPE = re.compile(r"%[0-9a-fA-F]{2}")
+_URI_AUTHORITY = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s/?#]*")
+_ASSIGNMENT_FIELD = re.compile(r"(?<![\w.-])([\w.-]+(?:\[[^\[\]&=]*\])*)[\"']?\s*[=:]\s*(?=\S)")
+_SCIENTIFIC_KEY_ROLES = frozenset(root + "key" + plural
+    for root in ("public", "source", "feature", "possession") for plural in ("", "s"))
 
 
 class ProspectiveEvidenceError(ValueError):
@@ -124,25 +132,8 @@ def _ordinary_quoted_text(text: str) -> bool:
 
 
 def _decoded_field_label(key: str) -> str:
-    """Inspect quoted JSON labels in their field role without rewriting callers."""
-    while _json_inspection_text(key).startswith('"'):
-        try:
-            encoded = _json_inspection_text(key).encode("utf-8")
-        except UnicodeError:
-            raise ProspectiveEvidenceError("serialized field label cannot be encoded") from None
-        try:
-            decoded = _decode_json(encoded)
-        except ProspectiveEvidenceError:
-            if not _ordinary_quoted_text(key):
-                raise
-            return key  # Ordinary quoted nicknames retain their existing meaning.
-        if not _ordinary_quoted_text(key):
-            # A nonstandard declared prefix must be valid before request stripping.
-            _decode_json(key.encode("utf-8"))
-        if not isinstance(decoded, str):
-            return key
-        key = decoded
-    return key
+    """Inspect supported field-name encodings without rewriting caller labels."""
+    return _inspection_text_forms(key, field_label=True)[-1]
 
 
 def _subject_offsets(name: str, subjects: tuple[str, ...], start: int = 0) -> tuple[int, ...]:
@@ -212,12 +203,105 @@ def _field_record(value: Mapping) -> tuple[str, str] | None:
     return labels[0], values[0]
 
 
-def _safe_text(value: str) -> None:
+def _form_components(name: str) -> tuple[str, ...]:
+    components = [name.partition("[")[0]]
+    for depth, component in enumerate(re.finditer(r"\[([^\[\]]*)\]", name), 1):
+        if depth > _TEXT_INSPECTION_LAYERS:
+            raise ProspectiveEvidenceError("form field nesting exceeds inspection limit")
+        components.append(component[1])
+    return tuple(component for component in components if component)
+
+
+def _parsed_form_fields(value: str) -> tuple[tuple[str, str, int, int], ...]:
+    """Retain complete query-name roles and their original text spans."""
+    documents = [(value, 0)] if "=" in value else []
+    prefixes = []
+    for match in _URI_AUTHORITY.finditer(value):
+        try:
+            parsed = urlsplit(value[match.start():])
+        except ValueError:
+            raise ProspectiveEvidenceError("URL query cannot be inspected") from None
+        if parsed.query:
+            start = value.index("?", match.start()) + 1
+            documents.append((parsed.query, start))
+            prefixes.append((match.start(), start))
+    fields = []
+    for document, start in documents:
+        try:
+            parsed_fields = parse_qsl(document, keep_blank_values=True, encoding="utf-8",
+                                      errors="strict", max_num_fields=_FORM_INSPECTION_FIELDS)
+        except (UnicodeError, ValueError):
+            raise ProspectiveEvidenceError("URL/form fields cannot be inspected") from None
+        index, offset = 0, start
+        for raw_field in document.split("&"):
+            if raw_field:
+                name, item = parsed_fields[index]
+                index += 1
+                end = offset + len(raw_field.partition("=")[0])
+                # A URI's prefix is syntax, not part of its first query name.
+                if not (start == 0 and any(offset <= left < end for left, _ in prefixes)):
+                    field = (name, item, offset, end)
+                    if field not in fields:
+                        fields.append(field)
+            offset += len(raw_field) + 1
+    return tuple(fields)
+
+
+def _scientific_key_role(name: str) -> bool:
+    compact = _semantic_key(name).replace("_", "")
+    return any(compact[offset:] in _SCIENTIFIC_KEY_ROLES
+               for offset in _subject_offsets(compact, _CREDENTIAL_SUBJECTS))
+
+
+def _safe_text_form(value: str, *, field_checker: Callable[[str, object], None] | None = None,
+                    value_checker: Callable[[object], None] | None = None) -> None:
     if re.search(r"(?i)\b(?:bearer|basic)\s+\S+", value):
         raise ProspectiveEvidenceError("credential-bearing text is prohibited")
-    for match in re.finditer(r"([A-Za-z0-9][A-Za-z0-9_.-]*)[\"']?\s*[=:]\s*(?=\S)", value):
-        if _secret_key(match[1]):
+    for match in _URI_AUTHORITY.finditer(value):
+        try:
+            username = urlsplit(match[0]).username
+        except ValueError:
+            raise ProspectiveEvidenceError("URL authority cannot be inspected") from None
+        if username is not None:
+            raise ProspectiveEvidenceError("credential-bearing URL userinfo is prohibited")
+    scientific_spans = []
+    for name, item, start, end in _parsed_form_fields(value):
+        if _secret_key(name):
+            raise ProspectiveEvidenceError("credential-bearing form field is prohibited")
+        if field_checker is not None:
+            field_checker(name, item)
+        components = _form_components(name)
+        for component in components:
+            if component == name:
+                continue
+            if _secret_key(component):
+                raise ProspectiveEvidenceError("credential-bearing form field is prohibited")
+            if field_checker is not None:
+                field_checker(component, item)
+        if components and _scientific_key_role(components[0]):
+            scientific_spans.append((start, end))
+        if value_checker is not None:
+            value_checker(item)
+    for match in _ASSIGNMENT_FIELD.finditer(value):
+        label = match[1]
+        base = label.partition("[")[0]
+        compact = _semantic_key(base).replace("_", "")
+        safe_partial = (compact in {"key", "keys"}
+                        and any(start <= match.start(1) and match.end(1) <= end
+                                for start, end in scientific_spans))
+        if _secret_key(base) and not safe_partial:
             raise ProspectiveEvidenceError("credential-bearing text is prohibited")
+        # A form name is a declared field path: profile[api_key][format]
+        # retains the api_key role regardless of later members or array indices.
+        for depth, component in enumerate(re.finditer(r"\[([^\[\]]*)\]", label), 1):
+            if depth > _TEXT_INSPECTION_LAYERS:
+                raise ProspectiveEvidenceError("form field nesting exceeds inspection limit")
+            if _secret_key(component[1]):
+                raise ProspectiveEvidenceError("credential-bearing text is prohibited")
+
+
+def _safe_text(value: str) -> None:
+    _safe_json(value, semantic_fields=True)
 
 
 def _json_inspection_text(text: str) -> str:
@@ -228,6 +312,52 @@ def _json_inspection_text(text: str) -> str:
     while inspected.startswith("\ufeff"):
         inspected = inspected[1:].lstrip()
     return inspected
+
+
+def _inspection_text_forms(text: str, *, max_layers: int = _TEXT_INSPECTION_LAYERS,
+                           field_label: bool = False) -> tuple[str, ...]:
+    """Inspect JSON-string and UTF-8 URL/form layers; retain every original form.
+
+    Plus has its standard form meaning only in inspection. Incomplete/nonhex
+    percent prose stays literal; encoded unreadable UTF-8 and excess layers fail
+    closed. No returned form replaces a persisted name, value, or raw body.
+    """
+    forms = [text]
+    for layer in range(max_layers + 1):
+        inspected = _json_inspection_text(text)
+        try:
+            encoded = text.encode("utf-8")
+        except UnicodeError:
+            raise ProspectiveEvidenceError("encoded text cannot be inspected as UTF-8") from None
+        if inspected.startswith(("{", "[")) and not field_label:
+            # A declared container owns its syntax. Inspect its keys and values
+            # through the shared walker rather than unquoting inside JSON bytes.
+            _decode_json(encoded)
+            return tuple(forms)
+        # A field label retains its name role, including bracket-like syntax,
+        # while further URL/form layers are inspected before classification.
+        decoded = text
+        if inspected.startswith('"'):
+            try:
+                quoted = _decode_json(encoded)
+            except ProspectiveEvidenceError:
+                if not _ordinary_quoted_text(text):
+                    raise
+            else:
+                if isinstance(quoted, str):
+                    decoded = quoted
+        if decoded == text and ("+" in text or _PERCENT_ESCAPE.search(text)):
+            try:
+                decoded = unquote_plus(text, encoding="utf-8", errors="strict")
+            except UnicodeError:
+                raise ProspectiveEvidenceError("URL/form text is not inspectable UTF-8") from None
+        if decoded == text:
+            return tuple(forms)
+        if layer == max_layers:
+            raise ProspectiveEvidenceError("text encoding nesting exceeds inspection limit")
+        text = decoded
+        forms.append(text)
+    raise ProspectiveEvidenceError("text encoding nesting exceeds inspection limit")
 
 
 def _safe_headers(value: object, *, strip_secrets: bool) -> dict:
@@ -271,47 +401,45 @@ def _safe_headers(value: object, *, strip_secrets: bool) -> dict:
 
 def _safe_json(value: object, *, strip_secrets: bool = False, screen_headers: bool = False,
                semantic_fields: bool = False,
-               field_policy: Callable[[str, object], None] | None = None) -> object:
+               field_policy: Callable[[str, object], None] | None = None,
+               _encoded_depth: int = 0) -> object:
     """Validate JSON with one optional mapping/pair/record semantic traversal.
 
     Requests alone may strip credential mapping/header fields. Model state and
     parsed raw responses reject them; response callers retain the original bytes.
     A caller's field policy never applies to provider bodies unless requested.
     """
-    def check_text(text: str) -> None:
-        inspected = _json_inspection_text(text)
-        if (semantic_fields or screen_headers) and inspected.startswith(("{", "[", '"')):
-            # Retain the caller's exact string, but do not let serialized JSON
-            # bypass the same policy. Inspection is reject-only: stripping a
-            # parsed secret would leave it in the retained original string.
-            try:
-                encoded = text.encode("utf-8")
-            except UnicodeError as exc:
-                raise ProspectiveEvidenceError("serialized JSON cannot be encoded") from exc
-            try:
-                decoded = _decode_json(encoded)
-            except ProspectiveEvidenceError:
-                if inspected.startswith('"') and _ordinary_quoted_text(text):
-                    # An ordinary quoted nickname is not declared container JSON.
-                    _safe_text(text)
-                    return
-                raise
-            _safe_json(decoded, screen_headers=screen_headers, semantic_fields=True,
-                       field_policy=field_policy)
-        else:
-            _safe_text(text)
+    if _encoded_depth > _TEXT_INSPECTION_LAYERS:
+        raise ProspectiveEvidenceError("serialized JSON nesting exceeds inspection limit")
+
+    def check_text(text: str, *, field_label: bool = False) -> None:
+        for form in _inspection_text_forms(text, field_label=field_label):
+            inspected = _json_inspection_text(form)
+            if (not field_label and (semantic_fields or screen_headers)
+                    and inspected.startswith(("{", "["))):
+                # Inspection is reject-only; stripping decoded content would
+                # leave the secret in the retained original encoded string.
+                decoded = _decode_json(form.encode("utf-8"))
+                _safe_json(decoded, screen_headers=screen_headers, semantic_fields=True,
+                           field_policy=field_policy, _encoded_depth=_encoded_depth + 1)
+            else:
+                _safe_text_form(form, field_checker=check_field,
+                    value_checker=lambda item: _safe_json(item, screen_headers=screen_headers,
+                        semantic_fields=True, field_policy=field_policy,
+                        _encoded_depth=_encoded_depth + 1))
 
     def check_field(name: str, item: object) -> None:
-        label = _decoded_field_label(name)
-        if _secret_key(label):
-            raise ProspectiveEvidenceError("credential field is prohibited")
-        if field_policy is not None:
-            field_policy(label, item)
-        check_text(name)
+        for label in _inspection_text_forms(name, field_label=True):
+            if _secret_key(label):
+                raise ProspectiveEvidenceError("credential field is prohibited")
+            if field_policy is not None:
+                field_policy(label, item)
+        check_text(name, field_label=True)
 
     def descend(item: object) -> object:
         return _safe_json(item, strip_secrets=strip_secrets, screen_headers=screen_headers,
-                          semantic_fields=semantic_fields, field_policy=field_policy)
+                          semantic_fields=semantic_fields, field_policy=field_policy,
+                          _encoded_depth=_encoded_depth)
 
     if isinstance(value, Mapping):
         record = _field_record(value) if semantic_fields or screen_headers else None
@@ -381,18 +509,7 @@ def _check_body(raw: bytes) -> None:
         text = raw.decode("utf-8")
     except UnicodeError as exc:
         raise ProspectiveEvidenceError("v1 requires inspectable UTF-8 response bytes") from exc
-    inspected = _json_inspection_text(text)
-    if inspected.startswith(("{", "[", '"')):
-        try:
-            decoded = _decode_json(raw)
-        except ProspectiveEvidenceError:
-            if inspected.startswith('"') and _ordinary_quoted_text(text):
-                _safe_text(text)
-                return
-            raise
-        _safe_json(decoded, semantic_fields=True)
-    else:
-        _safe_text(text)
+    _safe_json(text, semantic_fields=True)
 
 
 def immutable(value: object) -> object:
