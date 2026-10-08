@@ -34,7 +34,8 @@ _SECRET_NAMES = frozenset({"apikey", "key", "authorization", "proxyauthorization
     "subscriptionkey", "ocpapimsubscriptionkey", "session", "xsession", "requestsession"})
 _SECRET_SUFFIXES = ("apikey", "authorization", "password", "secret", "credential",
     "credentials", "token", "cookie", "subscriptionkey")
-_SECRET_DESCRIPTORS = ("value", "values", "header", "headers")
+_SECRET_DESCRIPTORS = ("query_parameters", "query_parameter", "parameters", "parameter",
+    "values", "value", "headers", "header", "query")
 _FIELD_LABELS = frozenset({"name", "key", "header", "headername", "field", "fieldname",
     "feature", "featurename"})
 _FIELD_VALUES = frozenset({"value", "headervalue", "fieldvalue", "featurevalue"})
@@ -95,23 +96,44 @@ def require_date(value: object) -> str:
     return value
 
 
+def _decoded_field_label(key: str) -> str:
+    """Inspect quoted JSON labels in their field role without rewriting callers."""
+    while _json_inspection_text(key).startswith('"'):
+        try:
+            encoded = key.encode("utf-8")
+        except UnicodeError:
+            raise ProspectiveEvidenceError("serialized field label cannot be encoded") from None
+        try:
+            decoded = _decode_json(encoded)
+        except ProspectiveEvidenceError:
+            return key  # Ordinary quoted nicknames retain their existing meaning.
+        if not isinstance(decoded, str):
+            return key
+        key = decoded
+    return key
+
+
 def _secret_key(key: str) -> bool:
+    key = _decoded_field_label(key)
     name = re.sub(r"[^a-z0-9]", "", key.casefold())
     tokens = _semantic_key(key).split("_")
     while name:
         if (name in _SECRET_NAMES or any(name.endswith(x) for x in _SECRET_SUFFIXES)
                 or tokens[-1:] == ["session"]):
             return True
-        descriptor = next((item for item in _SECRET_DESCRIPTORS if name.endswith(item)), None)
+        descriptor = next((item for item in _SECRET_DESCRIPTORS
+                           if name.endswith(item.replace("_", ""))), None)
         if descriptor is None:
             return False
-        name = name[:-len(descriptor)]
-        if tokens[-1:] == [descriptor]:
-            tokens.pop()
+        name = name[:-len(descriptor.replace("_", ""))]
+        descriptor_tokens = descriptor.split("_")
+        if tokens[-len(descriptor_tokens):] == descriptor_tokens:
+            del tokens[-len(descriptor_tokens):]
     return False
 
 
 def _semantic_key(key: str) -> str:
+    key = _decoded_field_label(key)
     text = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key)
     return re.sub(r"[^a-z0-9]+", "_", text.casefold()).strip("_")
 
@@ -140,6 +162,16 @@ def _safe_text(value: str) -> None:
     for match in re.finditer(r"([A-Za-z0-9][A-Za-z0-9_.-]*)[\"']?\s*[=:]\s*(?=\S)", value):
         if _secret_key(match[1]):
             raise ProspectiveEvidenceError("credential-bearing text is prohibited")
+
+
+def _json_inspection_text(text: str) -> str:
+    """Recognize BOM-prefixed JSON without changing retained strings or bytes."""
+    if "\0" in text:
+        raise ProspectiveEvidenceError("NUL-bearing text is not inspectable UTF-8 JSON/text")
+    inspected = text.lstrip()
+    while inspected.startswith("\ufeff"):
+        inspected = inspected[1:].lstrip()
+    return inspected
 
 
 def _safe_headers(value: object, *, strip_secrets: bool) -> dict:
@@ -191,7 +223,8 @@ def _safe_json(value: object, *, strip_secrets: bool = False, screen_headers: bo
     A caller's field policy never applies to provider bodies unless requested.
     """
     def check_text(text: str) -> None:
-        if (semantic_fields or screen_headers) and text.lstrip().startswith(("{", "[", '"')):
+        inspected = _json_inspection_text(text)
+        if (semantic_fields or screen_headers) and inspected.startswith(("{", "[", '"')):
             # Retain the caller's exact string, but do not let serialized JSON
             # bypass the same policy. Inspection is reject-only: stripping a
             # parsed secret would leave it in the retained original string.
@@ -202,7 +235,7 @@ def _safe_json(value: object, *, strip_secrets: bool = False, screen_headers: bo
             try:
                 decoded = _decode_json(encoded)
             except ProspectiveEvidenceError:
-                if text.lstrip().startswith('"'):
+                if inspected.startswith('"'):
                     # An ordinary quoted nickname is not declared container JSON.
                     _safe_text(text)
                     return
@@ -213,11 +246,12 @@ def _safe_json(value: object, *, strip_secrets: bool = False, screen_headers: bo
             _safe_text(text)
 
     def check_field(name: str, item: object) -> None:
-        if _secret_key(name):
+        label = _decoded_field_label(name)
+        if _secret_key(label):
             raise ProspectiveEvidenceError("credential field is prohibited")
         check_text(name)
         if field_policy is not None:
-            field_policy(name, item)
+            field_policy(label, item)
 
     def descend(item: object) -> object:
         return _safe_json(item, strip_secrets=strip_secrets, screen_headers=screen_headers,
@@ -291,11 +325,12 @@ def _check_body(raw: bytes) -> None:
         text = raw.decode("utf-8")
     except UnicodeError as exc:
         raise ProspectiveEvidenceError("v1 requires inspectable UTF-8 response bytes") from exc
-    if text.lstrip().startswith(("{", "[", '"')):
+    inspected = _json_inspection_text(text)
+    if inspected.startswith(("{", "[", '"')):
         try:
             decoded = _decode_json(raw)
         except ProspectiveEvidenceError:
-            if text.lstrip().startswith('"'):
+            if inspected.startswith('"'):
                 _safe_text(text)
                 return
             raise

@@ -1635,3 +1635,511 @@ def test_market_independent_pmf_and_cdf_parameters_preserve_model_freezes(tmp_pa
     assert frozen.rows[0]["distribution_parameters"]["pmf"]["probabilities"] == (0.2, 0.3, 0.5)
     assert frozen.rows[0]["distribution_parameters"]["cdf"]["values"] == (0.2, 0.5, 1.0)
     assert frozen.rows[0]["distribution_parameters"]["pmf"]["support"] == (0, 1, 2)
+
+
+BOM_ENCODED_PROHIBITED_CASES = [
+    ({"headers": [["X-API-Key", "SYNTHETIC-CREDENTIAL-A"]]}, "credential"),
+    ({"features": [{"field_name": "line", "data": 24.5}]}, "prohibited"),
+    ({"player_points_final": 12}, "prohibited"),
+]
+
+
+@pytest.mark.parametrize("payload,error", BOM_ENCODED_PROHIBITED_CASES)
+@pytest.mark.parametrize("location", ["value", "mapping_key"])
+@pytest.mark.parametrize("boundary", ["constructor", "disk"])
+def test_bom_encoded_containers_cannot_hide_model_credentials_market_or_outcomes(tmp_path, payload, error, location, boundary):
+    encoded = "\ufeff" + json.dumps(payload, separators=(",", ":"))
+    inputs = {encoded: "synthetic"} if location == "mapping_key" else {"serialized_context": encoded}
+    if boundary == "constructor":
+        capture(tmp_path)
+        with pytest.raises(ProspectiveEvidenceError, match=error) as caught:
+            snapshot(tmp_path, projection_inputs=inputs)
+        assert not (tmp_path / "articles").exists()
+    else:
+        root = freeze(tmp_path)
+        path = root / "model_snapshots.jsonl"
+        row = json.loads(path.read_bytes())
+        row["projection_inputs"] = inputs
+        resign_model_row(row)
+        path.write_bytes(canonical_bytes(row) + b"\n")
+        resign_freeze_artifact_hashes(root)
+        with pytest.raises(ProspectiveEvidenceError, match=error) as caught:
+            verify(tmp_path, root)
+    assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+
+
+@pytest.mark.parametrize("location", ["raw_json", "embedded_string"])
+def test_bom_raw_escaped_credentials_fail_capture_and_fully_resigned_readback(tmp_path, location):
+    encoded = '\ufeff{"\\u0061pi_key":"SYNTHETIC-CREDENTIAL-A"}'
+    body = encoded.encode("utf-8") if location == "raw_json" else canonical_bytes({"serialized_response": encoded})
+    with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+        capture(tmp_path, raw_body=body)
+    assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+    assert not (tmp_path / "journal").exists()
+    capture(tmp_path)
+    root = tmp_path / "journal" / EVIDENCE_SCHEMA / "stats-1"
+    (root / "body.bin").write_bytes(body)
+    def resign_capture(manifest):
+        manifest["raw_body_sha256"] = digest_body(body)
+        manifest["raw_body_byte_length"] = len(body)
+        manifest["capture_sha256"] = digest({key: value for key, value in manifest.items() if key != "capture_sha256"})
+    mutate_json(root / "manifest.json", resign_capture)
+    for read in (lambda: verify_capture(tmp_path / "journal", "stats-1"),
+                 lambda: source_manifest(tmp_path / "journal", ["stats-1"])):
+        with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+            read()
+        assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+
+
+def test_safe_bom_model_and_request_strings_preserve_exact_caller_text(tmp_path):
+    encoded = '\ufeff{ "features": [["projected_points",13],["pace_adjustment",1.02]], "token_count":3 }'
+    inputs = {"serialized_features": encoded, "serialized_weights": "\ufeff[0.4, 0.6]"}
+    parameters = {"player_id": "player-1", "season": "2025", "context": inputs}
+    req = request(parameters=parameters)
+    assert req["parameters"] == parameters
+    capture(tmp_path, req)
+    row = snapshot(tmp_path, projection_inputs=inputs)
+    root = freeze(tmp_path, rows=[row])
+    assert verify(tmp_path, root).rows[0]["projection_inputs"] == inputs
+    assert source_manifest(tmp_path / "journal", ["stats-1"])["stats-1"]["parameters"] == parameters
+
+
+def test_safe_bom_raw_historical_statistics_preserve_exact_bytes(tmp_path):
+    body = b'\xef\xbb\xbf{ "response": [{"points":12,"actual_minutes":18,"final_score":100,"possession":1}], "weights":[0.4,0.6] }\n'
+    saved = capture(tmp_path, raw_body=body)
+    row = snapshot(tmp_path, projection_inputs={"final_projected_minutes": 18})
+    root = freeze(tmp_path, rows=[row])
+    assert verify(tmp_path, root).rows[0]["model_snapshot_id"] == row["model_snapshot_id"]
+    assert saved.raw_body == body == verify_capture(tmp_path / "journal", "stats-1").raw_body
+    assert saved.manifest["raw_body_sha256"] == digest_body(body)
+
+
+def test_malformed_bom_model_container_fails_closed_before_publication(tmp_path):
+    capture(tmp_path)
+    with pytest.raises(ProspectiveEvidenceError):
+        snapshot(tmp_path, projection_inputs={"serialized_context": '\ufeff{"features":['})
+    assert not (tmp_path / "articles").exists()
+
+
+DESCRIPTOR_PARAMETER_AND_MARKET_ALIASES = [
+    ("api_key_parameter", "SYNTHETIC-CREDENTIAL-A", "credential", "mapping"),
+    ("api_key_query_parameter", "SYNTHETIC-CREDENTIAL-A", "credential", "pair"),
+    ("authorization_parameter", "SYNTHETIC-CREDENTIAL-A", "credential", "feature_name"),
+    ("consensus_price", 1.91, "prohibited", "encoded"),
+    ("book_price", 1.91, "prohibited", "pair"),
+    ("player_points_total", 24.5, "prohibited", "feature_name"),
+]
+
+
+@pytest.mark.parametrize("field,value,error,disk_form", DESCRIPTOR_PARAMETER_AND_MARKET_ALIASES)
+@pytest.mark.parametrize("form", ["mapping", "pair", "feature_name", "encoded"])
+def test_descriptor_parameter_and_market_aliases_reject_all_constructor_representations(tmp_path, field, value, error, disk_form, form):
+    capture(tmp_path)
+    with pytest.raises(ProspectiveEvidenceError, match=error) as caught:
+        snapshot(tmp_path, projection_inputs=semantic_alias_inputs(field, value, form))
+    assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+    assert not (tmp_path / "articles").exists()
+
+
+@pytest.mark.parametrize("field,value,error,form", DESCRIPTOR_PARAMETER_AND_MARKET_ALIASES)
+def test_descriptor_parameter_and_market_aliases_fail_fully_resigned_verification(tmp_path, field, value, error, form):
+    root = freeze(tmp_path)
+    path = root / "model_snapshots.jsonl"
+    row = json.loads(path.read_bytes())
+    row["projection_inputs"] = semantic_alias_inputs(field, value, form)
+    resign_model_row(row)
+    path.write_bytes(canonical_bytes(row) + b"\n")
+    resign_freeze_artifact_hashes(root)
+    with pytest.raises(ProspectiveEvidenceError, match=error) as caught:
+        verify(tmp_path, root)
+    assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+
+
+@pytest.mark.parametrize("field", ["is_bettable", "ISBETTABLE"])
+@pytest.mark.parametrize("form", ["mapping", "pair", "feature_name", "encoded"])
+@pytest.mark.parametrize("value", [True, 1])
+def test_bettable_aliases_cannot_enable_model_eligibility(tmp_path, field, form, value):
+    capture(tmp_path)
+    with pytest.raises(ProspectiveEvidenceError, match="economic"):
+        snapshot(tmp_path, projection_inputs=semantic_alias_inputs(field, value, form))
+    assert not (tmp_path / "articles").exists()
+
+
+@pytest.mark.parametrize("field,form", [("is_bettable", "feature_name"), ("ISBETTABLE", "encoded")])
+@pytest.mark.parametrize("value", [True, 1])
+def test_resigned_bettable_aliases_cannot_enable_model_eligibility(tmp_path, field, form, value):
+    root = freeze(tmp_path)
+    path = root / "model_snapshots.jsonl"
+    row = json.loads(path.read_bytes())
+    row["projection_inputs"] = semantic_alias_inputs(field, value, form)
+    resign_model_row(row)
+    path.write_bytes(canonical_bytes(row) + b"\n")
+    resign_freeze_artifact_hashes(root)
+    with pytest.raises(ProspectiveEvidenceError, match="economic"):
+        verify(tmp_path, root)
+
+
+@pytest.mark.parametrize("field,form", [("is_bettable", "pair"), ("ISBETTABLE", "mapping")])
+def test_bettable_aliases_preserve_only_literal_false(tmp_path, field, form):
+    root = freeze(tmp_path)
+    inputs = semantic_alias_inputs(field, False, form)
+    expected = snapshot(tmp_path, projection_inputs=inputs)
+    path = root / "model_snapshots.jsonl"
+    row = json.loads(path.read_bytes())
+    row["projection_inputs"] = inputs
+    resign_model_row(row)
+    assert row == expected
+    path.write_bytes(canonical_bytes(row) + b"\n")
+    resign_freeze_artifact_hashes(root)
+    saved = verify(tmp_path, root)
+    assert saved.rows[0]["model_snapshot_id"] == expected["model_snapshot_id"]
+    assert saved.rows[0]["measurement_metadata"]["eligible_for_betting"] is False
+    assert saved.rows[0]["measurement_metadata"]["kelly_eligible"] is False
+    assert saved.rows[0]["measurement_metadata"]["eligible_for_official_pick"] is False
+
+
+@pytest.mark.parametrize("encoding", ["utf-16-be", "utf-32-be"])
+def test_nul_interleaved_raw_json_credentials_fail_capture_and_resigned_readback(tmp_path, encoding):
+    body = json.dumps({"api_key": "SYNTHETIC-CREDENTIAL-A"}).encode(encoding)
+    assert b"\0" in body and b"api_key" not in body
+    with pytest.raises(ProspectiveEvidenceError):
+        capture(tmp_path, raw_body=body)
+    assert not (tmp_path / "journal").exists()
+    capture(tmp_path)
+    root = tmp_path / "journal" / EVIDENCE_SCHEMA / "stats-1"
+    (root / "body.bin").write_bytes(body)
+    def resign_capture(manifest):
+        manifest["raw_body_sha256"] = digest_body(body)
+        manifest["raw_body_byte_length"] = len(body)
+        manifest["capture_sha256"] = digest({key: value for key, value in manifest.items() if key != "capture_sha256"})
+    mutate_json(root / "manifest.json", resign_capture)
+    with pytest.raises(ProspectiveEvidenceError):
+        verify_capture(tmp_path / "journal", "stats-1")
+    with pytest.raises(ProspectiveEvidenceError):
+        source_manifest(tmp_path / "journal", ["stats-1"])
+
+
+@pytest.mark.parametrize("encoding", ["utf-16-be", "utf-32-be"])
+def test_embedded_nul_interleaved_provider_text_fails_capture_and_resigned_readback(tmp_path, encoding):
+    encoded = json.dumps({"api_key": "SYNTHETIC-CREDENTIAL-A"}).encode(encoding).decode("utf-8")
+    body = canonical_bytes({"serialized_response": encoded})
+    with pytest.raises(ProspectiveEvidenceError):
+        capture(tmp_path, raw_body=body)
+    assert not (tmp_path / "journal").exists()
+    capture(tmp_path)
+    root = tmp_path / "journal" / EVIDENCE_SCHEMA / "stats-1"
+    (root / "body.bin").write_bytes(body)
+    def resign_capture(manifest):
+        manifest["raw_body_sha256"] = digest_body(body)
+        manifest["raw_body_byte_length"] = len(body)
+        manifest["capture_sha256"] = digest({key: value for key, value in manifest.items() if key != "capture_sha256"})
+    mutate_json(root / "manifest.json", resign_capture)
+    with pytest.raises(ProspectiveEvidenceError):
+        verify_capture(tmp_path / "journal", "stats-1")
+
+
+@pytest.mark.parametrize("text", [
+    json.dumps({"api_key": "SYNTHETIC-CREDENTIAL-A"}).encode("utf-16-be").decode("utf-8"),
+    json.dumps({"line": 24.5}).encode("utf-32-be").decode("utf-8"),
+    "ordinary\0model-context",
+])
+@pytest.mark.parametrize("boundary", ["constructor", "disk"])
+def test_literal_nul_model_text_is_rejected_at_both_boundaries(tmp_path, text, boundary):
+    inputs = {"serialized_context": text}
+    if boundary == "constructor":
+        capture(tmp_path)
+        with pytest.raises(ProspectiveEvidenceError):
+            snapshot(tmp_path, projection_inputs=inputs)
+        assert not (tmp_path / "articles").exists()
+    else:
+        root = freeze(tmp_path)
+        path = root / "model_snapshots.jsonl"
+        row = json.loads(path.read_bytes())
+        row["projection_inputs"] = inputs
+        resign_model_row(row)
+        path.write_bytes(canonical_bytes(row) + b"\n")
+        resign_freeze_artifact_hashes(root)
+        with pytest.raises(ProspectiveEvidenceError):
+            verify(tmp_path, root)
+
+
+def test_literal_nul_plain_provider_body_fails_before_any_write(tmp_path):
+    with pytest.raises(ProspectiveEvidenceError):
+        capture(tmp_path, raw_body=b"ordinary\0provider-text")
+    assert not (tmp_path / "journal").exists()
+
+
+def test_explicit_historical_and_projected_totals_preserve_safe_model_state(tmp_path):
+    inputs = {"historical_points_total": 340, "projected_points_total": 13,
+        "historical_rebounds_total": 70, "projected_minutes_total": 18,
+        "beta": 0.4, "beta_distribution": {"alpha": 2, "beta": 3},
+        "better_estimate": 13, "alphabet": 26}
+    body = canonical_bytes({"response": [inputs]})
+    capture(tmp_path, request(parameters={"player_id": "player-1", "context": inputs}), raw_body=body)
+    row = snapshot(tmp_path, projection_inputs=inputs)
+    root = freeze(tmp_path, rows=[row])
+    assert verify(tmp_path, root).rows[0]["projection_inputs"] == inputs
+    assert source_manifest(tmp_path / "journal", ["stats-1"])["stats-1"]["parameters"]["context"] == inputs
+    assert verify_capture(tmp_path / "journal", "stats-1").raw_body == body
+
+
+@pytest.mark.parametrize("field,form", [("selectedSide", "pair"), ("SELECTEDSIDE", "feature_name")])
+@pytest.mark.parametrize("boundary", ["constructor", "disk"])
+def test_compact_selected_side_cannot_hide_behind_subject_normalization(tmp_path, field, form, boundary):
+    inputs = semantic_alias_inputs(field, "over", form)
+    if boundary == "constructor":
+        capture(tmp_path)
+        with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+            snapshot(tmp_path, projection_inputs=inputs)
+        assert not (tmp_path / "articles").exists()
+    else:
+        root = freeze(tmp_path)
+        path = root / "model_snapshots.jsonl"
+        row = json.loads(path.read_bytes())
+        row["projection_inputs"] = inputs
+        resign_model_row(row)
+        path.write_bytes(canonical_bytes(row) + b"\n")
+        resign_freeze_artifact_hashes(root)
+        with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+            verify(tmp_path, root)
+
+
+COMPACT_SELECTED_SIDE_SUBJECTS = [
+    (("observed",), "mapping"), (("player",), "pair"),
+    (("consensus", "player"), "feature_name"), (("selected", "player"), "encoded"),
+    (("provider", "observed", "targetgame"), "mapping"),
+    (("observed", "selected", "player"), "pair"),
+    (("home", "team", "selected"), "feature_name"),
+    (("away", "opponent", "observed"), "encoded"),
+]
+
+
+@pytest.mark.parametrize("subjects,form", COMPACT_SELECTED_SIDE_SUBJECTS)
+@pytest.mark.parametrize("descriptor", ["", "values"])
+@pytest.mark.parametrize("boundary", ["constructor", "disk"])
+def test_compact_selected_side_roots_and_descendants_survive_multiple_subject_prefixes(tmp_path, subjects, form, descriptor, boundary):
+    field = ("".join(subjects) + "selectedside" + descriptor).upper()
+    inputs = semantic_alias_inputs(field, "over", form)
+    if boundary == "constructor":
+        capture(tmp_path)
+        with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+            snapshot(tmp_path, projection_inputs=inputs)
+        assert not (tmp_path / "articles").exists()
+    else:
+        root = freeze(tmp_path)
+        path = root / "model_snapshots.jsonl"
+        row = json.loads(path.read_bytes())
+        row["projection_inputs"] = inputs
+        resign_model_row(row)
+        path.write_bytes(canonical_bytes(row) + b"\n")
+        resign_freeze_artifact_hashes(root)
+        with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+            verify(tmp_path, root)
+
+
+def quoted_escaped_field_label(label):
+    return '"' + "".join("\\u%04x" % ord(char) for char in label) + '"'
+
+
+def quoted_field_inputs(label, value, form):
+    encoded = quoted_escaped_field_label(label)
+    if form == "mapping":
+        return {encoded: value}
+    if form == "pair":
+        return {"features": [[encoded, value]]}
+    return {"features": [{"field_name": encoded, "value": value}]}
+
+
+@pytest.mark.parametrize("field,value,error", [
+    ("api_key", "SYNTHETIC-CREDENTIAL-A", "credential"),
+    ("line", 24.5, "prohibited"), ("actual_points", 12, "prohibited"),
+    ("kelly_eligible", True, "economic"),
+])
+@pytest.mark.parametrize("form", ["mapping", "pair", "record"])
+@pytest.mark.parametrize("boundary", ["constructor", "disk"])
+def test_quoted_escaped_field_labels_keep_their_semantic_role(tmp_path, field, value, error, form, boundary):
+    inputs = quoted_field_inputs(field, value, form)
+    if boundary == "constructor":
+        capture(tmp_path)
+        with pytest.raises(ProspectiveEvidenceError, match=error) as caught:
+            snapshot(tmp_path, projection_inputs=inputs)
+        assert not (tmp_path / "articles").exists()
+    else:
+        root = freeze(tmp_path)
+        path = root / "model_snapshots.jsonl"
+        row = json.loads(path.read_bytes())
+        row["projection_inputs"] = inputs
+        resign_model_row(row)
+        path.write_bytes(canonical_bytes(row) + b"\n")
+        resign_freeze_artifact_hashes(root)
+        with pytest.raises(ProspectiveEvidenceError, match=error) as caught:
+            verify(tmp_path, root)
+    assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+
+
+@pytest.mark.parametrize("record,error", [
+    ({quoted_escaped_field_label("field_name"): "line", "value": 24.5}, "prohibited"),
+    ({quoted_escaped_field_label("field_name"): quoted_escaped_field_label("actual_points"),
+      quoted_escaped_field_label("value"): 12}, "prohibited"),
+    ({quoted_escaped_field_label("key"): quoted_escaped_field_label("api_key"),
+      quoted_escaped_field_label("value"): "SYNTHETIC-CREDENTIAL-A"}, "credential"),
+    ({quoted_escaped_field_label("feature_name"): quoted_escaped_field_label("kelly_eligible"),
+      quoted_escaped_field_label("feature_value"): True}, "economic"),
+])
+@pytest.mark.parametrize("boundary", ["constructor", "disk"])
+def test_quoted_escaped_record_role_keys_cannot_hide_prohibited_fields(tmp_path, record, error, boundary):
+    inputs = {"features": [record]}
+    if boundary == "constructor":
+        capture(tmp_path)
+        with pytest.raises(ProspectiveEvidenceError, match=error) as caught:
+            snapshot(tmp_path, projection_inputs=inputs)
+        assert not (tmp_path / "articles").exists()
+    else:
+        root = freeze(tmp_path)
+        path = root / "model_snapshots.jsonl"
+        row = json.loads(path.read_bytes())
+        row["projection_inputs"] = inputs
+        resign_model_row(row)
+        path.write_bytes(canonical_bytes(row) + b"\n")
+        resign_freeze_artifact_hashes(root)
+        with pytest.raises(ProspectiveEvidenceError, match=error) as caught:
+            verify(tmp_path, root)
+    assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+
+
+def test_quoted_safe_field_labels_and_generic_value_strings_preserve_exact_text(tmp_path):
+    inputs = {quoted_escaped_field_label("pace_adjustment"): 1.02,
+        "features": [[quoted_escaped_field_label("projected_points"), 13],
+            {"field_name": quoted_escaped_field_label("lineup_status"), "value": "confirmed"},
+            {quoted_escaped_field_label("key"): quoted_escaped_field_label("pace_adjustment"),
+             quoted_escaped_field_label("value"): 1.02}],
+        "serialized_context": quoted_escaped_field_label("line"),
+        "quoted_nickname": '"Air" Jordan',
+        "economic_context": {quoted_escaped_field_label("kelly_eligible"): False}}
+    parameters = {"player_id": "player-1", "season": "2025", "context": inputs}
+    req = request(parameters=parameters)
+    assert req["parameters"] == parameters
+    capture(tmp_path, req)
+    row = snapshot(tmp_path, projection_inputs=inputs)
+    root = freeze(tmp_path, rows=[row])
+    frozen = verify(tmp_path, root)
+    assert frozen.rows[0]["model_snapshot_id"] == row["model_snapshot_id"]
+    assert frozen.rows[0]["projection_inputs"][quoted_escaped_field_label("pace_adjustment")] == 1.02
+    assert frozen.rows[0]["projection_inputs"]["serialized_context"] == quoted_escaped_field_label("line")
+    assert frozen.rows[0]["projection_inputs"]["quoted_nickname"] == '"Air" Jordan'
+    assert frozen.rows[0]["projection_inputs"]["features"][0][0] == quoted_escaped_field_label("projected_points")
+    assert source_manifest(tmp_path / "journal", ["stats-1"])["stats-1"]["parameters"] == parameters
+
+
+CANONICAL_COMPOUND_DESCENDANTS = [
+    (("BOXSCOREVALUES", "box_score_values", "boxScoreValues"), "mapping"),
+    (("FINALRESULTVALUE", "final_result_value", "finalResultValue"), "pair"),
+    (("AMERICANODDSVALUE", "american_odds_value", "americanOddsValue"), "feature_name"),
+    (("LINEVALUECONTEXT", "line_value_context", "lineValueContext"), "encoded"),
+    (("POINTSLINEVALUE", "points_line_value", "pointsLineValue"), "mapping"),
+]
+
+
+@pytest.mark.parametrize("aliases,form", CANONICAL_COMPOUND_DESCENDANTS)
+@pytest.mark.parametrize("style", [0, 1, 2])
+@pytest.mark.parametrize("boundary", ["constructor", "disk"])
+def test_canonical_compound_descendants_reject_compact_snake_and_camel_fields(tmp_path, aliases, form, style, boundary):
+    inputs = semantic_alias_inputs(aliases[style], 12, form)
+    if boundary == "constructor":
+        capture(tmp_path)
+        with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+            snapshot(tmp_path, projection_inputs=inputs)
+        assert not (tmp_path / "articles").exists()
+    else:
+        root = freeze(tmp_path)
+        path = root / "model_snapshots.jsonl"
+        row = json.loads(path.read_bytes())
+        row["projection_inputs"] = inputs
+        resign_model_row(row)
+        path.write_bytes(canonical_bytes(row) + b"\n")
+        resign_freeze_artifact_hashes(root)
+        with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+            verify(tmp_path, root)
+
+
+def test_canonical_compound_policy_preserves_scientific_fields_and_raw_historical_results(tmp_path):
+    inputs = {"points_linear": 13, "lineup_status": "confirmed", "baseline": 12,
+        "final_projected_minutes": 18, "beta": 0.4, "better_estimate": 13, "alphabet": 26,
+        "poverty": 0.2}
+    body = b'{ "response": [{"historical_game_id":"prior-game","box_score_values":{"points":12},"final_result_value":"win"}], "possession":1 }\n'
+    saved = capture(tmp_path, request(parameters={"player_id": "player-1", "context": inputs}), raw_body=body)
+    row = snapshot(tmp_path, projection_inputs=inputs)
+    root = freeze(tmp_path, rows=[row])
+    assert verify(tmp_path, root).rows[0]["projection_inputs"] == inputs
+    assert source_manifest(tmp_path / "journal", ["stats-1"])["stats-1"]["parameters"]["context"] == inputs
+    assert saved.raw_body == body == verify_capture(tmp_path / "journal", "stats-1").raw_body
+    assert saved.manifest["raw_body_sha256"] == digest_body(body)
+
+
+@pytest.mark.parametrize("field,form", [("POINTSLINEPROBABILITY", "feature_name"),
+    ("POVERCONTEXT", "pair"), ("PUNDERCONTEXT", "encoded")])
+@pytest.mark.parametrize("boundary", ["constructor", "disk"])
+def test_bounded_short_probability_compounds_are_prohibited_at_both_boundaries(tmp_path, field, form, boundary):
+    inputs = semantic_alias_inputs(field, 0.6, form)
+    if boundary == "constructor":
+        capture(tmp_path)
+        with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+            snapshot(tmp_path, projection_inputs=inputs)
+        assert not (tmp_path / "articles").exists()
+    else:
+        root = freeze(tmp_path)
+        path = root / "model_snapshots.jsonl"
+        row = json.loads(path.read_bytes())
+        row["projection_inputs"] = inputs
+        resign_model_row(row)
+        path.write_bytes(canonical_bytes(row) + b"\n")
+        resign_freeze_artifact_hashes(root)
+        with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+            verify(tmp_path, root)
+
+
+@pytest.mark.parametrize("field,value,error,form", [
+    ("MODELLINESPECIFICPROBABILITY", 0.6, "prohibited", "mapping"),
+    ("MODELFINALPOINTS", 12, "prohibited", "pair"),
+    ("MODELISBETTABLE", True, "economic", "encoded"),
+])
+@pytest.mark.parametrize("boundary", ["constructor", "disk"])
+def test_compact_model_wrappers_cannot_hide_market_outcome_or_economic_fields(tmp_path, field, value, error, form, boundary):
+    inputs = semantic_alias_inputs(field, value, form)
+    if boundary == "constructor":
+        capture(tmp_path)
+        with pytest.raises(ProspectiveEvidenceError, match=error):
+            snapshot(tmp_path, projection_inputs=inputs)
+        assert not (tmp_path / "articles").exists()
+    else:
+        root = freeze(tmp_path)
+        path = root / "model_snapshots.jsonl"
+        row = json.loads(path.read_bytes())
+        row["projection_inputs"] = inputs
+        resign_model_row(row)
+        path.write_bytes(canonical_bytes(row) + b"\n")
+        resign_freeze_artifact_hashes(root)
+        with pytest.raises(ProspectiveEvidenceError, match=error):
+            verify(tmp_path, root)
+
+
+def test_model_wrapper_policy_preserves_identity_projections_and_pmf_parameters(tmp_path):
+    saved = capture(tmp_path)
+    parameters = {"pmf": {"support": [0, 1, 2], "probabilities": [0.2, 0.3, 0.5]}}
+    inputs = {"model_projected_points": 13, "model_projected_minutes": 18,
+        "MODELISBETTABLE": False, "final_projected_minutes": 18}
+    ref = {"request_id": "stats-1", "raw_body_sha256": saved.manifest["raw_body_sha256"]}
+    row = snapshot(tmp_path, model_id="synthetic-wrapper-control", model_version="fixture-v2",
+        projected_points=13, projected_minutes=18, projection_inputs=inputs,
+        distribution_model_id="synthetic-pmf", distribution_evidence_ref=ref,
+        distribution_parameters=parameters)
+    root = freeze(tmp_path, rows=[row])
+    frozen = verify(tmp_path, root).rows[0]
+    assert frozen["model_id"] == "synthetic-wrapper-control"
+    assert frozen["model_version"] == "fixture-v2"
+    assert frozen["model_snapshot_id"] == row["model_snapshot_id"]
+    assert frozen["projected_points"] == 13 and frozen["projected_minutes"] == 18
+    assert frozen["projection_inputs"] == inputs
+    assert frozen["distribution_parameters"]["pmf"]["support"] == (0, 1, 2)
+    assert frozen["distribution_parameters"]["pmf"]["probabilities"] == (0.2, 0.3, 0.5)
+    assert frozen["measurement_metadata"]["eligible_for_betting"] is False

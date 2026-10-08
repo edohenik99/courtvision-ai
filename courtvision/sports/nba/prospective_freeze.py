@@ -34,10 +34,24 @@ _PROHIBITED = frozenset("""sportsbook bookmaker vendor line observed_line market
 _PROBABILITY_MARKET_FIELDS = frozenset({"model_over_probability", "model_under_probability",
     "over_probability", "under_probability", "probability_over", "probability_under",
     "line_specific_probability", "implied_probability", "probability_based_edge"})
-_MARKET_FIELDS = _PROHIBITED | _PROBABILITY_MARKET_FIELDS | {"points_line", "p_over", "p_under"}
+_POINTS_TOTAL_FIELDS = frozenset({"points_total", "total_points"})
+_POINTS_TOTAL_PREFIXES = tuple(name.replace("_", "") for name in _POINTS_TOTAL_FIELDS)
+_SCIENTIFIC_TOTAL_QUALIFIERS = ("historical", "projected")
+_MARKET_FIELDS = (_PROHIBITED | _PROBABILITY_MARKET_FIELDS | _POINTS_TOTAL_FIELDS
+    | {"points_line", "p_over", "p_under", "price", "consensus_price", "book_price"})
+_MARKET_PRICE_PREFIXES = ("bookprice", "consensusprice", "pricevalue", "pricevalues",
+    "priceamount", "pricequote", "pricequotes", "pricetimestamp")
+_FIELD_DESCRIPTORS = ("value", "values", "context", "metadata", "data", "parameter",
+    "parameters", "detail", "details", "observation", "observations", "timestamp", "utc",
+    "quote", "quotes", "count", "probability", "probabilities", "estimate", "estimates",
+    "odds", "price", "status", "threshold", "line")
+# `points_linear` is scientific data; the short `line` root needs a boundary.
+_MARKET_COMPOUND_PREFIXES = (tuple(name.replace("_", "") for name in _MARKET_FIELDS
+    if "_" in name and name not in {"points_line", "p_over", "p_under"})
+    + tuple("pointsline" + descriptor for descriptor in _FIELD_DESCRIPTORS))
 _MARKET_PROBABILITY_PREFIXES = (tuple(name.replace("_", "") for name in _PROBABILITY_MARKET_FIELDS)
     + tuple(stem + descriptor for stem in ("pover", "punder")
-            for descriptor in ("value", "values", "probability", "estimate", "estimates")))
+            for descriptor in _FIELD_DESCRIPTORS))
 _STAT_OUTCOME_FIELDS = frozenset(f"{qualifier}_{stat}" for qualifier in ("actual", "final")
     for stat in ("points", "pts", "minutes", "stats", "score", "scores", "rebounds", "assists",
         "steals", "blocks", "turnovers", "fouls", "reb", "ast", "stl", "blk", "tov",
@@ -47,6 +61,8 @@ _MODEL_OUTCOME_FIELDS = (TARGET_OUTCOME_FIELDS | _STAT_OUTCOME_FIELDS
     | {"final_result", "final_results", "final_grade", "final_grading"})
 _PROHIBITED_COMPACT = frozenset(name.replace("_", "") for name in _MARKET_FIELDS)
 _OUTCOME_COMPACT = frozenset(name.replace("_", "") for name in _MODEL_OUTCOME_FIELDS)
+_OUTCOME_COMPOUND_PREFIXES = tuple(name.replace("_", "") for name in _MODEL_OUTCOME_FIELDS
+    if "_" in name)
 _STAT_OUTCOME_PREFIXES = tuple(name.replace("_", "") for name in _STAT_OUTCOME_FIELDS
     | {"_".join(name.split("_")[1:] + name.split("_")[:1]) for name in _STAT_OUTCOME_FIELDS})
 _OUTCOME_PREFIXES = ("actual", "targetgameactual", "targetgamefinal", "settlement",
@@ -56,7 +72,7 @@ _OUTCOME_WORDS = frozenset({"actual", "settlement", "grading", "result", "result
 _OUTCOME_PATTERNS = tuple(tuple(name.split("_")) for name in _MODEL_OUTCOME_FIELDS)
 _MARKET_PATTERNS = tuple(tuple(name.split("_")) for name in _MARKET_FIELDS
     if name not in {"points", "pts", "minutes", "kelly"})
-_SUBJECT_PREFIXES = ("targetgame", "player", "provider", "opponent", "event", "game", "team", "home", "away")
+_SUBJECT_PREFIXES = ("targetgame", "player", "provider", "opponent", "event", "game", "team", "home", "away", "model")
 _MARKET_SUBJECT_PREFIXES = _SUBJECT_PREFIXES + ("consensus", "observed", "selected")
 _ECONOMIC_ROUTES = ("bet", "betting", "wager", "wagering", "kelly", "official_pick",
     "real_money", "real_kelly")
@@ -64,7 +80,7 @@ _ECONOMIC_ROUTE_COMPACT = frozenset(route.replace("_", "") for route in _ECONOMI
 _ECONOMIC_GATES = ("eligible", "eligibility", "enabled", "allowed", "permitted", "authorized")
 _ECONOMIC_FLAGS = (frozenset(route + gate for route in _ECONOMIC_ROUTE_COMPACT for gate in _ECONOMIC_GATES)
     | frozenset(gate + route for route in _ECONOMIC_ROUTE_COMPACT
-                for gate in (*_ECONOMIC_GATES, "eligiblefor")))
+                for gate in (*_ECONOMIC_GATES, "eligiblefor")) | {"bettable"})
 _BOOLEAN_WRAPPERS = ("is", "can", "may", "has", "should", "will", "would")
 _PERMISSION_ACTIONS = ("use", "place", "enable", "allow", "authorize", "permit")
 # Short permission roots are token/exact-grammar matches: `beta` is scientific data.
@@ -73,7 +89,7 @@ _BET_DESCRIPTORS = ("amount", "budget", "stake", "size", "sizing", "permission",
     "enabled", "eligibility", "eligible", "allowed", "authorized", "permitted", "route")
 _SHORT_BET_COMPOUNDS = frozenset(action + "bet" for action in _PERMISSION_ACTIONS)
 _SHORT_BET_PREFIXES = tuple(prefix + "bet" + descriptor
-    for prefix in ("", *_PERMISSION_ACTIONS) for descriptor in _BET_DESCRIPTORS)
+    for prefix in ("", *_PERMISSION_ACTIONS) for descriptor in _BET_DESCRIPTORS) + ("bettable",)
 _STATE_FIELDS = frozenset({"canonical_event_id", "provider_event_ids", "player_id",
     "canonical_player_name", "team", "opponent", "commence_time_utc", "model_id", "model_version",
     "minutes_evidence_ref", "projected_minutes", "minutes_uncertainty", "projection_evidence_ref",
@@ -139,10 +155,25 @@ def _reject_model_field(key: str, item: object) -> None:
             if prefix is None:
                 return value
             value = value[len(prefix):]
-    outcome_name = without_subject(compact, _MARKET_SUBJECT_PREFIXES)
-    market_name = without_subject(compact, _MARKET_SUBJECT_PREFIXES)
-    if (outcome_name in _OUTCOME_COMPACT or outcome_name.startswith(_STAT_OUTCOME_PREFIXES)
-            or outcome_name.startswith(_OUTCOME_PREFIXES)
+    def subject_forms(value: str, prefixes: tuple[str, ...]) -> tuple[str, ...]:
+        forms = [value]
+        while True:
+            prefix = next((p for p in prefixes if value.startswith(p)), None)
+            if prefix is None:
+                return tuple(forms)
+            value = value[len(prefix):]
+            forms.append(value)
+    market_forms = subject_forms(compact, _MARKET_SUBJECT_PREFIXES)
+    market_name = market_forms[-1]
+    outcome_name = market_name
+    total_qualifier = next((prefix for prefix in _SCIENTIFIC_TOTAL_QUALIFIERS
+                            if market_name.startswith(prefix)), None)
+    scientific_total = (total_qualifier is not None
+        and without_subject(market_name[len(total_qualifier):], _MARKET_SUBJECT_PREFIXES)
+            .startswith(_POINTS_TOTAL_PREFIXES))
+    if (any(form in _OUTCOME_COMPACT or form.startswith(
+            _STAT_OUTCOME_PREFIXES + _OUTCOME_PREFIXES + _OUTCOME_COMPOUND_PREFIXES)
+            for form in market_forms)
             or _OUTCOME_WORDS.intersection(tokens)
             or any(contains_pattern(pattern) for pattern in _OUTCOME_PATTERNS)
             or outcome_name == "artifactdomain" and item != NBA_PROSPECTIVE_EVIDENCE):
@@ -164,9 +195,13 @@ def _reject_model_field(key: str, item: object) -> None:
             or economic_name in _SHORT_BET_COMPOUNDS or economic_name.startswith(_SHORT_BET_PREFIXES)
             or any(contains_pattern(tuple(route.split("_"))) for route in _ECONOMIC_ROUTES)):
         raise ProspectiveEvidenceError("unrecognized economic route field is prohibited")
-    if (market_name in _PROHIBITED_COMPACT or market_name.startswith(_MARKET_PREFIXES)
+    if (any(form in _PROHIBITED_COMPACT or form.startswith(_MARKET_COMPOUND_PREFIXES)
+            for form in market_forms)
+            or market_name.startswith(_MARKET_PREFIXES + _MARKET_PRICE_PREFIXES)
             or market_name.startswith(_MARKET_PROBABILITY_PREFIXES)
-            or any(contains_pattern(pattern) for pattern in _MARKET_PATTERNS)):
+            or not scientific_total and market_name.startswith(_POINTS_TOTAL_PREFIXES)
+            or any(contains_pattern(pattern) for pattern in _MARKET_PATTERNS
+                   if not scientific_total or "_".join(pattern) not in _POINTS_TOTAL_FIELDS)):
         raise ProspectiveEvidenceError("observed market/economic field is prohibited in model state")
 
 
