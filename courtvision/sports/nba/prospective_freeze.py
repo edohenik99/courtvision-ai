@@ -15,7 +15,8 @@ from pathlib import Path
 
 from courtvision.sports.nba.artifact_domains import NBA_PROSPECTIVE_EVIDENCE, TARGET_OUTCOME_FIELDS
 from courtvision.sports.nba.prospective_evidence import (
-    ProspectiveEvidenceError, _safe_json, _semantic_key, canonical_bytes, digest, immutable, plain_path,
+    ProspectiveEvidenceError, _PARAMETER_DESCRIPTORS, _safe_json, _semantic_key, canonical_bytes,
+    digest, immutable, plain_path,
     read_document, require_date, require_hash, require_id, source_manifest, utc_clock,
     verify_capture, write_once,
 )
@@ -41,17 +42,33 @@ _MARKET_FIELDS = (_PROHIBITED | _PROBABILITY_MARKET_FIELDS | _POINTS_TOTAL_FIELD
     | {"points_line", "p_over", "p_under", "price", "consensus_price", "book_price"})
 _MARKET_PRICE_PREFIXES = ("bookprice", "consensusprice", "pricevalue", "pricevalues",
     "priceamount", "pricequote", "pricequotes", "pricetimestamp")
-_FIELD_DESCRIPTORS = ("value", "values", "context", "metadata", "data", "parameter",
-    "parameters", "detail", "details", "observation", "observations", "timestamp", "utc",
+_FIELD_DESCRIPTORS = ("value", "values", "context", "metadata", "data", "detail", "details",
+    "observation", "observations", "timestamp", "utc",
     "quote", "quotes", "count", "probability", "probabilities", "estimate", "estimates",
-    "odds", "price", "status", "threshold", "line")
+    "odds", "price", "status", "threshold", "line", "amount", "amounts", "budget", "size",
+    "sizing", "name", "names", "id", "ids", "source", "sources", "provenance") + _PARAMETER_DESCRIPTORS
+_SHORT_FIELD_DESCRIPTORS = frozenset({"param", "params", "arg", "args"})
+_FIELD_PREFIX_DESCRIPTORS = tuple(descriptor for descriptor in _FIELD_DESCRIPTORS
+    if descriptor not in _SHORT_FIELD_DESCRIPTORS)
 # `points_linear` is scientific data; the short `line` root needs a boundary.
 _MARKET_COMPOUND_PREFIXES = (tuple(name.replace("_", "") for name in _MARKET_FIELDS
     if "_" in name and name not in {"points_line", "p_over", "p_under"})
-    + tuple("pointsline" + descriptor for descriptor in _FIELD_DESCRIPTORS))
+    + tuple("pointsline" + descriptor for descriptor in _FIELD_PREFIX_DESCRIPTORS))
+_MARKET_SINGLE_PREFIXES = tuple(root + descriptor for root in _MARKET_FIELDS
+    if "_" not in root and root not in {"points", "pts", "minutes", "kelly"}
+    for descriptor in _FIELD_PREFIX_DESCRIPTORS)
+_MARKET_SHORT_DESCRIPTOR_STEMS = tuple(root + descriptor
+    for root in (*tuple(root for root in _MARKET_FIELDS
+        if "_" not in root and root not in {"points", "pts", "minutes", "kelly"}),
+        "pointsline", "pover", "punder")
+    for descriptor in _SHORT_FIELD_DESCRIPTORS)
+_STAT_VALUE_PREFIXES = tuple(root + descriptor for root in _MARKET_FIELDS
+    if root in {"points", "pts", "minutes"}
+    for descriptor in ("value", "values", "data", "context", "metadata", "observation",
+                       "observations", "count", "amount", "amounts"))
 _MARKET_PROBABILITY_PREFIXES = (tuple(name.replace("_", "") for name in _PROBABILITY_MARKET_FIELDS)
     + tuple(stem + descriptor for stem in ("pover", "punder")
-            for descriptor in _FIELD_DESCRIPTORS))
+            for descriptor in _FIELD_PREFIX_DESCRIPTORS))
 _STAT_OUTCOME_FIELDS = frozenset(f"{qualifier}_{stat}" for qualifier in ("actual", "final")
     for stat in ("points", "pts", "minutes", "stats", "score", "scores", "rebounds", "assists",
         "steals", "blocks", "turnovers", "fouls", "reb", "ast", "stl", "blk", "tov",
@@ -72,7 +89,8 @@ _OUTCOME_WORDS = frozenset({"actual", "settlement", "grading", "result", "result
 _OUTCOME_PATTERNS = tuple(tuple(name.split("_")) for name in _MODEL_OUTCOME_FIELDS)
 _MARKET_PATTERNS = tuple(tuple(name.split("_")) for name in _MARKET_FIELDS
     if name not in {"points", "pts", "minutes", "kelly"})
-_SUBJECT_PREFIXES = ("targetgame", "player", "provider", "opponent", "event", "game", "team", "home", "away", "model")
+_SUBJECT_PREFIXES = ("targetgame", "player", "provider", "opponent", "event", "game", "team", "home", "away", "model",
+    "sources", "source", "provenance")
 _MARKET_SUBJECT_PREFIXES = _SUBJECT_PREFIXES + ("consensus", "observed", "selected")
 _ECONOMIC_ROUTES = ("bet", "betting", "wager", "wagering", "kelly", "official_pick",
     "real_money", "real_kelly")
@@ -195,7 +213,12 @@ def _reject_model_field(key: str, item: object) -> None:
             or economic_name in _SHORT_BET_COMPOUNDS or economic_name.startswith(_SHORT_BET_PREFIXES)
             or any(contains_pattern(tuple(route.split("_"))) for route in _ECONOMIC_ROUTES)):
         raise ProspectiveEvidenceError("unrecognized economic route field is prohibited")
-    if (any(form in _PROHIBITED_COMPACT or form.startswith(_MARKET_COMPOUND_PREFIXES)
+    if (any(form in _PROHIBITED_COMPACT or form.startswith(
+            _MARKET_COMPOUND_PREFIXES + _MARKET_SINGLE_PREFIXES + _STAT_VALUE_PREFIXES)
+            # `linearg` is a field; `linear_gradient` is not an argument label.
+            or any(form == stem or form.startswith(stem) and
+                   form[len(stem):].startswith(_FIELD_DESCRIPTORS)
+                   for stem in _MARKET_SHORT_DESCRIPTOR_STEMS)
             for form in market_forms)
             or market_name.startswith(_MARKET_PREFIXES + _MARKET_PRICE_PREFIXES)
             or market_name.startswith(_MARKET_PROBABILITY_PREFIXES)

@@ -34,8 +34,10 @@ _SECRET_NAMES = frozenset({"apikey", "key", "authorization", "proxyauthorization
     "subscriptionkey", "ocpapimsubscriptionkey", "session", "xsession", "requestsession"})
 _SECRET_SUFFIXES = ("apikey", "authorization", "password", "secret", "credential",
     "credentials", "token", "cookie", "subscriptionkey")
-_SECRET_DESCRIPTORS = ("query_parameters", "query_parameter", "parameters", "parameter",
-    "values", "value", "headers", "header", "query")
+_PARAMETER_DESCRIPTORS = ("parameters", "parameter", "params", "param", "arguments",
+    "argument", "args", "arg")
+_SECRET_DESCRIPTORS = (tuple("query_" + item for item in _PARAMETER_DESCRIPTORS)
+    + _PARAMETER_DESCRIPTORS + ("values", "value", "headers", "header", "query"))
 _FIELD_LABELS = frozenset({"name", "key", "header", "headername", "field", "fieldname",
     "feature", "featurename"})
 _FIELD_VALUES = frozenset({"value", "headervalue", "fieldvalue", "featurevalue"})
@@ -96,17 +98,27 @@ def require_date(value: object) -> str:
     return value
 
 
+def _ordinary_quoted_text(text: str) -> bool:
+    """Only JSON whitespace may precede the ordinary quoted-text fallback."""
+    return text.lstrip(" \t\r\n").startswith('"')
+
+
 def _decoded_field_label(key: str) -> str:
     """Inspect quoted JSON labels in their field role without rewriting callers."""
     while _json_inspection_text(key).startswith('"'):
         try:
-            encoded = key.encode("utf-8")
+            encoded = _json_inspection_text(key).encode("utf-8")
         except UnicodeError:
             raise ProspectiveEvidenceError("serialized field label cannot be encoded") from None
         try:
             decoded = _decode_json(encoded)
         except ProspectiveEvidenceError:
+            if not _ordinary_quoted_text(key):
+                raise
             return key  # Ordinary quoted nicknames retain their existing meaning.
+        if not _ordinary_quoted_text(key):
+            # A nonstandard declared prefix must be valid before request stripping.
+            _decode_json(key.encode("utf-8"))
         if not isinstance(decoded, str):
             return key
         key = decoded
@@ -235,7 +247,7 @@ def _safe_json(value: object, *, strip_secrets: bool = False, screen_headers: bo
             try:
                 decoded = _decode_json(encoded)
             except ProspectiveEvidenceError:
-                if inspected.startswith('"'):
+                if inspected.startswith('"') and _ordinary_quoted_text(text):
                     # An ordinary quoted nickname is not declared container JSON.
                     _safe_text(text)
                     return
@@ -249,9 +261,9 @@ def _safe_json(value: object, *, strip_secrets: bool = False, screen_headers: bo
         label = _decoded_field_label(name)
         if _secret_key(label):
             raise ProspectiveEvidenceError("credential field is prohibited")
-        check_text(name)
         if field_policy is not None:
             field_policy(label, item)
+        check_text(name)
 
     def descend(item: object) -> object:
         return _safe_json(item, strip_secrets=strip_secrets, screen_headers=screen_headers,
@@ -330,7 +342,7 @@ def _check_body(raw: bytes) -> None:
         try:
             decoded = _decode_json(raw)
         except ProspectiveEvidenceError:
-            if inspected.startswith('"'):
+            if inspected.startswith('"') and _ordinary_quoted_text(text):
                 _safe_text(text)
                 return
             raise
