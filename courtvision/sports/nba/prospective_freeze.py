@@ -36,9 +36,12 @@ _PROBABILITY_MARKET_FIELDS = frozenset({"model_over_probability", "model_under_p
     "over_probability", "under_probability", "probability_over", "probability_under",
     "line_specific_probability", "implied_probability", "probability_based_edge"})
 _POINTS_TOTAL_FIELDS = frozenset({"points_total", "total_points"})
+_TOTAL_MARKET_FIELDS = (frozenset(f"{subject}_total" for subject in
+    ("consensus", "book", "vegas", "sportsbook", "bookmaker", "market", "opening", "closing"))
+    | {"over_under"})
 _POINTS_TOTAL_PREFIXES = tuple(name.replace("_", "") for name in _POINTS_TOTAL_FIELDS)
 _SCIENTIFIC_TOTAL_QUALIFIERS = ("historical", "projected")
-_MARKET_FIELDS = (_PROHIBITED | _PROBABILITY_MARKET_FIELDS | _POINTS_TOTAL_FIELDS
+_MARKET_FIELDS = (_PROHIBITED | _PROBABILITY_MARKET_FIELDS | _POINTS_TOTAL_FIELDS | _TOTAL_MARKET_FIELDS
     | {"points_line", "p_over", "p_under", "price", "consensus_price", "book_price"})
 _MARKET_PRICE_PREFIXES = ("bookprice", "consensusprice", "pricevalue", "pricevalues",
     "priceamount", "pricequote", "pricequotes", "pricetimestamp")
@@ -48,6 +51,7 @@ _FIELD_DESCRIPTORS = ("value", "values", "context", "metadata", "data", "detail"
     "odds", "price", "status", "threshold", "line", "amount", "amounts", "budget", "size",
     "sizing", "name", "names", "id", "ids", "source", "sources", "provenance") + _PARAMETER_DESCRIPTORS
 _SHORT_FIELD_DESCRIPTORS = frozenset({"param", "params", "arg", "args"})
+_FIELD_DESCRIPTOR_ORDER = tuple(sorted(_FIELD_DESCRIPTORS, key=len, reverse=True))
 _FIELD_PREFIX_DESCRIPTORS = tuple(descriptor for descriptor in _FIELD_DESCRIPTORS
     if descriptor not in _SHORT_FIELD_DESCRIPTORS)
 # `points_linear` is scientific data; the short `line` root needs a boundary.
@@ -73,7 +77,11 @@ _STAT_OUTCOME_FIELDS = frozenset(f"{qualifier}_{stat}" for qualifier in ("actual
     for stat in ("points", "pts", "minutes", "stats", "score", "scores", "rebounds", "assists",
         "steals", "blocks", "turnovers", "fouls", "reb", "ast", "stl", "blk", "tov",
         "fgm", "fga", "fg3m", "fg3a", "ftm", "fta"))
-_MODEL_OUTCOME_FIELDS = (TARGET_OUTCOME_FIELDS | _STAT_OUTCOME_FIELDS
+_SCORED_OUTCOME_FIELDS = frozenset(name for stat in ("points", "pts")
+    for name in (f"{stat}_scored", f"scored_{stat}"))
+_SCORED_OUTCOME_PREFIXES = tuple(name.replace("_", "") for name in _SCORED_OUTCOME_FIELDS)
+_SCIENTIFIC_SCORED_QUALIFIERS = ("historical", "season", "recent", "lastgame", "projected", "predicted")
+_MODEL_OUTCOME_FIELDS = (TARGET_OUTCOME_FIELDS | _STAT_OUTCOME_FIELDS | _SCORED_OUTCOME_FIELDS
     | {"_".join(name.split("_")[1:] + name.split("_")[:1]) for name in _STAT_OUTCOME_FIELDS}
     | {"final_result", "final_results", "final_grade", "final_grading"})
 _PROHIBITED_COMPACT = frozenset(name.replace("_", "") for name in _MARKET_FIELDS)
@@ -189,11 +197,41 @@ def _reject_model_field(key: str, item: object) -> None:
     scientific_total = (total_qualifier is not None
         and without_subject(market_name[len(total_qualifier):], _MARKET_SUBJECT_PREFIXES)
             .startswith(_POINTS_TOTAL_PREFIXES))
-    if (any(form in _OUTCOME_COMPACT or form.startswith(
+    scored_qualifier = next((prefix for prefix in _SCIENTIFIC_SCORED_QUALIFIERS
+                             if market_name.startswith(prefix)), None)
+    scored_forms = (subject_forms(market_name[len(scored_qualifier):], _MARKET_SUBJECT_PREFIXES)
+                    if scored_qualifier is not None else ())
+    scientific_scored = (any(form.startswith(_SCORED_OUTCOME_PREFIXES) for form in scored_forms)
+        and not any(form.startswith("targetgame") for form in market_forms + scored_forms)
+        and "final" not in tokens
+        and not any(form.startswith(tuple(stem + qualifier for stem in _SCORED_OUTCOME_PREFIXES
+            for qualifier in ("actual", "final", "settlement", "targetgame"))) for form in scored_forms))
+    if scientific_scored:
+        for form in scored_forms:
+            stem = next((stem for stem in _SCORED_OUTCOME_PREFIXES if form.startswith(stem)), None)
+            if stem is None:
+                continue
+            remainder = form[len(stem):]
+            while remainder:
+                # Keep each descriptor stage in its field role; a qualified
+                # score cannot hide a declared market or target-outcome tail.
+                _reject_model_field(remainder, item)
+                descriptor = next((descriptor for descriptor in _FIELD_DESCRIPTOR_ORDER
+                                   if remainder.startswith(descriptor)), None)
+                if descriptor is None:
+                    break
+                tail = remainder[len(descriptor):]
+                if descriptor in _SHORT_FIELD_DESCRIPTORS and tail and not tail.startswith(_FIELD_DESCRIPTORS):
+                    break
+                remainder = tail
+    if (any((form in _OUTCOME_COMPACT or form.startswith(
             _STAT_OUTCOME_PREFIXES + _OUTCOME_PREFIXES + _OUTCOME_COMPOUND_PREFIXES)
-            for form in market_forms)
+            ) and not (scientific_scored and form in scored_forms
+                       and form.startswith(_SCORED_OUTCOME_PREFIXES))
+            for form in market_forms + scored_forms)
             or _OUTCOME_WORDS.intersection(tokens)
-            or any(contains_pattern(pattern) for pattern in _OUTCOME_PATTERNS)
+            or any(contains_pattern(pattern) for pattern in _OUTCOME_PATTERNS
+                   if not scientific_scored or "_".join(pattern) not in _SCORED_OUTCOME_FIELDS)
             or outcome_name == "artifactdomain" and item != NBA_PROSPECTIVE_EVIDENCE):
         raise ProspectiveEvidenceError("target-game outcome is prohibited in model state")
     economic_name, wrapped = market_name, False

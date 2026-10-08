@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 import hashlib
 import json
-import os
 from pathlib import Path
 import re
 import stat
@@ -19,6 +18,7 @@ from types import MappingProxyType
 from typing import Callable
 
 from courtvision.sports.nba.artifact_domains import NBA_PROSPECTIVE_EVIDENCE, require_artifact_path
+from courtvision.sports.nba.prospective_io import ArtifactConfinementError, create_once_bytes
 
 EVIDENCE_SCHEMA = "nba-prospective-provider-evidence-v1"
 CAPTURE_MODE = "SYNTHETIC_OFFLINE"
@@ -31,9 +31,10 @@ _SECRET_NAMES = frozenset({"apikey", "key", "authorization", "proxyauthorization
     "cookies", "setcookie", "token", "accesstoken", "refreshtoken", "password", "secret",
     "clientsecret", "credentials", "xapikey", "xrapidapikey", "theoddsapikey", "auth",
     "authentication", "signature", "sessionid", "xapisportskey", "apitoken",
-    "subscriptionkey", "ocpapimsubscriptionkey", "session", "xsession", "requestsession"})
+    "subscriptionkey", "ocpapimsubscriptionkey", "session", "xsession", "requestsession",
+    "privatekey", "signingkey"})
 _SECRET_SUFFIXES = ("apikey", "authorization", "password", "secret", "credential",
-    "credentials", "token", "cookie", "subscriptionkey")
+    "credentials", "token", "cookie", "subscriptionkey", "privatekey", "signingkey")
 _PARAMETER_DESCRIPTORS = ("parameters", "parameter", "params", "param", "arguments",
     "argument", "args", "arg")
 _SECRET_DESCRIPTORS = (tuple("query_" + item for item in _PARAMETER_DESCRIPTORS)
@@ -379,13 +380,11 @@ def plain_path(path: str | Path) -> Path:
 
 
 def write_once(path: Path, raw: bytes) -> None:
-    plain_path(path)
-    with path.open("xb") as stream:
-        stream.write(raw)
-        stream.flush()
-        os.fsync(stream.fileno())
-    if plain_path(path).read_bytes() != raw:
-        raise ProspectiveEvidenceError("artifact write/read-back mismatch")
+    path = plain_path(path)
+    try:
+        create_once_bytes(path, raw)
+    except (ArtifactConfinementError, UnicodeError):
+        raise ProspectiveEvidenceError("artifact write confinement failed") from None
 
 
 def read_document(path: Path) -> dict:

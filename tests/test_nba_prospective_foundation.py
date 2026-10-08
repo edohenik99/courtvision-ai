@@ -2567,3 +2567,383 @@ def test_short_descriptor_policy_preserves_linear_gradient_and_graph_scientific_
     assert source_manifest(tmp_path / "journal", ["stats-1"])["stats-1"]["parameters"] == parameters
     assert saved.raw_body == body == verify_capture(tmp_path / "journal", "stats-1").raw_body
     assert saved.manifest["raw_body_sha256"] == digest_body(body)
+
+
+PRIVATE_SIGNING_KEY_ALIASES = [("private_key", "mapping"), ("privateKey", "pair"),
+    ("PRIVATEKEY", "feature_name"), ("signing_key", "mapping"),
+    ("signingKey", "key"), ("SIGNINGKEY", "encoded")]
+
+
+@pytest.mark.parametrize("field,form", PRIVATE_SIGNING_KEY_ALIASES)
+@pytest.mark.parametrize("boundary", ["constructor", "disk"])
+def test_private_and_signing_keys_cannot_enter_model_state_in_any_declared_form(tmp_path, field, form, boundary):
+    if boundary == "constructor":
+        capture(tmp_path)
+        original = snapshot(tmp_path)
+        for secret in ("SYNTHETIC-CREDENTIAL-A", "SYNTHETIC-CREDENTIAL-B"):
+            with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+                snapshot(tmp_path, projection_inputs=semantic_alias_inputs(field, secret, form))
+            assert secret not in str(caught.value)
+        assert snapshot(tmp_path) == original
+        assert not (tmp_path / "articles").exists()
+    else:
+        root = freeze(tmp_path)
+        path = root / "model_snapshots.jsonl"
+        row = json.loads(path.read_bytes())
+        row["projection_inputs"] = semantic_alias_inputs(field, "SYNTHETIC-CREDENTIAL-A", form)
+        resign_model_row(row)
+        path.write_bytes(canonical_bytes(row) + b"\n")
+        resign_freeze_artifact_hashes(root)
+        with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+            verify(tmp_path, root)
+        assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+
+
+@pytest.mark.parametrize("field", ["private_key", "privateKey", "signing_key"])
+def test_private_key_request_rotation_is_stripped_before_all_persisted_identities(tmp_path, field):
+    safe = {"player_id": "player-1", "season": "2025", "token_count": 3,
+        "request_latency_ms": 42, "headers": {"accept": "application/json"}}
+    rows, sources, artifacts = [], [], []
+    for index, secret in enumerate(("SYNTHETIC-CREDENTIAL-A", "SYNTHETIC-CREDENTIAL-B")):
+        parameters = {**safe, field: secret, "headers": {**safe["headers"], field: secret}}
+        req = request(parameters=parameters)
+        assert req == request(parameters=safe)
+        assert req["parameters"] == safe
+        directory = tmp_path / str(index)
+        captured = capture(directory, req)
+        assert captured.manifest["request_identity_sha256"] == digest(req)
+        rows.append(snapshot(directory))
+        sources.append(source_manifest(directory / "journal", ["stats-1"]))
+        root = freeze(directory, rows=[rows[-1]])
+        assert verify(directory, root).rows[0]["model_snapshot_id"] == rows[-1]["model_snapshot_id"]
+        artifacts.append({path.name: path.read_bytes() for path in root.iterdir()})
+        persisted = b"".join(path.read_bytes() for path in directory.rglob("*") if path.is_file())
+        assert secret.encode() not in persisted
+    assert rows[0] == rows[1]
+    assert sources[0] == sources[1]
+    assert artifacts[0] == artifacts[1]
+
+
+@pytest.mark.parametrize("field,form", PRIVATE_SIGNING_KEY_ALIASES)
+def test_raw_private_and_signing_key_forms_fail_capture_and_resigned_readback(tmp_path, field, form):
+    body = canonical_bytes({"response": [{"context":
+        semantic_alias_inputs(field, "SYNTHETIC-CREDENTIAL-A", form)}]})
+    with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+        capture(tmp_path, raw_body=body)
+    assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+    assert not (tmp_path / "journal").exists()
+    capture(tmp_path)
+    directory = tmp_path / "journal" / EVIDENCE_SCHEMA / "stats-1"
+    (directory / "body.bin").write_bytes(body)
+    def resign_capture(manifest):
+        manifest["raw_body_sha256"] = digest_body(body)
+        manifest["raw_body_byte_length"] = len(body)
+        manifest["capture_sha256"] = digest({key: value for key, value in manifest.items() if key != "capture_sha256"})
+    mutate_json(directory / "manifest.json", resign_capture)
+    for read in (lambda: verify_capture(tmp_path / "journal", "stats-1"),
+                 lambda: source_manifest(tmp_path / "journal", ["stats-1"])):
+        with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+            read()
+        assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+
+
+@pytest.mark.parametrize("field,form", [("points_scored", "mapping"), ("scored_points", "pair"),
+    ("player_points_scored", "feature_name"), ("PLAYERPOINTSSCORED", "encoded"),
+    ("pointsScored", "nested_pair"), ("scoredPoints", "mapping")])
+@pytest.mark.parametrize("boundary", ["constructor", "disk"])
+def test_scored_points_aliases_cannot_be_frozen_as_prospective_model_features(tmp_path, field, form, boundary):
+    inputs = semantic_alias_inputs(field, 12, form)
+    if boundary == "constructor":
+        capture(tmp_path)
+        with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+            snapshot(tmp_path, projection_inputs=inputs)
+        assert not (tmp_path / "articles").exists()
+    else:
+        root = freeze(tmp_path)
+        path = root / "model_snapshots.jsonl"
+        row = json.loads(path.read_bytes())
+        row["projection_inputs"] = inputs
+        resign_model_row(row)
+        path.write_bytes(canonical_bytes(row) + b"\n")
+        resign_freeze_artifact_hashes(root)
+        with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+            verify(tmp_path, root)
+
+
+@pytest.mark.parametrize("field,form", [("over_under", "mapping"), ("overunder", "pair"),
+    ("OVERUNDER", "feature_name"), ("consensus_total", "encoded"),
+    ("consensusTotal", "nested_pair"), ("book_total", "mapping"),
+    ("vegas_total", "feature_name"), ("VEGASTOTAL", "encoded")])
+@pytest.mark.parametrize("boundary", ["constructor", "disk"])
+def test_canonical_over_under_and_market_total_aliases_remain_market_only(tmp_path, field, form, boundary):
+    inputs = semantic_alias_inputs(field, 24.5, form)
+    if boundary == "constructor":
+        capture(tmp_path)
+        with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+            snapshot(tmp_path, projection_inputs=inputs)
+        assert not (tmp_path / "articles").exists()
+    else:
+        root = freeze(tmp_path)
+        path = root / "model_snapshots.jsonl"
+        row = json.loads(path.read_bytes())
+        row["projection_inputs"] = inputs
+        resign_model_row(row)
+        path.write_bytes(canonical_bytes(row) + b"\n")
+        resign_freeze_artifact_hashes(root)
+        with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+            verify(tmp_path, root)
+
+
+def test_key_and_score_policy_preserves_explicit_history_projection_and_raw_stat_custody(tmp_path):
+    inputs = {"historical_points": 12, "season_points": 340, "projected_points": 13,
+        "historical_points_total": 340, "projected_points_total": 13,
+        "public_key": "synthetic-public-identifier", "key_count": 3,
+        "feature_key": "pace_adjustment", "token_count": 3, "request_latency_ms": 42,
+        "lineup_status": "confirmed", "linear_gradient": 1.02, "baseline": 12,
+        "beta": 0.4, "better_estimate": 13, "alphabet": "abc", "poverty": 0.2}
+    req = request(parameters={"player_id": "player-1", "context": inputs})
+    body = b'{ "response": [{"historical_game_id":"prior-game","points_scored":12,"scored_points":12,"player_points_scored":12,"points":12}], "public_key":"synthetic-public-identifier" }\n'
+    saved = capture(tmp_path, req, raw_body=body)
+    row = snapshot(tmp_path, projection_inputs=inputs)
+    root = freeze(tmp_path, rows=[row])
+    frozen = verify(tmp_path, root).rows[0]
+    assert frozen["projection_inputs"] == inputs
+    assert frozen["model_snapshot_id"] == row["model_snapshot_id"]
+    assert frozen["source_manifest_sha256"] == digest(source_manifest(tmp_path / "journal", ["stats-1"]))
+    assert saved.raw_body == body == verify_capture(tmp_path / "journal", "stats-1").raw_body
+    assert saved.manifest["raw_body_sha256"] == digest_body(body)
+
+
+def test_explicit_historical_and_projected_scored_points_keep_exact_scientific_values(tmp_path):
+    inputs = {"historical_points_scored": 12, "projected_points_scored": 13,
+        "historical_points_total": 340, "projected_points_total": 13,
+        "historical_points": 12, "projected_points": 13, "lineup_status": "confirmed"}
+    parameters = {"player_id": "player-1", "context": inputs}
+    req = request(parameters=parameters)
+    assert req["parameters"] == parameters
+    body = b'{ "response": [{"historical_game_id":"prior-game","historical_points_scored":12,"points_scored":12}], "projected_points_scored":13 }\n'
+    saved = capture(tmp_path, req, raw_body=body)
+    ref = {"request_id": "stats-1", "raw_body_sha256": saved.manifest["raw_body_sha256"]}
+    row = snapshot(tmp_path, projected_points=13, projection_inputs=inputs,
+        distribution_model_id="synthetic-scientific", distribution_evidence_ref=ref,
+        distribution_parameters={"historical_points_scored": 12, "projected_points_scored": 13})
+    root = freeze(tmp_path, rows=[row])
+    frozen = verify(tmp_path, root).rows[0]
+    assert frozen["projection_inputs"] == inputs
+    assert frozen["distribution_parameters"] == {"historical_points_scored": 12, "projected_points_scored": 13}
+    assert frozen["model_snapshot_id"] == row["model_snapshot_id"]
+    assert source_manifest(tmp_path / "journal", ["stats-1"])["stats-1"]["parameters"] == parameters
+    assert saved.raw_body == body == verify_capture(tmp_path / "journal", "stats-1").raw_body
+    assert saved.manifest["raw_body_sha256"] == digest_body(body)
+
+
+@pytest.mark.parametrize("kind", ["file", "directory"])
+def test_parent_or_leaf_substitution_after_domain_validation_never_redirects_payload(tmp_path, monkeypatch, kind):
+    from courtvision.sports.nba import prospective_evidence as evidence
+    parent, redirect = tmp_path / "owned-parent", tmp_path / "owned-redirect"
+    parent.mkdir()
+    redirect.mkdir()
+    path, staged = parent / "payload.bin", tmp_path / "staged-link"
+    marker = redirect / "preserved.bin"
+    marker.write_bytes(b"preserved-target")
+    # Link creation itself is outside the expected-error context: missing link
+    # privilege must fail this real-link test, not resemble guarded rejection.
+    staged.symlink_to(marker if kind == "file" else redirect, target_is_directory=kind == "directory")
+    retained = tmp_path / "retained-original"
+    original = evidence.plain_path
+    validations = []
+    def substitute_after_validation(candidate):
+        validated = original(candidate)
+        validations.append(validated)
+        if len(validations) == 1:
+            if kind == "directory":
+                parent.rename(retained)
+                staged.rename(parent)
+            else:
+                staged.rename(path)
+        return validated
+    monkeypatch.setattr(evidence, "plain_path", substitute_after_validation)
+    raw = b"private-artifact-payload"
+    with pytest.raises((ProspectiveEvidenceError, OSError)) as caught:
+        evidence.write_once(path, raw)
+    assert raw.decode() not in str(caught.value)
+    assert len(validations) == 1
+    assert marker.read_bytes() == b"preserved-target"
+    assert not (redirect / "payload.bin").exists()
+    if kind == "directory":
+        assert parent.is_symlink() and retained.is_dir()
+        assert not (retained / "payload.bin").exists()
+    else:
+        assert path.is_symlink() and parent.is_dir()
+
+
+def test_acquired_directory_guard_blocks_windows_rename_or_keeps_posix_physical_target(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    import os
+    from courtvision.sports.nba import prospective_io as secure
+    parent, redirect = tmp_path / "guarded-parent", tmp_path / "owned-redirect"
+    parent.mkdir()
+    redirect.mkdir()
+    marker = redirect / "preserved.bin"
+    marker.write_bytes(b"preserved-target")
+    staged = tmp_path / "staged-directory-link"
+    staged.symlink_to(redirect, target_is_directory=True)
+    retained, path = tmp_path / "retained-original", parent / "payload.bin"
+    original, descriptors = secure._exclusive_file, []
+    @contextmanager
+    def substitute_after_handle_acquisition(candidate):
+        with original(candidate) as descriptor:
+            descriptors.append(descriptor)
+            if os.name == "nt":
+                with pytest.raises(OSError) as caught:
+                    parent.rename(retained)
+                assert caught.value.winerror in {5, 32, 33}
+                assert parent.is_dir() and not retained.exists()
+            else:
+                parent.rename(retained)
+                staged.rename(parent)
+            yield descriptor
+    monkeypatch.setattr(secure, "_exclusive_file", substitute_after_handle_acquisition)
+    raw = b"same-physical-directory-payload\n"
+    secure.create_once_bytes(path, raw)
+    assert len(descriptors) == 1
+    with pytest.raises(OSError):
+        os.fstat(descriptors[0])
+    if os.name == "nt":
+        # The same rename succeeds after guard release, proving no handle leak.
+        parent.rename(retained)
+    else:
+        assert parent.is_symlink()
+    assert (retained / "payload.bin").read_bytes() == raw
+    assert marker.read_bytes() == b"preserved-target"
+    assert not (redirect / "payload.bin").exists()
+
+
+@pytest.mark.parametrize("raw", [b"", b"exact\x00binary\xffpayload\n"])
+def test_secure_payload_creation_preserves_exact_bytes_and_is_exclusive(tmp_path, monkeypatch, raw):
+    from contextlib import contextmanager
+    import os
+    from courtvision.sports.nba import prospective_io as secure
+    parent = tmp_path / "plain-parent"
+    parent.mkdir()
+    path = parent / "payload.bin"
+    original, descriptors = secure._exclusive_file, []
+    @contextmanager
+    def record_owned_descriptor(candidate):
+        with original(candidate) as descriptor:
+            descriptors.append(descriptor)
+            assert not os.get_inheritable(descriptor)
+            yield descriptor
+    monkeypatch.setattr(secure, "_exclusive_file", record_owned_descriptor)
+    secure.create_once_bytes(path, raw)
+    with pytest.raises(OSError):
+        os.fstat(descriptors[0])
+    assert path.read_bytes() == raw
+    with pytest.raises(FileExistsError):
+        secure.create_once_bytes(path, b"replacement")
+    assert path.read_bytes() == raw
+    retained = tmp_path / "closed-handles-parent"
+    parent.rename(retained)
+    assert (retained / "payload.bin").read_bytes() == raw
+
+
+def test_secure_payload_creation_completes_short_physical_writes(tmp_path, monkeypatch):
+    from courtvision.sports.nba import prospective_io as secure
+    original, chunks = secure.os.write, []
+    def short_write(descriptor, data):
+        chunk = data[:3]
+        count = original(descriptor, chunk)
+        chunks.append(count)
+        return count
+    monkeypatch.setattr(secure.os, "write", short_write)
+    path, raw = tmp_path / "payload.bin", b"short-write-payload\n"
+    secure.create_once_bytes(path, raw)
+    assert len(chunks) > 1 and all(0 < count <= 3 for count in chunks)
+    assert sum(chunks) == len(raw) and path.read_bytes() == raw
+
+
+@pytest.mark.parametrize("defect", ["no-progress", "partial-write-error", "readback-mismatch"])
+def test_failed_secure_payload_write_retains_file_closes_handles_and_never_overwrites(tmp_path, monkeypatch, defect):
+    from contextlib import contextmanager
+    import os
+    from courtvision.sports.nba import prospective_io as secure
+    parent = tmp_path / "failure-parent"
+    parent.mkdir()
+    path, raw = parent / "payload.bin", b"immutable-payload\n"
+    original_guard, descriptors = secure._exclusive_file, []
+    @contextmanager
+    def record_owned_descriptor(candidate):
+        with original_guard(candidate) as descriptor:
+            descriptors.append(descriptor)
+            yield descriptor
+    monkeypatch.setattr(secure, "_exclusive_file", record_owned_descriptor)
+    original_write, written = secure.os.write, []
+    if defect == "readback-mismatch":
+        monkeypatch.setattr(secure.os, "read", lambda descriptor, count: b"different")
+    else:
+        def fail_write(descriptor, data):
+            if defect == "no-progress":
+                return 0
+            if written:
+                raise OSError("synthetic partial write failure")
+            count = original_write(descriptor, data[:3])
+            written.append(count)
+            return count
+        monkeypatch.setattr(secure.os, "write", fail_write)
+    with pytest.raises(OSError if defect == "partial-write-error" else secure.ArtifactConfinementError):
+        secure.create_once_bytes(path, raw)
+    assert len(descriptors) == 1
+    with pytest.raises(OSError):
+        os.fstat(descriptors[0])
+    expected = raw if defect == "readback-mismatch" else raw[:3] if defect == "partial-write-error" else b""
+    assert path.read_bytes() == expected
+    with pytest.raises(FileExistsError):
+        secure.create_once_bytes(path, b"replacement")
+    assert path.read_bytes() == expected
+    retained = tmp_path / "closed-handles-parent"
+    parent.rename(retained)
+    assert (retained / "payload.bin").read_bytes() == expected
+
+
+@pytest.mark.parametrize("field,form", [
+    ("PROJECTEDPLAYERPOINTSSCOREDVALUETARGETGAMEACTUALPOINTS", "encoded"),
+    ("historical_points_scored_odds_value", "pair"),
+    ("projected_points_scored_line_value", "feature_name")])
+@pytest.mark.parametrize("boundary", ["constructor", "disk"])
+def test_scientific_scored_qualification_cannot_hide_market_or_target_outcome_descendants(tmp_path, field, form, boundary):
+    inputs = semantic_alias_inputs(field, 12, form)
+    if boundary == "constructor":
+        capture(tmp_path)
+        with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+            snapshot(tmp_path, projection_inputs=inputs)
+        assert not (tmp_path / "articles").exists()
+    else:
+        root = freeze(tmp_path)
+        path = root / "model_snapshots.jsonl"
+        row = json.loads(path.read_bytes())
+        row["projection_inputs"] = inputs
+        resign_model_row(row)
+        path.write_bytes(canonical_bytes(row) + b"\n")
+        resign_freeze_artifact_hashes(root)
+        with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+            verify(tmp_path, root)
+
+
+def test_qualified_scored_roots_and_scientific_descriptors_preserve_exact_values(tmp_path):
+    inputs = {"historical_points_scored": 12, "projected_points_scored": 13,
+        "historical_points_scored_value": 12, "projected_points_scored_estimate": 13,
+        "PROJECTEDPLAYERPOINTSSCOREDVALUE": 13, "historical_points_total": 340,
+        "points_probability": 0.2, "lineup_status": "confirmed", "linear_gradient": 1.02}
+    parameters = {"player_id": "player-1", "context": inputs}
+    req = request(parameters=parameters)
+    assert req["parameters"] == parameters
+    saved = capture(tmp_path, req)
+    ref = {"request_id": "stats-1", "raw_body_sha256": saved.manifest["raw_body_sha256"]}
+    row = snapshot(tmp_path, projection_inputs=inputs, distribution_model_id="synthetic-scientific",
+        distribution_evidence_ref=ref, distribution_parameters=inputs)
+    root = freeze(tmp_path, rows=[row])
+    frozen = verify(tmp_path, root).rows[0]
+    assert frozen["model_snapshot_id"] == row["model_snapshot_id"]
+    assert frozen["projection_inputs"] == inputs and frozen["distribution_parameters"] == inputs
+    assert source_manifest(tmp_path / "journal", ["stats-1"])["stats-1"]["parameters"] == parameters
+    assert verify_capture(tmp_path / "journal", "stats-1").raw_body == saved.raw_body

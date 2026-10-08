@@ -157,3 +157,38 @@ jobs:
           tests/test_mlb_hr_prospective_context_acquisition.py::test_capture_manifest_and_disk_paths_share_portable_posix_keys
           -q
 
+      - name: Test NBA prospective exclusive payload writes on POSIX
+        run: |
+          python -B - <<'PY'
+          import os, sys, tempfile, uuid
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']) / ('nba-payload-' + uuid.uuid4().hex[:12])
+          root.mkdir(mode=0o700)
+          for name in ('TEMP', 'TMP', 'TMPDIR'):
+              os.environ[name] = str(root)
+          os.environ['PYTHONDONTWRITEBYTECODE'] = '1'
+          tempfile.tempdir = None
+          assert os.path.samefile(tempfile.gettempdir(), root)
+          target = root / 'canary-file'
+          target.write_bytes(b'canary')
+          directory = root / 'canary-directory'
+          directory.mkdir(mode=0o700)
+          os.symlink(target, root / 'file-link')
+          os.symlink(directory, root / 'directory-link', target_is_directory=True)
+          for name in ('file-link', 'directory-link'):
+              (root / name).unlink()
+          directory.rmdir()
+          target.unlink()
+          print('TEMP_ROOT_CANARY=PASS FILE_SYMLINK_CANARY=PASS DIRECTORY_SYMLINK_CANARY=PASS CLEANUP_CANARY=PASS', flush=True)
+          attempts = []
+          def offline(event, args):
+              if event in {'socket.connect', 'socket.getaddrinfo', 'socket.sendto'}:
+                  attempts.append(event)
+                  raise RuntimeError('OFFLINE_PROVIDER_NETWORK_FORBIDDEN')
+          sys.addaudithook(offline)
+          import pytest
+          selected = 'parent_or_leaf_substitution or acquired_directory_guard or secure_payload_creation or failed_secure_payload_write'
+          result = pytest.main(['-q', '-x', '-p', 'no:cacheprovider', '--basetemp', str(root / 'pytest'), 'tests/test_nba_prospective_foundation.py', '-k', selected])
+          sys.exit(result if not attempts else 3)
+          PY
+
