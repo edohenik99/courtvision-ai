@@ -4267,3 +4267,103 @@ def test_encoded_container_credential_label_shares_request_stripping_and_raw_cus
         with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
             read()
         assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+
+
+PASSPHRASE_CREDENTIAL_CASES = [("passphrase", "mapping"), ("api_passphrase", "pair"),
+    ("private_key_passphrase", "feature_name"), ("PassPhrase", "field_name"),
+    ("PASSPHRASES", "encoded"), ("providerPassphrase", "nested_pair"),
+    ("PRIVATEKEYPASSPHRASESMETADATA", "key")]
+
+
+@pytest.mark.parametrize("field,form", PASSPHRASE_CREDENTIAL_CASES)
+@pytest.mark.parametrize("boundary", ["constructor", "disk"])
+def test_passphrase_credentials_cannot_enter_model_state_or_resigned_freezes(tmp_path, field, form, boundary):
+    inputs = semantic_alias_inputs(field, "SYNTHETIC-CREDENTIAL-A", form)
+    if boundary == "constructor":
+        capture(tmp_path)
+        with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+            snapshot(tmp_path, projection_inputs=inputs)
+        assert not (tmp_path / "articles").exists()
+    else:
+        root = freeze(tmp_path)
+        path = root / "model_snapshots.jsonl"
+        row = json.loads(path.read_bytes())
+        row["projection_inputs"] = inputs
+        resign_model_row(row)
+        path.write_bytes(canonical_bytes(row) + b"\n")
+        resign_freeze_artifact_hashes(root)
+        with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+            verify(tmp_path, root)
+    assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+
+
+@pytest.mark.parametrize("field,form", PASSPHRASE_CREDENTIAL_CASES)
+def test_passphrase_raw_custody_rejects_capture_and_fully_resigned_source_readback(tmp_path, field, form):
+    body = canonical_bytes({"response": [{"context":
+        semantic_alias_inputs(field, "SYNTHETIC-CREDENTIAL-A", form)}]})
+    with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+        capture(tmp_path, raw_body=body)
+    assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+    assert not (tmp_path / "journal").exists()
+    capture(tmp_path)
+    directory = tmp_path / "journal" / EVIDENCE_SCHEMA / "stats-1"
+    (directory / "body.bin").write_bytes(body)
+    def resign_capture(manifest):
+        manifest["raw_body_sha256"] = digest_body(body)
+        manifest["raw_body_byte_length"] = len(body)
+        manifest["capture_sha256"] = digest({key: value for key, value in manifest.items() if key != "capture_sha256"})
+    mutate_json(directory / "manifest.json", resign_capture)
+    for read in (lambda: verify_capture(tmp_path / "journal", "stats-1"),
+                 lambda: source_manifest(tmp_path / "journal", ["stats-1"])):
+        with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+            read()
+        assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+
+
+@pytest.mark.parametrize("field", ["passphrase", "api_passphrase", "private_key_passphrase"])
+def test_passphrase_request_rotation_cannot_change_source_model_or_freeze_identity(tmp_path, field):
+    safe = {"player_id": "player-1", "season": "2025", "token_count": 3,
+        "passphrase_count": 0, "passphrase_length": 32, "public_key_name": "synthetic-public-key",
+        "source_manifest_sha256": "b" * 64, "headers": {"accept": "application/json"}}
+    rows, sources, artifacts = [], [], []
+    for index, secret in enumerate(("SYNTHETIC-CREDENTIAL-A", "SYNTHETIC-CREDENTIAL-B")):
+        req = request(parameters={**safe, field: secret,
+            "headers": {**safe["headers"], field: secret}})
+        assert req == request(parameters=safe) and req["parameters"] == safe
+        directory = tmp_path / str(index)
+        saved = capture(directory, req)
+        assert saved.manifest["request_identity_sha256"] == digest(req)
+        sources.append(source_manifest(directory / "journal", ["stats-1"]))
+        rows.append(snapshot(directory))
+        root = freeze(directory, rows=[rows[-1]])
+        assert verify(directory, root).rows[0]["model_snapshot_id"] == rows[-1]["model_snapshot_id"]
+        artifacts.append({path.name: path.read_bytes() for path in root.iterdir()})
+        persisted = b"".join(path.read_bytes() for path in directory.rglob("*") if path.is_file())
+        assert secret.encode() not in persisted
+    assert sources[0] == sources[1] and rows[0] == rows[1] and artifacts[0] == artifacts[1]
+
+
+def test_passphrase_policy_preserves_scientific_phrase_count_length_and_public_key_controls(tmp_path):
+    body = b'{ "response": [{"points":12,"minutes":18}], "phrase":"synthetic scouting phrase", "passphrase_count":0, "passphrase_length":32 }\n'
+    inputs = {"phrase": "synthetic scouting phrase", "phrase_count": 3, "phrases_count": 2,
+        "phrase_length": 17, "phrase_embedding_norm": 0.4, "phraseology_feature": "synthetic",
+        "passphrase_count": 0, "passphrase_length": 32, "api_passphrase_count": 0,
+        "private_key_passphrase_length": 32, "passphrase_count_metadata": 0,
+        "scientific_text": "Passphrase length and phrase counts are features.",
+        "public_key_name": "synthetic-public-key", "source_key_metadata": "scientific-id",
+        "source_manifest_sha256": "b" * 64, "raw_body_sha256": digest_body(body),
+        "token_count": 3, "request_latency_ms": 42, "possession_key_hash": "c" * 64}
+    parameters = {"player_id": "player-1", "context": inputs}
+    req = request(parameters=parameters)
+    assert req["parameters"] == parameters
+    saved = capture(tmp_path, req, raw_body=body)
+    ref = {"request_id": "stats-1", "raw_body_sha256": saved.manifest["raw_body_sha256"]}
+    row = snapshot(tmp_path, projection_inputs=inputs, distribution_model_id="synthetic-scientific",
+        distribution_evidence_ref=ref, distribution_parameters=inputs)
+    root = freeze(tmp_path, rows=[row])
+    frozen = verify(tmp_path, root).rows[0]
+    assert frozen["projection_inputs"] == inputs and frozen["distribution_parameters"] == inputs
+    assert frozen["model_snapshot_id"] == row["model_snapshot_id"]
+    assert source_manifest(tmp_path / "journal", ["stats-1"])["stats-1"]["parameters"] == parameters
+    assert saved.raw_body == body == verify_capture(tmp_path / "journal", "stats-1").raw_body
+    assert saved.manifest["raw_body_sha256"] == digest_body(body)

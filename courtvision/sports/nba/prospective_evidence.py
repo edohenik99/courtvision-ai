@@ -34,14 +34,15 @@ _CREDENTIAL_KEY_ROOTS = frozenset(subject + "key" + plural
                     "hmac", "master", "ssh", "client")
     for plural in ("", "s"))
 _SECRET_NAMES = (frozenset({"apikey", "key", "keys", "authorization", "proxyauthorization", "cookie",
-    "cookies", "setcookie", "token", "accesstoken", "refreshtoken", "password", "passwd", "secret",
+    "cookies", "setcookie", "token", "accesstoken", "refreshtoken", "password", "passwd",
+    "passphrase", "passphrases", "secret",
     "clientsecret", "credentials", "xapikey", "xrapidapikey", "theoddsapikey", "auth",
     "authentication", "signature", "sessionid", "xapisportskey", "apitoken",
     "subscriptionkey", "ocpapimsubscriptionkey", "session", "xsession", "requestsession",
     "privatekey", "signingkey", "signatures", "sessionids", "sessions", "xsessions", "requestsessions",
     "xsessionkey", "xsessionkeys", "requestsessionkey", "requestsessionkeys"})
     | _CREDENTIAL_KEY_ROOTS)
-_SECRET_BASE_SUFFIXES = ("apikey", "authorization", "password", "passwd", "secret", "credential",
+_SECRET_BASE_SUFFIXES = ("apikey", "authorization", "password", "passwd", "passphrase", "secret", "credential",
     "token", "cookie", "subscriptionkey", "privatekey", "signingkey")
 _SECRET_SUFFIXES = (tuple(suffix + plural for suffix in _SECRET_BASE_SUFFIXES for plural in ("", "s"))
     + tuple(root for root in _CREDENTIAL_KEY_ROOTS if root not in {"sessionkey", "sessionkeys"}))
