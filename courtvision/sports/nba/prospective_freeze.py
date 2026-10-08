@@ -42,10 +42,16 @@ _TOTAL_MARKET_FIELDS = (frozenset(f"{subject}_total" for subject in
 _SPREAD_MARKET_FIELDS = frozenset({"moneyline", "moneylines", "money_line", "money_lines",
     "spread", "spreads", "point_spread", "points_spread", "handicap", "handicaps", "asian_handicap",
     "point_handicap", "points_handicap"})
+_PRICING_ROOTS = frozenset({"juice", "juices", "vig", "vigs", "heavy_juice", "heavy_juices",
+    "vigorish", "vigorishes", "overround", "overrounds"})
+_PRICING_MARKET_FIELDS = (_PRICING_ROOTS
+    | frozenset(f"{root}_{qualifier}" for root in _PRICING_ROOTS
+        for qualifier in ("adjustment", "adjustments", "adjusted", "included", "removed",
+                          "removal", "removals", "rate", "rates")))
 _POINTS_TOTAL_PREFIXES = tuple(name.replace("_", "") for name in _POINTS_TOTAL_FIELDS)
 _SCIENTIFIC_TOTAL_QUALIFIERS = ("historical", "projected")
 _MARKET_FIELDS = (_PROHIBITED | _PROBABILITY_MARKET_FIELDS | _POINTS_TOTAL_FIELDS | _TOTAL_MARKET_FIELDS
-    | _SPREAD_MARKET_FIELDS
+    | _SPREAD_MARKET_FIELDS | _PRICING_MARKET_FIELDS
     | {"points_line", "p_over", "p_under", "price", "consensus_price", "book_price"})
 _MARKET_PRICE_PREFIXES = ("bookprice", "consensusprice", "pricevalue", "pricevalues",
     "priceamount", "pricequote", "pricequotes", "pricetimestamp")
@@ -84,7 +90,9 @@ _STAT_OUTCOME_FIELDS = frozenset(f"{qualifier}_{stat}" for qualifier in ("actual
 _SCORED_OUTCOME_FIELDS = frozenset(name for stat in ("points", "pts")
     for name in (f"{stat}_scored", f"scored_{stat}"))
 _PLAYED_OUTCOME_FIELDS = frozenset({"minutes_played", "played_minutes"})
-_QUALIFIED_OUTCOME_FIELDS = _SCORED_OUTCOME_FIELDS | _PLAYED_OUTCOME_FIELDS
+_RECORDED_OUTCOME_FIELDS = frozenset(name for stat in ("points", "pts", "minutes")
+    for verb in ("recorded", "logged") for name in (f"{stat}_{verb}", f"{verb}_{stat}"))
+_QUALIFIED_OUTCOME_FIELDS = _SCORED_OUTCOME_FIELDS | _PLAYED_OUTCOME_FIELDS | _RECORDED_OUTCOME_FIELDS
 _SCORED_OUTCOME_PREFIXES = tuple(name.replace("_", "") for name in _QUALIFIED_OUTCOME_FIELDS)
 _SCIENTIFIC_SCORED_QUALIFIERS = ("historical", "season", "recent", "lastgame", "projected", "predicted")
 _MODEL_OUTCOME_FIELDS = (TARGET_OUTCOME_FIELDS | _STAT_OUTCOME_FIELDS | _QUALIFIED_OUTCOME_FIELDS
@@ -122,6 +130,7 @@ _BET_DESCRIPTORS = ("amount", "budget", "stake", "size", "sizing", "permission",
 _SHORT_BET_COMPOUNDS = frozenset(action + "bet" for action in _PERMISSION_ACTIONS)
 _SHORT_BET_PREFIXES = tuple(prefix + "bet" + descriptor
     for prefix in ("", *_PERMISSION_ACTIONS) for descriptor in _BET_DESCRIPTORS) + ("bettable",)
+_RECOMMENDATION_PREDICATES = ("recommend", "recommended", "recommendation", "recommendations")
 _STATE_FIELDS = frozenset({"canonical_event_id", "provider_event_ids", "player_id",
     "canonical_player_name", "team", "opponent", "commence_time_utc", "model_id", "model_version",
     "minutes_evidence_ref", "projected_minutes", "minutes_uncertainty", "projection_evidence_ref",
@@ -183,6 +192,24 @@ def _reject_model_field(key: str, item: object) -> None:
                    for index in range(len(tokens) - len(pattern) + 1))
     def subject_forms(value: str, prefixes: tuple[str, ...]) -> tuple[str, ...]:
         return tuple(value[offset:] for offset in _subject_offsets(value, prefixes))
+    def bet_recommendation(offset: int) -> bool:
+        if compact.startswith("bet", offset):
+            # Forward economic compounds remain declared recommendation fields.
+            if any(compact.startswith(_RECOMMENDATION_PREDICATES, following)
+                   for following in _subject_offsets(compact,
+                       _BOOLEAN_WRAPPERS + _MARKET_SUBJECT_PREFIXES, offset + len("bet"))):
+                return True
+        for predicate in _RECOMMENDATION_PREDICATES:
+            if not compact.startswith(predicate, offset):
+                continue
+            for following in _subject_offsets(compact,
+                    ("for",) + _BOOLEAN_WRAPPERS + _MARKET_SUBJECT_PREFIXES, offset + len(predicate)):
+                if compact.startswith("bet", following):
+                    tail = following + len("bet")
+                    # Reverse short roots must preserve recommended_beta science.
+                    if tail == len(compact) or compact.startswith(_FIELD_DESCRIPTORS, tail):
+                        return True
+        return False
     def reject_qualified_tails(forms: tuple[str, ...], stems: tuple[str, ...]) -> None:
         for form in forms:
             stem = next((stem for stem in stems if form.startswith(stem)), None)
@@ -259,6 +286,7 @@ def _reject_model_field(key: str, item: object) -> None:
     if (any(any(route in compact[offset:] for route in _ECONOMIC_COMPOUNDS)
             or compact[offset:] in _SHORT_BET_COMPOUNDS
             or compact[offset:].startswith(_SHORT_BET_PREFIXES)
+            or bet_recommendation(offset)
             for offset, _ in economic_states)
             or any(contains_pattern(tuple(route.split("_"))) for route in _ECONOMIC_ROUTES)):
         raise ProspectiveEvidenceError("unrecognized economic route field is prohibited")

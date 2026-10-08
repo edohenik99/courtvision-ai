@@ -29,17 +29,18 @@ _CAPTURE_FIELDS = _REQUEST_FIELDS | {"schema_version", "capture_mode", "request_
     "raw_body_byte_length", "raw_body_sha256", "capture_sha256"}
 _CREDENTIAL_KEY_ROOTS = frozenset(subject + "key" + plural
     for subject in ("api", "private", "signing", "secret", "access", "auth", "authentication",
-                    "authorization", "session", "encryption", "decryption", "subscription")
+                    "authorization", "session", "encryption", "decryption", "subscription",
+                    "hmac", "master", "ssh", "client")
     for plural in ("", "s"))
 _SECRET_NAMES = (frozenset({"apikey", "key", "keys", "authorization", "proxyauthorization", "cookie",
-    "cookies", "setcookie", "token", "accesstoken", "refreshtoken", "password", "secret",
+    "cookies", "setcookie", "token", "accesstoken", "refreshtoken", "password", "passwd", "secret",
     "clientsecret", "credentials", "xapikey", "xrapidapikey", "theoddsapikey", "auth",
     "authentication", "signature", "sessionid", "xapisportskey", "apitoken",
     "subscriptionkey", "ocpapimsubscriptionkey", "session", "xsession", "requestsession",
     "privatekey", "signingkey", "signatures", "sessionids", "sessions", "xsessions", "requestsessions",
     "xsessionkey", "xsessionkeys", "requestsessionkey", "requestsessionkeys"})
     | _CREDENTIAL_KEY_ROOTS)
-_SECRET_BASE_SUFFIXES = ("apikey", "authorization", "password", "secret", "credential",
+_SECRET_BASE_SUFFIXES = ("apikey", "authorization", "password", "passwd", "secret", "credential",
     "token", "cookie", "subscriptionkey", "privatekey", "signingkey")
 _SECRET_SUFFIXES = (tuple(suffix + plural for suffix in _SECRET_BASE_SUFFIXES for plural in ("", "s"))
     + tuple(root for root in _CREDENTIAL_KEY_ROOTS if root not in {"sessionkey", "sessionkeys"}))
@@ -52,8 +53,11 @@ _PARAMETER_DESCRIPTORS = ("parameters", "parameter", "params", "param", "argumen
     "argument", "args", "arg")
 _SECRET_DESCRIPTORS = (tuple("query_" + item for item in _PARAMETER_DESCRIPTORS)
     + _PARAMETER_DESCRIPTORS + ("values", "value", "headers", "header", "query",
-        "identities", "identity", "ids", "id", "hashes", "hash", "sha512", "sha256", "sha1",
-        "fingerprints", "fingerprint", "digests", "digest", "checksums", "checksum"))
+        "identities", "identity", "ids", "id", "hashes", "hash", "sha512", "sha384", "sha256",
+        "sha224", "sha1", "md5", "fingerprints", "fingerprint", "digests", "digest",
+        "checksums", "checksum", "names", "name", "labels", "label", "metadata", "data",
+        "context", "information", "info", "details", "detail", "configuration", "config",
+        "materials", "material"))
 _FIELD_LABELS = frozenset({"name", "key", "header", "headername", "field", "fieldname",
     "feature", "featurename"})
 _FIELD_VALUES = frozenset({"value", "headervalue", "fieldvalue", "featurevalue"})
