@@ -4471,3 +4471,252 @@ def test_postgame_and_market_qualifier_policy_preserves_qualified_history_foreca
     assert source_manifest(tmp_path / "journal", ["stats-1"])["stats-1"]["parameters"] == parameters
     assert saved.raw_body == body == verify_capture(tmp_path / "journal", "stats-1").raw_body
     assert saved.manifest["raw_body_sha256"] == digest_body(body)
+
+
+@pytest.mark.parametrize("field,form", [("live_total", "mapping"), ("prop_total", "pair"),
+    ("current_total", "field_name"), ("total_opening", "encoded"),
+    ("LIVETOTAL", "nested_pair"), ("TOTALCURRENT", "key")])
+@pytest.mark.parametrize("boundary", ["constructor", "disk"])
+def test_market_role_totals_cannot_enter_model_state_or_fully_resigned_freezes(tmp_path, field, form, boundary):
+    inputs = semantic_alias_inputs(field, 15, form)
+    if boundary == "constructor":
+        capture(tmp_path)
+        with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+            snapshot(tmp_path, projection_inputs=inputs)
+        assert not (tmp_path / "articles").exists()
+    else:
+        root = freeze(tmp_path)
+        path = root / "model_snapshots.jsonl"
+        row = json.loads(path.read_bytes())
+        row["projection_inputs"] = inputs
+        resign_model_row(row)
+        path.write_bytes(canonical_bytes(row) + b"\n")
+        resign_freeze_artifact_hashes(root)
+        with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+            verify(tmp_path, root)
+
+
+# Literal admission contract: generic totals acquire market meaning under these roles.
+@pytest.mark.parametrize("qualifier", ["opening", "closing", "current", "live", "prop", "observed",
+    "market", "sportsbook", "bookmaker", "consensus", "book", "vegas"])
+def test_independent_market_role_total_contract_rejects_both_orders_and_normalized_spellings(qualifier):
+    for name in (qualifier + "_total", "total_" + qualifier):
+        parts = name.split("_")
+        aliases = (name, parts[0] + "".join(part.title() for part in parts[1:]),
+                   "".join(parts).upper())
+        for field in aliases:
+            for value in (15, False, {"estimate": 15}):
+                try:
+                    reject_market_outcomes({field: value})
+                except ProspectiveEvidenceError as error:
+                    assert "prohibited" in str(error), field
+                else:
+                    pytest.fail("accepted declared market-role total: " + field)
+
+
+CREDENTIAL_PAYLOAD_DESCRIPTOR_CASES = [("private_key_pem", "mapping"),
+    ("signing_key_pem", "pair"), ("client_secret_bytes", "field_name"),
+    ("PRIVATEKEYPEM", "encoded"), ("signingKeyPem", "nested_pair"),
+    ("CLIENTSECRETBYTES", "feature_name")]
+
+
+@pytest.mark.parametrize("field,form", CREDENTIAL_PAYLOAD_DESCRIPTOR_CASES)
+@pytest.mark.parametrize("boundary", ["constructor", "disk"])
+def test_credential_payload_descriptors_cannot_enter_model_or_fully_resigned_freeze(tmp_path, field, form, boundary):
+    inputs = semantic_alias_inputs(field, "SYNTHETIC-CREDENTIAL-A", form)
+    if boundary == "constructor":
+        capture(tmp_path)
+        with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+            snapshot(tmp_path, projection_inputs=inputs)
+        assert not (tmp_path / "articles").exists()
+    else:
+        root = freeze(tmp_path)
+        path = root / "model_snapshots.jsonl"
+        row = json.loads(path.read_bytes())
+        row["projection_inputs"] = inputs
+        resign_model_row(row)
+        path.write_bytes(canonical_bytes(row) + b"\n")
+        resign_freeze_artifact_hashes(root)
+        with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+            verify(tmp_path, root)
+    assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+
+
+@pytest.mark.parametrize("field,form", [("private_key_pem", "mapping"),
+    ("signing_key_pem", "pair"), ("client_secret_bytes", "encoded")])
+def test_credential_payload_raw_custody_rejects_capture_and_fully_resigned_source_readback(tmp_path, field, form):
+    body = canonical_bytes({"response": [{"context":
+        semantic_alias_inputs(field, "SYNTHETIC-CREDENTIAL-A", form)}]})
+    with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+        capture(tmp_path, raw_body=body)
+    assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+    assert not (tmp_path / "journal").exists()
+    capture(tmp_path)
+    directory = tmp_path / "journal" / EVIDENCE_SCHEMA / "stats-1"
+    (directory / "body.bin").write_bytes(body)
+    def resign_capture(manifest):
+        manifest["raw_body_sha256"] = digest_body(body)
+        manifest["raw_body_byte_length"] = len(body)
+        manifest["capture_sha256"] = digest({key: value for key, value in manifest.items() if key != "capture_sha256"})
+    mutate_json(directory / "manifest.json", resign_capture)
+    for read in (lambda: verify_capture(tmp_path / "journal", "stats-1"),
+                 lambda: source_manifest(tmp_path / "journal", ["stats-1"])):
+        with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+            read()
+        assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+
+
+@pytest.mark.parametrize("field", ["private_key_pem", "signing_key_pem", "client_secret_bytes"])
+def test_credential_payload_request_rotation_preserves_source_model_and_freeze_identity(tmp_path, field):
+    safe = {"player_id": "player-1", "season": "2025", "token_count": 3,
+        "public_key_pem": "synthetic-public-pem", "source_key_bytes": "synthetic-source-bytes",
+        "private_key_pem_count": 0, "client_secret_bytes_length": 32,
+        "source_manifest_sha256": "b" * 64, "headers": {"accept": "application/json"}}
+    rows, sources, artifacts = [], [], []
+    for index, secret in enumerate(("SYNTHETIC-CREDENTIAL-A", "SYNTHETIC-CREDENTIAL-B")):
+        req = request(parameters={**safe, field: secret,
+            "headers": {**safe["headers"], field: secret}})
+        assert req == request(parameters=safe) and req["parameters"] == safe
+        directory = tmp_path / str(index)
+        saved = capture(directory, req)
+        assert saved.manifest["request_identity_sha256"] == digest(req)
+        sources.append(source_manifest(directory / "journal", ["stats-1"]))
+        rows.append(snapshot(directory))
+        root = freeze(directory, rows=[rows[-1]])
+        assert verify(directory, root).rows[0]["model_snapshot_id"] == rows[-1]["model_snapshot_id"]
+        artifacts.append({path.name: path.read_bytes() for path in root.iterdir()})
+        persisted = b"".join(path.read_bytes() for path in directory.rglob("*") if path.is_file())
+        assert secret.encode() not in persisted
+    assert sources[0] == sources[1] and rows[0] == rows[1] and artifacts[0] == artifacts[1]
+
+
+# This format contract is literal and independent of production descriptor constants.
+@pytest.mark.parametrize("format_group", [("pem", "pems"), ("der", "ders"), ("byte", "bytes"),
+    ("binary", "binaries"), ("blob", "blobs"), ("base64", "base64url", "b64", "b64url"),
+    ("hex", "hexadecimal"), ("jwk", "jwks"), ("pkcs1", "pkcs8"), ("pkcs12",),
+    ("text", "texts"), ("string", "strings"), ("raw",), ("encoded", "encoding", "encodings"),
+    ("content", "contents"), ("body", "bodies"), ("payload", "payloads"),
+    ("buffer", "buffers"), ("json",), ("header", "headers", "context")])
+def test_independent_credential_payload_format_contract_preserves_role_and_count_boundaries(format_group):
+    for payload_format in format_group:
+        for root in ("private_key", "signing_key", "client_secret"):
+            name = root + "_" + payload_format
+            parts = name.split("_")
+            aliases = (name, parts[0] + "".join(part.title() for part in parts[1:]),
+                       "".join(parts).upper())
+            for field in aliases:
+                with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+                    reject_market_outcomes({field: "SYNTHETIC-CREDENTIAL-A"})
+                assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+                assert request(parameters={"context": {field: "SYNTHETIC-CREDENTIAL-A", "token_count": 3}})[
+                    "parameters"] == {"context": {"token_count": 3}}
+        safe = {root + "_" + payload_format:
+            ({"x-scientific-id": "synthetic-scientific-id"}
+             if payload_format in {"header", "headers"} else "synthetic-scientific-id")
+            for root in ("public_key", "source_key", "feature_key", "possession_key")}
+        safe.update({"private_key_" + payload_format + "_count": 0,
+            "private_key_" + payload_format + "_length": 32, "token_count": 3,
+            "token_length": 32, "request_latency_ms": 42, "source_manifest_sha256": "b" * 64})
+        reject_market_outcomes(safe)
+        assert request(parameters={"context": safe})["parameters"] == {"context": safe}
+
+
+def test_market_totals_and_credential_payload_policy_preserves_exact_scientific_custody_and_model_state(tmp_path):
+    inputs = {"total": 340, "total_count": 2, "totality": 0.4,
+        "current_totality": 0.4, "total_opening_angle": 1.02,
+        "historical_total": 340, "projected_total": 13,
+        "historical_points_total": 340, "projected_points_total": 13,
+        "historical_total_points": 340, "projected_total_points": 13,
+        "historical_points_total_value": 340, "projected_points_total_estimate": 13,
+        "public_key_pem": "synthetic-public-pem", "source_key_pem": "synthetic-source-pem",
+        "feature_key_pem": "synthetic-feature-pem", "possession_key_pem": "synthetic-possession-pem",
+        "public_key_bytes": "synthetic-public-bytes", "source_key_bytes": "synthetic-source-bytes",
+        "public_key_header": {"x-public-id": "synthetic-public-id"},
+        "source_key_headers": {"x-source-id": "synthetic-source-id"},
+        "private_key_pem_count": 0, "private_key_pem_length": 32,
+        "signing_key_pem_count": 0, "signing_key_pem_length": 32,
+        "client_secret_bytes_count": 0, "client_secret_bytes_length": 32,
+        "byte_count": 32, "pem_count": 0, "bytes_length": 32,
+        "token_count": 3, "token_length": 32, "request_latency_ms": 42,
+        "source_manifest_sha256": "b" * 64, "public_key_hash": "c" * 64,
+        "projected_points": 13, "projected_minutes": 19, "lineup_status": "confirmed",
+        "baseline": 12, "linear_gradient": 0.4, "points_linear": 13, "beta": 0.4}
+    body = b'{ "response": [{ "context": ' + canonical_bytes(inputs) + b', "points":12,"minutes":18}] }\n'
+    parameters = {"player_id": "player-1", "context": inputs}
+    req = request(parameters=parameters)
+    assert req["parameters"] == parameters
+    saved = capture(tmp_path, req, raw_body=body)
+    ref = {"request_id": "stats-1", "raw_body_sha256": saved.manifest["raw_body_sha256"]}
+    row = snapshot(tmp_path, projection_inputs=inputs, distribution_model_id="synthetic-scientific",
+        distribution_evidence_ref=ref, distribution_parameters=inputs)
+    root = freeze(tmp_path, rows=[row])
+    frozen = verify(tmp_path, root).rows[0]
+    assert frozen["projection_inputs"] == inputs and frozen["distribution_parameters"] == inputs
+    assert frozen["model_snapshot_id"] == row["model_snapshot_id"]
+    assert source_manifest(tmp_path / "journal", ["stats-1"])["stats-1"]["parameters"] == parameters
+    assert saved.raw_body == body == verify_capture(tmp_path / "journal", "stats-1").raw_body
+    assert saved.manifest["raw_body_sha256"] == digest_body(body)
+
+
+@pytest.mark.parametrize("field,form", [("private_key_header", "mapping"),
+    ("signing_key_headers", "encoded"), ("client_secret_header", "field_name"),
+    ("private_key_context", "pair"), ("access_token_context", "feature_name")])
+@pytest.mark.parametrize("boundary", ["constructor", "disk"])
+def test_credential_payload_suffixes_preserve_existing_header_and_context_classification(tmp_path, field, form, boundary):
+    inputs = semantic_alias_inputs(field, "SYNTHETIC-CREDENTIAL-A", form)
+    if boundary == "constructor":
+        capture(tmp_path)
+        with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+            snapshot(tmp_path, projection_inputs=inputs)
+        assert not (tmp_path / "articles").exists()
+    else:
+        root = freeze(tmp_path)
+        path = root / "model_snapshots.jsonl"
+        row = json.loads(path.read_bytes())
+        row["projection_inputs"] = inputs
+        resign_model_row(row)
+        path.write_bytes(canonical_bytes(row) + b"\n")
+        resign_freeze_artifact_hashes(root)
+        with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+            verify(tmp_path, root)
+    assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+
+
+@pytest.mark.parametrize("field,form", [("HISTORICALLIVETOTALPOINTS", "mapping"),
+    ("HISTORICALTOTALLIVEPOINTS", "encoded")])
+@pytest.mark.parametrize("boundary", ["constructor", "disk"])
+def test_market_role_totals_remain_prohibited_inside_qualified_statistic_names(tmp_path, field, form, boundary):
+    inputs = semantic_alias_inputs(field, 15, form)
+    if boundary == "constructor":
+        capture(tmp_path)
+        with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+            snapshot(tmp_path, projection_inputs=inputs)
+        assert not (tmp_path / "articles").exists()
+    else:
+        root = freeze(tmp_path)
+        path = root / "model_snapshots.jsonl"
+        row = json.loads(path.read_bytes())
+        row["projection_inputs"] = inputs
+        resign_model_row(row)
+        path.write_bytes(canonical_bytes(row) + b"\n")
+        resign_freeze_artifact_hashes(root)
+        with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+            verify(tmp_path, root)
+
+
+def test_independent_qualified_total_role_contract_rejects_equivalent_spelling_and_root_orders():
+    names = ("historical_live_total_points", "historical_total_live_points",
+        "historical_points_total_live", "historical_points_live_total",
+        "projected_live_points_total", "projected_total_points_live",
+        "projected_points_live_total", "projected_total_live_points")
+    for name in names:
+        parts = name.split("_")
+        aliases = (name, parts[0] + "".join(part.title() for part in parts[1:]),
+                   "".join(parts).upper())
+        for field in aliases:
+            try:
+                reject_market_outcomes({field: 15})
+            except ProspectiveEvidenceError as error:
+                assert "prohibited" in str(error), field
+            else:
+                pytest.fail("accepted declared market-role total inside qualified statistic: " + field)

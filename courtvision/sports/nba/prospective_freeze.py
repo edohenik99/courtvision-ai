@@ -49,6 +49,7 @@ _PRICING_MARKET_FIELDS = (_PRICING_ROOTS
         for qualifier in ("adjustment", "adjustments", "adjusted", "included", "removed",
                           "removal", "removals", "rate", "rates")))
 _POINTS_TOTAL_PREFIXES = tuple(name.replace("_", "") for name in _POINTS_TOTAL_FIELDS)
+_SCIENTIFIC_TOTAL_PREFIXES = _POINTS_TOTAL_PREFIXES + ("total",)
 _SCIENTIFIC_TOTAL_QUALIFIERS = ("historical", "projected")
 _MARKET_FIELDS = (_PROHIBITED | _PROBABILITY_MARKET_FIELDS | _POINTS_TOTAL_FIELDS | _TOTAL_MARKET_FIELDS
     | _SPREAD_MARKET_FIELDS | _PRICING_MARKET_FIELDS
@@ -202,6 +203,38 @@ def _reject_model_field(key: str, item: object) -> None:
                    for index in range(len(tokens) - len(pattern) + 1))
     def subject_forms(value: str, prefixes: tuple[str, ...]) -> tuple[str, ...]:
         return tuple(value[offset:] for offset in _subject_offsets(value, prefixes))
+    def total_descriptor_tail(value: str, offset: int) -> bool:
+        if offset == len(value) or value.startswith(_FIELD_PREFIX_DESCRIPTORS, offset):
+            return True
+        return any(value.startswith(descriptor, offset) and
+                   (offset + len(descriptor) == len(value)
+                    or value.startswith(_FIELD_DESCRIPTORS, offset + len(descriptor)))
+                   for descriptor in _SHORT_FIELD_DESCRIPTORS)
+    def market_total(value: str) -> bool:
+        # A bare scientific total is legal; a declared market role owns totals
+        # only at an exact field or registered descriptor boundary.
+        pending, seen = [(0, False, False, False)], {(0, False, False, False)}
+        while pending:
+            offset, role, total, points = pending.pop()
+            if role and total and total_descriptor_tail(value, offset):
+                return True
+            following = set()
+            for subject in _MARKET_SUBJECT_PREFIXES:
+                if value.startswith(subject, offset):
+                    following.add((offset + len(subject), role, total, points))
+            for qualifier in _MARKET_QUALIFIERS:
+                if value.startswith(qualifier, offset):
+                    following.add((offset + len(qualifier), True, total, points))
+            # Keep both existing points_total/total_points root orders intact,
+            # including a declared role between their two parts.
+            if not total and value.startswith("total", offset):
+                following.add((offset + len("total"), role, True, points))
+            if not points and value.startswith("points", offset):
+                following.add((offset + len("points"), role, total, True))
+            for state in following - seen:
+                seen.add(state)
+                pending.append(state)
+        return False
     def bet_recommendation(offset: int) -> bool:
         if compact.startswith("bet", offset):
             # Forward economic compounds remain declared recommendation fields.
@@ -253,9 +286,9 @@ def _reject_model_field(key: str, item: object) -> None:
         for form in market_forms for qualifier in _SCIENTIFIC_TOTAL_QUALIFIERS
         if form.startswith(qualifier)
         for tail in subject_forms(form[len(qualifier):], _MARKET_SUBJECT_PREFIXES)))
-    scientific_total = any(form.startswith(_POINTS_TOTAL_PREFIXES) for form in total_forms)
+    scientific_total = any(form.startswith(_SCIENTIFIC_TOTAL_PREFIXES) for form in total_forms)
     if scientific_total:
-        reject_qualified_tails(total_forms, _POINTS_TOTAL_PREFIXES)
+        reject_qualified_tails(total_forms, _SCIENTIFIC_TOTAL_PREFIXES)
     scored_forms = tuple(dict.fromkeys(tail
         for form in market_forms for qualifier in _SCIENTIFIC_SCORED_QUALIFIERS
         if form.startswith(qualifier)
@@ -324,6 +357,7 @@ def _reject_model_field(key: str, item: object) -> None:
             for form in market_role_forms)
             or any(form.startswith(_MARKET_PREFIXES + _MARKET_PRICE_PREFIXES
                                    + _MARKET_PROBABILITY_PREFIXES) for form in market_role_forms)
+            or any(market_total(form) for form in market_forms + total_forms)
             or not scientific_total and any(form.startswith(_POINTS_TOTAL_PREFIXES) for form in market_role_forms)
             or any(contains_pattern(pattern) for pattern in _MARKET_PATTERNS
                    if not scientific_total or "_".join(pattern) not in _POINTS_TOTAL_FIELDS)):

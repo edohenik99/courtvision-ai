@@ -53,8 +53,14 @@ _CREDENTIAL_SUBJECTS = ("targetgame", "player", "provider", "opponent", "event",
     "response", "headers", "header", "client", "proxy", "x", "consensus", "observed", "selected")
 _PARAMETER_DESCRIPTORS = ("parameters", "parameter", "params", "param", "arguments",
     "argument", "args", "arg")
+_CREDENTIAL_PAYLOAD_DESCRIPTORS = ("pem", "pems", "der", "ders", "byte", "bytes",
+    "binary", "binaries", "blob", "blobs", "base64", "base64url", "b64", "b64url",
+    "hex", "hexadecimal", "jwk", "jwks", "pkcs1", "pkcs8", "pkcs12", "text", "texts",
+    "string", "strings", "raw", "encoded", "encoding", "encodings", "content", "contents",
+    "body", "bodies", "payload", "payloads", "buffer", "buffers", "json")
 _SECRET_DESCRIPTORS = (tuple("query_" + item for item in _PARAMETER_DESCRIPTORS)
-    + _PARAMETER_DESCRIPTORS + ("values", "value", "headers", "header", "query",
+    + _PARAMETER_DESCRIPTORS + _CREDENTIAL_PAYLOAD_DESCRIPTORS
+    + ("values", "value", "headers", "header", "query",
         "identities", "identity", "ids", "id", "hashes", "hash", "sha512", "sha384", "sha256",
         "sha224", "sha1", "md5", "fingerprints", "fingerprint", "digests", "digest",
         "checksums", "checksum", "names", "name", "labels", "label", "metadata", "data",
@@ -161,22 +167,33 @@ def _subject_secret_key(name: str) -> bool:
 def _secret_key(key: str) -> bool:
     key = _decoded_field_label(key)
     name = re.sub(r"[^a-z0-9]", "", key.casefold())
-    tokens = _semantic_key(key).split("_")
-    while name:
-        if (name in _SECRET_NAMES or any(name.endswith(x) for x in _SECRET_SUFFIXES)
-                or _subject_secret_key(name)
-                or tokens[-1:] in (["session"], ["sessions"])
+    tokens = tuple(_semantic_key(key).split("_"))
+    pending, seen = [(len(name), len(tokens))], {(len(name), len(tokens))}
+    while pending:
+        end, token_end = pending.pop()
+        if end == 0:
+            continue
+        remaining, token_prefix = name[:end], tokens[:token_end]
+        if (remaining in _SECRET_NAMES or any(remaining.endswith(x) for x in _SECRET_SUFFIXES)
+                or _subject_secret_key(remaining)
+                or token_prefix[-1:] in (("session",), ("sessions",))
                 # Session key labels need a word boundary: possession_key is scientific.
-                or tokens[-2:] in (["session", "key"], ["session", "keys"])):
+                or token_prefix[-2:] in (("session", "key"), ("session", "keys"))):
             return True
-        descriptor = next((item for item in _SECRET_DESCRIPTORS
-                           if name.endswith(item.replace("_", ""))), None)
-        if descriptor is None:
-            return False
-        name = name[:-len(descriptor.replace("_", ""))]
-        descriptor_tokens = descriptor.split("_")
-        if tokens[-len(descriptor_tokens):] == descriptor_tokens:
-            del tokens[-len(descriptor_tokens):]
+        # A shorter format suffix may overlap a complete descriptor (DER/header,
+        # text/context); every declared interpretation must retain its token role.
+        for descriptor in _SECRET_DESCRIPTORS:
+            compact_descriptor = descriptor.replace("_", "")
+            if not remaining.endswith(compact_descriptor):
+                continue
+            descriptor_tokens = tuple(descriptor.split("_"))
+            following_tokens = token_end
+            if token_prefix[-len(descriptor_tokens):] == descriptor_tokens:
+                following_tokens -= len(descriptor_tokens)
+            following = (end - len(compact_descriptor), following_tokens)
+            if following not in seen:
+                seen.add(following)
+                pending.append(following)
     return False
 
 
