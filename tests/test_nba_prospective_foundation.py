@@ -100,7 +100,9 @@ def test_request_identity_deterministic_secret_independent(tmp_path):
 
 
 CREDENTIAL_HEADERS = ["Authorization", "authorization", "Proxy-Authorization", "X-API-Key", "API-Key",
-    "X-Api-Key", "x-apisports-key", "X-APISPORTS-KEY", "Cookie", "Set-Cookie", "X-Session-Token", "Client-Secret"]
+    "X-Api-Key", "x-apisports-key", "X-APISPORTS-KEY", "Cookie", "Set-Cookie", "X-Session-Token", "Client-Secret",
+    "Ocp-Apim-Subscription-Key", "Subscription-Key", "RequestCookie", "X-Session",
+    "api_key_value", "authorization_header"]
 
 
 def header_parameters(name, secret, form, nested=False):
@@ -178,7 +180,9 @@ def test_malformed_or_ambiguous_header_structures_fail_closed(headers):
     {"metadata": {"header": "x-apisports-key", "value": "hidden"}},
     {"metadata": [{"NAME": "X-Session-Token", "VALUE": "hidden"}]},
     {"metadata": {"header_name": "Authorization", "header_value": "hidden"}},
-    {"metadata": [{"headerName": "X-API-Key", "headerValue": "hidden"}]}])
+    {"metadata": [{"headerName": "X-API-Key", "headerValue": "hidden"}]},
+    {"metadata": [["api_key_value", "hidden"]]},
+    {"metadata": [{"featureName": "authorization_header", "featureValue": "hidden"}]}])
 def test_credential_pairs_outside_header_containers_fail_closed(params):
     with pytest.raises(ProspectiveEvidenceError, match="credential"):
         request(parameters=params)
@@ -747,7 +751,9 @@ MODEL_CREDENTIAL_FIELDS = ["authorization", "proxy-authorization", "x-api-key", 
     "password", "key", "cookies", "refresh-token", "client-secret", "credentials", "credential",
     "x-rapidapi-key", "the-odds-api-key", "auth", "authentication", "signature", "session-id",
     "X-Session-Token", "CustomApiKey", "AUTHORIZATION", "ProxyAuthorization", "X.API.KEY",
-    "ApiToken", "access_token", "CLIENTSECRET"]
+    "ApiToken", "access_token", "CLIENTSECRET", "Ocp-Apim-Subscription-Key", "OCPAPIMSUBSCRIPTIONKEY",
+    "ocp_apim_subscription_key", "Subscription-Key", "subscriptionKey", "SUBSCRIPTIONKEY",
+    "X-Session", "RequestSession", "RequestCookie", "api_key_value", "authorization_header"]
 MODEL_CREDENTIAL_FORMS = ["mapping", "pair", "tuple", "nested_pair", "name", "key",
     "header", "header_name", "field_name", "feature_name"]
 
@@ -816,7 +822,9 @@ def resign_freeze_artifact_hashes(root):
 
 @pytest.mark.parametrize("field,form", [("Authorization", "mapping"), ("proxy-authorization", "pair"),
     ("X-API-Key", "nested_pair"), ("api-token", "key"), ("X-APISPORTS-KEY", "header_name"),
-    ("Cookie", "name"), ("ClientSecret", "field_name"), ("Password", "feature_name")])
+    ("Cookie", "name"), ("ClientSecret", "field_name"), ("Password", "feature_name"),
+    ("Ocp-Apim-Subscription-Key", "header_name"), ("api_key_value", "pair"),
+    ("authorization_header", "field_name")])
 @pytest.mark.parametrize("location", ["projection_inputs", "distribution_parameters", "exclusions"])
 def test_disk_verifier_rejects_fully_resigned_nested_model_credentials(tmp_path, field, form, location):
     root = freeze(tmp_path)
@@ -878,7 +886,9 @@ def test_distribution_and_zero_row_exclusions_reject_credentials_before_publicat
     {"field_name": "lineup_status", "field_value": "available"}])
 def test_safe_model_structures_are_not_mistaken_for_credentials(tmp_path, record):
     capture(tmp_path)
-    inputs = {"token_count": 3, "request_latency_ms": 42,
+    inputs = {"token_count": 3, "request_latency_ms": 42, "session_count": 4, "cookie_count": 5,
+        "subscription_count": 6, "subscription_key_count": 7, "possession": 1, "possessions": 85,
+        "possession_count": 85,
         "features": [["projected_points", 23.8], ["pace_adjustment", 1.02]],
         "weights": [0.4, 0.6], "lineup_status": "available", "metadata": record}
     row = snapshot(tmp_path, projection_inputs=inputs)
@@ -887,6 +897,9 @@ def test_safe_model_structures_are_not_mistaken_for_credentials(tmp_path, record
     assert saved.rows[0]["model_snapshot_id"] == row["model_snapshot_id"]
     assert saved.rows[0]["projection_inputs"]["token_count"] == 3
     assert saved.rows[0]["projection_inputs"]["request_latency_ms"] == 42
+    for key, expected in (("session_count", 4), ("cookie_count", 5), ("subscription_count", 6), ("subscription_key_count", 7),
+                          ("possession", 1), ("possessions", 85), ("possession_count", 85)):
+        assert saved.rows[0]["projection_inputs"][key] == expected
     assert saved.rows[0]["projection_inputs"]["weights"] == (0.4, 0.6)
 
 
@@ -901,7 +914,9 @@ def test_ambiguous_semantic_records_cannot_hide_model_credentials(tmp_path, reco
 
 BODY_CREDENTIAL_CASES = [("X-API-Key", "mapping"), ("Authorization", "pair"),
     ("Cookie", "nested_pair"), ("access-token", "name"), ("api-token", "key"),
-    ("X-APISPORTS-KEY", "header_name"), ("Secret", "field_name"), ("Password", "feature_name")]
+    ("X-APISPORTS-KEY", "header_name"), ("Secret", "field_name"), ("Password", "feature_name"),
+    ("Ocp-Apim-Subscription-Key", "pair"), ("RequestCookie", "name"), ("X-Session", "header_name"),
+    ("api_key_value", "pair"), ("authorization_header", "feature_name")]
 
 
 @pytest.mark.parametrize("field,form", BODY_CREDENTIAL_CASES)
@@ -985,7 +1000,8 @@ def test_resigned_compact_market_prefix_fields_fail_disk_verification(tmp_path, 
 
 def test_safe_descriptor_request_metadata_preserves_custody_and_freeze(tmp_path):
     parameters = {"player_id": "player-1", "season": "2025", "token_count": 3,
-        "request_latency_ms": 42, "metadata": {"key": "pace_adjustment", "value": 1.02}}
+        "request_latency_ms": 42, "session_count": 4, "cookie_count": 5, "subscription_count": 6,
+        "subscription_key_count": 7, "metadata": {"key": "pace_adjustment", "value": 1.02}}
     req = request(parameters=parameters)
     assert req["parameters"] == parameters
     saved = capture(tmp_path, req)
@@ -1159,7 +1175,8 @@ def test_safe_encoded_model_and_request_structures_preserve_exact_strings(tmp_pa
 
 
 @pytest.mark.parametrize("body", [b'{ "response": "{\\"points\\":12,\\"minutes\\":18}", "weights": "[0.4, 0.6]" }\n',
-    b'"Air" Jordan', b'"Synthetic Player A"'])
+    b'"Air" Jordan', b'"Synthetic Player A"',
+    b'{"response":[{"points":12,"minutes":18,"possession":1,"possessions":85,"possession_count":85}]}'])
 def test_safe_encoded_or_quoted_provider_text_keeps_raw_body_bytes(tmp_path, body):
     saved = capture(tmp_path, raw_body=body)
     assert saved.raw_body == body == verify_capture(tmp_path / "journal", "stats-1").raw_body
@@ -1171,3 +1188,254 @@ def test_invalid_unicode_model_text_is_a_domain_error_before_publication(tmp_pat
     with pytest.raises(ProspectiveEvidenceError):
         snapshot(tmp_path, projection_inputs={"description": "\ud800"})
     assert not (tmp_path / "articles").exists()
+
+
+DESCRIPTIVE_PROHIBITED_FIELDS = ["player_actual_points", "playerActualPoints", "player_points_line",
+    "PLAYER_POINTS_LINE", "consensus_odds", "consensusOdds"]
+
+
+@pytest.mark.parametrize("field", DESCRIPTIVE_PROHIBITED_FIELDS)
+@pytest.mark.parametrize("form", ["mapping", "pair", "feature_name"])
+def test_descriptive_market_and_outcome_fields_cannot_enter_model_identity(tmp_path, field, form):
+    capture(tmp_path)
+    with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+        snapshot(tmp_path, projection_inputs=model_credential_payload(field, 12, form))
+    assert not (tmp_path / "articles").exists()
+
+
+@pytest.mark.parametrize("field", DESCRIPTIVE_PROHIBITED_FIELDS)
+@pytest.mark.parametrize("form", ["mapping", "pair", "feature_name"])
+def test_resigned_descriptive_market_and_outcome_fields_fail_disk_verification(tmp_path, field, form):
+    root = freeze(tmp_path)
+    path = root / "model_snapshots.jsonl"
+    row = json.loads(path.read_bytes())
+    row["projection_inputs"] = model_credential_payload(field, 12, form)
+    resign_model_row(row)
+    path.write_bytes(canonical_bytes(row) + b"\n")
+    resign_freeze_artifact_hashes(root)
+    with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+        verify(tmp_path, root)
+
+
+def test_descriptive_credential_mapping_values_never_enter_request_identity():
+    def with_secret(secret):
+        return request(parameters={"player_id": "player-1", "season": "2025",
+            "context": {"api_key_value": secret, "authorization_header": secret}})
+    first = with_secret("SYNTHETIC-CREDENTIAL-A")
+    second = with_secret("SYNTHETIC-CREDENTIAL-B")
+    assert first == second and digest(first) == digest(second)
+    assert first["parameters"]["context"] == {}
+    assert b"SYNTHETIC-CREDENTIAL" not in canonical_bytes(first)
+
+
+@pytest.mark.parametrize("original,replacement", [(1, True), (1, 1.0), (0, False), (0, 0.0)])
+@pytest.mark.parametrize("form", ["mapping", "pair", "record"])
+def test_resigned_source_type_drift_cannot_match_authoritative_journal(tmp_path, original, replacement, form):
+    def context(value):
+        if form == "mapping":
+            return {"sample_count": value}
+        if form == "pair":
+            return [["sample_count", value]]
+        return {"name": "sample_count", "value": value}
+    req = request(parameters={"player_id": "player-1", "season": "2025", "numeric_context": context(original)})
+    saved = capture(tmp_path, req)
+    root = freeze(tmp_path, rows=[snapshot(tmp_path)])
+    source_path = root / "sources.json"
+    sources = json.loads(source_path.read_bytes())
+    before_sources = canonical_bytes(sources)
+    sources["stats-1"]["parameters"]["numeric_context"] = context(replacement)
+    assert sources == json.loads(before_sources)  # Python equality hides the adversarial type change.
+    assert canonical_bytes(sources) != before_sources
+    source_path.write_bytes(canonical_bytes(sources) + b"\n")
+    row_path = root / "model_snapshots.jsonl"
+    row = json.loads(row_path.read_bytes())
+    row["source_manifest_sha256"] = digest(sources)
+    resign_model_row(row)
+    row_path.write_bytes(canonical_bytes(row) + b"\n")
+    resign_freeze_artifact_hashes(root)
+    with pytest.raises(ProspectiveEvidenceError, match="source"):
+        verify(tmp_path, root)
+    assert verify_capture(tmp_path / "journal", "stats-1") == saved
+    assert canonical_bytes(source_manifest(tmp_path / "journal", ["stats-1"])) == before_sources
+
+
+def test_safe_semantic_tokens_and_counts_preserve_verified_model_state(tmp_path):
+    inputs = {"baseline": {"pace_adjustment": 1.02}, "lineup_status": "available", "projected_points": 12,
+        "token_count": 3, "session_count": 4, "cookie_count": 5, "subscription_count": 6,
+        "possession": 1, "possessions": 85, "possession_count": 85}
+    capture(tmp_path, request(parameters={"player_id": "player-1", "season": "2025", "context": inputs}))
+    row = snapshot(tmp_path, projection_inputs=inputs)
+    root = freeze(tmp_path, rows=[row])
+    assert verify(tmp_path, root).rows[0]["projection_inputs"] == inputs
+    assert source_manifest(tmp_path / "journal", ["stats-1"])["stats-1"]["parameters"]["context"] == inputs
+
+
+UNSAFE_DECLARED_FIELD_RECORDS = [{"header_name": "Authorization", "header_data": "SYNTHETIC-CREDENTIAL-A"},
+    {"header_name": "Ocp-Apim-Subscription-Key"},
+    {"fieldName": "api_key_value", "data": "SYNTHETIC-CREDENTIAL-A"},
+    {"field_name": "line", "data": 24.5}, {"featureName": "player_points_line"},
+    {"featureName": "actual_points", "payload": 12}, {"field_name": "player_actual_points"}]
+
+
+@pytest.mark.parametrize("record", UNSAFE_DECLARED_FIELD_RECORDS)
+def test_declared_prohibited_labels_reject_missing_or_alternative_value_slots(tmp_path, record):
+    capture(tmp_path)
+    with pytest.raises(ProspectiveEvidenceError, match="credential|prohibited") as caught:
+        snapshot(tmp_path, projection_inputs={"metadata": record})
+    assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+    assert not (tmp_path / "articles").exists()
+
+
+@pytest.mark.parametrize("record", UNSAFE_DECLARED_FIELD_RECORDS)
+def test_resigned_declared_prohibited_labels_reject_missing_or_alternative_value_slots(tmp_path, record):
+    root = freeze(tmp_path)
+    path = root / "model_snapshots.jsonl"
+    row = json.loads(path.read_bytes())
+    row["projection_inputs"] = {"metadata": record}
+    resign_model_row(row)
+    path.write_bytes(canonical_bytes(row) + b"\n")
+    resign_freeze_artifact_hashes(root)
+    with pytest.raises(ProspectiveEvidenceError, match="credential|prohibited") as caught:
+        verify(tmp_path, root)
+    assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+
+
+@pytest.mark.parametrize("record", UNSAFE_DECLARED_FIELD_RECORDS[:3])
+def test_raw_declared_credential_labels_cannot_hide_behind_nonstandard_value_slots(tmp_path, record):
+    body = canonical_bytes({"response": [{"metadata": record}]})
+    with pytest.raises(ProspectiveEvidenceError, match="credential"):
+        capture(tmp_path, raw_body=body)
+    assert not (tmp_path / "journal").exists()
+    capture(tmp_path)
+    root = tmp_path / "journal" / EVIDENCE_SCHEMA / "stats-1"
+    (root / "body.bin").write_bytes(body)
+    def resign_capture(manifest):
+        manifest["raw_body_sha256"] = digest_body(body)
+        manifest["raw_body_byte_length"] = len(body)
+        manifest["capture_sha256"] = digest({key: value for key, value in manifest.items() if key != "capture_sha256"})
+    mutate_json(root / "manifest.json", resign_capture)
+    with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+        verify_capture(tmp_path / "journal", "stats-1")
+    assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+
+
+@pytest.mark.parametrize("record", [{"name": "Player A"}, {"field_name": "pace_adjustment"},
+    {"featureName": "projected_points", "data": 23.8},
+    {"header_name": "X-Trace-ID", "header_data": "trace-1"}])
+def test_safe_incomplete_declared_fields_and_ordinary_names_remain_valid(tmp_path, record):
+    body = canonical_bytes({"response": [record]})
+    assert capture(tmp_path, raw_body=body).raw_body == body
+    row = snapshot(tmp_path, projection_inputs={"metadata": record})
+    root = freeze(tmp_path, rows=[row])
+    assert verify(tmp_path, root).rows[0]["projection_inputs"]["metadata"] == record
+    assert verify_capture(tmp_path / "journal", "stats-1").raw_body == body
+
+
+@pytest.mark.parametrize("text", ["Ocp-Apim-Subscription-Key: SYNTHETIC-CREDENTIAL-A",
+    "X-Session=SYNTHETIC-CREDENTIAL-A", "api_key_value=SYNTHETIC-CREDENTIAL-A",
+    "authorization_header: SYNTHETIC-CREDENTIAL-A", "RequestCookie=SYNTHETIC-CREDENTIAL-A"])
+def test_canonical_credential_labels_in_plain_text_reject_model_and_raw_body(tmp_path, text):
+    capture(tmp_path)
+    with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+        snapshot(tmp_path, projection_inputs={"description": text})
+    assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+    assert not (tmp_path / "articles").exists()
+    with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+        capture(tmp_path / "raw", raw_body=text.encode("utf-8"))
+    assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+    assert not (tmp_path / "raw" / "journal").exists()
+
+
+def test_safe_plain_text_semantic_counts_keep_model_and_raw_bytes(tmp_path):
+    notes = ["possession=1", "token_count=3", "request_latency_ms:42", "session_count=4", "subscription_key_count=7"]
+    body = "\n".join(notes).encode("utf-8")
+    assert capture(tmp_path, raw_body=body).raw_body == body
+    row = snapshot(tmp_path, projection_inputs={"notes": notes})
+    root = freeze(tmp_path, rows=[row])
+    assert verify(tmp_path, root).rows[0]["projection_inputs"]["notes"] == tuple(notes)
+    assert verify_capture(tmp_path / "journal", "stats-1").raw_body == body
+
+
+FINAL_AND_COMPACT_OUTCOME_FIELDS = ["final_minutes", "finalMinutes", "FINALMINUTES",
+    "player_final_minutes", "PLAYERACTUALMINUTES", "PLAYERFINALPOINTS"]
+
+
+@pytest.mark.parametrize("field", FINAL_AND_COMPACT_OUTCOME_FIELDS)
+@pytest.mark.parametrize("form", ["mapping", "pair", "feature_name"])
+def test_final_and_compact_subject_outcome_fields_cannot_enter_model_identity(tmp_path, field, form):
+    capture(tmp_path)
+    with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+        snapshot(tmp_path, projection_inputs=model_credential_payload(field, 12, form))
+    assert not (tmp_path / "articles").exists()
+
+
+@pytest.mark.parametrize("field", FINAL_AND_COMPACT_OUTCOME_FIELDS)
+@pytest.mark.parametrize("form", ["mapping", "pair", "feature_name"])
+def test_resigned_final_and_compact_subject_outcome_fields_fail_disk_verification(tmp_path, field, form):
+    root = freeze(tmp_path)
+    path = root / "model_snapshots.jsonl"
+    row = json.loads(path.read_bytes())
+    row["projection_inputs"] = model_credential_payload(field, 12, form)
+    resign_model_row(row)
+    path.write_bytes(canonical_bytes(row) + b"\n")
+    resign_freeze_artifact_hashes(root)
+    with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+        verify(tmp_path, root)
+
+
+def test_safe_final_projection_and_counterfactual_fields_round_trip(tmp_path):
+    inputs = {"final_projected_minutes": 18, "counterfactual_points": 13}
+    body = canonical_bytes({"response": [inputs]})
+    capture(tmp_path, request(parameters={"player_id": "player-1", "season": "2025", "context": inputs}), raw_body=body)
+    row = snapshot(tmp_path, projection_inputs=inputs)
+    root = freeze(tmp_path, rows=[row])
+    assert verify(tmp_path, root).rows[0]["projection_inputs"] == inputs
+    assert source_manifest(tmp_path / "journal", ["stats-1"])["stats-1"]["parameters"]["context"] == inputs
+    assert verify_capture(tmp_path / "journal", "stats-1").raw_body == body
+
+
+ECONOMIC_ELIGIBILITY_ALIASES = [("observedKellyEligible", "mapping"),
+    ("CONSENSUSKELLYELIGIBLE", "pair"), ("selected_kelly_eligible", "feature_name"),
+    ("observedEligibleForBetting", "mapping"), ("selected_eligible_for_official_pick", "pair")]
+
+
+@pytest.mark.parametrize("field,form", ECONOMIC_ELIGIBILITY_ALIASES)
+@pytest.mark.parametrize("value", [True, 1])
+@pytest.mark.parametrize("boundary", ["constructor", "disk"])
+def test_normalized_economic_aliases_cannot_enable_model_eligibility(tmp_path, field, form, value, boundary):
+    inputs = model_credential_payload(field, value, form)
+    if boundary == "constructor":
+        capture(tmp_path)
+        with pytest.raises(ProspectiveEvidenceError, match="economic"):
+            snapshot(tmp_path, projection_inputs=inputs)
+        assert not (tmp_path / "articles").exists()
+    else:
+        root = freeze(tmp_path)
+        path = root / "model_snapshots.jsonl"
+        row = json.loads(path.read_bytes())
+        row["projection_inputs"] = inputs
+        resign_model_row(row)
+        path.write_bytes(canonical_bytes(row) + b"\n")
+        resign_freeze_artifact_hashes(root)
+        with pytest.raises(ProspectiveEvidenceError, match="economic"):
+            verify(tmp_path, root)
+
+
+@pytest.mark.parametrize("field,form", ECONOMIC_ELIGIBILITY_ALIASES)
+def test_normalized_economic_aliases_allow_only_literal_false_model_state(tmp_path, field, form):
+    root = freeze(tmp_path)
+    inputs = model_credential_payload(field, False, form)
+    expected = snapshot(tmp_path, projection_inputs=inputs)
+    assert expected["projection_inputs"] == inputs
+    path = root / "model_snapshots.jsonl"
+    row = json.loads(path.read_bytes())
+    row["projection_inputs"] = inputs
+    resign_model_row(row)
+    assert row == expected
+    path.write_bytes(canonical_bytes(row) + b"\n")
+    resign_freeze_artifact_hashes(root)
+    saved = verify(tmp_path, root)
+    assert saved.rows[0]["model_snapshot_id"] == expected["model_snapshot_id"]
+    assert saved.rows[0]["measurement_metadata"]["eligible_for_betting"] is False
+    assert saved.rows[0]["measurement_metadata"]["kelly_eligible"] is False
+    assert saved.rows[0]["measurement_metadata"]["eligible_for_official_pick"] is False

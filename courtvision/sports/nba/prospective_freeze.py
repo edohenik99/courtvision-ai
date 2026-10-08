@@ -31,11 +31,19 @@ _PROHIBITED = frozenset("""sportsbook bookmaker vendor line observed_line market
     implied_probability market_timestamp_utc selected_side edge model_edge probability_based_edge
     closing_line closing_odds clv stake kelly bankroll result settlement actual_points actual_minutes
     final_points final_stats box_score points pts minutes model_over_probability model_under_probability""".split())
-_PROHIBITED_COMPACT = frozenset(name.replace("_", "") for name in _PROHIBITED)
-_OUTCOME_COMPACT = frozenset(name.replace("_", "") for name in TARGET_OUTCOME_FIELDS)
+_MARKET_FIELDS = _PROHIBITED | {"points_line"}
+_MODEL_OUTCOME_FIELDS = TARGET_OUTCOME_FIELDS | {"final_minutes"}
+_PROHIBITED_COMPACT = frozenset(name.replace("_", "") for name in _MARKET_FIELDS)
+_OUTCOME_COMPACT = frozenset(name.replace("_", "") for name in _MODEL_OUTCOME_FIELDS)
 _OUTCOME_PREFIXES = ("actual", "targetgameactual", "targetgamefinal", "settlement",
     "grading", "result", "grade")
 _MARKET_PREFIXES = ("sportsbook", "bookmaker", "kelly", "closing", "settlement", "market")
+_OUTCOME_WORDS = frozenset({"actual", "settlement", "grading", "result", "results", "grade"})
+_OUTCOME_PATTERNS = tuple(tuple(name.split("_")) for name in _MODEL_OUTCOME_FIELDS)
+_MARKET_PATTERNS = tuple(tuple(name.split("_")) for name in _MARKET_FIELDS
+    if name not in {"points", "pts", "minutes", "kelly"})
+_SUBJECT_PREFIXES = ("targetgame", "player", "provider", "opponent", "event", "game", "team", "home", "away")
+_MARKET_SUBJECT_PREFIXES = _SUBJECT_PREFIXES + ("consensus", "observed", "selected")
 _STATE_FIELDS = frozenset({"canonical_event_id", "provider_event_ids", "player_id",
     "canonical_player_name", "team", "opponent", "commence_time_utc", "model_id", "model_version",
     "minutes_evidence_ref", "projected_minutes", "minutes_uncertainty", "projection_evidence_ref",
@@ -91,13 +99,28 @@ def _measurement(value: dict) -> PreseasonMeasurement:
 def _reject_model_field(key: str, item: object) -> None:
     name = _semantic_key(key)
     compact = name.replace("_", "")
-    if (compact in _OUTCOME_COMPACT or compact.startswith(_OUTCOME_PREFIXES)
-            or compact == "artifactdomain" and item != NBA_PROSPECTIVE_EVIDENCE):
+    tokens = tuple(name.split("_"))
+    def contains_pattern(pattern: tuple[str, ...]) -> bool:
+        return any(tokens[index:index + len(pattern)] == pattern
+                   for index in range(len(tokens) - len(pattern) + 1))
+    def without_subject(value: str, prefixes: tuple[str, ...]) -> str:
+        while True:
+            prefix = next((p for p in prefixes if value.startswith(p)), None)
+            if prefix is None:
+                return value
+            value = value[len(prefix):]
+    outcome_name = without_subject(compact, _SUBJECT_PREFIXES)
+    market_name = without_subject(compact, _MARKET_SUBJECT_PREFIXES)
+    if (outcome_name in _OUTCOME_COMPACT or outcome_name.startswith(_OUTCOME_PREFIXES)
+            or _OUTCOME_WORDS.intersection(tokens)
+            or any(contains_pattern(pattern) for pattern in _OUTCOME_PATTERNS)
+            or outcome_name == "artifactdomain" and item != NBA_PROSPECTIVE_EVIDENCE):
         raise ProspectiveEvidenceError("target-game outcome is prohibited in model state")
-    if compact in {"kellyeligible", "eligibleforbetting", "eligibleforofficialpick"} and item is not False:
+    if market_name in {"kellyeligible", "eligibleforbetting", "eligibleforofficialpick"} and item is not False:
         raise ProspectiveEvidenceError("model state cannot enable an economic route")
-    if (compact in _PROHIBITED_COMPACT or compact.startswith(_MARKET_PREFIXES)
-            and compact != "kellyeligible"):
+    if (market_name in _PROHIBITED_COMPACT or market_name.startswith(_MARKET_PREFIXES)
+            and market_name != "kellyeligible"
+            or market_name != "kellyeligible" and any(contains_pattern(pattern) for pattern in _MARKET_PATTERNS)):
         raise ProspectiveEvidenceError("observed market/economic field is prohibited in model state")
 
 
@@ -192,7 +215,8 @@ def json_clone(value: object) -> object:
 
 
 def _validate_sources(sources: dict, metadata: PreseasonMeasurement, evidence_root: Path) -> None:
-    if not isinstance(sources, dict) or sources != source_manifest(evidence_root, list(sources)):
+    if (not isinstance(sources, dict)
+            or canonical_bytes(sources) != canonical_bytes(source_manifest(evidence_root, list(sources)))):
         raise ProspectiveEvidenceError("preserved source manifest mismatch")
     reject_market_outcomes(sources)
     for capture in sources.values():

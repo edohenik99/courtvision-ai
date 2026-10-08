@@ -30,7 +30,11 @@ _CAPTURE_FIELDS = _REQUEST_FIELDS | {"schema_version", "capture_mode", "request_
 _SECRET_NAMES = frozenset({"apikey", "key", "authorization", "proxyauthorization", "cookie",
     "cookies", "setcookie", "token", "accesstoken", "refreshtoken", "password", "secret",
     "clientsecret", "credentials", "xapikey", "xrapidapikey", "theoddsapikey", "auth",
-    "authentication", "signature", "sessionid", "xapisportskey", "apitoken"})
+    "authentication", "signature", "sessionid", "xapisportskey", "apitoken",
+    "subscriptionkey", "ocpapimsubscriptionkey", "session", "xsession", "requestsession"})
+_SECRET_SUFFIXES = ("apikey", "authorization", "password", "secret", "credential",
+    "credentials", "token", "cookie", "subscriptionkey")
+_SECRET_DESCRIPTORS = ("value", "values", "header", "headers")
 _FIELD_LABELS = frozenset({"name", "key", "header", "headername", "field", "fieldname",
     "feature", "featurename"})
 _FIELD_VALUES = frozenset({"value", "headervalue", "fieldvalue", "featurevalue"})
@@ -93,8 +97,18 @@ def require_date(value: object) -> str:
 
 def _secret_key(key: str) -> bool:
     name = re.sub(r"[^a-z0-9]", "", key.casefold())
-    return name in _SECRET_NAMES or any(name.endswith(x) for x in
-        ("apikey", "authorization", "password", "secret", "credential", "credentials", "token"))
+    tokens = _semantic_key(key).split("_")
+    while name:
+        if (name in _SECRET_NAMES or any(name.endswith(x) for x in _SECRET_SUFFIXES)
+                or tokens[-1:] == ["session"]):
+            return True
+        descriptor = next((item for item in _SECRET_DESCRIPTORS if name.endswith(item)), None)
+        if descriptor is None:
+            return False
+        name = name[:-len(descriptor)]
+        if tokens[-1:] == [descriptor]:
+            tokens.pop()
+    return False
 
 
 def _semantic_key(key: str) -> str:
@@ -121,8 +135,11 @@ def _field_record(value: Mapping) -> tuple[str, str] | None:
 
 
 def _safe_text(value: str) -> None:
-    if re.search(r"(?i)\b(?:bearer|basic)\s+\S+|(?:api[_-]?key|authorization|password|cookie|secret|token)[\"']?\s*[=:]\s*\S+", value):
+    if re.search(r"(?i)\b(?:bearer|basic)\s+\S+", value):
         raise ProspectiveEvidenceError("credential-bearing text is prohibited")
+    for match in re.finditer(r"([A-Za-z0-9][A-Za-z0-9_.-]*)[\"']?\s*[=:]\s*(?=\S)", value):
+        if _secret_key(match[1]):
+            raise ProspectiveEvidenceError("credential-bearing text is prohibited")
 
 
 def _safe_headers(value: object, *, strip_secrets: bool) -> dict:
@@ -174,7 +191,6 @@ def _safe_json(value: object, *, strip_secrets: bool = False, screen_headers: bo
     A caller's field policy never applies to provider bodies unless requested.
     """
     def check_text(text: str) -> None:
-        _safe_text(text)
         if (semantic_fields or screen_headers) and text.lstrip().startswith(("{", "[", '"')):
             # Retain the caller's exact string, but do not let serialized JSON
             # bypass the same policy. Inspection is reject-only: stripping a
@@ -188,10 +204,13 @@ def _safe_json(value: object, *, strip_secrets: bool = False, screen_headers: bo
             except ProspectiveEvidenceError:
                 if text.lstrip().startswith('"'):
                     # An ordinary quoted nickname is not declared container JSON.
+                    _safe_text(text)
                     return
                 raise
             _safe_json(decoded, screen_headers=screen_headers, semantic_fields=True,
                        field_policy=field_policy)
+        else:
+            _safe_text(text)
 
     def check_field(name: str, item: object) -> None:
         if _secret_key(name):
@@ -208,6 +227,15 @@ def _safe_json(value: object, *, strip_secrets: bool = False, screen_headers: bo
         record = _field_record(value) if semantic_fields or screen_headers else None
         if record is not None:
             check_field(value[record[0]], value[record[1]])
+        elif semantic_fields or screen_headers:
+            for key, item in value.items():
+                compact = _semantic_key(key).replace("_", "")
+                if compact not in _FIELD_LABELS:
+                    continue
+                if isinstance(item, str):
+                    check_field(item, None)
+                elif compact in {"headername", "fieldname", "featurename"}:
+                    raise ProspectiveEvidenceError("ambiguous semantic field label")
         result = {}
         for key, item in value.items():
             if not isinstance(key, str):
@@ -263,15 +291,17 @@ def _check_body(raw: bytes) -> None:
         text = raw.decode("utf-8")
     except UnicodeError as exc:
         raise ProspectiveEvidenceError("v1 requires inspectable UTF-8 response bytes") from exc
-    _safe_text(text)
     if text.lstrip().startswith(("{", "[", '"')):
         try:
             decoded = _decode_json(raw)
         except ProspectiveEvidenceError:
             if text.lstrip().startswith('"'):
+                _safe_text(text)
                 return
             raise
         _safe_json(decoded, semantic_fields=True)
+    else:
+        _safe_text(text)
 
 
 def immutable(value: object) -> object:
