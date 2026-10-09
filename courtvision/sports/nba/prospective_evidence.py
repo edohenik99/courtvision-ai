@@ -19,7 +19,9 @@ from typing import Callable
 from urllib.parse import parse_qsl, unquote_plus, urlsplit
 
 from courtvision.sports.nba.artifact_domains import NBA_PROSPECTIVE_EVIDENCE, require_artifact_path
-from courtvision.sports.nba.prospective_io import ArtifactConfinementError, create_once_bytes
+from courtvision.sports.nba.prospective_io import (
+    ArtifactConfinementError, create_once_bytes, create_once_directory,
+)
 
 EVIDENCE_SCHEMA = "nba-prospective-provider-evidence-v1"
 CAPTURE_MODE = "SYNTHETIC_OFFLINE"
@@ -626,6 +628,15 @@ def write_once(path: Path, raw: bytes) -> None:
         raise ProspectiveEvidenceError("artifact write confinement failed") from None
 
 
+def claim_directory(path: Path) -> None:
+    path = plain_path(path)
+    try:
+        create_once_directory(path)
+    except (ArtifactConfinementError, UnicodeError):
+        raise ProspectiveEvidenceError("artifact directory claim confinement failed") from None
+    plain_path(path)
+
+
 def read_document(path: Path) -> dict:
     try:
         raw = plain_path(path).read_bytes()
@@ -733,10 +744,8 @@ def capture_response(journal_root: str | Path, *, request: dict, requested_at_ut
     # Detach nested caller-owned mappings before any filesystem operation.
     manifest = _decode_json(canonical_bytes(manifest))
     root = plain_path(Path(journal_root) / EVIDENCE_SCHEMA / manifest["request_id"])
-    root.parent.mkdir(parents=True, exist_ok=True)
-    plain_path(root)
     try:
-        root.mkdir()
+        claim_directory(root)
     except FileExistsError:
         saved = verify_capture(journal_root, manifest["request_id"])
         if saved.manifest != immutable(manifest) or saved.raw_body != raw_body:

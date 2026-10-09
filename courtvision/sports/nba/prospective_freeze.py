@@ -17,7 +17,7 @@ from courtvision.sports.nba.artifact_domains import NBA_PROSPECTIVE_EVIDENCE, TA
 from courtvision.sports.nba.prospective_evidence import (
     ProspectiveEvidenceError, _PARAMETER_DESCRIPTORS, _numeric_version_ends, _numeric_version_starts,
     _safe_json, _semantic_key, _subject_offsets, canonical_bytes,
-    digest, immutable, plain_path,
+    claim_directory, digest, immutable, plain_path,
     read_document, require_date, require_hash, require_id, source_manifest, utc_clock,
     verify_capture, write_once,
 )
@@ -145,7 +145,8 @@ _PERMISSION_ACTIONS = ("use", "place", "enable", "allow", "authorize", "permit")
 _ECONOMIC_COMPOUNDS = tuple(route for route in _ECONOMIC_ROUTE_COMPACT if route != "bet")
 _BET_DESCRIPTORS = ("amount", "budget", "stake", "size", "sizing", "permission", "approval",
     "enabled", "eligibility", "eligible", "allowed", "authorized", "permitted", "route", "limit", "limits")
-_BET_SIZING_STEMS = tuple(qualifier + "bet" for qualifier in ("max", "min", "maximum", "minimum"))
+_BET_SIZING_STEMS = tuple(stem for qualifier in ("max", "min", "maximum", "minimum")
+    for stem in (qualifier + "bet", "bet" + qualifier))
 _SHORT_BET_COMPOUNDS = frozenset(action + "bet" for action in _PERMISSION_ACTIONS)
 _SHORT_BET_PREFIXES = tuple(prefix + "bet" + descriptor
     for prefix in ("", *_PERMISSION_ACTIONS) for descriptor in _BET_DESCRIPTORS) + ("bettable",)
@@ -702,10 +703,8 @@ def freeze_models(freeze_root: str | Path, *, metadata: PreseasonMeasurement, ro
         snapshot_file_sha256=hashlib.sha256(blobs["model_snapshots.jsonl"]).hexdigest(),
         exclusion_file_sha256=hashlib.sha256(blobs["exclusions.json"]).hexdigest(), created_at_utc=created.isoformat())
     manifest["manifest_sha256"] = digest(manifest)
-    root.parent.mkdir(parents=True, exist_ok=True)
-    plain_path(root)
     try:
-        root.mkdir()
+        claim_directory(root)
     except FileExistsError as exc:
         raise ProspectiveEvidenceError("freeze run was claimed concurrently") from exc
     for name, raw in blobs.items():

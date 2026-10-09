@@ -2,6 +2,7 @@
 from dataclasses import FrozenInstanceError, replace
 from datetime import datetime, timezone
 import json
+import os
 import socket
 
 import pytest
@@ -690,17 +691,15 @@ def test_freeze_source_raw_tamper_and_journal_alias_fail_verification(tmp_path):
 
 
 def test_directory_claim_race_cannot_overwrite(tmp_path, monkeypatch):
-    from pathlib import Path
+    from courtvision.sports.nba import prospective_freeze as freezing
     capture(tmp_path)
     row = snapshot(tmp_path)
-    real_mkdir = Path.mkdir
-    def rival_claim(self, *args, **kwargs):
-        if self.name == metadata().prediction_run_id:
-            real_mkdir(self, *args, **kwargs)
-            (self / "rival.txt").write_bytes(b'preserve')
-            raise FileExistsError("simulated concurrent claim")
-        return real_mkdir(self, *args, **kwargs)
-    monkeypatch.setattr(Path, "mkdir", rival_claim)
+    real_claim = freezing.claim_directory
+    def rival_claim(path):
+        real_claim(path)
+        (path / "rival.txt").write_bytes(b'preserve')
+        raise FileExistsError("simulated concurrent claim")
+    monkeypatch.setattr(freezing, "claim_directory", rival_claim)
     with pytest.raises(ProspectiveEvidenceError, match="concurrently"):
         freeze(tmp_path, rows=[row])
     root = tmp_path / "articles" / FREEZE_SCHEMA / metadata().prediction_run_id
@@ -5205,7 +5204,8 @@ def test_account_key_credentials_cannot_enter_model_or_fully_resigned_freeze(tmp
 
 
 @pytest.mark.parametrize("field,value,form", [("MAXBET", 2.5, "mapping"),
-    ("MINBET", 2.5, "pair"), ("BETLIMIT", {"amount": 2.5}, "encoded")])
+    ("MINBET", 2.5, "pair"), ("BETLIMIT", {"amount": 2.5}, "encoded"),
+    ("BETMAX", False, "field_name"), ("BETMIN", {"amount": 2.5}, "encoded")])
 @pytest.mark.parametrize("boundary", ["constructor", "disk"])
 def test_compact_bet_sizing_cannot_enter_model_or_fully_resigned_freeze(tmp_path, field, value, form, boundary):
     inputs = semantic_alias_inputs(field, value, form)
@@ -5299,9 +5299,10 @@ def test_independent_account_key_contract_rejects_root_plural_role_descriptor_an
 
 
 def test_independent_compact_bet_contract_rejects_sizing_aliases_and_all_value_shapes():
-    bases = ("max_bet", "min_bet", "maximum_bet", "minimum_bet", "bet_limit", "bet_limits")
+    bases = ("max_bet", "min_bet", "maximum_bet", "minimum_bet", "bet_max", "bet_min",
+             "bet_maximum", "bet_minimum", "bet_limit", "bet_limits")
     names = tuple(base + descriptor for base in bases for descriptor in ("", "_value", "_amount"))
-    names += ("max_bet_param_v2", "max_bet_param_2")
+    names += ("max_bet_param_v2", "max_bet_param_2", "bet_max_param_v2", "bet_min_param_2")
     for name in names:
         parts = name.split("_")
         aliases = (name, parts[0] + "".join(part.title() for part in parts[1:]),
@@ -5326,6 +5327,7 @@ def test_account_key_and_compact_bet_policy_preserves_exact_scientific_custody_a
         "token_count": 3, "token_length": 32, "request_latency_ms": 42,
         "beta": 0.4, "max_beta": 0.4, "min_beta": 0.3, "MAXBETA": 0.4,
         "MINBETTER": 13, "max_better_estimate": 13, "better_estimate": 13, "alphabet": 26,
+        "betamax": "synthetic-format", "betamax_count": 0,
         "beta_distribution": {"alpha": 2, "beta": 3}, "can_bet": False,
         "historical_points_totals": 340, "projected_totals_points": 13,
         "total": 340, "totals": 340, "totality": 0.4, "current_totality": 0.4,
@@ -5346,3 +5348,144 @@ def test_account_key_and_compact_bet_policy_preserves_exact_scientific_custody_a
     assert source_manifest(tmp_path / "journal", ["stats-1"])["stats-1"]["parameters"] == parameters
     assert saved.raw_body == body == verify_capture(tmp_path / "journal", "stats-1").raw_body
     assert saved.manifest["raw_body_sha256"] == digest_body(body)
+
+
+def directory_claim_boundary(tmp_path, boundary):
+    if boundary == "freeze":
+        capture(tmp_path)
+        row = snapshot(tmp_path)
+        root = tmp_path / "articles" / FREEZE_SCHEMA / metadata().prediction_run_id
+        return root, lambda: freeze(tmp_path, rows=[row]), lambda: verify(tmp_path, root)
+    root = tmp_path / "journal" / EVIDENCE_SCHEMA / "stats-1"
+    return root, lambda: capture(tmp_path), lambda: verify_capture(tmp_path / "journal", "stats-1")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX directory durability requires real no-follow directory fds")
+@pytest.mark.parametrize("boundary", ["freeze", "capture"])
+def test_posix_directory_claim_syncs_new_ancestors_before_any_payload(tmp_path, monkeypatch, boundary):
+    import stat
+    from courtvision.sports.nba import prospective_evidence as evidence
+    from courtvision.sports.nba import prospective_freeze as freezing
+    from courtvision.sports.nba import prospective_io as secure
+    root, invoke, readback = directory_claim_boundary(tmp_path, boundary)
+    caller = freezing if boundary == "freeze" else evidence
+    real_fsync, real_write = secure.os.fsync, caller.write_once
+    new_directories = (root.parent.parent, root.parent, root)
+    assert all(not path.exists() for path in new_directories)
+    events, directory_descriptors = [], set()
+    def identity(info):
+        return info.st_dev, info.st_ino
+    def record_fsync(descriptor):
+        info = os.fstat(descriptor)
+        if stat.S_ISDIR(info.st_mode):
+            events.append(("fsync", identity(info)))
+            directory_descriptors.add(descriptor)
+        real_fsync(descriptor)
+    def record_write(path, raw):
+        events.append(("write", path.name))
+        return real_write(path, raw)
+    monkeypatch.setattr(secure.os, "fsync", record_fsync)
+    monkeypatch.setattr(caller, "write_once", record_write)
+    first = invoke()
+    first_write = next(index for index, event in enumerate(events) if event[0] == "write")
+    for path in new_directories:
+        child_sync = next(index for index in range(first_write)
+            if events[index] == ("fsync", identity(path.stat())))
+        parent_sync = next(index for index in range(child_sync + 1, first_write)
+            if events[index] == ("fsync", identity(path.parent.stat())))
+        assert child_sync < parent_sync < first_write
+    assert readback() is not None
+    original_bytes = {path.name: path.read_bytes() for path in root.iterdir()}
+    writes = sum(event[0] == "write" for event in events)
+    assert invoke() == first
+    assert sum(event[0] == "write" for event in events) == writes
+    assert {path.name: path.read_bytes() for path in root.iterdir()} == original_bytes
+    for descriptor in directory_descriptors:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX directory durability requires real no-follow directory fds")
+@pytest.mark.parametrize("boundary", ["freeze", "capture"])
+def test_posix_directory_claim_parent_sync_failure_retains_claim_and_blocks_retry(tmp_path, monkeypatch, boundary):
+    from courtvision.sports.nba import prospective_evidence as evidence
+    from courtvision.sports.nba import prospective_freeze as freezing
+    from courtvision.sports.nba import prospective_io as secure
+    root, invoke, readback = directory_claim_boundary(tmp_path, boundary)
+    caller = freezing if boundary == "freeze" else evidence
+    real_fsync, real_write = secure.os.fsync, caller.write_once
+    failed_descriptors, writes = [], []
+    def fail_leaf_parent_sync(descriptor):
+        info = os.fstat(descriptor)
+        if root.is_dir():
+            parent_info = root.parent.stat()
+            if (info.st_dev, info.st_ino) == (parent_info.st_dev, parent_info.st_ino):
+                failed_descriptors.append(descriptor)
+                raise OSError("synthetic directory-entry sync failure")
+        real_fsync(descriptor)
+    def record_write(path, raw):
+        writes.append(path.name)
+        return real_write(path, raw)
+    monkeypatch.setattr(secure.os, "fsync", fail_leaf_parent_sync)
+    monkeypatch.setattr(caller, "write_once", record_write)
+    with pytest.raises(OSError, match="directory-entry sync failure"):
+        invoke()
+    assert len(failed_descriptors) == 1
+    assert root.is_dir() and list(root.iterdir()) == [] and writes == []
+    assert not (root / "freeze.json").exists() and not (root / "manifest.json").exists()
+    with pytest.raises(OSError):
+        os.fstat(failed_descriptors[0])
+    with pytest.raises(ProspectiveEvidenceError):
+        readback()
+    monkeypatch.setattr(secure.os, "fsync", real_fsync)
+    with pytest.raises(ProspectiveEvidenceError):
+        invoke()
+    assert list(root.iterdir()) == [] and writes == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX directory durability requires real no-follow directory fds")
+def test_posix_directory_claim_ancestor_sync_failure_retains_only_created_ancestors(tmp_path, monkeypatch):
+    from courtvision.sports.nba import prospective_io as secure
+    ancestor = tmp_path / "new-ancestor"
+    root = ancestor / "next-ancestor" / "exclusive-claim"
+    real_fsync, failed_descriptors = secure.os.fsync, []
+    def fail_new_ancestor_sync(descriptor):
+        info = os.fstat(descriptor)
+        if ancestor.is_dir():
+            ancestor_info = ancestor.stat()
+            if (info.st_dev, info.st_ino) == (ancestor_info.st_dev, ancestor_info.st_ino):
+                failed_descriptors.append(descriptor)
+                raise OSError("synthetic ancestor sync failure")
+        real_fsync(descriptor)
+    monkeypatch.setattr(secure.os, "fsync", fail_new_ancestor_sync)
+    with pytest.raises(OSError, match="ancestor sync failure"):
+        secure.create_once_directory(root)
+    assert len(failed_descriptors) == 1
+    assert ancestor.is_dir() and list(ancestor.iterdir()) == []
+    assert not root.parent.exists() and not root.exists()
+    with pytest.raises(OSError):
+        os.fstat(failed_descriptors[0])
+    marker = ancestor / "retained-marker.bin"
+    marker.write_bytes(b"preserved-ancestor")
+    monkeypatch.setattr(secure.os, "fsync", real_fsync)
+    secure.create_once_directory(root)
+    assert root.is_dir() and list(root.iterdir()) == []
+    assert marker.read_bytes() == b"preserved-ancestor"
+    with pytest.raises(FileExistsError):
+        secure.create_once_directory(root)
+    assert marker.read_bytes() == b"preserved-ancestor" and list(root.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX directory confinement requires real no-follow directory fds")
+def test_posix_directory_claim_rejects_link_ancestor_without_redirected_creation(tmp_path):
+    from courtvision.sports.nba import prospective_io as secure
+    redirect = tmp_path / "owned-redirect"
+    redirect.mkdir()
+    marker = redirect / "retained-marker.bin"
+    marker.write_bytes(b"preserved-target")
+    link = tmp_path / "linked-ancestor"
+    link.symlink_to(redirect, target_is_directory=True)
+    with pytest.raises((secure.ArtifactConfinementError, OSError)):
+        secure.create_once_directory(link / "missing-ancestor" / "exclusive-claim")
+    assert link.is_symlink() and marker.read_bytes() == b"preserved-target"
+    assert {path.name for path in redirect.iterdir()} == {"retained-marker.bin"}

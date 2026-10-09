@@ -1,11 +1,13 @@
-"""Exclusive artifact payload creation without following substituted parents.
+"""Exclusive payload writes and durability for artifact directory claims.
 
-Callers validate their artifact domain before entering this primitive. Windows
-opens every component relative to a retained directory handle and refuses
+Callers validate their artifact domain before entering these primitives. Windows
+payload creation opens every component relative to a retained directory handle and refuses
 reparse processing. POSIX uses component-relative no-follow directory fds.
+POSIX directory claims sync each directory and its parent entry before returning;
+Windows directory claims preserve the existing mkdir behavior.
 Those fds prevent symlink redirection, but cannot stop another process renaming
-an already opened directory. This primitive does not create directories or
-claim to secure unrelated path-based readers against concurrent mutation.
+an already opened directory. These primitives do not secure unrelated
+path-based readers against concurrent mutation.
 """
 from __future__ import annotations
 
@@ -18,7 +20,7 @@ import stat
 
 
 class ArtifactConfinementError(ValueError):
-    """The exclusive payload operation cannot prove a plain filesystem path."""
+    """Artifact creation cannot prove a plain filesystem path."""
 
 
 def _components(path: Path) -> tuple[str, tuple[str, ...]]:
@@ -177,6 +179,53 @@ def _exclusive_file(path: Path):
             os.fsync(parent)
     else:
         raise ArtifactConfinementError("unsupported artifact filesystem platform")
+
+
+def create_once_directory(path: Path) -> None:
+    """Claim a new leaf after syncing its POSIX directory ancestry and entry.
+
+    Existing ancestors are permitted; only an existing leaf raises the claim
+    collision. Any new directories remain in place if validation or fsync fails.
+    """
+    anchor, parts = _components(path)
+    if os.name == "nt":
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.mkdir()
+        return
+    if (os.name != "posix" or not hasattr(os, "O_NOFOLLOW")
+            or os.open not in os.supports_dir_fd or os.mkdir not in os.supports_dir_fd):
+        raise ArtifactConfinementError("no-follow relative directory operations required")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    with ExitStack() as cleanup:
+        parent = os.open(anchor, flags)
+        cleanup.callback(os.close, parent)
+        if not stat.S_ISDIR(os.fstat(parent).st_mode):
+            raise ArtifactConfinementError("artifact anchor is not a directory")
+
+        def open_child(name: str, descriptor: int) -> int:
+            child = os.open(name, flags, dir_fd=descriptor)
+            cleanup.callback(os.close, child)
+            if not stat.S_ISDIR(os.fstat(child).st_mode):
+                raise ArtifactConfinementError("artifact claim component is not a directory")
+            return child
+
+        for name in parts[:-1]:
+            try:
+                child = open_child(name, parent)
+            except FileNotFoundError:
+                try:
+                    os.mkdir(name, 0o700, dir_fd=parent)
+                except FileExistsError:
+                    # An ancestor created concurrently still needs a no-follow fd.
+                    pass
+                child = open_child(name, parent)
+            os.fsync(child)
+            os.fsync(parent)
+            parent = child
+        os.mkdir(parts[-1], 0o700, dir_fd=parent)
+        child = open_child(parts[-1], parent)
+        os.fsync(child)
+        os.fsync(parent)
 
 
 def create_once_bytes(path: Path, raw: bytes) -> None:

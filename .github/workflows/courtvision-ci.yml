@@ -187,7 +187,7 @@ jobs:
                   raise RuntimeError('OFFLINE_PROVIDER_NETWORK_FORBIDDEN')
           sys.addaudithook(offline)
           import pytest
-          selected = 'parent_or_leaf_substitution or acquired_directory_guard or secure_payload_creation or failed_secure_payload_write'
+          selected = 'parent_or_leaf_substitution or acquired_directory_guard or secure_payload_creation or failed_secure_payload_write or directory_claim'
           result = pytest.main(['-q', '-x', '-p', 'no:cacheprovider', '--basetemp', str(root / 'pytest'), 'tests/test_nba_prospective_foundation.py', '-k', selected])
           sys.exit(result if not attempts else 3)
           PY
