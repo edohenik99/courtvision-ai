@@ -287,8 +287,14 @@ def _operational_endpoint(provider: str, capture: VerifiedLiveCapture, at: datet
         if (not {"sport", "tier", "status", "current_period_end", "cancel_at_period_end"} <= row.keys()
                 or type(row["cancel_at_period_end"]) is not bool):
             raise LiveCaptureError("NBA entitlement fields are unresolved")
-        if row["tier"] == "free" and row["status"] is None and row["current_period_end"] is None:
-            return None  # Games are in the documented free NBA endpoint scope.
+        if type(row["tier"]) is str and row["tier"] == "free":
+            status, period = row["status"], row["current_period_end"]
+            if status is not None and not (type(status) is str and status == "unpaid"):
+                raise LiveCaptureError("NBA free-tier billing metadata is unresolved")
+            if period is not None:
+                utc_clock(period)
+            # Free Games scope is independent of billing metadata; no paid access.
+            return None
         if (not isinstance(row["tier"], str) or row["tier"] not in {"paid", "paid_plus", "all_access_v3"}
                 or not isinstance(row["status"], str) or row["status"] not in {"active", "trialing"}
                 or utc_clock(row["current_period_end"]) <= at):
@@ -299,7 +305,7 @@ def _operational_endpoint(provider: str, capture: VerifiedLiveCapture, at: datet
     token, season, phase = document.get("ApiSeason"), document.get("Season"), document.get("SeasonType")
     if (not isinstance(token, str) or re.fullmatch(r"[12][0-9]{3}PRE", token) is None
             or type(season) is not int or season != int(token[:4])
-            or not ((type(phase) is int and phase == 2) or (type(phase) is str and phase == "2"))):
+            or not ((type(phase) is int and phase == 2) or (type(phase) is str and phase in {"2", "PRE"}))):
         raise LiveCaptureError("observed preseason token is unresolved")
     return "/v3/nba/scores/json/SchedulesBasic/" + token
 

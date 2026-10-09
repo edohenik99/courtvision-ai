@@ -1041,3 +1041,119 @@ def test_directory_claim_namespace_failure_blocks_return_or_http_without_replaci
         invoke()
     assert transport.calls == [] and not (run_root / "002").exists()
     assert _snapshot(run_root) == before
+
+
+@pytest.mark.parametrize("status,period,cancel", [
+    (None, "2026-10-09T18:00:00Z", False),
+    ("unpaid", "2026-10-09T18:00:00Z", False),
+    ("unpaid", "2026-10-01T18:00:00Z", True),
+], ids=["nullable-status-with-period", "unpaid-current-period", "unpaid-past-period"])
+def test_bdl_control_enum_free_billing_metadata_permits_only_games_custody(tmp_path, clock, status, period, cancel):
+    control = json.loads(json.dumps(BDL_FREE))
+    control["data"][0].update(status=status, current_period_end=period, cancel_at_period_end=cancel)
+    body = _body(control)
+    schedule = _body({"data": [{"id": 101, "date": "2026-10-08",
+        "season_type": "preseason", "status": "scheduled"}]})
+    pilot, transport = _claim(tmp_path, responses=[_response(body), _response(schedule)])
+    assert _fetch_first(pilot).raw_body == body
+    verified = live.verify_live_pilot(pilot.root)
+    assert verified.can_continue and verified.attempts_reserved == 1
+    assert verified.qualification_status == "CUSTODY_ONLY"
+    assert verified.qualified_minutes_inputs == 0 and verified.required_minutes_inputs == 16
+    clock.advance()
+    before = _snapshot(pilot.root)
+    for endpoint in ("/v1/stats", "/v1/player_injuries", "/v1/players/active"):
+        with pytest.raises(ProspectiveEvidenceError):
+            pilot.fetch_next(endpoint=endpoint, parameters={}, credential=CREDENTIAL)
+        assert len(transport.calls) == 1 and not (pilot.root / "002").exists()
+        assert _snapshot(pilot.root) == before
+    captured = _fetch_second(pilot)
+    assert captured.raw_body == schedule
+    intent = read_document(pilot.root / "002" / "intent.json")
+    assert intent["request"]["endpoint"] == BDL_SECOND
+    assert intent["request"]["parameters"] == BDL_PARAMETERS
+    assert intent["request"]["source_role"] == "factual_schedule"
+    verified = live.verify_live_pilot(pilot.root)
+    assert len(transport.calls) == 2 and verified.attempts_reserved == 2
+    assert verified.captures[0].raw_body == body and verified.captures[1].raw_body == schedule
+    assert not verified.can_continue and verified.qualification_status == "CUSTODY_ONLY"
+    assert verified.qualified_minutes_inputs == 0 and verified.required_minutes_inputs == 16
+
+
+@pytest.mark.parametrize("changes", [
+    {"tier": "FREE"}, {"status": "active"}, {"status": "UNPAID"},
+    {"status": "unpaid "}, {"status": False},
+    {"current_period_end": "not-a-clock"},
+    {"current_period_end": "2026-10-09T18:00:00"},
+    {"current_period_end": "2026-10-09T19:00:00+01:00"},
+    {"current_period_end": 12}, {"cancel_at_period_end": 0},
+], ids=["unknown-tier", "paid-status-on-free", "unknown-status-case", "status-whitespace",
+        "status-type", "malformed-period", "naive-period", "non-utc-period",
+        "period-type", "cancellation-type"])
+def test_bdl_control_enum_malformed_or_contradictory_free_metadata_stops_games(tmp_path, clock, changes):
+    control = json.loads(json.dumps(BDL_FREE))
+    control["data"][0].update(status="unpaid", current_period_end="2026-10-09T18:00:00Z")
+    control["data"][0].update(changes)
+    body = _body(control)
+    pilot, transport = _claim(tmp_path, responses=[_response(body)])
+    assert _fetch_first(pilot).raw_body == body
+    verified = live.verify_live_pilot(pilot.root)
+    assert not verified.can_continue and verified.attempts_reserved == 1
+    assert verified.qualification_status == "CUSTODY_ONLY"
+    assert verified.qualified_minutes_inputs == 0 and verified.required_minutes_inputs == 16
+    before = _snapshot(pilot.root)
+    clock.advance()
+    with pytest.raises(ProspectiveEvidenceError):
+        _fetch_second(pilot)
+    assert len(transport.calls) == 1 and not (pilot.root / "002").exists()
+    assert _snapshot(pilot.root) == before
+
+
+def test_sdi_control_enum_exact_pre_preserves_schedule_row_bytes_and_custody_only_status(tmp_path, clock):
+    control = dict(SDI_PRE, SeasonType="PRE")
+    body = _body(control)
+    rows = [{"GameID": 101, "Season": 2027, "SeasonType": 2, "Status": "Scheduled"}]
+    schedule = _body(rows)
+    pilot, transport = _claim(tmp_path, "sportsdataio", [_response(body), _response(schedule)])
+    assert _fetch_first(pilot, "sportsdataio").raw_body == body
+    assert live.verify_live_pilot(pilot.root).can_continue
+    clock.advance()
+    captured = _fetch_second(pilot, "sportsdataio")
+    assert captured.raw_body == schedule
+    intent = read_document(pilot.root / "002" / "intent.json")
+    assert intent["request"]["endpoint"] == SDI_SECOND
+    assert intent["request"]["parameters"] == {}
+    assert intent["request"]["source_role"] == "factual_schedule"
+    verified = live.verify_live_pilot(pilot.root)
+    assert len(transport.calls) == 2 and verified.attempts_reserved == 2
+    assert verified.captures[0].raw_body == body and verified.captures[1].raw_body == schedule
+    assert json.loads(verified.captures[1].raw_body) == rows
+    assert type(json.loads(verified.captures[1].raw_body)[0]["SeasonType"]) is int
+    assert not verified.can_continue and verified.qualification_status == "CUSTODY_ONLY"
+    assert verified.qualified_minutes_inputs == 0 and verified.required_minutes_inputs == 16
+
+
+@pytest.mark.parametrize("changes", [
+    {"SeasonType": "pre"}, {"SeasonType": " PRE "}, {"SeasonType": "REG"},
+    {"SeasonType": "POST"}, {"SeasonType": "UNKNOWN"}, {"SeasonType": True},
+    {"SeasonType": 2.0}, {"ApiSeason": "2027pre"}, {"ApiSeason": "2027PRE "},
+    {"ApiSeason": "2027REG"}, {"ApiSeason": "2027POST"}, {"Season": "2027"},
+    {"Season": 2026},
+], ids=["phase-case", "phase-whitespace", "regular-phase", "postseason-phase",
+        "unknown-phase", "phase-bool", "phase-float", "token-case",
+        "token-whitespace", "regular-token", "postseason-token", "season-type",
+        "season-mismatch"])
+def test_sdi_control_enum_inexact_or_conflicting_pre_metadata_stops_schedule(tmp_path, clock, changes):
+    body = _body({**SDI_PRE, "SeasonType": "PRE", **changes})
+    pilot, transport = _claim(tmp_path, "sportsdataio", [_response(body)])
+    assert _fetch_first(pilot, "sportsdataio").raw_body == body
+    verified = live.verify_live_pilot(pilot.root)
+    assert not verified.can_continue and verified.attempts_reserved == 1
+    assert verified.qualification_status == "CUSTODY_ONLY"
+    assert verified.qualified_minutes_inputs == 0 and verified.required_minutes_inputs == 16
+    before = _snapshot(pilot.root)
+    clock.advance()
+    with pytest.raises(ProspectiveEvidenceError):
+        _fetch_second(pilot, "sportsdataio")
+    assert len(transport.calls) == 1 and not (pilot.root / "002").exists()
+    assert _snapshot(pilot.root) == before
