@@ -3,6 +3,8 @@
 Each run permanently reserves at most two physical GET attempts. Interrupted
 attempts and unsuccessful responses stop the run. No retries, redirects, mutable
 cache, sportsbook routes or credentials in persisted request identity.
+Plan and intent namespaces pass an OS directory barrier before transport. This
+does not independently qualify model inputs or prove power-loss survival.
 """
 from __future__ import annotations
 
@@ -22,6 +24,7 @@ from courtvision.sports.nba.prospective_evidence import (
     claim_directory, immutable, plain_path, read_document, require_date, require_hash, require_id,
     utc_clock, write_once,
 )
+from courtvision.sports.nba.prospective_io import sync_directory_namespace
 
 LIVE_SCHEMA = "nba-factual-custody-rehearsal-v1"
 MAX_BODY_BYTES = 1_048_576
@@ -427,11 +430,12 @@ class LivePilot:
             "request": request, "request_sha256": digest(request), "reserved_at_utc": _stamp(reserved),
             "previous_receipt_sha256": saved.receipts[-1]["receipt_sha256"] if saved.receipts else None}, "intent_sha256")
         directory = plain_path(self.root / f"{ordinal:03d}")
-        claim_directory(directory)  # Exclusive durable attempt claim.
+        claim_directory(directory)  # Exclusive claim; intent namespace barrier follows.
         write_once(directory / "intent.json", canonical_bytes(intent) + b"\n")
         # Reservation readback is mandatory before the sole transport invocation.
         if canonical_bytes(read_document(directory / "intent.json")) != canonical_bytes(intent):
             raise LiveCaptureError("reservation readback differs")
+        sync_directory_namespace(directory)  # Failure retains intent and makes no HTTP attempt.
         started = _now()
         monotonic_start = time.monotonic()
         error_code = "TRANSPORT_FAILED"
@@ -507,4 +511,5 @@ def claim_live_pilot(journal_root: str | Path, *, run_id: str, provider: str,
     claim_directory(root)  # Never resume or replace an existing claim.
     write_once(root / "plan.json", canonical_bytes(plan) + b"\n")
     verify_live_pilot(root)
+    sync_directory_namespace(root)  # Plan name and ancestry must survive before use.
     return LivePilot(root, transport)

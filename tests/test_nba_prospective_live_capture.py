@@ -6,6 +6,7 @@ from email.message import Message
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import socket
 from urllib.error import HTTPError
@@ -873,3 +874,170 @@ def test_attempt_directory_claim_barrier_failure_blocks_retry_without_calls(
     assert transport.calls == [] and not (pilot.root / "002").exists()
     assert directory.is_dir() and list(directory.iterdir()) == []
     assert _snapshot(pilot.root) == before
+
+
+def _namespace_barrier_operation(tmp_path, boundary):
+    if boundary == "pilot":
+        transport = Transport([_response(_body(BDL_PAID))])
+        root = tmp_path / live.LIVE_SCHEMA / "namespace-failure"
+        def invoke():
+            return live.claim_live_pilot(tmp_path, run_id="namespace-failure",
+                provider="balldontlie", repository_commit_sha=REPOSITORY_SHA,
+                transport=transport)
+        return root, root, transport, invoke
+    pilot, transport = _claim(tmp_path)
+    return pilot.root / "001", pilot.root, transport, lambda: _fetch_first(pilot)
+
+
+def _native_directory_identity(kernel, information_type, handle):
+    import ctypes
+    info = information_type()
+    assert kernel.GetFileInformationByHandle(handle, ctypes.byref(info))
+    assert kernel.GetFileType(handle) == 1
+    assert info.Attributes & 0x10 and not info.Attributes & 0x400
+    return info.Volume, (info.IndexHigh << 32) | info.IndexLow
+
+
+def _native_directory_path_identity(secure, path):
+    import ctypes
+    kernel, _, _, _, _, information_type = secure._windows_api()
+    handle = kernel.CreateFileW(str(path), 0x80, 0x7, None, 3,
+        0x02000000 | 0x00200000, None)
+    assert handle and handle != ctypes.c_void_p(-1).value
+    try:
+        return _native_directory_identity(kernel, information_type, handle)
+    finally:
+        assert kernel.CloseHandle(handle)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows namespace durability requires real native directory handles")
+def test_windows_directory_claim_namespace_flush_uses_real_native_normal_flags_and_bottom_up_identities(tmp_path, monkeypatch):
+    import ctypes
+    from courtvision.sports.nba import prospective_io as secure
+    root = tmp_path / "namespace-parent" / "namespace-leaf"
+    root.mkdir(parents=True)
+    kernel, native, _, attributes_type, status_type, information_type = secure._windows_api()
+    expected = [_native_directory_path_identity(secure, path) for path in (root, *root.parents)]
+    real_flush, real_create, real_root = native.NtFlushBuffersFileEx, native.NtCreateFile, kernel.CreateFileW
+    flushed, handles, child_opens, root_opens = [], [], [], []
+    def record_root(*args):
+        root_opens.append((args[0], args[1], args[2], args[4], args[5]))
+        return real_root(*args)
+    def record_create(*args):
+        attributes = ctypes.cast(args[2], ctypes.POINTER(attributes_type)).contents
+        child_opens.append((args[1], args[6], args[7], attributes.Attributes, args[8]))
+        return real_create(*args)
+    def record_flush(handle, flags, parameters, length, io_status):
+        assert flags == 0 and parameters is None and length == 0
+        identity = _native_directory_identity(kernel, information_type, handle)
+        status = real_flush(handle, flags, parameters, length, io_status)
+        completion = ctypes.cast(io_status, ctypes.POINTER(status_type)).contents.Result.Status
+        assert status == 0 and completion == 0
+        flushed.append(identity)
+        handles.append(handle)
+        return status
+    monkeypatch.setattr(kernel, "CreateFileW", record_root)
+    monkeypatch.setattr(native, "NtCreateFile", record_create)
+    monkeypatch.setattr(native, "NtFlushBuffersFileEx", record_flush)
+    secure.sync_directory_namespace(root)
+    assert flushed == expected
+    assert root_opens == [(root.anchor, 0x1000A4, 0x1, 3, 0x02000000 | 0x00200000)]
+    assert len(child_opens) == len(expected) - 1
+    for access, share, disposition, attributes, options in child_opens:
+        assert access == 0x1000A4 and share == 0x1 and disposition == 0x1
+        assert attributes & 0x1000
+        assert options & 0x00200000 and options & 0x1 and options & 0x20
+    for handle in handles:
+        info = information_type()
+        assert not kernel.GetFileInformationByHandle(handle, ctypes.byref(info))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows namespace failures require real native directory flush calls")
+@pytest.mark.parametrize("boundary,target,defect", [
+    ("pilot", "leaf", "status"), ("pilot", "parent", "completion"),
+    ("attempt", "leaf", "completion"), ("attempt", "parent", "status"),
+])
+def test_windows_directory_claim_native_namespace_failure_retains_budget_before_http(
+        tmp_path, clock, monkeypatch, boundary, target, defect):
+    import ctypes
+    from courtvision.sports.nba import prospective_io as secure
+    directory, run_root, transport, invoke = _namespace_barrier_operation(tmp_path, boundary)
+    kernel, native, _, _, status_type, information_type = secure._windows_api()
+    real_flush, real_namespace = native.NtFlushBuffersFileEx, live.sync_directory_namespace
+    expected, flushed, injected = [], [], []
+    target_identity = None
+    def observe_namespace(path):
+        nonlocal target_identity
+        assert path == directory
+        expected.extend(_native_directory_path_identity(secure, item)
+            for item in (directory, directory.parent))
+        target_identity = expected[0 if target == "leaf" else 1]
+        return real_namespace(path)
+    def fail_reported_native_result(handle, flags, parameters, length, io_status):
+        assert flags == 0 and parameters is None and length == 0
+        identity = _native_directory_identity(kernel, information_type, handle)
+        status = real_flush(handle, flags, parameters, length, io_status)
+        completion = ctypes.cast(io_status, ctypes.POINTER(status_type)).contents
+        assert status == 0 and completion.Result.Status == 0
+        flushed.append(identity)
+        if identity == target_identity:
+            injected.append(identity)
+            denied = ctypes.c_int32(0xC0000022).value
+            if defect == "completion":
+                completion.Result.Status = denied
+                return 0
+            return denied
+        return status
+    monkeypatch.setattr(live, "sync_directory_namespace", observe_namespace)
+    monkeypatch.setattr(native, "NtFlushBuffersFileEx", fail_reported_native_result)
+    result = None
+    with pytest.raises(OSError) as caught:
+        result = invoke()
+    assert result is None and caught.value.winerror == 5
+    assert CREDENTIAL not in str(caught.value)
+    assert injected == [target_identity]
+    assert flushed == expected[:1 if target == "leaf" else 2]
+    assert transport.calls == []
+    assert {path.name for path in directory.iterdir()} == (
+        {"plan.json"} if boundary == "pilot" else {"intent.json"})
+    before = _snapshot(run_root)
+    assert CREDENTIAL.encode() not in b"".join(before.values())
+    if boundary == "attempt":
+        assert read_document(directory / "intent.json")["ordinal"] == 1
+        with pytest.raises(ProspectiveEvidenceError):
+            live.verify_live_pilot(run_root)
+    monkeypatch.setattr(native, "NtFlushBuffersFileEx", real_flush)
+    monkeypatch.setattr(live, "sync_directory_namespace", real_namespace)
+    with pytest.raises(FileExistsError if boundary == "pilot" else ProspectiveEvidenceError):
+        invoke()
+    assert transport.calls == [] and not (run_root / "002").exists()
+    assert _snapshot(run_root) == before
+
+
+@pytest.mark.parametrize("boundary", ["pilot", "attempt"])
+def test_directory_claim_namespace_failure_blocks_return_or_http_without_replacing_claim(
+        tmp_path, clock, monkeypatch, boundary):
+    directory, run_root, transport, invoke = _namespace_barrier_operation(tmp_path, boundary)
+    real_namespace, barriers = live.sync_directory_namespace, []
+    def fail_after_real_namespace(path):
+        assert path == directory
+        real_namespace(path)
+        barriers.append(path)
+        raise OSError("synthetic completed namespace barrier failure")
+    monkeypatch.setattr(live, "sync_directory_namespace", fail_after_real_namespace)
+    result = None
+    with pytest.raises(OSError, match="completed namespace barrier failure"):
+        result = invoke()
+    assert result is None and barriers == [directory] and transport.calls == []
+    assert {path.name for path in directory.iterdir()} == (
+        {"plan.json"} if boundary == "pilot" else {"intent.json"})
+    before = _snapshot(run_root)
+    assert CREDENTIAL.encode() not in b"".join(before.values())
+    if boundary == "attempt":
+        with pytest.raises(ProspectiveEvidenceError):
+            live.verify_live_pilot(run_root)
+    monkeypatch.setattr(live, "sync_directory_namespace", real_namespace)
+    with pytest.raises(FileExistsError if boundary == "pilot" else ProspectiveEvidenceError):
+        invoke()
+    assert transport.calls == [] and not (run_root / "002").exists()
+    assert _snapshot(run_root) == before
