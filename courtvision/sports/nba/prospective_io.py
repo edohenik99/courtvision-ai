@@ -4,7 +4,8 @@ Callers validate their artifact domain before entering these primitives. Windows
 payload creation opens every component relative to a retained directory handle and refuses
 reparse processing. POSIX uses component-relative no-follow directory fds.
 POSIX directory claims sync each directory and its parent entry before returning;
-Windows directory claims preserve the existing mkdir behavior.
+Windows directory claims preserve the existing mkdir behavior. Live callers can
+opt into a separate native directory namespace barrier before transport.
 Those fds prevent symlink redirection, but cannot stop another process renaming
 an already opened directory. These primitives do not secure unrelated
 path-based readers against concurrent mutation.
@@ -87,6 +88,12 @@ def _windows_api():
         wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
         ctypes.c_void_p, wintypes.DWORD]
     native.NtCreateFile.restype = ctypes.c_int32
+    # An absent optional flush entry point does not change offline operations.
+    flush = getattr(native, "NtFlushBuffersFileEx", None)
+    if flush is not None:
+        flush.argtypes = [wintypes.HANDLE, wintypes.ULONG, ctypes.c_void_p,
+                          wintypes.ULONG, ctypes.POINTER(IoStatus)]
+        flush.restype = ctypes.c_int32
     native.RtlNtStatusToDosError.argtypes = [ctypes.c_int32]
     native.RtlNtStatusToDosError.restype = wintypes.DWORD
     return kernel, native, UnicodeString, ObjectAttributes, IoStatus, FileInformation
@@ -103,7 +110,8 @@ def _verify_windows_handle(handle: int, *, directory: bool) -> None:
         raise ArtifactConfinementError("artifact handle is not a plain expected object")
 
 
-def _open_windows_child(parent: int, name: str, *, directory: bool, existing: bool = False) -> int:
+def _open_windows_child(parent: int, name: str, *, directory: bool, existing: bool = False,
+                        directory_flush: bool = False) -> int:
     import ctypes
     from ctypes import wintypes
     kernel, native, UnicodeString, ObjectAttributes, IoStatus, _ = _windows_api()
@@ -115,7 +123,11 @@ def _open_windows_child(parent: int, name: str, *, directory: bool, existing: bo
     attrs = ObjectAttributes(ctypes.sizeof(ObjectAttributes), parent, ctypes.pointer(text),
                              0x40 | 0x1000, None, None)  # CASE_INSENSITIVE | DONT_REPARSE
     result, io_status = wintypes.HANDLE(), IoStatus()
+    if directory_flush and not directory:
+        raise ArtifactConfinementError("directory flush access requires a directory")
     access = (0x80 | 0x20 | 0x100000) if directory else (0x80000000 | 0x40000000 | 0x100000)
+    if directory_flush:
+        access |= 0x4  # FILE_APPEND_DATA / FILE_ADD_SUBDIRECTORY, not GENERIC_WRITE.
     options = 0x00200000 | 0x20 | (0x1 if directory else 0x40)
     status = native.NtCreateFile(ctypes.byref(result), access, ctypes.byref(attrs),
         ctypes.byref(io_status), None, 0x80, 0x1 if directory else 0,
@@ -130,6 +142,25 @@ def _open_windows_child(parent: int, name: str, *, directory: bool, existing: bo
         kernel.CloseHandle(result.value)
         raise
     return result.value
+
+
+def _flush_windows_directory(handle: int) -> None:
+    """Require the synchronous native normal data/metadata/storage flush."""
+    import ctypes
+    _, native, _, _, IoStatus, _ = _windows_api()
+    try:
+        flush = native.NtFlushBuffersFileEx
+    except AttributeError:
+        raise ArtifactConfinementError("native directory flush is unavailable") from None
+
+    completion = IoStatus()
+    completion.Result.Status = 0x103  # STATUS_PENDING must not count as completion.
+    status = flush(handle, 0, None, 0, ctypes.byref(completion))
+    for result in (status, completion.Result.Status):
+        if result < 0:
+            raise ctypes.WinError(native.RtlNtStatusToDosError(result))
+        if result != 0:
+            raise ArtifactConfinementError("native directory flush did not complete")
 
 
 @contextmanager
@@ -227,6 +258,56 @@ def create_once_directory(path: Path) -> None:
         child = open_child(parts[-1], parent)
         os.fsync(child)
         os.fsync(parent)
+
+
+def sync_directory_namespace(directory: Path) -> None:
+    """Sync an existing plain directory and all retained ancestors, bottom-up.
+
+    This opt-in barrier is used after a live plan or attempt intent is fsynced
+    and read back. Windows native normal flags 0 flush metadata and synchronize
+    storage; POSIX fsyncs the relative no-follow directory chain. Every error
+    propagates without a weaker fallback. This is the operating-system barrier,
+    not a power-loss experiment or a change to offline directory claims.
+    """
+    anchor, parts = _components(directory)
+    if os.name == "nt":
+        import ctypes
+        kernel, _, _, _, _, _ = _windows_api()
+        with ExitStack() as cleanup:
+            root = kernel.CreateFileW(anchor, 0x4 | 0x80 | 0x20 | 0x100000,
+                0x1, None, 3, 0x02000000 | 0x00200000, None)
+            if root == ctypes.c_void_p(-1).value:
+                raise ctypes.WinError(ctypes.get_last_error())
+            cleanup.callback(kernel.CloseHandle, root)
+            _verify_windows_handle(root, directory=True)
+            parent = root
+            directories = [root]
+            for name in parts:
+                parent = _open_windows_child(parent, name, directory=True,
+                                             directory_flush=True)
+                cleanup.callback(kernel.CloseHandle, parent)
+                directories.append(parent)
+            for handle in reversed(directories):
+                _flush_windows_directory(handle)
+        return
+    if (os.name != "posix" or not hasattr(os, "O_NOFOLLOW")
+            or os.open not in os.supports_dir_fd):
+        raise ArtifactConfinementError("no-follow relative directory operations required")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    with ExitStack() as cleanup:
+        parent = os.open(anchor, flags)
+        cleanup.callback(os.close, parent)
+        directories = [parent]
+        if not stat.S_ISDIR(os.fstat(parent).st_mode):
+            raise ArtifactConfinementError("artifact anchor is not a directory")
+        for name in parts:
+            parent = os.open(name, flags, dir_fd=parent)
+            cleanup.callback(os.close, parent)
+            if not stat.S_ISDIR(os.fstat(parent).st_mode):
+                raise ArtifactConfinementError("artifact parent is not a directory")
+            directories.append(parent)
+        for descriptor in reversed(directories):
+            os.fsync(descriptor)
 
 
 def create_once_bytes(path: Path, raw: bytes) -> None:

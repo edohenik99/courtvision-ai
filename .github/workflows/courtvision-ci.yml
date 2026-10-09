@@ -75,6 +75,12 @@ jobs:
           target.unlink()
           print('TEMP_ROOT_CANARY=PASS FILE_SYMLINK_CANARY=PASS DIRECTORY_SYMLINK_CANARY=PASS CLEANUP_CANARY=PASS', flush=True)
           import pytest
+          network_attempts = []
+          def offline(event, args):
+              if event in {'socket.connect', 'socket.getaddrinfo', 'socket.sendto'}:
+                  network_attempts.append(event)
+                  raise RuntimeError('OFFLINE_PROVIDER_NETWORK_FORBIDDEN')
+          sys.addaudithook(offline)
           real_symlink = os.symlink
           def guarded_symlink(*args, **kwargs):
               try:
@@ -84,7 +90,10 @@ jobs:
                       pytest.exit('STOP: WinError 1314 in exact pytest runner', returncode=3)
                   raise
           os.symlink = guarded_symlink
-          sys.exit(pytest.main(['-q', '-x', '-p', 'no:cacheprovider', '--basetemp', str(root / 'pytest'), 'tests/test_nba_prospective_foundation.py']))
+          result = pytest.main(['-q', '-x', '-p', 'no:cacheprovider', '--basetemp', str(root / 'pytest'), 'tests/test_nba_prospective_foundation.py', 'tests/test_nba_prospective_live_capture.py'])
+          if network_attempts:
+              raise SystemExit('STOP: offline prospective tests attempted networking')
+          sys.exit(result)
           '@
           python -B -c $qualification $prospectiveTemp
           exit $LASTEXITCODE
@@ -188,7 +197,7 @@ jobs:
           sys.addaudithook(offline)
           import pytest
           selected = 'parent_or_leaf_substitution or acquired_directory_guard or secure_payload_creation or failed_secure_payload_write or directory_claim'
-          result = pytest.main(['-q', '-x', '-p', 'no:cacheprovider', '--basetemp', str(root / 'pytest'), 'tests/test_nba_prospective_foundation.py', '-k', selected])
+          result = pytest.main(['-q', '-x', '-p', 'no:cacheprovider', '--basetemp', str(root / 'pytest'), 'tests/test_nba_prospective_foundation.py', 'tests/test_nba_prospective_live_capture.py', '-k', selected])
           sys.exit(result if not attempts else 3)
           PY
 
