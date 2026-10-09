@@ -41,6 +41,54 @@ jobs:
       - name: Validate Python syntax
         run: python -B -m py_compile courtvision\sports\nba\player_points_research_runner.py tools\run_nba_player_points_research.py
 
+      - name: Test NBA prospective evidence and model-freeze foundation
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $prospectiveTemp = Join-Path $env:RUNNER_TEMP ('nba-prospective-' + [guid]::NewGuid().ToString('N').Substring(0, 12))
+          New-Item -ItemType Directory -Path $prospectiveTemp | Out-Null
+          $env:TEMP = $prospectiveTemp
+          $env:TMP = $prospectiveTemp
+          $env:TMPDIR = $prospectiveTemp
+          $env:PYTHONDONTWRITEBYTECODE = '1'
+          $qualification = @'
+          import os, sys, tempfile
+          from pathlib import Path
+          root = Path(sys.argv[1])
+          if not os.path.samefile(tempfile.gettempdir(), root):
+              raise SystemExit('STOP: pytest temp root differs from declared root')
+          target = root / 'canary-file'
+          target.write_bytes(b'canary')
+          directory = root / 'canary-directory'
+          directory.mkdir(mode=0o700)
+          (directory / 'probe').write_bytes(b'probe')
+          assert (directory / 'probe').read_bytes() == b'probe' and list(directory.iterdir())
+          try:
+              os.symlink(target, root / 'file-link')
+              os.symlink(directory, root / 'directory-link', target_is_directory=True)
+          except OSError as exc:
+              raise SystemExit('STOP: exact-runner symlink canary failed: ' + repr(exc))
+          for name in ('file-link', 'directory-link'):
+              (root / name).unlink()
+          (directory / 'probe').unlink()
+          directory.rmdir()
+          target.unlink()
+          print('TEMP_ROOT_CANARY=PASS FILE_SYMLINK_CANARY=PASS DIRECTORY_SYMLINK_CANARY=PASS CLEANUP_CANARY=PASS', flush=True)
+          import pytest
+          real_symlink = os.symlink
+          def guarded_symlink(*args, **kwargs):
+              try:
+                  return real_symlink(*args, **kwargs)
+              except OSError as exc:
+                  if getattr(exc, 'winerror', None) == 1314:
+                      pytest.exit('STOP: WinError 1314 in exact pytest runner', returncode=3)
+                  raise
+          os.symlink = guarded_symlink
+          sys.exit(pytest.main(['-q', '-x', '-p', 'no:cacheprovider', '--basetemp', str(root / 'pytest'), 'tests/test_nba_prospective_foundation.py']))
+          '@
+          python -B -c $qualification $prospectiveTemp
+          exit $LASTEXITCODE
+
       - name: Test NBA player points research runner
         run: python -B -m pytest -p no:cacheprovider tests\test_nba_player_points_research_runner.py -q
 
@@ -108,4 +156,39 @@ jobs:
           tests/test_mlb_hits_acquisition.py
           tests/test_mlb_hr_prospective_context_acquisition.py::test_capture_manifest_and_disk_paths_share_portable_posix_keys
           -q
+
+      - name: Test NBA prospective exclusive payload writes on POSIX
+        run: |
+          python -B - <<'PY'
+          import os, sys, tempfile, uuid
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']) / ('nba-payload-' + uuid.uuid4().hex[:12])
+          root.mkdir(mode=0o700)
+          for name in ('TEMP', 'TMP', 'TMPDIR'):
+              os.environ[name] = str(root)
+          os.environ['PYTHONDONTWRITEBYTECODE'] = '1'
+          tempfile.tempdir = None
+          assert os.path.samefile(tempfile.gettempdir(), root)
+          target = root / 'canary-file'
+          target.write_bytes(b'canary')
+          directory = root / 'canary-directory'
+          directory.mkdir(mode=0o700)
+          os.symlink(target, root / 'file-link')
+          os.symlink(directory, root / 'directory-link', target_is_directory=True)
+          for name in ('file-link', 'directory-link'):
+              (root / name).unlink()
+          directory.rmdir()
+          target.unlink()
+          print('TEMP_ROOT_CANARY=PASS FILE_SYMLINK_CANARY=PASS DIRECTORY_SYMLINK_CANARY=PASS CLEANUP_CANARY=PASS', flush=True)
+          attempts = []
+          def offline(event, args):
+              if event in {'socket.connect', 'socket.getaddrinfo', 'socket.sendto'}:
+                  attempts.append(event)
+                  raise RuntimeError('OFFLINE_PROVIDER_NETWORK_FORBIDDEN')
+          sys.addaudithook(offline)
+          import pytest
+          selected = 'parent_or_leaf_substitution or acquired_directory_guard or secure_payload_creation or failed_secure_payload_write or directory_claim'
+          result = pytest.main(['-q', '-x', '-p', 'no:cacheprovider', '--basetemp', str(root / 'pytest'), 'tests/test_nba_prospective_foundation.py', '-k', selected])
+          sys.exit(result if not attempts else 3)
+          PY
 
