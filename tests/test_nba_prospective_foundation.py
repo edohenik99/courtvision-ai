@@ -5168,3 +5168,181 @@ def test_pregame_market_and_versioned_credential_policy_preserves_exact_scientif
     assert source_manifest(tmp_path / "journal", ["stats-1"])["stats-1"]["parameters"] == parameters
     assert saved.raw_body == body == verify_capture(tmp_path / "journal", "stats-1").raw_body
     assert saved.manifest["raw_body_sha256"] == digest_body(body)
+
+
+def account_key_credential_inputs(field, secret, form):
+    if form == "connection":
+        return {"connection_string": "AccountName=synthetic-account;AccountKey=" + secret
+            + ";EndpointSuffix=example.invalid"}
+    return semantic_alias_inputs(field, secret, form)
+
+
+ACCOUNT_KEY_CREDENTIAL_CASES = [("account_key", "mapping"), ("AccountKey", "pair"),
+    ("storage_account_key", "field_name"), ("service_account_key", "encoded"),
+    ("ACCOUNTKEYSPEM", "nested_pair"), ("AccountKey", "connection")]
+
+
+@pytest.mark.parametrize("field,form", ACCOUNT_KEY_CREDENTIAL_CASES)
+@pytest.mark.parametrize("boundary", ["constructor", "disk"])
+def test_account_key_credentials_cannot_enter_model_or_fully_resigned_freeze(tmp_path, field, form, boundary):
+    inputs = account_key_credential_inputs(field, "SYNTHETIC-CREDENTIAL-A", form)
+    if boundary == "constructor":
+        capture(tmp_path)
+        with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+            snapshot(tmp_path, projection_inputs=inputs)
+        assert not (tmp_path / "articles").exists()
+    else:
+        root = freeze(tmp_path)
+        path = root / "model_snapshots.jsonl"
+        row = json.loads(path.read_bytes())
+        row["projection_inputs"] = inputs
+        resign_model_row(row)
+        path.write_bytes(canonical_bytes(row) + b"\n")
+        resign_freeze_artifact_hashes(root)
+        with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+            verify(tmp_path, root)
+    assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+
+
+@pytest.mark.parametrize("field,value,form", [("MAXBET", 2.5, "mapping"),
+    ("MINBET", 2.5, "pair"), ("BETLIMIT", {"amount": 2.5}, "encoded")])
+@pytest.mark.parametrize("boundary", ["constructor", "disk"])
+def test_compact_bet_sizing_cannot_enter_model_or_fully_resigned_freeze(tmp_path, field, value, form, boundary):
+    inputs = semantic_alias_inputs(field, value, form)
+    if boundary == "constructor":
+        capture(tmp_path)
+        with pytest.raises(ProspectiveEvidenceError, match="economic"):
+            snapshot(tmp_path, projection_inputs=inputs)
+        assert not (tmp_path / "articles").exists()
+    else:
+        root = freeze(tmp_path)
+        path = root / "model_snapshots.jsonl"
+        row = json.loads(path.read_bytes())
+        row["projection_inputs"] = inputs
+        resign_model_row(row)
+        path.write_bytes(canonical_bytes(row) + b"\n")
+        resign_freeze_artifact_hashes(root)
+        with pytest.raises(ProspectiveEvidenceError, match="economic"):
+            verify(tmp_path, root)
+
+
+@pytest.mark.parametrize("field,form", [("account_key", "mapping"),
+    ("storage_account_key", "pair"), ("AccountKey", "connection")])
+def test_account_key_raw_custody_rejects_capture_and_fully_resigned_source_readback(tmp_path, field, form):
+    body = canonical_bytes({"response": [{"context":
+        account_key_credential_inputs(field, "SYNTHETIC-CREDENTIAL-A", form)}]})
+    with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+        capture(tmp_path, raw_body=body)
+    assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+    assert not (tmp_path / "journal").exists()
+    capture(tmp_path)
+    directory = tmp_path / "journal" / EVIDENCE_SCHEMA / "stats-1"
+    (directory / "body.bin").write_bytes(body)
+    def resign_capture(manifest):
+        manifest["raw_body_sha256"] = digest_body(body)
+        manifest["raw_body_byte_length"] = len(body)
+        manifest["capture_sha256"] = digest({key: value for key, value in manifest.items() if key != "capture_sha256"})
+    mutate_json(directory / "manifest.json", resign_capture)
+    for read in (lambda: verify_capture(tmp_path / "journal", "stats-1"),
+                 lambda: source_manifest(tmp_path / "journal", ["stats-1"])):
+        with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+            read()
+        assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+
+
+@pytest.mark.parametrize("field", ["account_key", "storage_account_key", "service_account_key"])
+def test_account_key_request_rotation_preserves_identity_and_rejects_retained_connection_strings(tmp_path, field):
+    safe = {"player_id": "player-1", "season": "2025", "token_count": 3,
+        "account_key_count": 0, "storage_account_key_length": 32, "service_account_keys_count": 0,
+        "public_key": "synthetic-public-key", "source_key_metadata": "synthetic-source-id",
+        "source_manifest_sha256": "b" * 64, "headers": {"accept": "application/json"}}
+    rows, sources, artifacts = [], [], []
+    for index, secret in enumerate(("SYNTHETIC-CREDENTIAL-A", "SYNTHETIC-CREDENTIAL-B")):
+        directory = tmp_path / str(index)
+        with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+            request(parameters={**safe, **account_key_credential_inputs("AccountKey", secret, "connection")})
+        assert secret not in str(caught.value) and not directory.exists()
+        req = request(parameters={**safe, field: secret,
+            "headers": {**safe["headers"], field: secret}})
+        assert req == request(parameters=safe) and req["parameters"] == safe
+        saved = capture(directory, req)
+        assert saved.manifest["request_identity_sha256"] == digest(req)
+        sources.append(source_manifest(directory / "journal", ["stats-1"]))
+        rows.append(snapshot(directory))
+        root = freeze(directory, rows=[rows[-1]])
+        assert verify(directory, root).rows[0]["model_snapshot_id"] == rows[-1]["model_snapshot_id"]
+        artifacts.append({path.name: path.read_bytes() for path in root.iterdir()})
+        persisted = b"".join(path.read_bytes() for path in directory.rglob("*") if path.is_file())
+        assert secret.encode() not in persisted
+    assert sources[0] == sources[1] and rows[0] == rows[1] and artifacts[0] == artifacts[1]
+
+
+def test_independent_account_key_contract_rejects_root_plural_role_descriptor_and_encoded_aliases():
+    for plural in ("", "s"):
+        for role in ("", "storage_", "service_", "provider_", "source_"):
+            for descriptor in ("", "_pem", "_metadata", "_v2"):
+                name = role + "account_key" + plural + descriptor
+                parts = name.split("_")
+                aliases = (name, parts[0] + "".join(part.title() for part in parts[1:]),
+                           "".join(parts).upper(), name.replace("_", "%5F"))
+                for field in aliases:
+                    with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+                        reject_market_outcomes({field: "SYNTHETIC-CREDENTIAL-A"})
+                    assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+                    assert request(parameters={"context": {field: "SYNTHETIC-CREDENTIAL-A", "token_count": 3}})[
+                        "parameters"] == {"context": {"token_count": 3}}
+    for text in ("AccountName=synthetic-account;AccountKey=SYNTHETIC-CREDENTIAL-A;EndpointSuffix=example.invalid",
+                 "AccountName=synthetic-account;AccountKey%3DSYNTHETIC-CREDENTIAL-A;EndpointSuffix=example.invalid"):
+        with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+            request(parameters={"connection_string": text})
+        assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+
+
+def test_independent_compact_bet_contract_rejects_sizing_aliases_and_all_value_shapes():
+    bases = ("max_bet", "min_bet", "maximum_bet", "minimum_bet", "bet_limit", "bet_limits")
+    names = tuple(base + descriptor for base in bases for descriptor in ("", "_value", "_amount"))
+    names += ("max_bet_param_v2", "max_bet_param_2")
+    for name in names:
+        parts = name.split("_")
+        aliases = (name, parts[0] + "".join(part.title() for part in parts[1:]),
+                   "".join(parts).upper(), name.replace("_", "%5F"))
+        for field in aliases:
+            for value in (2.5, 1, True, False, 0, None, {"amount": 2.5}):
+                with pytest.raises(ProspectiveEvidenceError, match="economic"):
+                    reject_market_outcomes({field: value})
+
+
+def test_account_key_and_compact_bet_policy_preserves_exact_scientific_custody_and_model_state(tmp_path):
+    inputs = {"account_key_count": 0, "account_key_length": 32, "account_keys_payload_count": 0,
+        "storage_account_key_count": 0, "storage_account_key_length": 32,
+        "service_account_key_count": 0, "service_account_keys_length": 32,
+        "account_count": 3, "account_name": "synthetic-account", "accountability_feature": 0.4,
+        "account_connection_metadata": "AccountName=synthetic-account;EndpointSuffix=example.invalid",
+        "public_key": "synthetic-public-key", "source_key_metadata": "synthetic-source-id",
+        "feature_key": "synthetic-feature-id", "possession_key": "synthetic-possession-id",
+        "public_key_header": {"x-public-id": "synthetic-public-id"},
+        "source_key_headers": {"x-source-id": "synthetic-source-id"},
+        "source_manifest_sha256": "b" * 64, "public_key_hash": "c" * 64,
+        "token_count": 3, "token_length": 32, "request_latency_ms": 42,
+        "beta": 0.4, "max_beta": 0.4, "min_beta": 0.3, "MAXBETA": 0.4,
+        "MINBETTER": 13, "max_better_estimate": 13, "better_estimate": 13, "alphabet": 26,
+        "beta_distribution": {"alpha": 2, "beta": 3}, "can_bet": False,
+        "historical_points_totals": 340, "projected_totals_points": 13,
+        "total": 340, "totals": 340, "totality": 0.4, "current_totality": 0.4,
+        "pregame_minutes": 19, "pregame_points": 13, "projected_points": 13, "projected_minutes": 19,
+        "lineup_status": "confirmed", "baseline": 12, "linear_gradient": 0.4, "linearly": 0.4}
+    body = b'{ "response": [{"historical_game_id":"prior-game","minutes":18,"MAXBET":2.5}], "features": ' + canonical_bytes(inputs) + b' }\n'
+    parameters = {"player_id": "player-1", "context": inputs}
+    req = request(parameters=parameters)
+    assert req["parameters"] == parameters
+    saved = capture(tmp_path, req, raw_body=body)
+    ref = {"request_id": "stats-1", "raw_body_sha256": saved.manifest["raw_body_sha256"]}
+    row = snapshot(tmp_path, projection_inputs=inputs, distribution_model_id="synthetic-scientific",
+        distribution_evidence_ref=ref, distribution_parameters=inputs)
+    root = freeze(tmp_path, rows=[row])
+    frozen = verify(tmp_path, root).rows[0]
+    assert frozen["projection_inputs"] == inputs and frozen["distribution_parameters"] == inputs
+    assert frozen["model_snapshot_id"] == row["model_snapshot_id"]
+    assert source_manifest(tmp_path / "journal", ["stats-1"])["stats-1"]["parameters"] == parameters
+    assert saved.raw_body == body == verify_capture(tmp_path / "journal", "stats-1").raw_body
+    assert saved.manifest["raw_body_sha256"] == digest_body(body)

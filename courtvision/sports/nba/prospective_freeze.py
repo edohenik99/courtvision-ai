@@ -144,7 +144,8 @@ _PERMISSION_ACTIONS = ("use", "place", "enable", "allow", "authorize", "permit")
 # Short permission roots are token/exact-grammar matches: `beta` is scientific data.
 _ECONOMIC_COMPOUNDS = tuple(route for route in _ECONOMIC_ROUTE_COMPACT if route != "bet")
 _BET_DESCRIPTORS = ("amount", "budget", "stake", "size", "sizing", "permission", "approval",
-    "enabled", "eligibility", "eligible", "allowed", "authorized", "permitted", "route")
+    "enabled", "eligibility", "eligible", "allowed", "authorized", "permitted", "route", "limit", "limits")
+_BET_SIZING_STEMS = tuple(qualifier + "bet" for qualifier in ("max", "min", "maximum", "minimum"))
 _SHORT_BET_COMPOUNDS = frozenset(action + "bet" for action in _PERMISSION_ACTIONS)
 _SHORT_BET_PREFIXES = tuple(prefix + "bet" + descriptor
     for prefix in ("", *_PERMISSION_ACTIONS) for descriptor in _BET_DESCRIPTORS) + ("bettable",)
@@ -283,6 +284,24 @@ def _reject_model_field(key: str, item: object) -> None:
                     if tail == len(compact) or compact.startswith(_FIELD_DESCRIPTORS, tail):
                         return True
         return False
+    def bet_sizing(offset: int) -> bool:
+        for stem in _BET_SIZING_STEMS:
+            if not compact.startswith(stem, offset):
+                continue
+            tail = offset + len(stem)
+            if (tail == len(compact)
+                    or compact.startswith(_FIELD_PREFIX_DESCRIPTORS + _BET_DESCRIPTORS, tail)
+                    or _numeric_version_ends(compact, tail)):
+                return True
+            # Reverse short roots must preserve max_beta/min_better science.
+            for descriptor in _SHORT_FIELD_DESCRIPTORS:
+                following = tail + len(descriptor)
+                if (compact.startswith(descriptor, tail)
+                        and (following == len(compact)
+                             or compact.startswith(_FIELD_DESCRIPTORS + _BET_DESCRIPTORS, following)
+                             or _numeric_version_ends(compact, following))):
+                    return True
+        return False
     def reject_qualified_tails(forms: tuple[str, ...], stems: tuple[str, ...],
                                fallback_stems: tuple[str, ...] = ()) -> None:
         for form in forms:
@@ -398,6 +417,7 @@ def _reject_model_field(key: str, item: object) -> None:
             or compact[offset:] in _SHORT_BET_COMPOUNDS
             or compact[offset:].startswith(_SHORT_BET_PREFIXES)
             or bet_recommendation(offset)
+            or bet_sizing(offset)
             for offset, _ in economic_states)
             or any(contains_pattern(tuple(route.split("_"))) for route in _ECONOMIC_ROUTES)):
         raise ProspectiveEvidenceError("unrecognized economic route field is prohibited")
