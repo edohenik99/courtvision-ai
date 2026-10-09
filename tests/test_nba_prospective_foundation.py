@@ -4926,3 +4926,245 @@ def test_plural_market_total_repair_preserves_qualified_outcome_and_economic_tai
         resign_freeze_artifact_hashes(root)
         with pytest.raises(ProspectiveEvidenceError, match=error):
             verify(tmp_path, root)
+
+
+@pytest.mark.parametrize("field,value,form", [("book_pregame_total", [15, 16], "mapping"),
+    ("opening_pregame_totals", [15, 16], "pair"), ("pregame_book_total", [15, 16], "field_name"),
+    ("totals_pre_game_opening", [15, 16], "encoded"), ("PLAYERBOOKPREGAMETOTAL", [15, 16], "key"),
+    ("PRE_GAME_PLAYER_OPENING_TOTALS", [15, 16], "nested_pair"),
+    ("BOOKPREGAMELINE", 15, "mapping"), ("OPENINGPREGAMEOVERPROBABILITY", 0.6, "pair"),
+    ("PROJECTEDPREGAMETOTALSODDSVALUE", 1.8, "encoded"),
+    ("PREGAMEPROJECTEDPOINTSTOTALSVALUEOVERPROBABILITY", 0.6, "feature_name"),
+    ("LINEV2", 15, "mapping"), ("PREGAMELINE", 15, "pair"), ("LINEV2VALUE", 15, "encoded"),
+    ("CURRENTTOTALV2", 15, "mapping"), ("LIVEPREGAMETOTALSV2", [15, 16], "pair"),
+    ("PROJECTEDPREGAMELIVETOTALSV2", [15, 16], "encoded"),
+    ("PREGAMEACTUALASSISTS", 7, "field_name"), ("HISTORICALTOTALV2ACTUALMINUTES", 18, "nested_pair"),
+    ("LINEV2ACTUALMINUTES", 18, "feature_name")])
+@pytest.mark.parametrize("boundary", ["constructor", "disk"])
+def test_pregame_market_totals_cannot_enter_model_state_or_fully_resigned_freezes(tmp_path, field, value, form, boundary):
+    inputs = semantic_alias_inputs(field, value, form)
+    if boundary == "constructor":
+        capture(tmp_path)
+        with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+            snapshot(tmp_path, projection_inputs=inputs)
+        assert not (tmp_path / "articles").exists()
+    else:
+        root = freeze(tmp_path)
+        path = root / "model_snapshots.jsonl"
+        row = json.loads(path.read_bytes())
+        row["projection_inputs"] = inputs
+        resign_model_row(row)
+        path.write_bytes(canonical_bytes(row) + b"\n")
+        resign_freeze_artifact_hashes(root)
+        with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+            verify(tmp_path, root)
+
+
+# Literal pregame role spelling must not change already-declared total ownership.
+@pytest.mark.parametrize("qualifier", ["opening", "closing", "current", "live", "prop", "observed",
+    "market", "sportsbook", "bookmaker", "consensus", "book", "vegas"])
+def test_independent_pregame_market_total_contract_rejects_role_order_and_encoded_spelling_aliases(qualifier):
+    for timing in ("pregame", "pre_game"):
+        for root in ("total", "totals"):
+            for name in (qualifier + "_" + timing + "_" + root,
+                         root + "_" + timing + "_" + qualifier):
+                parts = name.split("_")
+                aliases = (name, parts[0] + "".join(part.title() for part in parts[1:]),
+                           "".join(parts).upper(), name.replace("_", "%5F"))
+                for field in aliases:
+                    try:
+                        reject_market_outcomes({field: [15, 16]})
+                    except ProspectiveEvidenceError as error:
+                        assert "prohibited" in str(error), field
+                    else:
+                        pytest.fail("accepted declared pregame market total: " + field)
+
+
+VERSIONED_CREDENTIAL_CASES = [("api_key_v2", "mapping"), ("appKeyV2", "pair"),
+    ("consumer_key_2", "field_name"), ("APIKEYSV12PEM", "encoded"),
+    ("provider_private_key_v2_context", "nested_pair"), ("CLIENTSECRETV2", "feature_name"),
+    ("APPKEYSHA2562", "mapping"), ("PRIVATEKEYPKCS82", "encoded")]
+
+
+@pytest.mark.parametrize("field,form", VERSIONED_CREDENTIAL_CASES)
+@pytest.mark.parametrize("boundary", ["constructor", "disk"])
+def test_versioned_credentials_cannot_enter_model_or_fully_resigned_freeze(tmp_path, field, form, boundary):
+    inputs = semantic_alias_inputs(field, "SYNTHETIC-CREDENTIAL-A", form)
+    if boundary == "constructor":
+        capture(tmp_path)
+        with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+            snapshot(tmp_path, projection_inputs=inputs)
+        assert not (tmp_path / "articles").exists()
+    else:
+        root = freeze(tmp_path)
+        path = root / "model_snapshots.jsonl"
+        row = json.loads(path.read_bytes())
+        row["projection_inputs"] = inputs
+        resign_model_row(row)
+        path.write_bytes(canonical_bytes(row) + b"\n")
+        resign_freeze_artifact_hashes(root)
+        with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+            verify(tmp_path, root)
+    assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+
+
+@pytest.mark.parametrize("field,form", [("api_key_v2", "mapping"), ("appKeyV2", "pair"),
+    ("consumer_key_2", "encoded")])
+def test_versioned_credential_raw_custody_rejects_capture_and_fully_resigned_source_readback(tmp_path, field, form):
+    body = canonical_bytes({"response": [{"context":
+        semantic_alias_inputs(field, "SYNTHETIC-CREDENTIAL-A", form)}]})
+    with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+        capture(tmp_path, raw_body=body)
+    assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+    assert not (tmp_path / "journal").exists()
+    capture(tmp_path)
+    directory = tmp_path / "journal" / EVIDENCE_SCHEMA / "stats-1"
+    (directory / "body.bin").write_bytes(body)
+    def resign_capture(manifest):
+        manifest["raw_body_sha256"] = digest_body(body)
+        manifest["raw_body_byte_length"] = len(body)
+        manifest["capture_sha256"] = digest({key: value for key, value in manifest.items() if key != "capture_sha256"})
+    mutate_json(directory / "manifest.json", resign_capture)
+    for read in (lambda: verify_capture(tmp_path / "journal", "stats-1"),
+                 lambda: source_manifest(tmp_path / "journal", ["stats-1"])):
+        with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+            read()
+        assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+
+
+@pytest.mark.parametrize("field", ["api_key_v2", "appKeyV2", "consumer_key_2"])
+def test_versioned_credential_request_rotation_preserves_source_model_and_freeze_identity(tmp_path, field):
+    safe = {"player_id": "player-1", "season": "2025", "token_count": 3,
+        "api_key_v2_count": 0, "app_key_count_v2": 0, "consumer_key_2_length": 32,
+        "public_key_v2": "synthetic-public-key", "source_key_v2": "synthetic-source-id",
+        "source_manifest_sha256": "b" * 64, "headers": {"accept": "application/json"}}
+    rows, sources, artifacts = [], [], []
+    for index, secret in enumerate(("SYNTHETIC-CREDENTIAL-A", "SYNTHETIC-CREDENTIAL-B")):
+        req = request(parameters={**safe, field: secret,
+            "headers": {**safe["headers"], field: secret}})
+        assert req == request(parameters=safe) and req["parameters"] == safe
+        directory = tmp_path / str(index)
+        saved = capture(directory, req)
+        assert saved.manifest["request_identity_sha256"] == digest(req)
+        sources.append(source_manifest(directory / "journal", ["stats-1"]))
+        rows.append(snapshot(directory))
+        root = freeze(directory, rows=[rows[-1]])
+        assert verify(directory, root).rows[0]["model_snapshot_id"] == rows[-1]["model_snapshot_id"]
+        artifacts.append({path.name: path.read_bytes() for path in root.iterdir()})
+        persisted = b"".join(path.read_bytes() for path in directory.rglob("*") if path.is_file())
+        assert secret.encode() not in persisted
+    assert sources[0] == sources[1] and rows[0] == rows[1] and artifacts[0] == artifacts[1]
+
+
+@pytest.mark.parametrize("root", ["api_key", "app_key", "consumer_key"])
+def test_independent_versioned_credential_contract_preserves_roles_descriptors_and_encoded_labels(root):
+    for version in ("v2", "v12", "ver2", "version2", "2"):
+        for role in ("", "provider_"):
+            for descriptor in ("", "_pem", "_context"):
+                for name in (role + root + "_" + version + descriptor,
+                             role + root + descriptor + "_" + version):
+                    parts = name.split("_")
+                    aliases = (name, parts[0] + "".join(part.title() for part in parts[1:]),
+                               "".join(parts).upper(), name.replace("_", "%5F"))
+                    for field in aliases:
+                        with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+                            reject_market_outcomes({field: "SYNTHETIC-CREDENTIAL-A"})
+                        assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+                        assert request(parameters={"context": {field: "SYNTHETIC-CREDENTIAL-A", "token_count": 3}})[
+                            "parameters"] == {"context": {"token_count": 3}}
+    for name in ("app_key_sha256_2", "private_key_pkcs8_2"):
+        parts = name.split("_")
+        aliases = (name, parts[0] + "".join(part.title() for part in parts[1:]),
+                   "".join(parts).upper(), name.replace("_", "%5F"))
+        for field in aliases:
+            with pytest.raises(ProspectiveEvidenceError, match="credential") as caught:
+                reject_market_outcomes({field: "SYNTHETIC-CREDENTIAL-A"})
+            assert "SYNTHETIC-CREDENTIAL-A" not in str(caught.value)
+            assert request(parameters={"context": {field: "SYNTHETIC-CREDENTIAL-A", "token_count": 3}})[
+                "parameters"] == {"context": {"token_count": 3}}
+    safe = {root + "_v2_count": 0, root + "_count_v2": 0, root + "_2_length": 32,
+        "public_key_v2": "synthetic-public-key", "source_key_2": "synthetic-source-id",
+        "feature_key_v12": "synthetic-feature-id", "possession_key_v2": "synthetic-possession-id",
+        "token_count_v2": 3, "token_length_2": 32, "request_latency_ms": 42,
+        "source_manifest_sha256": "b" * 64}
+    reject_market_outcomes(safe)
+    assert request(parameters={"context": safe})["parameters"] == {"context": safe}
+
+
+def test_independent_pregame_market_nonstat_root_contract_rejects_witnessed_connector_aliases():
+    for role in ("book", "opening"):
+        for timing in ("pregame", "pre_game"):
+            for root in ("line", "odds", "over_probability", "under_probability", "moneyline"):
+                for name in (role + "_" + timing + "_" + root,
+                             timing + "_" + role + "_" + root):
+                    parts = name.split("_")
+                    aliases = (name, parts[0] + "".join(part.title() for part in parts[1:]),
+                               "".join(parts).upper(), name.replace("_", "%5F"))
+                    for field in aliases:
+                        try:
+                            reject_market_outcomes({field: 15})
+                        except ProspectiveEvidenceError as error:
+                            assert "prohibited" in str(error), field
+                        else:
+                            pytest.fail("accepted declared witnessed pregame market field: " + field)
+    for root in ("line", "odds", "over_probability"):
+        for version in ("v2", "ver2", "version2", "2"):
+            for descriptor in ("", "_value", "_context"):
+                for name in (root + "_" + version + descriptor,
+                             root + descriptor + "_" + version):
+                    parts = name.split("_")
+                    aliases = (name, parts[0] + "".join(part.title() for part in parts[1:]),
+                               "".join(parts).upper(), name.replace("_", "%5F"))
+                    for field in aliases:
+                        try:
+                            reject_market_outcomes({field: 15})
+                        except ProspectiveEvidenceError as error:
+                            assert "prohibited" in str(error), field
+                        else:
+                            pytest.fail("accepted declared versioned market field: " + field)
+    modifier_names = ("current_total_v2", "live_pregame_totals_v2", "projected_pregame_live_totals_v2",
+        "pregame_actual_assists", "historical_total_v2_actual_minutes", "line_v2_actual_minutes")
+    for name in modifier_names:
+        parts = name.split("_")
+        aliases = (name, parts[0] + "".join(part.title() for part in parts[1:]),
+                   "".join(parts).upper(), name.replace("_", "%5F"))
+        for field in aliases:
+            with pytest.raises(ProspectiveEvidenceError, match="prohibited"):
+                reject_market_outcomes({field: 15})
+
+
+def test_pregame_market_and_versioned_credential_policy_preserves_exact_scientific_custody_and_model_state(tmp_path):
+    inputs = {"pregame_minutes": 19, "pre_game_minutes": 19,
+        "pregame_points": 13, "pre_game_points": 13,
+        "pregame_lineup": "confirmed", "pregame_lineup_status": "confirmed",
+        "pre_game_lineup_status": "confirmed", "pregame_projected_minutes": 19,
+        "pre_game_projected_points": 13, "pregame_minutes_uncertainty": 2.0,
+        "pregame_pace_adjustment": 1.02, "projected_pregame_points_total": 13,
+        "pregame_projected_points_total": 13, "historical_points_totals": 340,
+        "projected_totals_points": 13, "historical_total_points": 340,
+        "total": 340, "totals": 340, "historical_totals": 340, "projected_totals": 13,
+        "totality": 0.4, "current_totality": 0.4, "total_opening_angle": 1.02,
+        "api_key_v2_count": 0, "app_key_count_v2": 0, "consumer_key_2_length": 32,
+        "public_key_v2": "synthetic-public-key", "source_key_2": "synthetic-source-id",
+        "feature_key_v12": "synthetic-feature-id", "possession_key_v2": "synthetic-possession-id",
+        "public_key_header": {"x-public-id": "synthetic-public-id"},
+        "source_key_headers": {"x-source-id": "synthetic-source-id"},
+        "source_manifest_sha256": "b" * 64, "public_key_hash": "c" * 64,
+        "token_count": 3, "token_count_v2": 3, "token_length_2": 32, "request_latency_ms": 42,
+        "projected_points": 13, "projected_minutes": 19, "lineup_status": "confirmed",
+        "baseline": 12, "linear_gradient": 0.4, "linearly": 0.4, "points_linear": 13, "beta": 0.4}
+    body = b'{ "response": [{"historical_game_id":"prior-game","minutes":18,"book_pregame_total":15}], "features": ' + canonical_bytes(inputs) + b' }\n'
+    parameters = {"player_id": "player-1", "context": inputs}
+    req = request(parameters=parameters)
+    assert req["parameters"] == parameters
+    saved = capture(tmp_path, req, raw_body=body)
+    ref = {"request_id": "stats-1", "raw_body_sha256": saved.manifest["raw_body_sha256"]}
+    row = snapshot(tmp_path, projection_inputs=inputs, distribution_model_id="synthetic-scientific",
+        distribution_evidence_ref=ref, distribution_parameters=inputs)
+    root = freeze(tmp_path, rows=[row])
+    frozen = verify(tmp_path, root).rows[0]
+    assert frozen["projection_inputs"] == inputs and frozen["distribution_parameters"] == inputs
+    assert frozen["model_snapshot_id"] == row["model_snapshot_id"]
+    assert source_manifest(tmp_path / "journal", ["stats-1"])["stats-1"]["parameters"] == parameters
+    assert saved.raw_body == body == verify_capture(tmp_path / "journal", "stats-1").raw_body
+    assert saved.manifest["raw_body_sha256"] == digest_body(body)

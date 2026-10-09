@@ -66,6 +66,10 @@ _SECRET_DESCRIPTORS = (tuple("query_" + item for item in _PARAMETER_DESCRIPTORS)
         "checksums", "checksum", "names", "name", "labels", "label", "metadata", "data",
         "context", "information", "info", "details", "detail", "configuration", "config",
         "materials", "material"))
+_VERSION_MARKERS = ("v", "ver", "version")
+_CREDENTIAL_NUMERIC_DESCRIPTORS = tuple((compact[:match.start()], match[0])
+    for descriptor in _SECRET_DESCRIPTORS for compact in (descriptor.replace("_", ""),)
+    for match in (re.search(r"[0-9]+$", compact),) if match is not None)
 _FIELD_LABELS = frozenset({"name", "key", "header", "headername", "field", "fieldname",
     "feature", "featurename"})
 _FIELD_VALUES = frozenset({"value", "headervalue", "fieldvalue", "featurevalue"})
@@ -164,16 +168,68 @@ def _subject_secret_key(name: str) -> bool:
                for offset in _subject_offsets(name, _CREDENTIAL_SUBJECTS))
 
 
+def _numeric_version_starts(name: str,
+                            numeric_descriptors: tuple[tuple[str, str], ...] = ()) -> tuple[int, ...]:
+    """Keep numeric versions and finite numeric-descriptor overlap boundaries."""
+    if not name or not "0" <= name[-1] <= "9":
+        return ()
+    start = len(name) - 1
+    while start and "0" <= name[start - 1] <= "9":
+        start -= 1
+    starts = {start}
+    for marker in _VERSION_MARKERS:
+        if name[:start].endswith(marker):
+            starts.add(start - len(marker))
+    # SHA2562 has both version 2562 and SHA256 + version 2 interpretations.
+    # Only declared descriptor boundaries branch; long digit runs do not fan out.
+    for prefix, descriptor_digits in numeric_descriptors:
+        following = start + len(descriptor_digits)
+        if (following < len(name) and name[:start].endswith(prefix)
+                and name.startswith(descriptor_digits, start)):
+            starts.add(following)
+    return tuple(sorted(starts))
+
+
+def _numeric_version_ends(name: str, start: int = 0) -> tuple[int, ...]:
+    """Recognize a numeric version only at a caller-owned field/tail boundary."""
+    starts = (start, *(start + len(marker) for marker in _VERSION_MARKERS
+        if name.startswith(marker, start)))
+    ends = set()
+    for offset in starts:
+        if offset == len(name) or not "0" <= name[offset] <= "9":
+            continue
+        end = offset + 1
+        while end < len(name) and "0" <= name[end] <= "9":
+            end += 1
+        ends.add(end)
+    return tuple(sorted(ends))
+
+
+def _version_token_prefix(tokens: tuple[str, ...], suffix: str) -> tuple[str, ...]:
+    """Trim version characters on this branch while retaining word boundaries."""
+    if not "".join(tokens).endswith(suffix):
+        return tokens
+    following = list(tokens)
+    remaining = len(suffix)
+    while remaining:
+        token = following.pop()
+        if len(token) > remaining:
+            following.append(token[:-remaining])
+            break
+        remaining -= len(token)
+    return tuple(following)
+
+
 def _secret_key(key: str) -> bool:
     key = _decoded_field_label(key)
     name = re.sub(r"[^a-z0-9]", "", key.casefold())
     tokens = tuple(_semantic_key(key).split("_"))
-    pending, seen = [(len(name), len(tokens))], {(len(name), len(tokens))}
+    pending, seen = [(len(name), tokens)], {(len(name), tokens)}
     while pending:
-        end, token_end = pending.pop()
+        end, token_prefix = pending.pop()
         if end == 0:
             continue
-        remaining, token_prefix = name[:end], tokens[:token_end]
+        remaining = name[:end]
         if (remaining in _SECRET_NAMES or any(remaining.endswith(x) for x in _SECRET_SUFFIXES)
                 or _subject_secret_key(remaining)
                 or token_prefix[-1:] in (("session",), ("sessions",))
@@ -187,10 +243,15 @@ def _secret_key(key: str) -> bool:
             if not remaining.endswith(compact_descriptor):
                 continue
             descriptor_tokens = tuple(descriptor.split("_"))
-            following_tokens = token_end
+            following_tokens = token_prefix
             if token_prefix[-len(descriptor_tokens):] == descriptor_tokens:
-                following_tokens -= len(descriptor_tokens)
+                following_tokens = token_prefix[:-len(descriptor_tokens)]
             following = (end - len(compact_descriptor), following_tokens)
+            if following not in seen:
+                seen.add(following)
+                pending.append(following)
+        for start in _numeric_version_starts(remaining, _CREDENTIAL_NUMERIC_DESCRIPTORS):
+            following = (start, _version_token_prefix(token_prefix, remaining[start:]))
             if following not in seen:
                 seen.add(following)
                 pending.append(following)

@@ -15,7 +15,8 @@ from pathlib import Path
 
 from courtvision.sports.nba.artifact_domains import NBA_PROSPECTIVE_EVIDENCE, TARGET_OUTCOME_FIELDS
 from courtvision.sports.nba.prospective_evidence import (
-    ProspectiveEvidenceError, _PARAMETER_DESCRIPTORS, _safe_json, _semantic_key, _subject_offsets, canonical_bytes,
+    ProspectiveEvidenceError, _PARAMETER_DESCRIPTORS, _numeric_version_ends, _numeric_version_starts,
+    _safe_json, _semantic_key, _subject_offsets, canonical_bytes,
     digest, immutable, plain_path,
     read_document, require_date, require_hash, require_id, source_manifest, utc_clock,
     verify_capture, write_once,
@@ -70,6 +71,7 @@ _FIELD_PREFIX_DESCRIPTORS = tuple(descriptor for descriptor in _FIELD_DESCRIPTOR
     if descriptor not in _SHORT_FIELD_DESCRIPTORS)
 _MARKET_QUALIFIERS = ("opening", "closing", "current", "live", "prop", "observed", "market",
     "sportsbook", "bookmaker", "consensus", "book", "vegas")
+_MARKET_NEUTRAL_CONNECTORS = ("pregame",)
 _MARKET_DESCRIPTORS = _FIELD_DESCRIPTORS + _MARKET_QUALIFIERS
 _MARKET_PREFIX_DESCRIPTORS = _FIELD_PREFIX_DESCRIPTORS + _MARKET_QUALIFIERS
 # `points_linear` is scientific data; the short `line` root needs a boundary.
@@ -113,6 +115,8 @@ _MODEL_OUTCOME_FIELDS = (TARGET_OUTCOME_FIELDS | _STAT_OUTCOME_FIELDS | _QUALIFI
     | {"_".join(name.split("_")[1:] + name.split("_")[:1]) for name in _STAT_OUTCOME_FIELDS}
     | {"final_result", "final_results", "final_grade", "final_grading"})
 _PROHIBITED_COMPACT = frozenset(name.replace("_", "") for name in _MARKET_FIELDS)
+_NONSTAT_MARKET_ROOTS = tuple(root for root in _PROHIBITED_COMPACT
+    if root not in {"points", "pts", "minutes", "kelly"})
 _OUTCOME_COMPACT = frozenset(name.replace("_", "") for name in _MODEL_OUTCOME_FIELDS)
 _OUTCOME_COMPOUND_PREFIXES = tuple(name.replace("_", "") for name in _MODEL_OUTCOME_FIELDS
     if "_" in name)
@@ -213,6 +217,27 @@ def _reject_model_field(key: str, item: object) -> None:
                    (offset + len(descriptor) == len(value)
                     or value.startswith(_FIELD_DESCRIPTORS, offset + len(descriptor)))
                    for descriptor in _SHORT_FIELD_DESCRIPTORS)
+    def versioned_market_forms(value: str) -> tuple[str, ...]:
+        # Numeric versions may sit before or after registered model descriptors.
+        pending, seen = [(len(value), False)], {(len(value), False)}
+        forms = []
+        while pending:
+            end, versioned = pending.pop()
+            remaining = value[:end]
+            if versioned:
+                forms.append(remaining)
+            following = set()
+            for start in _numeric_version_starts(remaining):
+                following.add((start, True))
+            # A short descriptor is terminal here, or owns the previously peeled
+            # registered descriptor/version; it cannot consume linear_gradient.
+            for descriptor in _FIELD_DESCRIPTORS:
+                if remaining.endswith(descriptor):
+                    following.add((end - len(descriptor), versioned))
+            for state in following - seen:
+                seen.add(state)
+                pending.append(state)
+        return tuple(dict.fromkeys(forms))
     def market_total(value: str) -> bool:
         # A bare scientific total is legal; a declared market role owns totals
         # only at an exact field or registered descriptor boundary.
@@ -222,7 +247,7 @@ def _reject_model_field(key: str, item: object) -> None:
             if role and total and total_descriptor_tail(value, offset):
                 return True
             following = set()
-            for subject in _MARKET_SUBJECT_PREFIXES:
+            for subject in _MARKET_SUBJECT_PREFIXES + _MARKET_NEUTRAL_CONNECTORS:
                 if value.startswith(subject, offset):
                     following.add((offset + len(subject), role, total, points))
             for qualifier in _MARKET_QUALIFIERS:
@@ -283,35 +308,56 @@ def _reject_model_field(key: str, item: object) -> None:
                         if following not in seen:
                             seen.add(following)
                             pending.append(following)
+                    for following in _numeric_version_ends(remainder, offset):
+                        if following not in seen:
+                            seen.add(following)
+                            pending.append(following)
     market_forms = subject_forms(compact, _MARKET_SUBJECT_PREFIXES)
     market_role_forms = subject_forms(compact, _MARKET_SUBJECT_PREFIXES + _MARKET_QUALIFIERS)
+    # Neutral timing exposes only the existing nonstat market guards below;
+    # bare pregame points/minutes and totals never acquire a market role here.
+    market_context_forms = subject_forms(compact,
+        _MARKET_SUBJECT_PREFIXES + _MARKET_QUALIFIERS + _MARKET_NEUTRAL_CONNECTORS)
+    market_guard_forms = tuple(dict.fromkeys((*market_context_forms, *(tail
+        for form in market_context_forms for tail in versioned_market_forms(form)))))
     # Timing/market roles expose postgame statistics only, preserving current
     # projection, lineup, and scientific-stat namespaces.
     postgame_forms = tuple(form for form in market_role_forms
         if form.startswith(_POSTGAME_OUTCOME_PREFIXES))
+    connector_outcome_forms = tuple(dict.fromkeys(tail
+        for form in market_role_forms for connector in _MARKET_NEUTRAL_CONNECTORS
+        if form.startswith(connector)
+        for tail in subject_forms(form[len(connector):],
+            _MARKET_SUBJECT_PREFIXES + _MARKET_QUALIFIERS + _MARKET_NEUTRAL_CONNECTORS)))
+    total_context_prefixes = _MARKET_SUBJECT_PREFIXES + _MARKET_NEUTRAL_CONNECTORS
     total_forms = tuple(dict.fromkeys(tail
-        for form in market_forms for qualifier in _SCIENTIFIC_TOTAL_QUALIFIERS
+        for form in subject_forms(compact, total_context_prefixes)
+        for qualifier in _SCIENTIFIC_TOTAL_QUALIFIERS
         if form.startswith(qualifier)
-        for tail in subject_forms(form[len(qualifier):], _MARKET_SUBJECT_PREFIXES)))
+        for tail in subject_forms(form[len(qualifier):], total_context_prefixes)))
+    total_forms = tuple(dict.fromkeys((*total_forms, *(tail
+        for form in total_forms for tail in versioned_market_forms(form)))))
     scientific_total = any(form.startswith(_SCIENTIFIC_TOTAL_PREFIXES) for form in total_forms)
     if scientific_total:
         # Complete points-total roots own their statistic; generic total/totals
         # remain alternate fallback paths so the plural cannot hide an S-tail.
         reject_qualified_tails(total_forms, _POINTS_TOTAL_PREFIXES, _TOTAL_ROOTS)
     scored_forms = tuple(dict.fromkeys(tail
-        for form in market_forms for qualifier in _SCIENTIFIC_SCORED_QUALIFIERS
+        for form in subject_forms(compact, total_context_prefixes)
+        for qualifier in _SCIENTIFIC_SCORED_QUALIFIERS
         if form.startswith(qualifier)
-        for tail in subject_forms(form[len(qualifier):], _MARKET_SUBJECT_PREFIXES)))
+        for tail in subject_forms(form[len(qualifier):], total_context_prefixes)))
     postgame_scientific_groups = (subject_forms(form[len(qualifier):],
-            _MARKET_SUBJECT_PREFIXES + _MARKET_QUALIFIERS)
-        for form in market_role_forms for qualifier in _SCIENTIFIC_SCORED_QUALIFIERS
+            _MARKET_SUBJECT_PREFIXES + _MARKET_QUALIFIERS + _MARKET_NEUTRAL_CONNECTORS)
+        for form in market_context_forms for qualifier in _SCIENTIFIC_SCORED_QUALIFIERS
         if form.startswith(qualifier))
     scored_forms = tuple(dict.fromkeys((*scored_forms, *(tail
         for group in postgame_scientific_groups
         if any(form.startswith(_POSTGAME_OUTCOME_PREFIXES) for form in group)
         for tail in group))))
     scientific_scored = (any(form.startswith(_SCORED_OUTCOME_PREFIXES) for form in scored_forms)
-        and not any(form.startswith("targetgame") for form in market_role_forms + scored_forms)
+        and not any(form.startswith("targetgame")
+            for form in market_role_forms + connector_outcome_forms + scored_forms)
         and "final" not in tokens
         and not any(form.startswith(tuple(stem + qualifier for stem in _SCORED_OUTCOME_PREFIXES
             for qualifier in ("actual", "final", "settlement", "targetgame"))) for form in scored_forms))
@@ -321,7 +367,7 @@ def _reject_model_field(key: str, item: object) -> None:
             _STAT_OUTCOME_PREFIXES + _OUTCOME_PREFIXES + _OUTCOME_COMPOUND_PREFIXES)
             ) and not (scientific_scored and form in scored_forms
                        and form.startswith(_SCORED_OUTCOME_PREFIXES))
-            for form in market_forms + postgame_forms + scored_forms)
+            for form in market_forms + postgame_forms + connector_outcome_forms + scored_forms)
             or _OUTCOME_WORDS.intersection(tokens)
             or any(contains_pattern(pattern) for pattern in _OUTCOME_PATTERNS
                    if not scientific_scored or "_".join(pattern) not in _QUALIFIED_OUTCOME_FIELDS)
@@ -363,11 +409,13 @@ def _reject_model_field(key: str, item: object) -> None:
             or any(form == stem or form.startswith(stem) and
                    form[len(stem):].startswith(_MARKET_DESCRIPTORS)
                    for stem in _MARKET_SHORT_DESCRIPTOR_STEMS)
-            for form in market_role_forms)
+            or any(form.startswith(root) and _numeric_version_ends(form, len(root))
+                   for root in _NONSTAT_MARKET_ROOTS)
+            for form in market_guard_forms)
             or any(form.startswith(_MARKET_PREFIXES + _MARKET_PRICE_PREFIXES
-                                   + _MARKET_PROBABILITY_PREFIXES) for form in market_role_forms)
-            or any(market_total(form) for form in market_forms + total_forms)
-            or not scientific_total and any(form.startswith(_POINTS_TOTAL_PREFIXES) for form in market_role_forms)
+                                   + _MARKET_PROBABILITY_PREFIXES) for form in market_guard_forms)
+            or any(market_total(form) for form in market_guard_forms + total_forms)
+            or not scientific_total and any(form.startswith(_POINTS_TOTAL_PREFIXES) for form in market_guard_forms)
             or any(contains_pattern(pattern) for pattern in _MARKET_PATTERNS
                    if not scientific_total or "_".join(pattern) not in _POINTS_TOTAL_FIELDS)):
         raise ProspectiveEvidenceError("observed market/economic field is prohibited in model state")
