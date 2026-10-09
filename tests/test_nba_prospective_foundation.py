@@ -474,7 +474,8 @@ def test_positive_multirow_freeze_and_exact_retry(tmp_path):
     assert saved.manifest["row_count"] == 2 and len(saved.rows) == 2
     assert [r["player_id"] for r in saved.rows] == ["player-1", "player-2"]
     before = {p.name: p.read_bytes() for p in root.iterdir()}
-    assert freeze(tmp_path, rows=list(reversed(rows)), request_ids=["stats-2", "stats-1"]) == root
+    assert freeze(tmp_path, rows=list(reversed(rows)), request_ids=["stats-2", "stats-1"],
+        clock=lambda: DURABLE) == root
     assert before == {p.name: p.read_bytes() for p in root.iterdir()}
     with pytest.raises(TypeError):
         saved.rows[0]["measurement_metadata"]["research_only"] = False
@@ -5355,7 +5356,7 @@ def directory_claim_boundary(tmp_path, boundary):
         capture(tmp_path)
         row = snapshot(tmp_path)
         root = tmp_path / "articles" / FREEZE_SCHEMA / metadata().prediction_run_id
-        return root, lambda: freeze(tmp_path, rows=[row]), lambda: verify(tmp_path, root)
+        return root, lambda: freeze(tmp_path, rows=[row], clock=lambda: DURABLE), lambda: verify(tmp_path, root)
     root = tmp_path / "journal" / EVIDENCE_SCHEMA / "stats-1"
     return root, lambda: capture(tmp_path), lambda: verify_capture(tmp_path / "journal", "stats-1")
 
@@ -5489,3 +5490,283 @@ def test_posix_directory_claim_rejects_link_ancestor_without_redirected_creation
         secure.create_once_directory(link / "missing-ancestor" / "exclusive-claim")
     assert link.is_symlink() and marker.read_bytes() == b"preserved-target"
     assert {path.name for path in redirect.iterdir()} == {"retained-marker.bin"}
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX retry durability requires real no-follow directory fds")
+@pytest.mark.parametrize("boundary", ["freeze", "capture"])
+def test_posix_directory_claim_complete_retry_requires_successful_file_and_directory_sync(tmp_path, monkeypatch, boundary):
+    import stat
+    from courtvision.sports.nba import prospective_evidence as evidence
+    from courtvision.sports.nba import prospective_freeze as freezing
+    from courtvision.sports.nba import prospective_io as secure
+    root, invoke, readback = directory_claim_boundary(tmp_path, boundary)
+    caller = freezing if boundary == "freeze" else evidence
+    final_file = root / ("freeze.json" if boundary == "freeze" else "manifest.json")
+    real_fsync, real_write, real_resync = secure.os.fsync, caller.write_once, caller.resync_artifacts
+    writes, failed_descriptors, events = [], [], []
+    expected_bytes = None
+    inside_resync = False
+    barrier = "directory"
+    def identity(info):
+        return info.st_dev, info.st_ino
+    def injected_fsync(descriptor):
+        info = os.fstat(descriptor)
+        if final_file.is_file():
+            target = root if barrier == "directory" else final_file
+            if barrier in {"directory", "file"} and identity(info) == identity(target.stat()):
+                failed_descriptors.append(descriptor)
+                raise OSError("synthetic " + barrier + " retry sync failure")
+        if inside_resync:
+            events.append(("directory" if stat.S_ISDIR(info.st_mode) else "file", identity(info)))
+        real_fsync(descriptor)
+    def record_write(path, raw):
+        writes.append(path.name)
+        return real_write(path, raw)
+    def record_resync(directory, expected_files):
+        nonlocal inside_resync
+        assert directory == root and expected_files == expected_bytes
+        inside_resync = True
+        try:
+            return real_resync(directory, expected_files)
+        finally:
+            inside_resync = False
+    monkeypatch.setattr(secure.os, "fsync", injected_fsync)
+    monkeypatch.setattr(caller, "write_once", record_write)
+    with pytest.raises(OSError, match="directory retry sync failure"):
+        invoke()
+    assert final_file.is_file() and readback() is not None
+    expected_bytes = {path.name: path.read_bytes() for path in root.iterdir()}
+    assert set(expected_bytes) == ({"model_snapshots.jsonl", "sources.json", "exclusions.json", "manifest.json", "freeze.json"}
+        if boundary == "freeze" else {"body.bin", "manifest.json"})
+    writes.clear()
+    monkeypatch.setattr(caller, "resync_artifacts", record_resync)
+    with pytest.raises(OSError, match="directory retry sync failure"):
+        invoke()
+    barrier = "file"
+    with pytest.raises(OSError, match="file retry sync failure"):
+        invoke()
+    assert len(failed_descriptors) == 3 and writes == []
+    assert {path.name: path.read_bytes() for path in root.iterdir()} == expected_bytes
+    for descriptor in failed_descriptors:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+    barrier = None
+    events.clear()
+    result = invoke()
+    assert result is not None and readback() is not None and writes == []
+    assert {path.name: path.read_bytes() for path in root.iterdir()} == expected_bytes
+    file_events = [(index, value) for index, value in enumerate(events) if value[0] == "file"]
+    assert {value[1] for _, value in file_events} == {
+        identity((root / name).stat()) for name in expected_bytes}
+    last_file_sync = max(index for index, _ in file_events)
+    prior_directory_sync = last_file_sync
+    for directory in (root, *root.parents):
+        directory_sync = next(index for index in range(prior_directory_sync + 1, len(events))
+            if events[index] == ("directory", identity(directory.stat())))
+        assert directory_sync > prior_directory_sync
+        prior_directory_sync = directory_sync
+
+
+@pytest.mark.parametrize("boundary", ["freeze", "capture"])
+def test_directory_claim_exact_retry_cannot_return_when_resync_boundary_fails(tmp_path, monkeypatch, boundary):
+    from courtvision.sports.nba import prospective_evidence as evidence
+    from courtvision.sports.nba import prospective_freeze as freezing
+    root, invoke, readback = directory_claim_boundary(tmp_path, boundary)
+    caller = freezing if boundary == "freeze" else evidence
+    first = invoke()
+    before = {path.name: path.read_bytes() for path in root.iterdir()}
+    real_resync, real_write = caller.resync_artifacts, caller.write_once
+    calls, writes = [], []
+    def fail_resync(directory, expected_files):
+        assert directory == root and expected_files == before
+        calls.append(directory)
+        raise OSError("synthetic retry durability barrier failure")
+    def record_write(path, raw):
+        writes.append(path.name)
+        return real_write(path, raw)
+    monkeypatch.setattr(caller, "resync_artifacts", fail_resync)
+    monkeypatch.setattr(caller, "write_once", record_write)
+    for _ in range(2):
+        with pytest.raises(OSError, match="retry durability barrier failure"):
+            invoke()
+    assert calls == [root, root] and writes == []
+    assert readback() is not None
+    assert {path.name: path.read_bytes() for path in root.iterdir()} == before
+    monkeypatch.setattr(caller, "resync_artifacts", real_resync)
+    assert invoke() == first and writes == []
+    assert {path.name: path.read_bytes() for path in root.iterdir()} == before
+
+
+@pytest.mark.parametrize("start,end,expected_resyncs", [
+    (datetime(2026, 10, 7, 23, tzinfo=timezone.utc), datetime(2026, 10, 7, 23, tzinfo=timezone.utc), 0),
+    (datetime(2026, 10, 7, 22, 59, 59, tzinfo=timezone.utc), datetime(2026, 10, 7, 23, tzinfo=timezone.utc), 1),
+    (CREATED, DURABLE, 0),
+    (datetime(2026, 10, 7, 20, 0, 2, tzinfo=timezone.utc), DURABLE, 1),
+], ids=["late-positive", "crossed-tip", "start-rollback", "end-rollback"])
+def test_directory_claim_positive_exact_retry_clock_guards_preserve_receipt(tmp_path, monkeypatch, start, end, expected_resyncs):
+    from courtvision.sports.nba import prospective_freeze as freezing
+    root = freeze(tmp_path)
+    row = snapshot(tmp_path)
+    before = {path.name: path.read_bytes() for path in root.iterdir()}
+    real_resync, calls = freezing.resync_artifacts, []
+    def record_resync(directory, expected_files):
+        calls.append(directory)
+        return real_resync(directory, expected_files)
+    monkeypatch.setattr(freezing, "resync_artifacts", record_resync)
+    clocks = iter([start, end])
+    with pytest.raises(ProspectiveEvidenceError):
+        freeze(tmp_path, rows=[row], clock=lambda: next(clocks))
+    assert calls == [root] * expected_resyncs
+    assert {path.name: path.read_bytes() for path in root.iterdir()} == before
+    # Historical content verification remains independent of the present clock.
+    assert verify(tmp_path, root).rows[0]["model_snapshot_id"] == row["model_snapshot_id"]
+
+
+def test_directory_claim_zero_row_late_retry_and_historical_readback_preserve_receipts(tmp_path, monkeypatch):
+    from courtvision.sports.nba import prospective_freeze as freezing
+    positive = freeze(tmp_path)
+    positive_bytes = {path.name: path.read_bytes() for path in positive.iterdir()}
+    meta = metadata(prediction_run_id="synthetic-zero-run")
+    empty = freeze(tmp_path, rows=[], meta=meta)
+    empty_bytes = {path.name: path.read_bytes() for path in empty.iterdir()}
+    real_resync, calls = freezing.resync_artifacts, []
+    def record_resync(directory, expected_files):
+        assert directory == empty and expected_files == empty_bytes
+        calls.append(directory)
+        return real_resync(directory, expected_files)
+    monkeypatch.setattr(freezing, "resync_artifacts", record_resync)
+    later = datetime(2026, 10, 8, tzinfo=timezone.utc)
+    assert freeze(tmp_path, rows=[], meta=meta, clock=lambda: later) == empty
+    assert calls == [empty] and verify(tmp_path, empty).rows == ()
+    assert verify(tmp_path, positive).rows[0]["projected_minutes"] == 18
+    assert {path.name: path.read_bytes() for path in empty.iterdir()} == empty_bytes
+    assert {path.name: path.read_bytes() for path in positive.iterdir()} == positive_bytes
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX retry confinement requires real no-follow directory fds")
+@pytest.mark.parametrize("kind", ["leaf", "ancestor"])
+def test_posix_directory_claim_resync_rejects_links_before_any_sync(tmp_path, monkeypatch, kind):
+    from courtvision.sports.nba import prospective_io as secure
+    redirect = tmp_path / "owned-redirect"
+    redirect.mkdir()
+    marker = redirect / "payload.bin"
+    marker.write_bytes(b"preserved-target")
+    (redirect / "safe.bin").write_bytes(b"preserved-safe")
+    root = tmp_path / "artifact-directory"
+    if kind == "ancestor":
+        root.symlink_to(redirect, target_is_directory=True)
+    else:
+        root.mkdir()
+        (root / "safe.bin").write_bytes(b"preserved-safe")
+        (root / "payload.bin").symlink_to(marker)
+    real_fsync, synced = secure.os.fsync, []
+    def record_fsync(descriptor):
+        synced.append(descriptor)
+        return real_fsync(descriptor)
+    monkeypatch.setattr(secure.os, "fsync", record_fsync)
+    with pytest.raises((secure.ArtifactConfinementError, OSError)):
+        secure.resync_existing_artifacts(root, {"safe.bin": b"preserved-safe", "payload.bin": b"preserved-target"})
+    assert synced == []
+    assert marker.read_bytes() == b"preserved-target"
+    assert (redirect / "safe.bin").read_bytes() == b"preserved-safe"
+    assert {path.name for path in redirect.iterdir()} == {"safe.bin", "payload.bin"}
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX FIFO rejection requires a real nonblocking special file")
+def test_posix_directory_claim_resync_fifo_rejection_is_nonblocking(tmp_path):
+    import subprocess
+    import sys
+    root = tmp_path / "artifact-directory"
+    root.mkdir()
+    fifo = root / "payload.bin"
+    os.mkfifo(fifo, 0o600)
+    script = '''
+import sys
+from pathlib import Path
+from courtvision.sports.nba import prospective_io as secure
+def forbidden_sync(descriptor):
+    raise AssertionError("no sync before every expected regular file is verified")
+secure.os.fsync = forbidden_sync
+try:
+    secure.resync_existing_artifacts(Path(sys.argv[1]), {"payload.bin": b"expected-regular-payload"})
+except (secure.ArtifactConfinementError, OSError):
+    pass
+else:
+    raise AssertionError("special file admitted as an immutable artifact")
+'''
+    completed = subprocess.run([sys.executable, "-B", "-c", script, str(root)],
+        capture_output=True, text=True, timeout=10, check=False)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert {path.name for path in root.iterdir()} == {"payload.bin"}
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows retry durability requires real native file handles")
+@pytest.mark.parametrize("boundary", ["freeze", "capture"])
+def test_windows_directory_claim_complete_retry_requires_successful_existing_file_sync(tmp_path, monkeypatch, boundary):
+    import stat
+    from courtvision.sports.nba import prospective_evidence as evidence
+    from courtvision.sports.nba import prospective_freeze as freezing
+    from courtvision.sports.nba import prospective_io as secure
+    root, invoke, readback = directory_claim_boundary(tmp_path, boundary)
+    caller = freezing if boundary == "freeze" else evidence
+    final_file = root / ("freeze.json" if boundary == "freeze" else "manifest.json")
+    real_fsync, real_write, real_resync = secure.os.fsync, caller.write_once, caller.resync_artifacts
+    writes, failed_descriptors, synced_files = [], [], []
+    expected_bytes = None
+    active_write = None
+    final_identity = None
+    inside_resync = False
+    fail = True
+    def identity(info):
+        return info.st_dev, info.st_ino
+    def injected_fsync(descriptor):
+        info = os.fstat(descriptor)
+        assert stat.S_ISREG(info.st_mode)
+        # The new payload has an exclusive Windows handle. Do not reopen it
+        # just to identify the fsync that follows its completed physical write.
+        if fail and (active_write == final_file or identity(info) == final_identity):
+            failed_descriptors.append(descriptor)
+            raise OSError("synthetic existing-file retry sync failure")
+        if inside_resync:
+            synced_files.append(identity(info))
+        real_fsync(descriptor)
+    def record_write(path, raw):
+        nonlocal active_write
+        writes.append(path.name)
+        active_write = path
+        try:
+            return real_write(path, raw)
+        finally:
+            active_write = None
+    def record_resync(directory, expected_files):
+        nonlocal inside_resync
+        assert directory == root and expected_files == expected_bytes
+        inside_resync = True
+        try:
+            return real_resync(directory, expected_files)
+        finally:
+            inside_resync = False
+    monkeypatch.setattr(secure.os, "fsync", injected_fsync)
+    monkeypatch.setattr(caller, "write_once", record_write)
+    with pytest.raises(OSError, match="existing-file retry sync failure"):
+        invoke()
+    assert final_file.is_file() and readback() is not None
+    expected_bytes = {path.name: path.read_bytes() for path in root.iterdir()}
+    final_identity = identity(final_file.stat())
+    assert set(expected_bytes) == ({"model_snapshots.jsonl", "sources.json", "exclusions.json", "manifest.json", "freeze.json"}
+        if boundary == "freeze" else {"body.bin", "manifest.json"})
+    writes.clear()
+    monkeypatch.setattr(caller, "resync_artifacts", record_resync)
+    with pytest.raises(OSError, match="existing-file retry sync failure"):
+        invoke()
+    assert len(failed_descriptors) == 2 and writes == []
+    assert {path.name: path.read_bytes() for path in root.iterdir()} == expected_bytes
+    for descriptor in failed_descriptors:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+    fail = False
+    synced_files.clear()
+    result = invoke()
+    assert result is not None and readback() is not None and writes == []
+    assert set(synced_files) == {identity((root / name).stat()) for name in expected_bytes}
+    assert {path.name: path.read_bytes() for path in root.iterdir()} == expected_bytes

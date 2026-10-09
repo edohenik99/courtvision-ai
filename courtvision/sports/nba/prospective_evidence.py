@@ -21,6 +21,7 @@ from urllib.parse import parse_qsl, unquote_plus, urlsplit
 from courtvision.sports.nba.artifact_domains import NBA_PROSPECTIVE_EVIDENCE, require_artifact_path
 from courtvision.sports.nba.prospective_io import (
     ArtifactConfinementError, create_once_bytes, create_once_directory,
+    resync_existing_artifacts,
 )
 
 EVIDENCE_SCHEMA = "nba-prospective-provider-evidence-v1"
@@ -637,6 +638,14 @@ def claim_directory(path: Path) -> None:
     plain_path(path)
 
 
+def resync_artifacts(directory: Path, expected_files: Mapping[str, bytes]) -> None:
+    directory = plain_path(directory)
+    try:
+        resync_existing_artifacts(directory, expected_files)
+    except (ArtifactConfinementError, UnicodeError):
+        raise ProspectiveEvidenceError("artifact retry durability verification failed") from None
+
+
 def read_document(path: Path) -> dict:
     try:
         raw = plain_path(path).read_bytes()
@@ -750,6 +759,8 @@ def capture_response(journal_root: str | Path, *, request: dict, requested_at_ut
         saved = verify_capture(journal_root, manifest["request_id"])
         if saved.manifest != immutable(manifest) or saved.raw_body != raw_body:
             raise ProspectiveEvidenceError("conflicting same capture identity")
+        resync_artifacts(root, {"body.bin": raw_body,
+                               "manifest.json": canonical_bytes(manifest) + b"\n"})
         return saved
     write_once(root / "body.bin", raw_body)
     write_once(root / "manifest.json", canonical_bytes(manifest) + b"\n")

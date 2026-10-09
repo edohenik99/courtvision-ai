@@ -18,7 +18,7 @@ from courtvision.sports.nba.prospective_evidence import (
     ProspectiveEvidenceError, _PARAMETER_DESCRIPTORS, _numeric_version_ends, _numeric_version_starts,
     _safe_json, _semantic_key, _subject_offsets, canonical_bytes,
     claim_directory, digest, immutable, plain_path,
-    read_document, require_date, require_hash, require_id, source_manifest, utc_clock,
+    read_document, require_date, require_hash, require_id, resync_artifacts, source_manifest, utc_clock,
     verify_capture, write_once,
 )
 from courtvision.sports.nba.player_points_research import toronto_operating_date
@@ -660,8 +660,9 @@ def freeze_models(freeze_root: str | Path, *, metadata: PreseasonMeasurement, ro
                   clock=lambda: datetime.now(timezone.utc)) -> Path:
     """Claim one run directory; fsync/read back each file and publish a receipt last.
 
-    Exact content retries return the original receipt. Conflicts and interrupted
-    claims fail closed. Nothing is overwritten, rolled back, or deleted.
+    Exact content retries preserve the original receipt and recheck durability
+    before tipoff. Its recorded clock is not relabelled as the retry barrier time.
+    Conflicts and interrupted claims fail closed. Nothing is overwritten or deleted.
     """
     metadata = _measurement(asdict(metadata))
     sources = source_manifest(evidence_root, request_ids)
@@ -690,6 +691,17 @@ def freeze_models(freeze_root: str | Path, *, metadata: PreseasonMeasurement, ro
         if saved.manifest["measurement_metadata"] != immutable(asdict(metadata)) or any(
                 plain_path(root / name).read_bytes() != raw for name, raw in blobs.items()):
             raise ProspectiveEvidenceError("conflicting same-run freeze")
+        start = utc_clock(clock().isoformat())
+        recorded = utc_clock(saved.receipt["durable_at_utc"])
+        if start < recorded or any(start >= utc_clock(r["commence_time_utc"]) for r in saved.rows):
+            raise ProspectiveEvidenceError("retry durability clock is not prospective")
+        resync_artifacts(root, {**blobs,
+            "manifest.json": canonical_bytes(_safe_json(saved.manifest, semantic_fields=True)) + b"\n",
+            "freeze.json": canonical_bytes(_safe_json(saved.receipt, semantic_fields=True)) + b"\n"})
+        end = utc_clock(clock().isoformat())
+        if (end < start or end < recorded
+                or any(end >= utc_clock(r["commence_time_utc"]) for r in saved.rows)):
+            raise ProspectiveEvidenceError("retry durability clock is not prospective")
         return root
     created = utc_clock(clock().isoformat())
     for capture in sources.values():
